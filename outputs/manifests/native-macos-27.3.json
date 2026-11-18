@@ -50,5 +50,15 @@
       "android_return": "fastboot reboot succeeded; ADB confirmed piano / BP2A.250605.031.A3 / _a",
       "persistent_writes": false
     }
+  },
+  "historical_deployment_evidence": {
+    "checkout": "E:\\codex\\2026-11-01\\ni\\work\\piano-macos-c146",
+    "commit": "c146dfc6ce1a24c9b85df9b70003d6ecbe9fba63",
+    "commit_date": "2026-11-14T17:19:08+08:00",
+    "reported_by_historical_results": "native macOS 27.3 desktop, GPU/input, Wi-Fi networking and persistent Data",
+    "current_device_recheck": "2026-11-19 live GPT has no linux_rootfs, linux_data, or ESP; intervening return-to-stock event unknown",
+    "historical_native_outputs_available": false,
+    "other_backup_assets": "F:\\piano-backup\\data-local-tmp\\tmp.tar contains 13 macos27 members; archived run.sh uses crosvm --hypervisor gunyah, so these are VM guest assets, not native UFS boot inputs",
+    "paused_wipe_proposal": "2026-11-16 proposal targets HyperOS 3.0.308; not executed or resumed"
   }
 }

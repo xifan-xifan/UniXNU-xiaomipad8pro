@@ -39,6 +39,14 @@ The configured Mac is Apple silicon running macOS 15.3 with about 198 GiB free. 
 
 The repository's committed artifact catalog describes older 2026-11-10 slice-1 outputs and inputs. Those files are not a matched 27.3 device candidate and are not reused. No build, image, or device test is claimed by this audit.
 
+## Historical local evidence
+
+The preserved `E:\codex\2026-11-01\ni\work\piano-macos-c146` checkout is commit `c146dfc6ce1a24c9b85df9b70003d6ecbe9fba63` (2026-11-14 17:19 UTC) with tracked edits and ignored build outputs absent. Its README and dated results report a native macOS 27.3 (`26C5035r`) desktop and earlier tests on the tablet, including GPU, input, Wi-Fi, and persistent Data. This is material historical evidence, but it is not a current-device result; the 2026-11-19 live GPT audit finds no native partitions. The intervening transition is not established.
+
+The current clone of that checkout has no `out/` directory. Its artifact catalog names historical generated images, but the binaries and the exact local k27 tree are not present there. The valid `F:\piano-backup\data-local-tmp\tmp.tar` listing contains 13 `macos27` entries; its archived `run.sh` launches `crosvm run --hypervisor gunyah` with `os.img` and a Data image. These files are DroidVM/Gunyah guest evidence, not native UFS install inputs. The archive's member list was read without extraction; do not reuse those VM images as native boot artifacts.
+
+The separate 2026-11-16 Android wipe proposal targets HyperOS 3.0.308 and recommends `fastboot -w`; its archived verification log marks the large app/data/media tar files as unrecognized archive formats. It is not authorization or a recovery plan for the current 3.0.309 device. No wipe has been performed in this task, and the paused erase must remain paused.
+
 ## Reproduction gate
 
 **Not reproducible yet.** The blocking inputs are the exact local k27 tree and its generated build state, matched Apple `26C5035r` payloads, complete firmware/calibration and userland inputs, a verified signing/boot profile, and the missing Mac host tools. First resolve these by inventorying existing user assets and checking public preparation steps/branches/forks; do not download duplicates or mix newer pins into this locked set.
