@@ -34,7 +34,7 @@ On 2026-11-19, the A-slot `boot_a`, `vendor_boot_a`, `init_boot_a`, and 4 MiB `m
 
 The standard AOSP slot-control structure read from `misc` did not have the expected magic or valid CRC at the checked location. A temporary Fastboot query on 2026-11-19 provided authoritative bootloader values instead: current slot A, both slots `successful=yes`, both retry counts 6. The tablet was returned with `fastboot reboot`; ADB then confirmed `piano`, build `BP2A.250605.031.A3`, slot `_a`. These values are a point-in-time observation, not proof of switching or recovery behavior.
 
-GPT entries and primary/backup CRCs are now verified. A/B bootable/successful flags and retry counters have not been decoded. Android's `bootctl` command is absent/inaccessible and the read-only property query only established the active suffix. These remain required before a switching plan can be approved. A verified recovery package is also outstanding.
+GPT entries and primary/backup CRCs are now verified. On 2026-11-19, the first and last 1 MiB of every UFS LUN were also read-only captured on independent E: and F: volumes. Each copy is length- and SHA-256-verified; offline validation confirms both GPT headers and entry-array CRCs pass and the primary/backup entry arrays match on all six LUNs. These are GPT boundary backups only, not full LUN images or userdata backups. Paths and hashes are in `outputs/manifests/native-macos-27.3.json` and each volume's `MANIFEST.csv`.
 
 ## Recovery asset inventory
 
