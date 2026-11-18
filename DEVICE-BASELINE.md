@@ -22,21 +22,22 @@ No device serial, MAC address, calibration value, or private backup location is 
 
 ## Storage observations
 
-Root-readable Linux block metadata reports `sda` as the user-area disk, with a 4096-byte logical block size and 996417536 512-byte sysfs sectors. `/dev/block/by-name/userdata` resolves to `sda34`; its sysfs start and size are 29057024 and 967360472 512-byte sectors. These are Linux sysfs sector units, not confirmed GPT LBAs. The current table has `boot_a`, `boot_b`, `vendor_boot_a/b`, `init_boot_a/b`, `super`, `userdata`, and the normal Android partitions. No `linux_rootfs`, `linux_data`, or named ESP partition is present.
+Root-readable Linux block metadata reports six UFS LUNs, all with 4096-byte logical blocks. A read-only parser checked the primary and backup GPT header CRCs and entry-array CRCs on all six LUNs; all were valid and primary/backup entry arrays matched. LUN 0 (`sda`) contains 124552192 logical blocks and 34 entries; LUNs 1-5 (`sdb`-`sdf`) contain 3072, 3072, 2048, 378880, and 16384 logical blocks, with 6, 6, 4, 79, and 8 entries respectively. No full GPT dump or device GUIDs are included in this repository.
 
-The boot triplet resides on the block device exposed as `sde` (sysfs path ends in UFS target LUN 4); `boot_a` is `sde13` (start 618800, size 196608 512-byte sectors), `vendor_boot_a` is `sde23` (start 970800, size 196608), and `init_boot_a` is `sde28` (start 1438256, size 16384). The three device logical block sizes checked were 4096 bytes. This mapping is inventory only; it is not a write recipe.
+On LUN 0, `super` ends at LBA 3632127 and `userdata` occupies LBAs 3632128-124552186, through the last usable GPT LBA. Thus no unallocated range exists after userdata for a native root/Data/ESP layout. The table contains Android `boot_a`, `boot_b`, `vendor_boot_a/b`, and `init_boot_a/b`, but no `linux_rootfs`, `linux_data`, or named ESP partition.
 
-The complete GPT entries, primary/backup GPT CRCs, block-control success flags, and retry counters have not been decoded. Android's `bootctl` command is absent/inaccessible and the read-only property query only established the active suffix. These remain required before a storage or switching plan can be approved. The full disk/LUN inventory and verified recovery package are also outstanding.
+The boot triplet resides on LUN 4 (`sde`): `boot_a` is `sde13` (start 77350, last LBA 101925), `vendor_boot_a` is `sde23` (start 121350, last LBA 145925), and `init_boot_a` is `sde28` (start 179782, last LBA 181829). These are native 4096-byte GPT LBAs. This mapping is inventory only; it is not a write recipe.
+
+GPT entries and primary/backup CRCs are now verified. A/B bootable/successful flags and retry counters have not been decoded. Android's `bootctl` command is absent/inaccessible and the read-only property query only established the active suffix. These remain required before a switching plan can be approved. A verified recovery package is also outstanding.
 
 ## Recovery asset inventory
 
-An external local backup volume contains a large historical tablet backup (about 210 GB across the inventoried categories). It is preserved and was not modified. It is not yet accepted as a 3.0.309 recovery set: its source build is not established, and the existing verification log reports `Unrecognized archive format` for several large archives, including the aggregate media archive. Individual DCIM and Pictures markers report entry/byte totals, but archive parsing and content-level comparison were not confirmed in this audit. Do not delete or overwrite this copy; do not rely on it as the sole recovery path.
+An external local backup volume contains a large historical tablet backup (about 210 GB across the inventoried categories). It is preserved and was not modified. It is not yet accepted as a 3.0.309 recovery set: its source build is not established, and the existing verification log reports `Unrecognized archive format` for several large archives, including the aggregate media archive. The separate DCIM and Pictures tar files parse successfully and contain 5519 and 571 entries; they have not yet been compared file-by-file with the tablet or validated against a content-hash manifest. Do not delete or overwrite this copy; do not rely on it as the sole recovery path.
 
 The older research workspace has an unrelated 67 MB `kernel` and 3.6 MB `ramdisk`, but no `out/k27`, `out/k273`, or `out/inputs` tree. Their provenance does not match the pinned native 27.3 input set, so they are retained as historical evidence and excluded from candidate builds.
 
 ## Remaining read-only work
 
-- Decode every relevant LUN's GPT with a verified parser and record partition boundaries in native LBA units.
 - Determine A/B bootable/successful flags and retry counts using an authoritative read-only method.
 - Establish whether an official, region-matched 3.0.309 package and a second verified copy of the required recovery assets exist.
-- Re-verify the requested photo/screenshot backup without extracting over or changing its only known copy.
+- Compare requested photo/screenshot files against the tablet without extracting over or changing the existing archive.
