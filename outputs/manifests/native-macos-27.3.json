@@ -25,5 +25,18 @@
   },
   "build_status": "not_started_missing_inputs_and_mac_command_line_tools",
   "device_test_status": "read_only_baseline_only",
-  "writes_performed": false
+  "writes_performed": false,
+  "readonly_device_captures": {
+    "captured_on": "2026-11-19",
+    "partitions": {
+      "boot_a": {"bytes": 100663296, "sha256": "7c444a2d6aa930cd79e2d48c569f6c891fbaff054c63fc85c3a57fb61c660ac2"},
+      "vendor_boot_a": {"bytes": 100663296, "sha256": "7f766f1d728c39d779a3fb7cf0ac1310dac4306cd3b37a98a0143dd4fca5bd23"},
+      "init_boot_a": {"bytes": 8388608, "sha256": "56197797f2ec99870a4e42b7a24bbf88407e4409615aba61f401182f13ea5cdc"},
+      "misc": {"bytes": 4194304, "sha256": "d9148e265e838ebc3013ac8537cfbc1a3ef615055fe87562b46fd3b5dfa16540"}
+    },
+    "locations": ["E:\\piano-verified-readonly-20261119-073450", "F:\\piano-verified-readonly-20261119-073450"],
+    "verification": "two independent captures matched by length and SHA-256; fresh device reread matched E: copy",
+    "scope_limit": "not a full device backup or verified HyperOS recovery package; GPT images and userdata are not included",
+    "slot_control": "standard misc structure failed magic/CRC validation at checked location; success/retry state unknown"
+  }
 }
