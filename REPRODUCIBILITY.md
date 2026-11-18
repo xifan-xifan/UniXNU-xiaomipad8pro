@@ -1,0 +1,44 @@
+# Native macOS 27.3 Reproducibility Audit
+
+Audit date: 2026-11-19. Execution baseline: `lenzhang/UniXNU-xiaomipad8pro` commit `2438556c77c90c22c7b76e57eb8b40c44b35f1af`, targeting macOS 27.3 build `26C5035r`.
+
+## Upstream comparison
+
+GitHub REST API returned `2438556c77c90c22c7b76e57eb8b40c44b35f1af` as the latest `main` commit; comparing `main` with the requested baseline returned `identical` (`ahead_by=0`, `behind_by=0`). The two public forks were also checked: `xifan-xifan/UniXNU-xiaomipad8pro` points to the same commit, while the other fork is older. Releases API returned no releases. Issue #1 remains open requesting a second-device RAM validation; PR #2 remains open as a staged macOS packaging proposal. No independent second-device success report was found in those repository records.
+
+The baseline already contains commits for the single-frame video output teardown, passive video timeout diagnostics, Metal frontend staging, and reversible UID 501 `passd` policy. These do not establish continuous hardware decode, Safari qualification, or a successful clean restart; maintainer reports remain separate from this device's results.
+
+## Locked source set
+
+The source commit and all dependency pins remain unchanged. `unixnu.lock` SHA-256 is `ced429fc4a1e44be80076cc56f2c740e37265f6cfee3bcd268ccbacfc1d55a7`; `feeds.toml` SHA-256 is `4cd179d4bc2bb1810201ebec50653f41b4831dc511e823703fe0f122c8bb0385`. The complete set is the contents of those two files at the execution baseline. Key pins include:
+
+- UniXNU core: `d830d23b0d19c9322d906c21afeca1d6c54aeffe`.
+- SM8750 source: `feaa135df4763e3c19a155402e6b17b124a12e13`.
+- piano UEFI: `31545f9392d5f5c2acae14cec2fa3a0aa1de51d4`.
+- DarwinBoot: `8544957e04bdc43e2aac9243764ac16979f15c42`.
+- Mu-Silicium: `e51cd877e31c8fbb322032dc4cb6715e83d25ad3`.
+- Local k27 tree pin: `11ac316b789d81fc9f734e15645456f536c05141`; its recorded XNU base is `ac9718fb1af618d5ce8678d0dc6e8a58f252216f`, with a locally prepared tree at `de16623d957cccff6dfb78d8eca4a79842af9702`.
+
+No dependency pin was changed. `tooling/k273/prepare-k27-tree.sh` consumes an existing `PIANO_K27_TREE`, applies the repository patches, and relinks it; it does not provide a zero-input public reconstruction of the local k27 tree.
+
+## Input status
+
+| Input | Status on this workstation / configured Mac |
+|---|---|
+| Device source at the requested commit | Present in this workspace; clean tracked tree at the baseline. `AGENTS.md` is an existing untracked instruction file and is not part of this change. |
+| Pinned source checkouts / `unixnu-research` | Not present in the current workspace or in the configured Mac's documented project location. |
+| Exact local k27 tree, generated objects/headers, KC build inputs | Missing. The old research workspace contains unrelated kernel/ramdisk outputs only; excluded. |
+| macOS 27.3 / `26C5035r` Apple IPSW-derived inputs | Not present under this workspace's `out/inputs`; no compatible cached payload was identified. |
+| Device DTB/firmware and per-unit calibration | Repository has the source-side configuration; no complete per-unit, provenance-checked build input set has been assembled. |
+| Native kext and Metal/userland build outputs | No current 27.3 candidate outputs or matching manifest found. |
+| Data seed, trust cache and root image | No matched 27.3 set in the current `out/` tree; `out/` is absent. |
+| Signing chain / boot profile | Not verified for this device/build. The upstream persistent flow references an owner-specific signing setup; its private key is not an input we will request or copy. |
+| Current 3.0.309 Android boot triplet and verified rollback package | Not captured or validated in this audit. |
+
+The configured Mac is Apple silicon running macOS 15.3 with about 202 GiB free. It has no project checkout, no active Xcode developer directory, and no usable Command Line Tools (`xcode-select` reports none). No build was started. Installing the tools will require the Mac's developer tools to be made available before source reconstruction can proceed.
+
+The repository's committed artifact catalog describes older 2026-11-10 slice-1 outputs and inputs. Those files are not a matched 27.3 device candidate and are not reused. No build, image, or device test is claimed by this audit.
+
+## Reproduction gate
+
+**Not reproducible yet.** The blocking inputs are the exact local k27 tree and its generated build state, matched Apple `26C5035r` payloads, complete firmware/calibration and userland inputs, a verified signing/boot profile, and the Mac toolchain. First resolve these by inventorying existing user assets and checking public preparation steps/branches/forks; do not download duplicates or mix newer pins into this locked set.

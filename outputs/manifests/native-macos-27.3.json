@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "checked_on": "2026-11-19",
+  "device_repository": "https://github.com/lenzhang/UniXNU-xiaomipad8pro",
+  "device_commit": "2438556c77c90c22c7b76e57eb8b40c44b35f1af",
+  "main_comparison": {
+    "status": "identical",
+    "ahead_by": 0,
+    "behind_by": 0
+  },
+  "target": {
+    "macos": "27.3",
+    "build": "26C5035r",
+    "profile": "macos-27.3-26C5035r"
+  },
+  "lockfiles": {
+    "unixnu.lock": "ced429fc4a1e44be80076cc56f2c740e37265f6cfee3bcd268ccbacfc1d55a7",
+    "feeds.toml": "4cd179d4bc2bb1810201ebec50653f41b4831dc511e823703fe0f122c8bb0385"
+  },
+  "local_k27": {
+    "pin": "11ac316b789d81fc9f734e15645456f536c05141",
+    "xnu_base": "ac9718fb1af618d5ce8678d0dc6e8a58f252216f",
+    "prepared_tree_pin": "de16623d957cccff6dfb78d8eca4a79842af9702",
+    "available": false
+  },
+  "build_status": "not_started_missing_inputs_and_mac_command_line_tools",
+  "device_test_status": "read_only_baseline_only",
+  "writes_performed": false
+}
