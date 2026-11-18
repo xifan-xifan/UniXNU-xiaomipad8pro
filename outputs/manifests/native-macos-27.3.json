@@ -37,6 +37,18 @@
     "locations": ["E:\\piano-verified-readonly-20261119-073450", "F:\\piano-verified-readonly-20261119-073450"],
     "verification": "two independent captures matched by length and SHA-256; fresh device reread matched E: copy",
     "scope_limit": "not a full device backup or verified HyperOS recovery package; GPT images and userdata are not included",
-    "slot_control": "standard misc structure failed magic/CRC validation at checked location; success/retry state unknown"
+    "slot_control": "standard misc structure failed magic/CRC validation at checked location; queried read-only through Fastboot",
+    "fastboot_observation": {
+      "current_slot": "a",
+      "slot_successful_a": "yes",
+      "slot_successful_b": "yes",
+      "slot_retry_count_a": 6,
+      "slot_retry_count_b": 6,
+      "partition_size_boot_a": "0x6000000",
+      "partition_size_vendor_boot_a": "0x6000000",
+      "partition_size_init_boot_a": "0x800000",
+      "android_return": "fastboot reboot succeeded; ADB confirmed piano / BP2A.250605.031.A3 / _a",
+      "persistent_writes": false
+    }
   }
 }

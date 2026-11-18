@@ -32,7 +32,7 @@ The boot triplet resides on LUN 4 (`sde`): `boot_a` is `sde13` (start 77350, las
 
 On 2026-11-19, the A-slot `boot_a`, `vendor_boot_a`, `init_boot_a`, and 4 MiB `misc` partition were captured with root-readable `toybox dd` to independent E: NVMe and F: USB destinations. Exact partition lengths were checked; both copies match by SHA-256, and a fresh device reread of each partition matched the stored E: copy. The file hashes and paths are recorded in `outputs/manifests/native-macos-27.3.json`. These are boot-control/rollback inputs only, not a full device backup or verified HyperOS recovery package. No GPT images or userdata are included.
 
-The standard AOSP slot-control structure read from `misc` did not have the expected magic or valid CRC at the checked location, so its slot-success and retry fields remain unknown. Do not infer boot health from the active-slot property alone.
+The standard AOSP slot-control structure read from `misc` did not have the expected magic or valid CRC at the checked location. A temporary Fastboot query on 2026-11-19 provided authoritative bootloader values instead: current slot A, both slots `successful=yes`, both retry counts 6. The tablet was returned with `fastboot reboot`; ADB then confirmed `piano`, build `BP2A.250605.031.A3`, slot `_a`. These values are a point-in-time observation, not proof of switching or recovery behavior.
 
 GPT entries and primary/backup CRCs are now verified. A/B bootable/successful flags and retry counters have not been decoded. Android's `bootctl` command is absent/inaccessible and the read-only property query only established the active suffix. These remain required before a switching plan can be approved. A verified recovery package is also outstanding.
 
