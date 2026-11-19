@@ -40,10 +40,15 @@
     "referer_required": true,
     "range_probe": "HTTP 206; exact requested bytes returned",
     "full_download_rate_bytes_per_second_per_connection": 20300,
+    "windows_range_probe": {
+      "bytes": 1048576,
+      "rate_bytes_per_second": 20905,
+      "temporary_probe_removed": true
+    },
     "download_status": "in_progress",
     "last_size_check_date": "2026-11-19",
     "local_partial_path": "/tmp/piano_images_OS3.0.309.0.WPYCNXM_20260906.0000.00_16.0_cn_d5071e52da.tgz",
-    "local_partial_bytes_at_last_check": 7184384,
+    "local_partial_bytes_at_last_check": 14045184,
     "usable_recovery_asset": false,
     "archive_verified_or_extracted": false,
     "write_attempted": false
@@ -209,6 +214,14 @@
         "path": "E:\\codex\\2026-11-01\\ni\\work\\external\\macOS-DroidVM",
         "head": "9db2f6f263173b660536530c2d102f480280cdb3",
         "refs": ["main"],
+        "unreachable_commits": 260,
+        "unreachable_vm_k27_reexport": {
+          "commit": "71405bb427c480916662ed79d4a598fdcf038865",
+          "date": "2026-11-10",
+          "numbered_xnu_patches": 49,
+          "scope": "single-volume Gunyah VM tree per its patches/xnu-12377/README.md; not native-variant pin"
+        },
+        "local_object_inventory_contains_required_commit_or_tree": false,
         "required_commit_object_available": false,
         "sparse_checkout_excludes": ["patches", "sources"],
         "generated_out_tree_present": false
@@ -221,7 +234,7 @@
         "PIANO_K27_TREE_set": false,
         "external_k27_tree_found_in_bounded_home_Codex_search": false
       },
-      "result": "locked local source input unavailable in the checked public refs, forks, Windows clone, and Mac home search"
+      "result": "locked local source input unavailable in the checked public refs, forks, Windows clone reachable and unreachable objects, and Mac home search"
     },
     "pinned_tree_match": false,
     "native_device_evidence": false
