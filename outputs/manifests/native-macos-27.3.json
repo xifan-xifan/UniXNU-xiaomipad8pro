@@ -34,11 +34,18 @@
       "tooling/k27/test-piano-guard.sh",
       "tooling/k27/test-piano-pm.sh",
       "tooling/k27/check-native-kexts.py --self-test",
-      "tooling/metal/check-bundle-paths.py --self-test"
+      "tooling/metal/check-bundle-paths.py --self-test",
+      "tooling/userland/test-stage.py",
+      "tooling/persist/test-data-store.py"
     ],
-    "blocked": {
-      "tooling/userland/test-stage.py": "Mac Python 3.9.6 lacks tomllib; repository host checklist requires Python 3.11+",
-      "tooling/persist/test-data-store.py": "Mac Python 3.9.6 lacks tomllib; exact pinned UniXNU source is available at /tmp/codex-unixnu-d830d23"
+    "skipped": {
+      "tooling/userland/test-stage.py": "tests 4-7 require PIANO_K27_TREE, unavailable on Mac",
+      "tooling/persist/test-data-store.py": "pin --esp subtest requires mtools, unavailable on Mac"
+    },
+    "python": {
+      "version": "3.11.18",
+      "path": "/tmp/cpython311-3.11.18/python/bin/python3.11",
+      "archive_sha256": "73f1ed14486aa278d331e95f7d6d452f5cfb69d90b418e26e62fd4846d53557d"
     },
     "unixnu_python_source": {
       "commit": "d830d23b0d19c9322d906c21afeca1d6c54aeffe",
