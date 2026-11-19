@@ -428,6 +428,24 @@
       "global_commit_search_results": 0,
       "public_forks_checked": 9,
       "fork_commit_lookup": "exact commit unavailable through each checked fork API",
+      "latest_fork_audit_2026_11_19": {
+        "repository": "Droid-VM/macOS-DroidVM",
+        "current_fork_count": 8,
+        "forks": [
+          "a19102275-jpg/macOS-DroidVM",
+          "qeqenn/macOS-DroidVM",
+          "zhangxucheng018/macOS-DroidVM",
+          "djun/macOS-DroidVM",
+          "bushan/macOS-DroidVM",
+          "1454228/macOS-DroidVM",
+          "msft404/macOS-DroidVM",
+          "rooteduniverse1003/macOS-DroidVM"
+        ],
+        "exact_commit_api_lookup": "11ac316b789d81fc9f734e15645456f536c05141 unavailable in all 8",
+        "current_branch_refs": ["main", "macOS", "wip/hackintosh"],
+        "all_pull_requests": 0,
+        "result": "no newly available source for the locked native variant"
+      },
       "local_partial_clone": {
         "path": "E:\\codex\\2026-11-01\\ni\\work\\external\\macOS-DroidVM",
         "head": "9db2f6f263173b660536530c2d102f480280cdb3",
