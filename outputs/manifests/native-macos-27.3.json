@@ -72,6 +72,18 @@
     },
     "write_attempted": false
   },
+  "userdata_f2fs_probe_2026_11_19": {
+    "filesystem": "f2fs",
+    "mount_device": "/dev/block/dm-56",
+    "mount_option_resizable_tail_secno": "not shown",
+    "sysfs_feature_access_shell": "permission denied",
+    "sysfs_feature_access_su": "permission denied",
+    "resize_f2fs_binary": "not found by PATH lookup or under /system and /vendor",
+    "data_file_contents_read": false,
+    "device_write_attempted": false,
+    "shrinkability": "unverified; do not assume support in a WRITE-PLAN",
+    "upstream_reference": "Android common android15-6.6 commit 39e1749b1b88a1d9d0253e96b1d15ffed6f3fb67 (2026-11-05); not evidence for the stock device kernel"
+  },
   "host_validation_2026_11_19": {
     "host": "mac-lan",
     "passed": [
