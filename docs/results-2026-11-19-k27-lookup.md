@@ -19,4 +19,6 @@ The current GitHub fork API returned these eight repositories; a direct commit l
 
 An isolated bare-repository probe also attempted `git fetch` by the full required commit hash from the DroidVM Git remote. Git's upload-pack rejected it with `not our ref 11ac316b789d81fc9f734e15645456f536c05141`, so the object is not directly fetchable from the current remote even when requested by hash.
 
+An additional read-only scan of `E:\codex\2026-11-01\ni\work` checked the Git object databases for the retained `downloaded-repos`, `piano-macos-c146`, `piano-macos-upstream-main-49c589`, and `sources/UniXNU-xiaomipad8pro-latest` checkouts, along with the other source repositories found there. None contains the required commit or prepared tree. Their k27 patch files and historical outputs remain provenance only; no source tree was imported.
+
 This lookup found no new source candidate. The separate local DroidVM 27.0.1 tree remains useful provenance for the recorded VM runtime successes, but it is not the required native 27.3 source. No dependency pin or build input was changed.
