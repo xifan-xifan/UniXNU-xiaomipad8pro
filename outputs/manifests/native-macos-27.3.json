@@ -265,11 +265,25 @@
       "scope_limit": "first/last 1 MiB only; not full LUN or userdata backups",
       "locations": ["E:\\piano-gpt-boundaries-20261119-075429", "F:\\piano-gpt-boundaries-20261119-075429"],
       "manifest_csv_sha256": "6bed82408cbef8999cf503044046fad7fd5fc503a62a1740d006808c1fd55388",
+      "free_space_audit": {
+        "tool": "tooling/persist/audit-gpt-space.py",
+        "capture_sets": ["E:\\piano-gpt-boundaries-20261119-075429", "F:\\piano-gpt-boundaries-20261119-075429"],
+        "result": "both capture sets pass SHA-256, GPT header/entry-array CRC, and primary/backup entry equality checks",
+        "free_extents": [
+          {"device":"sda","blocks":124552192,"partitions":34,"extents":[]},
+          {"device":"sdb","blocks":3072,"partitions":5,"extents":[{"first_lba":2262,"last_lba":3066,"bytes":3297280}]},
+          {"device":"sdc","blocks":3072,"partitions":5,"extents":[{"first_lba":2262,"last_lba":3066,"bytes":3297280}]},
+          {"device":"sdd","blocks":2048,"partitions":3,"extents":[{"first_lba":576,"last_lba":2042,"bytes":6008832}]},
+          {"device":"sde","blocks":378880,"partitions":79,"extents":[{"first_lba":374924,"last_lba":378872,"bytes":16175104}]},
+          {"device":"sdf","blocks":16384,"partitions":7,"extents":[{"first_lba":14848,"last_lba":16378,"bytes":6270976}]}
+        ],
+        "scope": "offline GPT-unallocated extents only; no device access, userdata content read, or disk write"
+      },
       "luns": [
         {"device":"sda","blocks":124552192,"head_sha256":"0adfb85a53f909df3e77d6b4a9c2e49f7f444163a479be3f3784292945d2e51f","tail_sha256":"dc0eb2ce8fa2c40e8752d5d7dba186ab76152540779920f3815193eb1cae418f"},
         {"device":"sdb","blocks":3072,"head_sha256":"e7a811b00239caa2155db932b6dc451e4d198819382a2d3c7d320456c3eca701","tail_sha256":"82a8c61dc68244279320f3006fb839ae01d90f979f782314a2a88af3e9c99210"},
         {"device":"sdc","blocks":3072,"head_sha256":"b1ca5a1733a07b6baa68251267fa237d4c61be4e843772df7caa791c99652141","tail_sha256":"b6e82b6f6d250d13de0b5f314737bb53a4f496f453027c13345267628e3bf4da"},
-        {"device":"sdd","blocks":2048,"head_sha256":"807666ed0f48d2d93583ed60320694c5d05dc4f96ec0b765f5cb75a2464e8214","tail_sha256":"632f8714835bfa5a779bd5f42e6a1394e2a5612da37b003658736310bee67316"},
+        {"device":"sdd","blocks":2048,"head_sha256":"807666ed0f48d2d93583ed60320694c5d05dc4f96ec0b765f5cb75a2464e8214","tail_sha256":"632f8714835baf5a779bd5f42e6a1394e2a5612da37b003658736310bee67316"},
         {"device":"sde","blocks":378880,"head_sha256":"585599f015837083de42c7c306ccf9c744234d9a43ad5ee6254fa041f8513f47","tail_sha256":"6d98b4d0aae358edb0cf28e4e5b129cf231123271ccaf83cea100b88633b1cf2"},
         {"device":"sdf","blocks":16384,"head_sha256":"92633c4a20a4e683e0912b9f460944655a5eef18f2c64f75644ccea3043d6b4e","tail_sha256":"eb66f4eb6cb6b6906616701d3eb24380bbca9f72b9fa3b8fb88bcf3e974adef9"}
       ]
