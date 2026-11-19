@@ -92,6 +92,12 @@
     "tool_path": "tools/piano-switch.py",
     "tool_git_blob": "c504b603ba1cb3629057afeb501afe5740819766",
     "tool_bytes": 3111,
+    "release_tools_archive": {
+      "path": "D:\\Temp\\piano-ubuntu-v1.6.1-tools.zip",
+      "bytes": 35336074,
+      "sha256": "1e6b309b2a6c9f8be8d8ed02ea7ffe767b85cd1209ba0066cef21790111088e6",
+      "contained_script_blob_matches_tag": true
+    },
     "release_stock_baseline": "OS3.0.303.0.WPYCNXM",
     "installer_erases_android_data": true,
     "fastboot_preflight_matched_current_device": true,
