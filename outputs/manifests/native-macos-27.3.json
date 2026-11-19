@@ -45,7 +45,16 @@
       "rate_bytes_per_second": 20905,
       "temporary_probe_removed": true
     },
-    "download_status": "in_progress",
+    "download_status": "segmented_in_progress",
+    "segmented_download": {
+      "parts": 32,
+      "chunk_bytes_except_last": 354566076,
+      "directory": "/tmp/piano-rom-chunks-full-20261119",
+      "bytes_at_last_check": 98172928,
+      "all_part_files_present": true,
+      "aggregate_rate_bytes_per_second_observed": 1600000,
+      "verified": false
+    },
     "last_size_check_date": "2026-11-19",
     "local_partial_path": "/tmp/piano_images_OS3.0.309.0.WPYCNXM_20260906.0000.00_16.0_cn_d5071e52da.tgz",
     "local_partial_bytes_at_last_check": 14045184,
