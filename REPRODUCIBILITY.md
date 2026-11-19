@@ -10,7 +10,7 @@ The baseline already contains commits for the single-frame video output teardown
 
 ## Locked source set
 
-The source commit and all dependency pins remain unchanged. `unixnu.lock` SHA-256 is `ced429fc4a1e44be80076cc56f2c740e37265f6cfee3bcd268ccbacfc1d55a7`; `feeds.toml` SHA-256 is `4cd179d4bc2bb1810201ebec50653f41b4831dc511e823703fe0f122c8bb0385`. The complete set is the contents of those two files at the execution baseline. Key pins include:
+The source commit and all dependency pins remain unchanged. The Windows working-tree SHA-256 values are `unixnu.lock=ced429fc4a1e44be80076cc56f2c740e37265f6cfee3bcd268ccbacfc1d55a7` and `feeds.toml=4cd179d4bc2bb1810201ebec50653f41b4831dc511e823703fe0f122c8bb0385`. Canonical Git/LF byte streams hash to `unixnu.lock=7df01ca8fd9cbdbaa8864f0eb906ddbd6d107f628a26fa95540a2090164542c8` and `feeds.toml=fbc246637fe07cf61a620c1339a1f7859535c6f81841d07c5ed4046bf0633a83`; the apparent historical difference is line-ending normalization, not a dependency-pin change. The complete set is the contents of those two files at the execution baseline. Key pins include:
 
 - UniXNU core: `d830d23b0d19c9322d906c21afeca1d6c54aeffe`.
 - SM8750 source: `feaa135df4763e3c19a155402e6b17b124a12e13`.
@@ -20,6 +20,8 @@ The source commit and all dependency pins remain unchanged. `unixnu.lock` SHA-25
 - Local k27 tree pin: `11ac316b789d81fc9f734e15645456f536c05141`; its recorded XNU base is `ac9718fb1af618d5ce8678d0dc6e8a58f252216f`, with a locally prepared tree at `de16623d957cccff6dfb78d8eca4a79842af9702`.
 
 No dependency pin was changed. `tooling/k273/prepare-k27-tree.sh` consumes an existing `PIANO_K27_TREE`, applies the repository patches, and relinks it; it does not provide a zero-input public reconstruction of the local k27 tree.
+
+The WSL host-side persistence test was rerun with GNU mtools 4.0.50, downloaded from ftp.gnu.org, verified with the signed release archive, and built locally. Repeated creation of the same 1 GiB FAT32 image is byte-identical with 4.0.50; the installed 4.0.43 produced differing hashes. Remaining test failures are host-fixture issues: a fake sysfs partition-size mismatch, Linux lacking macOS `fcntl.F_NOCACHE`, and a test continuation after an expected backup stop. No tablet I/O occurred.
 
 ## Input status
 

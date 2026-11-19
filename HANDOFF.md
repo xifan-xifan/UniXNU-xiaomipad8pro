@@ -26,6 +26,8 @@ Updated 2026-11-19. Goal status is active. The current objective remains deploym
 
 ## Next actions
 
+- Host reproducibility update: GNU mtools 4.0.50 was signature-verified and built in WSL; identical FAT32 formatting is now deterministic. The persistence suite's remaining red cases are Linux/test-fixture limitations (`F_NOCACHE`, fake sysfs size, and expected backup-stop continuation), not tablet results.
+
 - Keep the A/B successful/retry values as a timestamped Fastboot observation; recheck only before any future switching plan because bootloader state can change.
 - Do not collect or back up tablet data. Treat the two interrupted `/data` outputs above as unusable partial files; continue only with host-side and public-source research.
 - Find the exact c146 native image set and its k27/input provenance in preserved copies, if present; keep DroidVM assets separate. Determine the documented return-to-Android event without assuming the paused 3.0.308 wipe proposal ran.
