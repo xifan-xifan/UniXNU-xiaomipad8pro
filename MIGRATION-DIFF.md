@@ -41,4 +41,4 @@ The script has no dry-run mode, no boot-success/retry-counter check, and no read
 4. Match root, Data seed/header/LBA, FD, ESP, ADT, trust cache, userland layer and boot signature as one manifest-backed set.
 5. Produce a concrete `WRITE-PLAN.md` with target, range, hashes, commands, readback and rollback for each write. Any userdata clear/rebuild, GPT change or persistent boot write remains gated on explicit confirmation of that specific plan.
 
-No WRITE-PLAN is issued here because the partition map, independent recovery copies and target sizes are not yet verified.
+The subsequent baseline verified the current GPT maps and existing A-slot boot triplet copies. The independent kernel host build on 2026-11-20 leaves the stock storage layout intact. No usable internal extent or external root/Data path has been qualified, so there is still no concrete write plan. See the [kernel result](docs/results-2026-11-20-independent-k27.md).

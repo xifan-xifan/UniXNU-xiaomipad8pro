@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "checked_on": "2026-11-19",
+  "checked_on": "2026-11-20",
   "device_repository": "https://github.com/lenzhang/UniXNU-xiaomipad8pro",
   "device_commit": "2438556c77c90c22c7b76e57eb8b40c44b35f1af",
   "main_comparison": {
@@ -58,7 +58,7 @@
   "local_k27": {
     "pin": "11ac316b789d81fc9f734e15645456f536c05141",
     "xnu_base": "ac9718fb1af618d5ce8678d0dc6e8a58f252216f",
-    "prepared_tree_pin": "de16623d957cccff6dfb78d8eca4a79842af9702",
+    "inner_xnu_commit_from_patch_0054": "de16623d957cccff6dfb78d8eca4a79842af9702",
     "available": false
   },
   "mac_host_tools_2026_11_19": {
@@ -116,9 +116,35 @@
     },
     "boundary": "Apple inputs only; no claim that the native kernel, root image, Data seed, or boot set is matched or buildable"
   },
-  "build_status": "not_started_missing_locked_k27_tree_and_matched_native_root_data_inputs",
+  "build_status": "independent_kernel_reproducibly_linked_target_kc_layout_failed",
+  "independent_build_2026_11_20": {
+    "upstream_main": "2438556c77c90c22c7b76e57eb8b40c44b35f1af",
+    "upstream_pr2_head": "7228bb953ad8ed1817cd2324166af90f0abb439d",
+    "xnu_head": "c2936efdf3724e3268ee812e6712d9d3b8d5a403",
+    "modified_tracked_files": 60,
+    "source_sha256": "119dc3f35273084c1629d2fc7744442fb11b0c47638d340c17e7e38d2ee41576",
+    "build_input_files": 10201,
+    "input_inventory_sha256": "a110fc415dbd54837950ca48dab2fb7c3cc744d3c8ff9a5c58b07ff4f8471ac2",
+    "build_inputs_archive_sha256": "f687af31008c76d57978a0712e7c6ec8f3c08dd60acbda5deef2ffbf02437c1d",
+    "clang_sha256": "8ef402d453d1ba4902e4ee0f0f847f6cfa01400c95aa43c24e97818b9c0e3f45",
+    "ld64_sha256": "f37f793dbbc2e651db479c66a0375ca1a58f800eebde2092c6af7503dc911446",
+    "objects_rebuilt_per_run": 1093,
+    "objects_identical_across_runs": 1093,
+    "fixed_object_mtime_epoch": 946684800,
+    "reproducible_kernel_bytes": 23714232,
+    "reproducible_kernel_sha256": "d827848fe3a905d068b521e298dcd70a3bcc03988c753bdbf0a74001b76fd2ba",
+    "target_layout_rc": 1,
+    "data_const_headroom_shortfall_bytes": 32768,
+    "arm64e_abi_warnings": 1447,
+    "device_profile_descriptors": 26,
+    "signed_or_booted": false,
+    "exact_upstream_source_equivalence": "unestablished",
+    "evidence": "docs/results-2026-11-20-independent-k27.md",
+    "host_local_directory": "out/k27-independent-20261120/host-run"
+  },
   "build_blockers": [
-    "local k27 pin 11ac316b789d81fc9f734e15645456f536c05141 and prepared tree de16623d957cccff6dfb78d8eca4a79842af9702 unavailable",
+    "independent candidate target KC constant-data reserve and arm64e ABI unresolved",
+    "local k27 pin 11ac316b789d81fc9f734e15645456f536c05141 and inner XNU commit de16623d957cccff6dfb78d8eca4a79842af9702 unavailable",
     "no qualified internal root/Data layout; current NativeUfs root and NativeRamBlock persistent store are UFS-specific",
     "no matched native Data seed/root image or device signing configuration"
   ],
@@ -458,7 +484,7 @@
       "required_commit": "11ac316b789d81fc9f734e15645456f536c05141",
       "required_branch": "el1/native-variant",
       "required_baseline_patches": "0001-0054",
-      "required_prepared_tree": "de16623d957cccff6dfb78d8eca4a79842af9702",
+      "required_inner_xnu_commit": "de16623d957cccff6dfb78d8eca4a79842af9702",
       "upstream_refs_checked": ["main", "macOS", "wip/hackintosh"],
       "upstream_commit_api": "commit object unavailable",
       "global_commit_search_results": 0,

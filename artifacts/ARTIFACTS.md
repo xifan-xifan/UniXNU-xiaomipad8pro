@@ -96,3 +96,14 @@ not installed). The seed is the store's base, pinned from the installed `esp-dai
 The Turnip bundle built from a fresh worktree is byte for byte main's: `NativeAdrenoMetal` d4ffaf27…, `libvulkan_freedreno.dylib`
 8c6958ba… (patch 0006), `Info.plist` 9595a4d2… (`docs/data-store.md` §9.4).
 
+
+## Independent host build, 2026-11-20
+
+| Local artifact | SHA-256 |
+| --- | --- |
+| XNU source snapshot | `119dc3f35273084c1629d2fc7744442fb11b0c47638d340c17e7e38d2ee41576` |
+| Build inputs and recipes archive | `f687af31008c76d57978a0712e7c6ec8f3c08dd60acbda5deef2ffbf02437c1d` |
+| First linked measurement kernel with binary symbol sets | `9471d79293ff8fb9e66c8fb79bc852f42719747ac7addee1f67749193bfda0c0` |
+| Measurement kernel reproduced twice with fixed object mtimes | `d827848fe3a905d068b521e298dcd70a3bcc03988c753bdbf0a74001b76fd2ba` |
+
+The kernel is a host sizing artifact. The mac17j layout check failed. [Measurements and scope](../docs/results-2026-11-20-independent-k27.md).
