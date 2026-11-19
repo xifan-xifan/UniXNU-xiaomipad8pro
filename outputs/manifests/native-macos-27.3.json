@@ -80,7 +80,32 @@
     "historical_feeds_toml_sha256": "fbc246637fe07cf61a620c1339a1f7859535c6f81841d07c5ed4046bf0633a83",
     "reported_by_historical_results": "native macOS 27.3 desktop, GPU/input, Wi-Fi networking and persistent Data",
     "current_device_recheck": "2026-11-19 live GPT has no linux_rootfs, linux_data, or ESP; intervening return-to-stock event unknown",
-    "historical_native_outputs_available": false,
+    "historical_native_outputs_available": true,
+    "historical_native_outputs_scope": "partial mismatched offline candidate only; no current-baseline reproducible source, persistent root, or ESP",
+    "historical_sibling_checkout": {
+      "path": "E:\\codex\\2026-11-01\\ni\\work\\piano-macos-latest",
+      "commit": "9097efb936692ef743c3c947e3682adade97d87d",
+      "unixnu_lock_sha256": "7df01ca8fd9cbdbbaa8864f0eb906ddbd6d107f628a26fa95540a2090164542c8",
+      "feeds_toml_sha256": "fbc246637fe07cf61a620c1339a1f7859535c6f81841d07c5ed4046bf0633a83",
+      "k27_output_files": 114,
+      "k27_output_bytes": 6249169588,
+      "generated_input_files": 4,
+      "generated_input_bytes": 1675568,
+      "k27_source_tree_present": false,
+      "persistent_root_image_present": false,
+      "persistent_esp_image_present": false,
+      "kc_k273_native_sha256": "663e6ef7f06666829b5d8a0770ea77c18923e1e534ad2b2e5ef2f18d1508459e",
+      "ram_candidate": {
+        "path": "out/k27/ram-native-fd3d40-v3/boot-piano-macos-ram-A-bundled.img",
+        "bytes": 177512448,
+        "sha256": "1040b921835a14bcfb2bb5a51872613a3dba5ad45e4caa7b0077be9f5eaf1c99",
+        "status": "OFFLINE_CANDIDATE_NOT_DEVICE_TESTED",
+        "data_persist": 0,
+        "same_seed": false,
+        "installed_seed_source": "unknown",
+        "signing_stock_baseline": "OS3.0.303"
+      }
+    },
     "other_backup_assets": "F:\\piano-backup\\data-local-tmp\\tmp.tar contains 13 macos27 members; archived run.sh uses crosvm --hypervisor gunyah, so these are VM guest assets, not native UFS boot inputs",
     "paused_wipe_proposal": "2026-11-16 proposal targets HyperOS 3.0.308; not executed or resumed"
   },
