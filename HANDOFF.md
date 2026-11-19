@@ -27,6 +27,7 @@ Updated 2026-11-19. Goal status is active. The current objective remains deploym
 ## Next actions
 
 - Host reproducibility update: GNU mtools 4.0.50 was signature-verified and built in WSL; identical FAT32 formatting is now deterministic. The persistence suite's remaining red cases are Linux/test-fixture limitations (`F_NOCACHE`, fake sysfs size, and expected backup-stop continuation), not tablet results.
+- k27 source audit update: neither the current repository nor the preserved historical checkouts contains the exact local tree at pin `11ac316b789d81fc9f734e15645456f536c05141`; the public `Droid-VM/macOS-DroidVM` remote currently exposes only `main`, `macOS`, and `wip/hackintosh`, with no matching ref. Existing historical outputs remain non-reproducible without that tree and are not promoted to build inputs.
 
 - Keep the A/B successful/retry values as a timestamped Fastboot observation; recheck only before any future switching plan because bootloader state can change.
 - Do not collect or back up tablet data. Treat the two interrupted `/data` outputs above as unusable partial files; continue only with host-side and public-source research.
