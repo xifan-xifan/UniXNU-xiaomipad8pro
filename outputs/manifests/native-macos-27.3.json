@@ -144,6 +144,34 @@
       "replay_status": "all numbered patches applied in order with git am; clean working tree",
       "scope_limit": "temporary public DroidVM source replay from a verified base archive; not proven equivalent to private device pin 11ac316b789d81fc9f734e15645456f536c05141 and not a native build"
     },
+    "locked_pin_lookup": {
+      "required_commit": "11ac316b789d81fc9f734e15645456f536c05141",
+      "required_branch": "el1/native-variant",
+      "required_baseline_patches": "0001-0054",
+      "required_prepared_tree": "de16623d957cccff6dfb78d8eca4a79842af9702",
+      "upstream_refs_checked": ["main", "macOS", "wip/hackintosh"],
+      "upstream_commit_api": "commit object unavailable",
+      "global_commit_search_results": 0,
+      "public_forks_checked": 9,
+      "fork_commit_lookup": "exact commit unavailable through each checked fork API",
+      "local_partial_clone": {
+        "path": "E:\\codex\\2026-11-01\\ni\\work\\external\\macOS-DroidVM",
+        "head": "9db2f6f263173b660536530c2d102f480280cdb3",
+        "refs": ["main"],
+        "required_commit_object_available": false,
+        "sparse_checkout_excludes": ["patches", "sources"],
+        "generated_out_tree_present": false
+      },
+      "mac_build_host": {
+        "checkout": "/Users/zhangqi/Codex/UniXNU-xiaomipad8pro",
+        "checkout_commit": "2438556c77c90c22c7b76e57eb8b40c44b35f1af",
+        "checkout_status": "clean, detached",
+        "piano_env_present": false,
+        "PIANO_K27_TREE_set": false,
+        "external_k27_tree_found_in_bounded_home_Codex_search": false
+      },
+      "result": "locked local source input unavailable in the checked public refs, forks, Windows clone, and Mac home search"
+    },
     "pinned_tree_match": false,
     "native_device_evidence": false
   },
