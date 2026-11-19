@@ -123,6 +123,22 @@
     "no matched native Data seed/root image or device signing configuration"
   ],
   "apple_27_3_input_state": "required IPSW-derived member files already present and SHA-256-verified in D:\\Download\\piano-macos-273-inputs; complete IPSW archive absent but not a reason to redownload verified members",
+  "host_validation_2026_11_19": {
+    "result": "PASS: 0 failure(s) for test-k273-only.py; all listed host suites passed",
+    "tests": [
+      "tooling/native/test_piano_input.py",
+      "tooling/native/test_rtc_offset.py",
+      "package/NativeRamBlock/Test/run-tests.sh",
+      "package/include/tests/run.sh",
+      "bash tooling/k27/test-piano-bootargs.sh",
+      "tooling/k27/test-piano-guard.sh",
+      "tooling/k27/test-piano-pm.sh",
+      "tooling/k27/check-native-kexts.py --self-test",
+      "tooling/persist/test-k273-only.py with CPython 3.11.18 and GNU mtools 4.0.50"
+    ],
+    "device_access": false,
+    "scope_limit": "host and fake-tablet validation only; no native image build or boot"
+  },
   "device_test_status": "read_only_baseline_only",
   "writes_performed": false,
   "android_recovery_package_probe": {
