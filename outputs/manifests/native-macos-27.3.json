@@ -116,7 +116,7 @@
     },
     "boundary": "Apple inputs only; no claim that the native kernel, root image, Data seed, or boot set is matched or buildable"
   },
-  "build_status": "independent_kernel_reproducibly_linked_target_kc_layout_failed",
+  "build_status": "independent_mac_kernel_layout_and_apple_pointer_preflight_passed",
   "independent_build_2026_11_20": {
     "upstream_main": "2438556c77c90c22c7b76e57eb8b40c44b35f1af",
     "upstream_pr2_head": "7228bb953ad8ed1817cd2324166af90f0abb439d",
@@ -159,8 +159,22 @@
     "host_local_archive": "out/k27-independent-20261120/host-run/mac-object-checkpoint.tar.gz",
     "evidence": "docs/results-2026-11-20-mac-k27-objects.md"
   },
+  "mac_kc_preflight_2026_11_20": {
+    "kernel_bytes": 28026624,
+    "kernel_sha256": "25a417668cbba250ee0d055935ef0b2da1381f7224237fe1aa089cff607e6d31",
+    "archive_members_arm64e": 536,
+    "data_const_start": "0xdb8000",
+    "segment_addresses_matched": 18,
+    "device_descriptors": 26,
+    "retained_apple_kexts": 54,
+    "kernel_chained_pointers": 117187,
+    "unresolved_retained_apple_pointer_targets": 0,
+    "kc_emitted": false,
+    "device_tested": false,
+    "evidence": "docs/results-2026-11-20-mac-k27-kc-preflight.md"
+  },
   "build_blockers": [
-    "independent candidate target KC constant-data reserve and arm64e ABI unresolved",
+    "native kext objects and full KC not linked; driver and kernel ABI compatibility unqualified",
     "local k27 pin 11ac316b789d81fc9f734e15645456f536c05141 and inner XNU commit de16623d957cccff6dfb78d8eca4a79842af9702 unavailable",
     "no qualified internal root/Data layout; current NativeUfs root and NativeRamBlock persistent store are UFS-specific",
     "no matched native Data seed/root image or device signing configuration"

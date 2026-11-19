@@ -1,12 +1,8 @@
 # Native macOS Deployment Handoff
 
-Updated 2026-11-20. The owner requested a pause after the Mac object build. The independently built kernel links on the host. Target KC layout, ABI compatibility, a matched root/Data pair and hardware acceptance remain open. The objective remains deployment and local qualification of native macOS 27.3 while preserving HyperOS 3.0.309 and validating both switch directions and recovery.
+Updated 2026-11-20. The independent Mac kernel links and passes the 26C5035r mac17j segment layout check. The preflight for the 26-driver profile also resolves the retained Apple kext pointer targets. Native driver compilation and final kernel collection validation are the next build gates. The objective remains deployment on the tablet while preserving HyperOS 3.0.309 and verifying switching and recovery.
 
-The [independent k27 result](docs/results-2026-11-20-independent-k27.md) supersedes the earlier exact-source-only restart criterion. No further source location is needed from the owner for this build route. Resume from the frozen inputs and layout log in `out/k27-independent-20261120/host-run/`.
-
-## Resume at the Mac object checkpoint
-
-Apple clang 17 built all 1,093 kernel objects with the mac17j kernel subtype, including all 27 assembly files using a regenerated offset header. The verified local archive is `out/k27-independent-20261120/host-run/mac-object-checkpoint.tar.gz`. The local `mac-path.txt` in its parent records the remote work folder. On resumption, qualify or rebuild the five external archives for this ABI, apply XNU’s constructor postprocessing to the Mac object, link the Mac kernel, and measure it against the frozen mac17j input. The 32 KiB headroom deficit was measured on the WSL kernel. The Mac kernel has not yet been linked or measured. See [Mac object handoff](docs/results-2026-11-20-mac-k27-objects.md).
+The Mac archive inputs, positioned kernel and isolated KC builder are preserved under `out/k27-independent-20261120/host-run/`. Resume from the [KC preflight](docs/results-2026-11-20-mac-k27-kc-preflight.md). The exact author k27 pin remains unavailable. Keep this independent build on its frozen inputs.
 
 ## Current state
 
@@ -32,7 +28,7 @@ Apple clang 17 built all 1,093 kernel objects with the mac17j kernel subtype, in
 1. **Read-only baseline and source lock:** device identity and upstream commit confirmed; all six GPTs validated; A-slot boot triplet and misc read-only captured twice and reread-verified; Fastboot slot state/capacities read and normal Android return confirmed. Full recovery qualification remains open.
 2. **Reproducibility and migration reports:** first versions created in this change; missing inputs and stock-to-upstream layout differences recorded.
 3. **Complete rollback set and write design:** the official 3.0.309 OS package is now verified; still blocked on the matched macOS image set, a concrete storage plan, and write-specific rollback/recovery design. No tablet data backup is planned.
-4. **Kernel and matched build.** All 1,093 kernel objects compiled and linked for the independent candidate. The target layout checker rejects its reserved constant-data span. The Apple input members are available. Native patch coverage, the arm64e ABI, the device driver set and paired userland/signing remain open.
+4. **Kernel and matched build.** All 1,093 kernel objects compiled and linked for the independent candidate. The Apple clang relink passes the segment check with a 32 KiB boundary shift. Native patch coverage, driver ABI and linking, matched storage, and userland/signing remain open.
 5. **Diagnostic boot and desktop qualification:** not started; storage root dependency must be resolved first.
 6. **Persistence, switching, recovery and daily-use acceptance:** not started; requires an approved concrete write plan and paired image sets.
 

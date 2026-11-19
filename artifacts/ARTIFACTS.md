@@ -109,3 +109,11 @@ The Turnip bundle built from a fresh worktree is byte for byte main's: `NativeAd
 The kernel is a host sizing artifact. The mac17j layout check failed. [Measurements and scope](../docs/results-2026-11-20-independent-k27.md).
 
 The Apple clang object checkpoint archive SHA-256 is `3c04ed4434e30a079fd604872334c63d4d4d846229b7078f296e7b679c42e09b`. [Mac object verification](../docs/results-2026-11-20-mac-k27-objects.md).
+
+| Local artifact | SHA-256 |
+| --- | --- |
+| Mac external archive build inputs | `7488a65a0fc7637bf5905011bfb8e5bdac6fb56e8e8596ac5a0aea6faaf6fb12` |
+| Mac positioned kernel (28,026,624 B) | `25a417668cbba250ee0d055935ef0b2da1381f7224237fe1aa089cff607e6d31` |
+| 26-descriptor KC preflight log | `3c31d03862c731fe42e74532f5fbb08dc64cbc9c5362132c7e58873af6bee84c` |
+
+The Mac kernel and KC preflight have host evidence in the [dated result](../docs/results-2026-11-20-mac-k27-kc-preflight.md).
