@@ -1,0 +1,13 @@
+# F2FS Offline Resize Tool Audit
+
+Audit date: 2026-11-19. Host-source and synthetic-image testing only. No tablet access, userdata read, backup, or device write was performed.
+
+The current upstream `f2fs-tools` `master` resolved through `git ls-remote` to `83fd39a184df96db5def895ddc55bf68e720ef76`, dated 2026-09-24, version 1.17.0. A clean detached checkout was built in WSL2 `UbuntuPiano` and installed under `/tmp/f2fs-tools-83fd39a/install`. The preinstalled tools in that distro are 1.16.0; they were not used for this test.
+
+Source review of `fsck/resize.c` confirms `resize.f2fs -s` selects the offline shrink path. It checks the target geometry and NAT availability, attempts to defragment live blocks out of the tail, then writes updated superblock and checkpoint metadata. The manual page still says only expansion is supported, so the source and manual disagree. This is a host-side offline operation that directly mutates the filesystem; it is not Android's online `resizable_tail_secno` feature, and it does not change the GPT partition boundary.
+
+On a synthetic, unencrypted F2FS image, version 1.17.0 formatted a 512 MiB file, `sload.f2fs` populated an 8 MiB random payload, `resize.f2fs -s -F -t 786432` shrank it to 384 MiB, and `fsck.f2fs -f -N` completed with its structural counters matching. Expanding the backing file to 512 MiB first allowed `resize.f2fs -F -t 1048576` to grow the filesystem back; a subsequent `fsck.f2fs -N` returned 0 and reported the valid block, node, inode, and free-segment counts matching. The payload source SHA-256 was `3b6437f3648dc9a6a81ff67f7468868ce54d53d3c3f15cea610c47105577f9ed`.
+
+The first post-shrink full check emitted `Invalid CP CRC offset: 0` for a checkpoint copy while the filesystem consistency counters passed; the later read-only check after the grow-back returned 0 without that warning. The test did not extract and hash the payload from the image, inject interruption/power loss, or test an Android-formatted filesystem. It establishes only that this source revision's basic shrink/grow path can operate on a simple synthetic image under this WSL host.
+
+This does not establish compatibility with the tablet's Android 16 F2FS feature set, metadata, encryption state, or stock kernel, and it is not a userdata migration recipe. The target's exact vendor kernel/source and on-disk feature set remain unknown. No shrinkability claim is made for the tablet. Do not use this tool on the device or include userdata shrink in a WRITE-PLAN without a matching-format fixture, end-to-end data readback, crash/recovery testing, a concrete range/recovery design, and the required explicit authorization.

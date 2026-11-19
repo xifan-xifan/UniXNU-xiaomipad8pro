@@ -177,6 +177,33 @@
     "shrinkability": "unverified; do not assume support in a WRITE-PLAN",
     "upstream_reference": "Android common android15-6.6 commit 39e1749b1b88a1d9d0253e96b1d15ffed6f3fb67 (2026-11-05); not evidence for the stock device kernel"
   },
+  "f2fs_tools_offline_shrink_2026_11_19": {
+    "upstream_repository": "https://git.kernel.org/pub/scm/linux/kernel/git/jaegeuk/f2fs-tools.git",
+    "upstream_head_checked": "83fd39a184df96db5def895ddc55bf68e720ef76",
+    "source_date": "2026-09-24",
+    "version": "1.17.0",
+    "host": "WSL2 UbuntuPiano",
+    "build_status": "built from exact detached commit",
+    "install_prefix": "/tmp/f2fs-tools-83fd39a/install",
+    "source_review": "resize.f2fs -s selects offline shrink; direct filesystem writes; not online resizable_tail_secno and not GPT resize",
+    "synthetic_test": {
+      "format": "unencrypted F2FS file image",
+      "initial_bytes": 536870912,
+      "target_bytes": 402653184,
+      "payload_bytes": 8388608,
+      "payload_source_sha256": "3b6437f3648dc9a6a81ff67f7468868ce54d53d3c3f15cea610c47105577f9ed",
+      "shrink_command": "resize.f2fs -s -F -t 786432 fs.img",
+      "shrink_fsck": "structural counters matched; first full check emitted Invalid CP CRC offset: 0 for a checkpoint copy",
+      "grow_back": "passed after expanding the backing file to 512 MiB before resize.f2fs -F -t 1048576",
+      "final_read_only_fsck": "fsck.f2fs -N returned 0; valid block/node/inode/free-segment counters matched",
+      "payload_extracted_and_hashed": false,
+      "power_loss_or_crash_tested": false
+    },
+    "device_compatibility": "not tested; Android F2FS feature/encryption set and exact vendor kernel source unavailable",
+    "tablet_access_or_backup": false,
+    "device_write_attempted": false,
+    "result": "host synthetic proof only; do not infer userdata shrinkability or use in a WRITE-PLAN"
+  },
   "existing_boot_capture_static_audit_2026_11_19": {
     "new_device_access_or_capture": false,
     "source_capture": "E:\\piano-verified-readonly-20261119-073450\\boot_a.img",
