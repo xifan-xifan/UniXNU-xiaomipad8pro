@@ -8,6 +8,29 @@
     "ahead_by": 0,
     "behind_by": 0
   },
+  "alternate_upstream_piano_audit_2026_11_19": {
+    "catalog": "UniXNU/UniXNU devices.toml and unixnu.com piano device records",
+    "donyanchen": {
+      "repository": "donyanchen/UniXNU-piano",
+      "revision": "a596eb2e9034bdd951b9551fffda932edb3a2266",
+      "os_profile": "ipados-17.7.11-21H461",
+      "reported_device_milestone": "fastboot stage + fastboot oem ramdisk published a 160 MiB payload volume and UEFI showed the XNU entry",
+      "remaining_limit": "current porting record says no XNU boot has been captured; handoff/runtime unverified",
+      "source_record": "https://unixnu.com/devices/piano-donyanchen"
+    },
+    "code002_kernel": {
+      "repository": "code002-2/UniXNU-piano",
+      "revision": "98b3f94a067aff93a9296de7b80fdddc03dae380",
+      "status": "CI kernel/prelink only; not run on tablet"
+    },
+    "code002_device": {
+      "repository": "code002-2/piano-macos-unixnu",
+      "revision": "e9ff4f0a8dc53fcf0c7e274589ef3ba159106106",
+      "os_profile": "ipados-17.7.11-21H461",
+      "status": "not booted; porting areas planned"
+    },
+    "applicability": "research lead only; distinct OS profile, XNU/UEFI pins and image path; no source or artifact imported into the locked 27.3 build"
+  },
   "target": {
     "macos": "27.3",
     "build": "26C5035r",
