@@ -40,6 +40,9 @@
     "slot_control": "standard misc structure failed magic/CRC validation at checked location; queried read-only through Fastboot",
     "fastboot_observation": {
       "current_slot": "a",
+      "product": "piano",
+      "unlocked": "yes",
+      "is_userspace": "no",
       "slot_successful_a": "yes",
       "slot_successful_b": "yes",
       "slot_retry_count_a": 6,
@@ -80,5 +83,21 @@
     "historical_native_outputs_available": false,
     "other_backup_assets": "F:\\piano-backup\\data-local-tmp\\tmp.tar contains 13 macos27 members; archived run.sh uses crosvm --hypervisor gunyah, so these are VM guest assets, not native UFS boot inputs",
     "paused_wipe_proposal": "2026-11-16 proposal targets HyperOS 3.0.308; not executed or resumed"
+  },
+  "switching_tool_audit": {
+    "repository": "yzddmr6/xiaomipad-8pro-mainline",
+    "latest_release": "v1.6.1",
+    "release_date": "2026-11-18",
+    "observed_main_commit": "aa4095a02c8455dfabc3dc42a8bacdb11bacab6b",
+    "tool_path": "tools/piano-switch.py",
+    "tool_git_blob": "c504b603ba1cb3629057afeb501afe5740819766",
+    "tool_bytes": 3111,
+    "release_stock_baseline": "OS3.0.303.0.WPYCNXM",
+    "installer_erases_android_data": true,
+    "fastboot_preflight_matched_current_device": true,
+    "checks_slot_success_and_retries": false,
+    "implements_post_write_readback": false,
+    "operation_attempted": false,
+    "reason_not_run": "no matched macOS image set or verified 3.0.309 recovery set; no WRITE-PLAN approval"
   }
 }
