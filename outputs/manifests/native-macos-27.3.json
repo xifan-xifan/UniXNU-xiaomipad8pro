@@ -31,7 +31,10 @@
     "listing": "XiaomiROM Xiaomi Pad 8 Pro China Fastboot OS3.0.309.0.WPYCNXM, dated 2026-09-06",
     "cdn_file": "piano_images_OS3.0.309.0.WPYCNXM_20260906.0000.00_16.0_cn_d5071e52da.tgz",
     "cdn_url": "https://bigota.d.miui.com/OS3.0.309.0.WPYCNXM/piano_images_OS3.0.309.0.WPYCNXM_20260906.0000.00_16.0_cn_d5071e52da.tgz",
-    "listing_md5": "not provided",
+    "listing_md5": {
+      "value": "d5071e52da7c5dff4479d45e2775c437",
+      "source": "XM Firmware Updater third-party listing; not verified against local bytes"
+    },
     "cdn_content_length": 11346114406,
     "cdn_etag": "1e89deae4016b8347df45f25316f1d48",
     "referer_required": true,
