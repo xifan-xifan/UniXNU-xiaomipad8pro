@@ -109,6 +109,27 @@
     "other_backup_assets": "F:\\piano-backup\\data-local-tmp\\tmp.tar contains 13 macos27 members; archived run.sh uses crosvm --hypervisor gunyah, so these are VM guest assets, not native UFS boot inputs",
     "paused_wipe_proposal": "2026-11-16 proposal targets HyperOS 3.0.308; not executed or resumed"
   },
+  "historical_k27_reconstruction": {
+    "source_repository": "Droid-VM/macOS-DroidVM",
+    "source_commit": "9b31c236e570a32293e2bcdf1cea331ea6d292f8",
+    "source_claim": "patches/xnu-12377 README says pristine xnu-12377.121.6 ac9718f plus 48 patches applied with git am yields local k27 tree e4caa8c",
+    "droidvm_success_evidence": "local TODO.md and Git history record login/desktop, GPU, audio, and video milestones; virtual DroidVM only, not native piano hardware",
+    "base_archive": {
+      "path": "D:\\Temp\\xnu-ac9718.tar.gz",
+      "source": "apple-oss-distributions/xnu ac9718fb1af618d5ce8678d0dc6e8a58f252216f",
+      "bytes": 18043169,
+      "sha256": "577f4a220304296332e28c802779e7b5e6a27a46812315aacf61c0269a03e12a"
+    },
+    "patch_archive": {
+      "path": "D:\\Temp\\DroidVM-xnu12377-k27-patches-9b31c23.tar.gz",
+      "patch_count": 48,
+      "bytes": 145195,
+      "sha256": "27531cbc5dd3047b9b0682391f93f89d0efe40aebfcc2e56ce3b02d3f6e2627b"
+    },
+    "replay_result": "patches 0001-0007 apply to the existing base; 0008 fails because its kern_exec.c context requires an XNU_NATIVE_RAM_BLOCK/XNU_OWNER_DATA_VOLUME_UUID block absent after those patches; no manual adaptation was made",
+    "pinned_tree_match": false,
+    "native_device_evidence": false
+  },
   "switching_tool_audit": {
     "repository": "yzddmr6/xiaomipad-8pro-mainline",
     "latest_release": "v1.6.1",
