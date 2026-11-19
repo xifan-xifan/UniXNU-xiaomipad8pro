@@ -6,7 +6,22 @@
   "main_comparison": {
     "status": "identical",
     "ahead_by": 0,
-    "behind_by": 0
+    "behind_by": 0,
+    "live_remote_head": "2438556c77c90c22c7b76e57eb8b40c44b35f1af",
+    "live_query": "ssh mac-lan: git ls-remote https://github.com/lenzhang/UniXNU-xiaomipad8pro.git refs/heads/main (2026-11-19)",
+    "mac_local_divergent_tracking_ref": {
+      "commit": "286f5a594563f863aa448ab21c8d160fdcb95eba",
+      "commits_after_baseline": 14,
+      "changed_paths": [
+        "DEVICE-BASELINE.md",
+        "HANDOFF.md",
+        "MIGRATION-DIFF.md",
+        "REPRODUCIBILITY.md",
+        "docs/results-2026-11-19.md",
+        "outputs/manifests/native-macos-27.3.json"
+      ],
+      "scope": "audit/documentation only; not the live GitHub main head"
+    }
   },
   "alternate_upstream_piano_audit_2026_11_19": {
     "catalog": "UniXNU/UniXNU devices.toml and unixnu.com piano device records",
