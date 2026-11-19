@@ -26,6 +26,25 @@
   "build_status": "not_started_missing_inputs_and_mac_command_line_tools",
   "device_test_status": "read_only_baseline_only",
   "writes_performed": false,
+  "android_recovery_package_probe": {
+    "device_accessed": false,
+    "listing": "XiaomiROM Xiaomi Pad 8 Pro China Fastboot OS3.0.309.0.WPYCNXM, dated 2026-09-06",
+    "cdn_file": "piano_images_OS3.0.309.0.WPYCNXM_20260906.0000.00_16.0_cn_d5071e52da.tgz",
+    "cdn_url": "https://bigota.d.miui.com/OS3.0.309.0.WPYCNXM/piano_images_OS3.0.309.0.WPYCNXM_20260906.0000.00_16.0_cn_d5071e52da.tgz",
+    "listing_md5": "not provided",
+    "cdn_content_length": 11346114406,
+    "cdn_etag": "1e89deae4016b8347df45f25316f1d48",
+    "referer_required": true,
+    "range_probe": "HTTP 206; exact requested bytes returned",
+    "full_download_rate_bytes_per_second_per_connection": 20300,
+    "download_status": "in_progress",
+    "last_size_check_date": "2026-11-19",
+    "local_partial_path": "/tmp/piano_images_OS3.0.309.0.WPYCNXM_20260906.0000.00_16.0_cn_d5071e52da.tgz",
+    "local_partial_bytes_at_last_check": 7184384,
+    "usable_recovery_asset": false,
+    "archive_verified_or_extracted": false,
+    "write_attempted": false
+  },
   "host_validation_2026_11_19": {
     "host": "mac-lan",
     "passed": [
