@@ -129,11 +129,11 @@
       "tooling/k27/check-native-kexts.py --self-test",
       "tooling/metal/check-bundle-paths.py --self-test",
       "tooling/userland/test-stage.py",
-      "tooling/persist/test-data-store.py"
+      "tooling/persist/test-data-store.py",
+      "tooling/persist/test-k273-only.py"
     ],
     "skipped": {
-      "tooling/userland/test-stage.py": "tests 4-7 require PIANO_K27_TREE, unavailable on Mac",
-      "tooling/persist/test-data-store.py": "pin --esp subtest requires mtools, unavailable on Mac"
+      "tooling/userland/test-stage.py": "tests 4-7 require PIANO_K27_TREE, unavailable on Mac"
     },
     "python": {
       "version": "3.11.18",
@@ -144,6 +144,16 @@
       "commit": "d830d23b0d19c9322d906c21afeca1d6c54aeffe",
       "temporary_checkout": "/tmp/codex-unixnu-d830d23",
       "working_tree_clean": true
+    },
+    "mtools": {
+      "version": "4.0.50",
+      "archive_sha256": "7f078accae7551c6b3a316ccd8296357329f7bbbc09583dcd1a2bbaeb081a7a4",
+      "signature_sha256": "fc74b396fe532c3e3df85ea1b9fa0cda718d385ebd5c82d8ea12c84e1cd20cc8",
+      "signature": "Good signature from key 51A23D9D7C4DF41AA48FA893E99CF5537790B839; signer identity not locally certified",
+      "mac_build": "Apple clang 17, arm64, temporary prefix; configure --disable-floppyd",
+      "compiler_warnings": "two format warnings in config.c for mt_off_t versus long offsets; build succeeded",
+      "install_prefix": "/tmp/codex-mtools-4.0.50-src/install",
+      "enabled_tests": ["tooling/persist/test-data-store.py", "tooling/persist/test-k273-only.py"]
     },
     "device_io": false,
     "native_runtime_qualified": false
