@@ -55,6 +55,8 @@ The current clone of that checkout has no `out/` directory. Its artifact catalog
 
 The separate 2026-11-16 Android wipe proposal targets HyperOS 3.0.308 and recommends `fastboot -w`; its archived verification log marks the large app/data/media tar files as unrecognized archive formats. It is not authorization or a recovery plan for the current 3.0.309 device. No wipe has been performed in this task, and the paused erase must remain paused.
 
+Read-only follow-up on the existing 52,839,244,759-byte `F:\piano-backup\data-data\data-data.tar` found a 39-byte GNU tar warning before the first header. Skipping only that prefix let Python's streaming tar parser read 4,719 entries (169,597,666 declared payload bytes) to an end marker at about 177 MB; the file continues for about 52.6 GB, with tar diagnostic text after the marker. A scan through the unexplained tail was stopped before traversing tens of gigabytes. No files were extracted or changed. This may be a partial salvage lead, but it does not validate the aggregate archive or provide a complete recovery set.
+
 ## Reproduction gate
 
 **Not reproducible yet.** The blocking inputs are the exact local k27 tree and its generated build state, matched Apple `26C5035r` payloads, complete firmware/calibration and userland inputs, a verified signing/boot profile, and the missing Mac host tools. First resolve these by inventorying existing user assets and checking public preparation steps/branches/forks; do not download duplicates or mix newer pins into this locked set.
