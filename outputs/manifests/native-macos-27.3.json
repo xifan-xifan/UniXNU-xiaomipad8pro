@@ -314,6 +314,18 @@
       "replay_status": "all numbered patches applied in order with git am; clean working tree",
       "scope_limit": "temporary public DroidVM source replay from a verified base archive; not proven equivalent to private device pin 11ac316b789d81fc9f734e15645456f536c05141 and not a native build"
     },
+    "local_vm_reconstruction_candidate": {
+      "path": "D:\\Temp\\k27-reconstruct-20261119-b",
+      "patch_readme_scope": "xnu-12377 k27 VM, macOS 27.0.1 kexts and userland",
+      "xnu_head": "17f4433a795587e8d8b468c14bf05218e7f35d1d",
+      "xnu_tree": "7373bc69be30fe86af90bedb1324ec87aced9a17",
+      "xnu_parent": "2303f45443b49c0ae52f29fec18566a841393941",
+      "patch_files": 48,
+      "source_markers": ["GUNYAH_LINUX", "DroidVMDisplay", "DroidVMGpu"],
+      "working_tree_clean": true,
+      "locked_native_pin_available": false,
+      "scope_limit": "lineage for historical DroidVM runtime reports only; not a native macOS 27.3 source or build"
+    },
     "locked_pin_lookup": {
       "required_commit": "11ac316b789d81fc9f734e15645456f536c05141",
       "required_branch": "el1/native-variant",
