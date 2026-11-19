@@ -26,6 +26,23 @@
   "build_status": "not_started_missing_inputs_and_mac_command_line_tools",
   "device_test_status": "read_only_baseline_only",
   "writes_performed": false,
+  "host_validation_2026_11_19": {
+    "host": "mac-lan",
+    "passed": [
+      "package/include/tests/run.sh",
+      "tooling/k27/test-piano-bootargs.sh",
+      "tooling/k27/test-piano-guard.sh",
+      "tooling/k27/test-piano-pm.sh",
+      "tooling/k27/check-native-kexts.py --self-test",
+      "tooling/metal/check-bundle-paths.py --self-test"
+    ],
+    "blocked": {
+      "tooling/userland/test-stage.py": "Mac Python 3.9.6 lacks tomllib; repository host checklist requires Python 3.11+",
+      "tooling/persist/test-data-store.py": "pinned unixnu.bootimg package unavailable; no unixnu source tree in Mac checkout"
+    },
+    "device_io": false,
+    "native_runtime_qualified": false
+  },
   "readonly_device_captures": {
     "captured_on": "2026-11-19",
     "partitions": {

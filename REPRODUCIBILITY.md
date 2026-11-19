@@ -23,6 +23,10 @@ No dependency pin was changed. `tooling/k273/prepare-k27-tree.sh` consumes an ex
 
 The WSL host-side persistence test was rerun with GNU mtools 4.0.50, downloaded from ftp.gnu.org, verified with the signed release archive, and built locally. Repeated creation of the same 1 GiB FAT32 image is byte-identical with 4.0.50; the installed 4.0.43 produced differing hashes. Remaining test failures are host-fixture issues: a fake sysfs partition-size mismatch, Linux lacking macOS `fcntl.F_NOCACHE`, and a test continuation after an expected backup stop. No tablet I/O occurred.
 
+The configured Mac's pure host checks were run on 2026-11-19 over `ssh mac-lan` in the clean device-repository checkout. `package/include/tests/run.sh`, `tooling/k27/test-piano-bootargs.sh`, `test-piano-guard.sh`, and `test-piano-pm.sh` all exited 0; the include suite's SPMI lock stress case reported 6,000/6,000 reads, 1,500/1,500 writes, and 11,481/11,481 commands with no failures, incorrect readbacks, or dropped commands. `check-native-kexts.py --self-test` and `check-bundle-paths.py --self-test` also passed. The bootargs suite ran its Python self-test successfully. These are host tests, not tablet or macOS runtime qualification.
+
+Two additional host tests could not run to completion on that Mac. `tooling/userland/test-stage.py` stops importing `tooling/userland/stage.py` because its `python3` is 3.9.6 and lacks the standard-library `tomllib` required by the repository (the host checklist requires Python 3.11+). `tooling/persist/test-data-store.py` stops while loading `tooling/bootimg/build-ram-images.py` because the pinned `unixnu.bootimg` package is unavailable; the Mac checkout has no `unixnu/` source tree, and its `git submodule status` is empty. No tablet command or persistent device I/O was performed. Rerun these two tests only after the documented Python runtime and exact pinned UniXNU checkout/package are present.
+
 ## Input status
 
 | Input | Status on this workstation / configured Mac |
