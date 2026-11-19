@@ -442,6 +442,18 @@
       "locked_native_pin_available": false,
       "scope_limit": "lineage for historical DroidVM runtime reports only; not a native macOS 27.3 source or build"
     },
+    "native_candidate_gate_2026_11_19": {
+      "disposable_path": "E:\\Temp\\k27-native-candidate-20261119-a",
+      "base_archive_sha256": "577f4a220304296332e28c802779e7b5e6a27a46812315aacf61c0269a03e12a",
+      "public_vm_patch_archive_sha256": "91eeedeeb3e879f05f53939183c8e0e96f87dca41a043e3bb8c4ac325e1a3247",
+      "public_vm_patches_replayed": 47,
+      "native_series_checked": "patches/k27/0053-0070",
+      "first_native_patch": "0053",
+      "check_result": "failed before applying native patches",
+      "failure_paths": ["bsd/vfs/vfs_subr.c:2661", "osfmk/arm64/machine_routines.c:923"],
+      "accepted_as_locked_native": false,
+      "scope_limit": "public DroidVM replay is not equivalent to native pin 11ac316b789d81fc9f734e15645456f536c05141 and is excluded from device builds"
+    },
     "locked_pin_lookup": {
       "required_commit": "11ac316b789d81fc9f734e15645456f536c05141",
       "required_branch": "el1/native-variant",
