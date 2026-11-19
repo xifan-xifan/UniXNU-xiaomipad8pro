@@ -1,0 +1,11 @@
+# Native Storage Backend Audit
+
+Audit date: 2026-11-19. Static review of the locked device repository at `2438556c77c90c22c7b76e57eb8b40c44b35f1af` and preserved host-side records only. No tablet access, backup, or device write was performed.
+
+The current native root path is UFS-specific. `NativeUfs::startRoot` reads its root manifest from UFS, selects a GPT partition through `native-ufs-root-part`, and publishes read-only `NativeUfsBlock` windows for the APFS root/SystemOS volumes. The 27.3 layout expects `linux_rootfs` and an associated UFS Data store layout. This device currently has neither partition.
+
+The Data persistence path is also UFS-specific. `NativeRamBlock`'s overlay calls the weak `native_ufs_store_read`, `native_ufs_store_write`, `native_ufs_store_sync`, and GPT-check functions; when that provider is absent, Data remains volatile. The current code does not accept an arbitrary `IOBlockStorageDevice` as its persistent store.
+
+External USB storage is a possible research branch, not a ready no-GPT solution. The repository has a gated USB-host path, `PianoXhciHost` A2 and a link configuration including Apple's `IOUSBMassStorageDriver`; the project records say the A2 image and host tests were built, but the probe was not run on hardware. The planned attended H6 acceptance requires a USB device to enumerate and a stick to mount. Neither USB-root selection nor persistent Data over USB is demonstrated. The current worktree's `out/` contains host test folders only, not the queued A2 boot image; the preserved November 1 worktree has no matching native image or locked k27 source.
+
+Conclusion: do not assume external USB avoids the internal storage dependency. To qualify it, first recover the exact locked k27 tree and matching image inputs, run the no-device A2 diagnostic, then run the attended USB-stick mount test, and separately prove that macOS can select the external APFS root and persist Data there across a reboot. If Data requires a new USB-backed provider, that is a source change and its own host/device qualification. Until those gates pass, the current storage path still requires a designed internal layout; the offline F2FS tool test does not qualify shrinking this tablet's userdata.
