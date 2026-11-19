@@ -4,7 +4,7 @@ Audit date: 2026-11-19. Execution baseline: `lenzhang/UniXNU-xiaomipad8pro` comm
 
 ## Upstream comparison
 
-GitHub REST API returned `2438556c77c90c22c7b76e57eb8b40c44b35f1af` as the latest `main` commit; comparing `main` with the requested baseline returned `identical` (`ahead_by=0`, `behind_by=0`). The two public forks were also checked: `xifan-xifan/UniXNU-xiaomipad8pro` points to the same commit, while the other fork is older. Releases API returned no releases. Issue #1 remains open requesting a second-device RAM validation; PR #2 remains open as a staged macOS packaging proposal. No independent second-device success report was found in those repository records.
+GitHub REST API recheck on 2026-11-19 returned `2438556c77c90c22c7b76e57eb8b40c44b35f1af` as the latest upstream `main` commit; it is identical to the requested source baseline. The execution fork `xifan-xifan/UniXNU-xiaomipad8pro` is now at `9a0604d8638a1400c6cbbf2facbe23281512a86c`, a documentation-only commit on top of that source baseline; the other public fork is older. The upstream releases API returned no releases. Issue #1 remains open requesting second-device RAM validation, and PR #2 remains open as a staged macOS packaging proposal. No independent second-device success report was found in those repository records.
 
 The baseline already contains commits for the single-frame video output teardown, passive video timeout diagnostics, Metal frontend staging, and reversible UID 501 `passd` policy. These do not establish continuous hardware decode, Safari qualification, or a successful clean restart; maintainer reports remain separate from this device's results.
 
