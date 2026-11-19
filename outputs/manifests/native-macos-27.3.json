@@ -116,7 +116,13 @@
     },
     "boundary": "Apple inputs only; no claim that the native kernel, root image, Data seed, or boot set is matched or buildable"
   },
-  "build_status": "not_started_missing_inputs_and_mac_command_line_tools",
+  "build_status": "not_started_missing_locked_k27_tree_and_matched_native_root_data_inputs",
+  "build_blockers": [
+    "local k27 pin 11ac316b789d81fc9f734e15645456f536c05141 and prepared tree de16623d957cccff6dfb78d8eca4a79842af9702 unavailable",
+    "no qualified internal root/Data layout; current NativeUfs root and NativeRamBlock persistent store are UFS-specific",
+    "no matched native Data seed/root image or device signing configuration"
+  ],
+  "apple_27_3_input_state": "required IPSW-derived member files already present and SHA-256-verified in D:\\Download\\piano-macos-273-inputs; complete IPSW archive absent but not a reason to redownload verified members",
   "device_test_status": "read_only_baseline_only",
   "writes_performed": false,
   "android_recovery_package_probe": {
