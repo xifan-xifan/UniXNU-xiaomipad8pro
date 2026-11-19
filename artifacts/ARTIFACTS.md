@@ -107,3 +107,5 @@ The Turnip bundle built from a fresh worktree is byte for byte main's: `NativeAd
 | Measurement kernel reproduced twice with fixed object mtimes | `d827848fe3a905d068b521e298dcd70a3bcc03988c753bdbf0a74001b76fd2ba` |
 
 The kernel is a host sizing artifact. The mac17j layout check failed. [Measurements and scope](../docs/results-2026-11-20-independent-k27.md).
+
+The Apple clang object checkpoint archive SHA-256 is `3c04ed4434e30a079fd604872334c63d4d4d846229b7078f296e7b679c42e09b`. [Mac object verification](../docs/results-2026-11-20-mac-k27-objects.md).

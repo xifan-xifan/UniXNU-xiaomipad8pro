@@ -4,6 +4,8 @@ Audit dates: 2026-11-19 and 2026-11-20. Execution baseline: `lenzhang/UniXNU-xia
 
 The independent host build links from a frozen local XNU source archive, generated headers, toolchain and external libraries. Its 26C5035r kernel collection layout still fails. The [dated result](docs/results-2026-11-20-independent-k27.md) records the method, input digests and remaining gaps.
 
+The [Mac object checkpoint](docs/results-2026-11-20-mac-k27-objects.md) records a second compiler target with all 1,093 objects built. Linking and the layout measurement for that target are pending.
+
 ## Upstream comparison
 
 GitHub REST API recheck and a live `git ls-remote` query through `ssh mac-lan` on 2026-11-19 returned `2438556c77c90c22c7b76e57eb8b40c44b35f1af` as upstream `refs/heads/main`; it is identical to the requested source baseline. The Mac checkout's local `refs/remotes/origin/main` instead points to `286f5a594563f863aa448ab21c8d160fdcb95eba`. That divergent local ref is 14 commits after the baseline and changes only six audit/documentation files; neither source nor dependency pins changed. It is not the live upstream head and was not used as a source update. The execution fork `xifan-xifan/UniXNU-xiaomipad8pro` is at `9a0604d8638a1400c6cbbf2facbe23281512a86c`, a documentation-only commit on top of that source baseline; the other public fork is older. The upstream releases API returned no releases. Issue #1 remains open requesting second-device RAM validation, and PR #2 remains open as a staged macOS packaging proposal. No independent second-device success report was found in those repository records.

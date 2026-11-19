@@ -142,6 +142,23 @@
     "evidence": "docs/results-2026-11-20-independent-k27.md",
     "host_local_directory": "out/k27-independent-20261120/host-run"
   },
+  "mac_object_checkpoint_2026_11_20": {
+    "compiler": "Apple clang 17.0.0 (clang-1700.0.13.5)",
+    "target": "arm64e-apple-ios27.0",
+    "native_flag": "XNU_VM_GUEST=0",
+    "input_source_sha256": "119dc3f35273084c1629d2fc7744442fb11b0c47638d340c17e7e38d2ee41576",
+    "objects_verified": 1093,
+    "subtype": "0xc0000002",
+    "assym_definitions": 161,
+    "asm_units_rechecked": 27,
+    "external_archives_rebuilt": false,
+    "kernel_linked": false,
+    "kc_layout_measured": false,
+    "device_tested": false,
+    "archive_sha256": "3c04ed4434e30a079fd604872334c63d4d4d846229b7078f296e7b679c42e09b",
+    "host_local_archive": "out/k27-independent-20261120/host-run/mac-object-checkpoint.tar.gz",
+    "evidence": "docs/results-2026-11-20-mac-k27-objects.md"
+  },
   "build_blockers": [
     "independent candidate target KC constant-data reserve and arm64e ABI unresolved",
     "local k27 pin 11ac316b789d81fc9f734e15645456f536c05141 and inner XNU commit de16623d957cccff6dfb78d8eca4a79842af9702 unavailable",
