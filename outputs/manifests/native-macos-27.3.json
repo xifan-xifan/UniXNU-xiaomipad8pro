@@ -38,7 +38,12 @@
     ],
     "blocked": {
       "tooling/userland/test-stage.py": "Mac Python 3.9.6 lacks tomllib; repository host checklist requires Python 3.11+",
-      "tooling/persist/test-data-store.py": "pinned unixnu.bootimg package unavailable; no unixnu source tree in Mac checkout"
+      "tooling/persist/test-data-store.py": "Mac Python 3.9.6 lacks tomllib; exact pinned UniXNU source is available at /tmp/codex-unixnu-d830d23"
+    },
+    "unixnu_python_source": {
+      "commit": "d830d23b0d19c9322d906c21afeca1d6c54aeffe",
+      "temporary_checkout": "/tmp/codex-unixnu-d830d23",
+      "working_tree_clean": true
     },
     "device_io": false,
     "native_runtime_qualified": false
