@@ -50,7 +50,7 @@
       "parts": 32,
       "chunk_bytes_except_last": 354566076,
       "directory": "/tmp/piano-rom-chunks-full-20261119",
-      "bytes_at_last_check": 9902362624,
+      "bytes_at_last_check": 10087354368,
       "all_part_files_present": true,
       "aggregate_rate_bytes_per_second_observed": 1600000,
       "verified": false
