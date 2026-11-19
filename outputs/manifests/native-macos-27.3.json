@@ -207,7 +207,8 @@
   "storage_backend_review_2026_11_19": {
     "source_commit": "2438556c77c90c22c7b76e57eb8b40c44b35f1af",
     "ufs_root": "NativeUfs reads the UFS root manifest, selects a GPT partition, and publishes UFS-backed root windows",
-    "data_persistence": "NativeRamBlock uses weak native_ufs_store_read/write/sync and GPT-check calls; no provider leaves Data volatile",
+    "root_bootstrap": "NativeUfs::startRoot runs from the root-device path and directly reads UFS; native-ufs-root-part selects only a UFS partition name",
+    "data_persistence": "NativeRamBlock waits for NativeUfs root layout then calls its native_ufs_store_read/write/sync and GPT-check imports; no provider leaves Data volatile",
     "usb_mass_storage": {
       "source_path": "docs/drivers/usb-host.md; package/PianoXhciHost; gated PianoUsbHostStack",
       "apple_mass_storage_stack": "included in host-side link configuration behind piano-usbhost=6",
@@ -216,6 +217,7 @@
       "usb_root_selection": "not demonstrated",
       "persistent_data_backend": "no generic USB provider in the current NativeRamBlock implementation"
     },
+    "usb_early_root_requirement": "Apple USB mass-storage is behind the later PianoUsbHostStack host path; qualifying USB root requires early USB block-device publication before NativeUfs root windows and a separately qualified persistent Data provider",
     "current_checkout_out": "host test directories only; no A2 diagnostic image",
     "device_access_or_backup": false,
     "device_write_attempted": false,
