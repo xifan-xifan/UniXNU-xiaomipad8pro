@@ -23,6 +23,27 @@
     "prepared_tree_pin": "de16623d957cccff6dfb78d8eca4a79842af9702",
     "available": false
   },
+  "apple_27_3_inputs": {
+    "build": "26C5035r",
+    "directory": "D:\\Download\\piano-macos-273-inputs",
+    "source_ipsw": {
+      "url": "https://updates.cdn-apple.com/2026FallSeed/53df7654-4865-4259-8dae-30177b76f104/UniversalMac_27.3_26C5035r_Restore.ipsw",
+      "expected_bytes": 27206093542,
+      "expected_sha256": "1f372fa17c2a6c7e10fd135213b928028e9fbe73d54b949deb6c04bea57c93fa",
+      "complete_archive_present": false
+    },
+    "verification": "IPSW member AEA, kernelcache, device-tree, and trustcache files match adjacent member JSON SHA-256 records; decrypted DMGs were independently hashed locally; all listed file sizes and SHA-256 values were rechecked; retained in place; no download performed",
+    "files": {
+      "root_aea": {"path": "141-22145-021.dmg.aea", "bytes": 2483027968, "sha256": "00f80636bede8b709d0f6342ebefef3ec25ac43b3db03e544f4ccf692ada736d"},
+      "root_decrypted_dmg": {"path": "decrypted/141-22145-021.dmg", "bytes": 2917138432, "sha256": "14330ed990fe7022114b10718f4defe3049d49b6e5d52fd3ac71a487541cd1f3"},
+      "systemos_aea": {"path": "141-22233-021.dmg.aea", "bytes": 11408506880, "sha256": "b7dbb5c6c3ee18ba43fcccb2e865aee008e4388f634bcfbd611b93bf9907d434"},
+      "systemos_decrypted_dmg": {"path": "decrypted/141-22233-021.dmg", "bytes": 14493417472, "sha256": "40d8282eb8650da9b4d7437a981764c48d47ee4bdc5b8b362248f25ecbce0e70"},
+      "kernelcache_mac17j": {"path": "kernelcache.release.mac17j", "bytes": 32709948, "sha256": "66bbe2fa3edfae6fe7b479ce78a7e3935ea29ae2f155e0f4ef45cd5b03594720"},
+      "device_tree_k114cap": {"path": "DeviceTree.k114cap.im4p", "bytes": 106603, "sha256": "7810505c5da4894725aed79b21ba673d651fc9fddaf04aafce58ab6f8cd65797"},
+      "systemos_trustcache": {"path": "141-22233-021.dmg.aea.trustcache", "bytes": 445681, "sha256": "6bc49e0dffade1c61401fd3e087636627f1ae7eca26df9b8890b1cb78ffb2963"}
+    },
+    "boundary": "Apple inputs only; no claim that the native kernel, root image, Data seed, or boot set is matched or buildable"
+  },
   "build_status": "not_started_missing_inputs_and_mac_command_line_tools",
   "device_test_status": "read_only_baseline_only",
   "writes_performed": false,

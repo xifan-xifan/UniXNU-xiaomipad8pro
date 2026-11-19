@@ -36,16 +36,22 @@ The Mac's system Python 3.9.6 could not run tests requiring `tomllib`, so I down
 | Device source at the requested commit | Present in this workspace; clean tracked tree at the baseline. `AGENTS.md` is an existing untracked instruction file and is not part of this change. |
 | Pinned source checkouts / `unixnu-research` | Not present in the current workspace or in the configured Mac's documented project location. |
 | Exact local k27 tree, generated objects/headers, KC build inputs | Missing. The old research workspace contains unrelated kernel/ramdisk outputs only; excluded. |
-| macOS 27.3 / `26C5035r` Apple IPSW-derived inputs | Not present under this workspace's `out/inputs`; no compatible cached payload was identified. |
+| macOS 27.3 / `26C5035r` Apple IPSW-derived inputs | Found in `D:\Download\piano-macos-273-inputs` and `decrypted/`. Root/SystemOS AEA containers, mac17j kernelcache, k114cap DTB, and SystemOS trust cache match adjacent IPSW member SHA-256 records. Decrypted DMGs were independently hashed locally. The complete source IPSW is not present. |
 | Device DTB/firmware and per-unit calibration | Repository has the source-side configuration; no complete per-unit, provenance-checked build input set has been assembled. |
 | Native kext and Metal/userland build outputs | No current 27.3 candidate outputs or matching manifest found. |
-| Data seed, trust cache and root image | No matched 27.3 set in the current `out/` tree; `out/` is absent. |
+| Data seed, trust cache and root image | Apple SystemOS trust cache is present and verified; no matched native Data seed/root image exists in the current working tree. Historical scratch seeds belong to another source/build set and are excluded. |
 | Signing chain / boot profile | Not verified for this device/build. The upstream persistent flow references an owner-specific signing setup; its private key is not an input we will request or copy. |
 | Current 3.0.309 Android boot triplet and verified rollback package | No complete recovery package is available. A later interrupted `/data` collection left two identical 4,202,692,608-byte partial tar files on E: and F:; they are not backups and must not be resumed or used for recovery. The user has directed that no tablet backup be made. |
 
 The configured Mac is Apple silicon running macOS 15.3 with about 198 GiB free. It has no project checkout and no globally selected developer directory. The Command Line Tools package is installed; `DEVELOPER_DIR=/Library/Developer/CommandLineTools` resolves Apple clang 17, `ld`, and `codesign`. The host has Python 3.9.6, while `docs/host-checklist.md` requires Python 3.11 or newer; `nasm`, `iasl`, and Homebrew are absent, and `xcodebuild` is unavailable without full Xcode. The host toolchain is therefore incomplete. No build was started.
 
 The repository's committed artifact catalog describes older 2026-11-10 slice-1 outputs and inputs. Those files are not a matched 27.3 device candidate and are not reused. No build, image, or device test is claimed by this audit.
+
+### Additional read-only asset audit (2026-11-19)
+
+An old build's symlink records exposed a local Apple-input directory that had not been checked in the earlier inventory. Files under `D:\Download\piano-macos-273-inputs` were retained in place. Root/SystemOS AEA containers, the mac17j kernelcache, k114cap device tree, and SystemOS trust cache match their adjacent IPSW-member JSON SHA-256 records; decrypted DMGs were independently hashed locally. All listed file sizes and SHA-256 values were rechecked against the manifest. Exact file details are in `outputs/manifests/native-macos-27.3.json` under `apple_27_3_inputs`. This closes the Apple-payload discovery gap without downloading another copy. It does not provide the complete IPSW, the device-specific local k27 tree, generated kernel objects/KC, a matched native seed/root, firmware/calibration bundle, or local signing profile.
+
+The WSL `UbuntuPiano` distribution contains old k27 worktrees and RAM images, but none matches the locked local pin. The cleanest `xnu-k27-final` is at `c2936ef` with 112 modified files; other k27 worktrees have over 1,200 modifications. None contains commit `11ac316b` or prepared tree `de16623d`. Its three candidate RAM image manifests explicitly say `OFFLINE_CANDIDATE_NOT_DEVICE_TESTED`, `data_persist=0`, and `same_seed=false`; they are not candidates for this device. These worktrees and outputs were inspected read-only and left untouched.
 
 ## Historical local evidence
 
@@ -73,4 +79,4 @@ Read-only follow-up on the existing 52,839,244,759-byte `F:\piano-backup\data-da
 
 ## Reproduction gate
 
-**Not reproducible yet.** The blocking inputs are the exact local k27 tree and its generated build state, matched Apple `26C5035r` payloads, complete firmware/calibration and userland inputs, a verified signing/boot profile, and the missing Mac host tools. First resolve these by inventorying existing user assets and checking public preparation steps/branches/forks; do not download duplicates or mix newer pins into this locked set.
+**Not reproducible yet.** Apple `26C5035r` payload inputs are now located and hash-checked, but the blocking inputs remain the exact local k27 tree and generated build state, a complete device-matched firmware/calibration and userland set, a native seed/root, verified signing/boot profile, and missing Mac host tools. Do not download duplicates or mix newer pins into this locked set.
