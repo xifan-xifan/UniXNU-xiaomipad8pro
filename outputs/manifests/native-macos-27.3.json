@@ -33,7 +33,7 @@
     "cdn_url": "https://bigota.d.miui.com/OS3.0.309.0.WPYCNXM/piano_images_OS3.0.309.0.WPYCNXM_20260906.0000.00_16.0_cn_d5071e52da.tgz",
     "listing_md5": {
       "value": "d5071e52da7c5dff4479d45e2775c437",
-      "source": "XM Firmware Updater third-party listing; not verified against local bytes"
+      "source": "XM Firmware Updater third-party listing; matches the verified local archive"
     },
     "cdn_content_length": 11346114406,
     "cdn_etag": "1e89deae4016b8347df45f25316f1d48",
@@ -45,21 +45,26 @@
       "rate_bytes_per_second": 20905,
       "temporary_probe_removed": true
     },
-    "download_status": "segmented_in_progress",
+    "download_status": "complete_and_verified",
     "segmented_download": {
       "parts": 32,
       "chunk_bytes_except_last": 354566076,
       "directory": "/tmp/piano-rom-chunks-full-20261119",
-      "bytes_at_last_check": 10807988224,
+      "bytes": 11346114406,
       "all_part_files_present": true,
       "aggregate_rate_bytes_per_second_observed": 1600000,
-      "verified": false
+      "verified": true
     },
     "last_size_check_date": "2026-11-19",
-    "local_partial_path": "/tmp/piano_images_OS3.0.309.0.WPYCNXM_20260906.0000.00_16.0_cn_d5071e52da.tgz",
-    "local_partial_bytes_at_last_check": 14045184,
-    "usable_recovery_asset": false,
-    "archive_verified_or_extracted": false,
+    "local_archive_path_on_mac_lan": "/tmp/piano_images_OS3.0.309.0.WPYCNXM_20260906.0000.00_16.0_cn_d5071e52da.tgz",
+    "local_archive_bytes": 11346114406,
+    "local_archive_md5": "d5071e52da7c5dff4479d45e2775c437",
+    "local_archive_sha256": "c7b0446a4704611d1d562e3b27cdd01fdd14bdee7b979973b76992c2200836e8",
+    "tar_listing_entries": 110,
+    "usable_recovery_asset": true,
+    "scope_limit": "stock OS recovery package only; not a userdata or personal-data backup",
+    "archive_verified": true,
+    "archive_extracted": false,
     "write_attempted": false
   },
   "host_validation_2026_11_19": {
