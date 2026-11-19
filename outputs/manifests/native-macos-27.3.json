@@ -127,8 +127,50 @@
       "sha256": "27531cbc5dd3047b9b0682391f93f89d0efe40aebfcc2e56ce3b02d3f6e2627b"
     },
     "replay_result": "patches 0001-0007 apply to the existing base; 0008 fails because its kern_exec.c context requires an XNU_NATIVE_RAM_BLOCK/XNU_OWNER_DATA_VOLUME_UUID block absent after those patches; no manual adaptation was made",
+    "latest_public_replay": {
+      "repository": "Droid-VM/macOS-DroidVM",
+      "source_commit": "524d27bf57ae92375aa39e3a81e11727c08973ff",
+      "source_archive": {
+        "path": "D:\\Temp\\DroidVM-macOS-DroidVM-524d27bf.tar.gz",
+        "bytes": 1196966,
+        "sha256": "d3b0c2a3c0c657c09d87673cad1e7e3a7989eabfaa9b93e0e510b5f5dfb87f8e"
+      },
+      "base_archive": "D:\\Temp\\xnu-ac9718.tar.gz",
+      "numbered_patches_applied": 48,
+      "replay_checkout": "D:\\Temp\\DroidVM-replay-524d27bf\\base\\xnu-ac9718fb1af618d5ce8678d0dc6e8a58f252216f",
+      "synthetic_git_baseline": true,
+      "replay_head": "7d34301983c6463cd3815cb6a64d472622a134a2",
+      "replay_git_tree": "3faa7ce551e462a93f34808eaf78549768c67f5a",
+      "replay_status": "all numbered patches applied in order with git am; clean working tree",
+      "scope_limit": "temporary public DroidVM source replay from a verified base archive; not proven equivalent to private device pin 11ac316b789d81fc9f734e15645456f536c05141 and not a native build"
+    },
     "pinned_tree_match": false,
     "native_device_evidence": false
+  },
+  "historical_droidvm_runtime_evidence": {
+    "checkout": "E:\\codex\\2026-11-01\\ni\\work\\external\\macOS-DroidVM",
+    "local_notes": ["TODO.md", "k27/TODO.md"],
+    "environment": "Android host with crosvm on Gunyah; virtual macOS guest",
+    "guest_version": "macOS 27.0.1 (26A434)",
+    "reported_results": [
+      {
+        "date": "2026-11-04",
+        "area": "Safari/Bilibili video playback",
+        "result": "23 sessions; in=2131, out=2111, dropped=20; notes report playback normal"
+      },
+      {
+        "date": "2026-11-05",
+        "area": "virtio-snd audio and video",
+        "result": "user-confirmed audible playback without stutter and with audio/video synchronization"
+      },
+      {
+        "date": "2026-11-04",
+        "area": "GPU desktop rendering",
+        "result": "notes report login/lock screen normal and desktop/video frames; GPU/Metal tuning records include measured frame rates"
+      }
+    ],
+    "known_limits": ["not native Xiaomi Pad UFS evidence", "not macOS 27.3 (26C5035r)", "microphone access and audio helper scheduling remained unresolved", "GPU memory/resource limits were tracked"],
+    "evidence_class": "local development notes; reported host-run results, not independently rerun in this task"
   },
   "switching_tool_audit": {
     "repository": "yzddmr6/xiaomipad-8pro-mainline",
