@@ -105,6 +105,20 @@
     "shrinkability": "unverified; do not assume support in a WRITE-PLAN",
     "upstream_reference": "Android common android15-6.6 commit 39e1749b1b88a1d9d0253e96b1d15ffed6f3fb67 (2026-11-05); not evidence for the stock device kernel"
   },
+  "existing_boot_capture_static_audit_2026_11_19": {
+    "new_device_access_or_capture": false,
+    "source_capture": "E:\\piano-verified-readonly-20261119-073450\\boot_a.img",
+    "source_capture_sha256": "7c444a2d6aa930cd79e2d48c569f6c891fbaff054c63fc85c3a57fb61c660ac2",
+    "boot_header": "Android boot v4",
+    "kernel_bytes": 36866560,
+    "kernel_sha256": "3ea8e88cc67b206de0c1753b2abd7c8a42eb68fee0e4d9bd5985abdd4b9ed87a",
+    "kernel_release": "6.6.118-android15-8-gc44b714366cc-abogki519650608-4k",
+    "kernel_build_utc": "2026-06-04 03:48:35",
+    "embedded_config": ["CONFIG_IKCONFIG=y", "CONFIG_IKCONFIG_PROC=y", "CONFIG_F2FS_FS=y", "CONFIG_F2FS_FS_COMPRESSION=y"],
+    "searched_strings_absent": ["resizable_tail_secno", "pinned_area_max_secno", "/sys/fs/f2fs/features/resizable_tail", "resizable_tail"],
+    "interpretation": "no evidence the installed kernel supports reserved-tail online shrink; vendor source is unavailable and a vendor backport cannot be ruled out",
+    "shrinkability": "unverified; do not assume support in a WRITE-PLAN"
+  },
   "host_validation_2026_11_19": {
     "host": "mac-lan",
     "passed": [
