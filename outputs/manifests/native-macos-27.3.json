@@ -61,6 +61,29 @@
     "prepared_tree_pin": "de16623d957cccff6dfb78d8eca4a79842af9702",
     "available": false
   },
+  "mac_host_tools_2026_11_19": {
+    "directory": "/tmp/piano-host-tools-20261119",
+    "nasm": {
+      "version": "3.02",
+      "executable": "/tmp/piano-host-tools-20261119/prefix/bin/nasm",
+      "sha256": "004ea465ce8c29f8d62ba6433d3c8fe893ecf4e953673341d24e09991db577a9"
+    },
+    "acpica": {
+      "source_archive": "/tmp/piano-host-tools-20261119/src/acpica-unix-20260930.tar.gz",
+      "source_sha256": "aa18901b92e30749be0edc3081c8d550c61fce4fa37546fc6a65d367a4ae71a5",
+      "iasl_version": "20260930",
+      "iasl_executable": "/tmp/piano-host-tools-20261119/iasl-packed-test/acpica-unix-20260930/generate/unix/bin/iasl",
+      "iasl_sha256": "257a9054016aa49a6ac88bd0b717f555ba90351375185d0e739cbabd12ee7d6b",
+      "build_configuration": "OPT_CFLAGS=-DACPI_PACKED_POINTERS_NOT_SUPPORTED -O2 -D_FORTIFY_SOURCE=2",
+      "initial_failure": "Apple ld rejected packed pointer-bearing AcpiExDumpNode data as misaligned",
+      "functional_test": {
+        "input": "ACPICA tests/misc/converterSample.asl",
+        "result": "compiled successfully, 0 errors, 0 warnings",
+        "aml_sha256": "8f75f6e441432b4349b4cb400dd0d6bd2e6acbff08d70c7e8c2b220d32964a47"
+      }
+    },
+    "scope": "host tool builds and ASL compile test only; no native target image build or device test"
+  },
   "apple_27_3_inputs": {
     "build": "26C5035r",
     "directory": "D:\\Download\\piano-macos-273-inputs",
