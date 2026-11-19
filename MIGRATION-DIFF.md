@@ -21,6 +21,8 @@ The switching source verifies SHA-256 manifests for both image sets, checks Fast
 
 The stock OS recovery package is now locally verified on `mac-lan`: `/tmp/piano_images_OS3.0.309.0.WPYCNXM_20260906.0000.00_16.0_cn_d5071e52da.tgz`, 11,346,114,406 bytes, MD5 `d5071e52da7c5dff4479d45e2775c437`, SHA-256 `c7b0446a4704611d1d562e3b27cdd01fdd14bdee7b979973b76992c2200836e`; all 110 tar entries listed successfully. This is a stock OS recovery package, not a backup of userdata. No archive contents were extracted and no tablet write was performed.
 
+Read-only inspection of the packaged scripts found `flash_all.sh` erases and flashes `metadata` and writes `userdata.img`. `flash_all_except_storage.sh` omits userdata/metadata, but still erases `boot_ab`, flashes firmware, `super`, boot-chain, `misc` and recovery partitions, sets slot A, and reboots automatically. Neither script was executed; the archive checksum and tar structure do not qualify these write procedures as safe for this deployment.
+
 The script has no dry-run mode, no boot-success/retry-counter check, and no readback implementation. Its fit to a matched macOS 27.3 image set and a verified 3.0.309 boot rollback set remains **unverified**. The official stock OS package is verified, but it does not preserve userdata. The script must not be run against the device until image sets are matched, boot rollback inputs and post-write readback are verified, the storage plan is resolved, and a concrete WRITE-PLAN is approved.
 
 ## Required design before writes

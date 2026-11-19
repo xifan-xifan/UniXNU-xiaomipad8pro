@@ -65,6 +65,11 @@
     "scope_limit": "stock OS recovery package only; not a userdata or personal-data backup",
     "archive_verified": true,
     "archive_extracted": false,
+    "restore_script_audit": {
+      "flash_all_sh": "writes userdata.img and erases/flashes metadata; not compatible with preserving user data",
+      "flash_all_except_storage_sh": "does not write userdata or metadata, but erases boot_ab; flashes firmware, super, boot-chain, misc and recovery partitions; sets slot A and reboots",
+      "execution_status": "not executed; package validation does not qualify either script as a safe recovery procedure"
+    },
     "write_attempted": false
   },
   "host_validation_2026_11_19": {
