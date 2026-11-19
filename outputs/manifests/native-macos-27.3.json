@@ -84,6 +84,17 @@
     },
     "scope": "host tool builds and ASL compile test only; no native target image build or device test"
   },
+  "abl_slot_state_gate_2026_11_19": {
+    "implementation": "tooling/persist/maint-session.py abl-check and abl-final",
+    "rules": [
+      "parse slot-retry-count:a as an integer in the AOSP 3-bit range 0-7",
+      "before reboot require current-slot=a, slot-successful:a=yes, slot-unbootable:a=no",
+      "require slot-retry-count:a unchanged from the recorded abl-check"
+    ],
+    "test": "tooling/persist/test-abl-state.py",
+    "result": "PASS on mac-lan Python 3.9.6 with fake Fastboot responses; no tablet command executed",
+    "scope": "host validation of the repository maintenance flow only; does not qualify or run the external piano-switch.py"
+  },
   "apple_27_3_inputs": {
     "build": "26C5035r",
     "directory": "D:\\Download\\piano-macos-273-inputs",

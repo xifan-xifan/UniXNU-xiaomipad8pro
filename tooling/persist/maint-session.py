@@ -1228,6 +1228,9 @@ def abl_check(s):
         out = s.fastboot('getvar', var, check=False)
         m = re.search(rf'{re.escape(var)}:\s*(\S+)', out or '')
         values[var] = m.group(1) if m else None
+        if var == 'slot-retry-count:a':
+            values[var] = int(m.group(1)) if m and re.fullmatch(r'[0-7]', m.group(1)) else None
+            s.need(values[var] is not None if s.execute else None, 'slot-retry-count:a is an integer from 0 through 7')
         if var in ABL_EXPECT and var != 'slot-successful:a':
             s.need(values[var] == ABL_EXPECT[var] if s.execute else None, f'{var} = {ABL_EXPECT[var]} (got {values[var]})')
         else:
@@ -2028,12 +2031,18 @@ def slot_back(s):
 
 @step('abl-final', 'ABL fastboot, read only')
 def abl_final(s):
-    """Before the first boot from boot_a: slot A current, successful and bootable."""
+    """Before the first boot from boot_a: slot A current, successful and bootable; retry count unchanged since abl-check."""
     for var, want in (('current-slot', 'a'), ('slot-successful:a', 'yes'), ('slot-unbootable:a', 'no')):
         out = s.fastboot('getvar', var, check=False)
         m = re.search(rf'{re.escape(var)}:\s*(\S+)', out or '')
         s.need((m and m.group(1)) == want if s.execute else None, f'{var} = {want}')
-    s.fastboot('getvar', 'slot-retry-count:a', check=False)
+    var = 'slot-retry-count:a'
+    out = s.fastboot('getvar', var, check=False)
+    m = re.search(rf'{re.escape(var)}:\s*(\S+)', out or '')
+    count = int(m.group(1)) if m and re.fullmatch(r'[0-7]', m.group(1)) else None
+    s.need(count is not None if s.execute else None, f'{var} is an integer from 0 through 7 (got {m.group(1) if m else None})')
+    before = (s.state.get('abl') or {}).get(var)
+    s.need(count == before if s.execute else None, f'{var} unchanged since abl-check ({before} -> {count})')
 
 
 @step('reboot', 'ABL fastboot -> slot A (macOS)')
