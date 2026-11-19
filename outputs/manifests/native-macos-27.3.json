@@ -200,6 +200,14 @@
     "known_limits": ["not native Xiaomi Pad UFS evidence", "not macOS 27.3 (26C5035r)", "microphone access and audio helper scheduling remained unresolved", "GPU memory/resource limits were tracked"],
     "evidence_class": "local development notes; reported host-run results, not independently rerun in this task"
   },
+  "droidvm_to_native_transferability": {
+    "display": "NativeGopDisplay reuses the VM-era display kext model but replaces virtio-gpu scanout with the piano GOP framebuffer",
+    "gpu": "plugin/Turnip lineage reused; native transport is physical Adreno 830 ABI v2; VM v1 ABI is incompatible",
+    "video": "VideoToolbox service/front-end reused above transport; virtio-media replaced by native Iris backend",
+    "audio": "IOAudio2 device top-half reused; virtio-snd replaced by native PCM/DSP path; VM-specific host-timebase workaround is not a native input",
+    "root_data": "native UFS via NativeUfs/NativeRamBlock; VM virtio-block results do not qualify native storage or persistence",
+    "acceptance_implication": "VM results guide userland integration checks only; native hardware paths retain separate gates"
+  },
   "switching_tool_audit": {
     "repository": "yzddmr6/xiaomipad-8pro-mainline",
     "latest_release": "v1.6.1",
