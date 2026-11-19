@@ -33,7 +33,7 @@ No dependency pin was changed. `tooling/k273/prepare-k27-tree.sh` consumes an ex
 | Native kext and Metal/userland build outputs | No current 27.3 candidate outputs or matching manifest found. |
 | Data seed, trust cache and root image | No matched 27.3 set in the current `out/` tree; `out/` is absent. |
 | Signing chain / boot profile | Not verified for this device/build. The upstream persistent flow references an owner-specific signing setup; its private key is not an input we will request or copy. |
-| Current 3.0.309 Android boot triplet and verified rollback package | Not captured or validated in this audit. |
+| Current 3.0.309 Android boot triplet and verified rollback package | No complete recovery package is available. A later interrupted `/data` collection left two identical 4,202,692,608-byte partial tar files on E: and F:; they are not backups and must not be resumed or used for recovery. The user has directed that no tablet backup be made. |
 
 The configured Mac is Apple silicon running macOS 15.3 with about 198 GiB free. It has no project checkout and no globally selected developer directory. The Command Line Tools package is installed; `DEVELOPER_DIR=/Library/Developer/CommandLineTools` resolves Apple clang 17, `ld`, and `codesign`. The host has Python 3.9.6, while `docs/host-checklist.md` requires Python 3.11 or newer; `nasm`, `iasl`, and Homebrew are absent, and `xcodebuild` is unavailable without full Xcode. The host toolchain is therefore incomplete. No build was started.
 
