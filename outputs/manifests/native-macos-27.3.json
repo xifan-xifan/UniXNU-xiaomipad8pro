@@ -146,7 +146,7 @@
     "reported_by_historical_results": "native macOS 27.3 desktop, GPU/input, Wi-Fi networking and persistent Data",
     "current_device_recheck": "2026-11-19 live GPT has no linux_rootfs, linux_data, or ESP; intervening return-to-stock event unknown",
     "historical_native_outputs_available": true,
-    "historical_native_outputs_scope": "partial mismatched offline candidate only; no current-baseline reproducible source, persistent root, or ESP",
+    "historical_native_outputs_scope": "partial mismatched offline candidate only; ARTIFACTS.md records exact-pinned kernel-k27-0054-native.macho sha256 20a5b4fdcf54b6ac6e8f1878856b6049fc800591d6936c204545e15c53ebbfae, but the binary is absent from the preserved output tree; no current-baseline reproducible source, persistent root, or ESP",
     "historical_sibling_checkout": {
       "path": "E:\\codex\\2026-11-01\\ni\\work\\piano-macos-latest",
       "commit": "9097efb936692ef743c3c947e3682adade97d87d",
