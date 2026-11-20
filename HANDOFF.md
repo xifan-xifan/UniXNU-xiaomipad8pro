@@ -282,3 +282,5 @@ The maintenance RAM image now boots on the tablet with USB NCM/root shell. Read-
 The owner authorized persistent writes within the deployment scope and requested no tablet backup. The maintainer baseline and retained Mac inputs were rechecked. The SystemOS helper pair and kernel union mount remain open. See [the deployment input check](docs/results-2026-11-21-deployment-inputs.md).
 
 The Mac persistence simulation passed with zero failures on the maintainer fixture geometry. See [host persistence regression](docs/results-2026-11-21-persistence-host.md).
+
+The current HyperOS mount, encryption, and Data capacity reference is in [the recovery acceptance baseline](docs/results-2026-11-21-hyperos-recovery-baseline.md).
