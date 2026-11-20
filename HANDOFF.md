@@ -90,3 +90,5 @@ See [DEVICE-BASELINE.md](DEVICE-BASELINE.md), [REPRODUCIBILITY.md](REPRODUCIBILI
 - The independent WSL FD build succeeded with the populated pinned EDK2 feed. Its SHA-256 is in the deployment manifest. Generated VariableRuntimeDxe settings show emulation enabled and a zero reserved-store address in the staging build tree. Device qualification and RAM-only configuration enforcement remain open.
 
 Ubuntu v1.1.0 RAM reference archive verified at `D:\Temp\piano-v110-ranges-bc75e4c7-38d0-4bd0-8eb7-f04886abad71\verified.zip`. The UEFI-only candidate passed `verify-ram-images.py` with zero failures under UbuntuPiano. Next gate is firmware storage isolation. The locked native k27 input is still missing.
+
+The pinned piano platform sources show early dispatch of binary UFSDxe, ESP and Android fallback outside the UniXNU menu, and a reset callback that flushes present writable Block I/O devices. Treat the existing candidate as host-only evidence pending a separately verified diagnostic build with physical storage dispatch disabled.
