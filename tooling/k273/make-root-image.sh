@@ -30,8 +30,22 @@ policy_args=()
 if [ -n "${K273_VROOT_DIR:-}" ]; then
   [ ! -e "$O/root.img" ] || { echo "policy build requires a fresh root.img output: $O/root.img" >&2; exit 1; }
   for label in OS SystemOS; do
+    case $label in
+      OS) window=$OS ;;
+      SystemOS) window=$SYS ;;
+    esac
     table=$K273_VROOT_DIR/$label.vroot
     [ -s "$table" ] || { echo "missing or empty policy table: $table" >&2; exit 1; }
+    python3 - "$window" "$table" <<'CHECK_TABLE'
+import os
+import sys
+
+window, table = sys.argv[1:]
+expected = ((os.path.getsize(window) + 4095) // 4096) * 32
+actual = os.path.getsize(table)
+if actual != expected:
+    sys.exit(f"{table}: expected {expected} hash table bytes for {window}, got {actual}")
+CHECK_TABLE
     policy_args+=(--object "$label.vroot=$table")
   done
 fi
