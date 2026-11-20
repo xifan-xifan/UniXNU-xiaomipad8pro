@@ -1,0 +1,85 @@
+--- a/package/UniXNUPkg/Library/UniXNULib/Config.c
++++ b/package/UniXNUPkg/Library/UniXNULib/Config.c
+@@ -10,5 +10,7 @@
+ #include "Internal.h"
+ 
+ #include <Library/FdtLib.h>
++#include <Protocol/BlockIo.h>
++#include <Protocol/DiskIo.h>
+ 
+ //
+@@ -1462,5 +1463,6 @@
+ 
+   Status = UniXNUReadFile (Volume, (CONST CHAR16 *)PcdGetPtr (PcdUniXNUConfigPath), (VOID **)&Text, &Size);
++  UniXNULog ("config: RAM TOML read %r", Status);
+   if (EFI_ERROR (Status)) {
+     return FALSE;
+   }
+@@ -1481,4 +1482,37 @@
+ }
+ 
++STATIC
++VOID
++TraceRamPayload (
++  IN EFI_HANDLE Volume
++  )
++{
++  EFI_BLOCK_IO_PROTOCOL *BlockIo;
++  EFI_STATUS Status;
++  UINT8 Sector[512];
++  UINT32 Crc;
++
++  Status = gBS->HandleProtocol (Volume, &gEfiBlockIoProtocolGuid, (VOID **)&BlockIo);
++  UniXNULog ("config: matched RAM handle %p, Block I/O %r", Volume, Status);
++  if (EFI_ERROR (Status) || (BlockIo->Media == NULL)) {
++    return;
++  }
++
++  UniXNULog ("config: RAM block size %u align %u readonly %u", BlockIo->Media->BlockSize,
++             BlockIo->Media->IoAlign, BlockIo->Media->ReadOnly);
++  if ((BlockIo->Media->BlockSize != sizeof (Sector)) || (BlockIo->Media->IoAlign > 1)) {
++    return;
++  }
++
++  Status = BlockIo->ReadBlocks (BlockIo, BlockIo->Media->MediaId, 0, sizeof (Sector), Sector);
++  UniXNULog ("config: RAM LBA 0 read %r", Status);
++  if (!EFI_ERROR (Status)) {
++    Status = gBS->CalculateCrc32 (Sector, sizeof (Sector), &Crc);
++    if (!EFI_ERROR (Status)) {
++      UniXNULog ("config: RAM LBA 0 crc32 %08x signature %02x%02x", Crc, Sector[510], Sector[511]);
++    }
++  }
++}
++
+ VOID
+ UniXNUConfigLoad (
+@@ -1495,11 +1530,20 @@
+   ZeroMem (Config, sizeof (*Config));
+   Loaded = FALSE;
+   Status = gBS->LocateHandleBuffer (ByProtocol, &gEfiBlockIoProtocolGuid, NULL, &Count, &Handles);
++  UniXNULog ("config: enumerate Block I/O %r", Status);
+   if (!EFI_ERROR (Status)) {
+     for (UINTN Index = 0; Index < Count && !Loaded && Config->Error[0] == '\0'; Index++) {
+       if (IsRamPayloadVolume (Handles[Index])) {
+-        gBS->ConnectController (Handles[Index], NULL, NULL, FALSE);
++        VOID *Interface;
++
++        TraceRamPayload (Handles[Index]);
++        Status = gBS->ConnectController (Handles[Index], NULL, NULL, FALSE);
++        UniXNULog ("config: connect RAM controller %r", Status);
++        Status = gBS->HandleProtocol (Handles[Index], &gEfiDiskIoProtocolGuid, &Interface);
++        UniXNULog ("config: RAM Disk I/O %r", Status);
++        Status = gBS->HandleProtocol (Handles[Index], &gEfiSimpleFileSystemProtocolGuid, &Interface);
++        UniXNULog ("config: RAM Simple File System %r", Status);
+         Loaded = TryVolume (Config, Handles[Index]);
+       }
+     }
+     FreePool (Handles);
+--- a/package/UniXNUPkg/Library/UniXNULib/UniXNULib.inf
++++ b/package/UniXNUPkg/Library/UniXNULib/UniXNULib.inf
+@@ -56,4 +56,5 @@
+   gEfiBlockIoProtocolGuid           ## SOMETIMES_CONSUMES ## SOMETIMES_PRODUCES
+   gEfiPartitionInfoProtocolGuid     ## SOMETIMES_CONSUMES
+   gEfiDevicePathProtocolGuid        ## CONSUMES
++  gEfiDiskIoProtocolGuid            ## SOMETIMES_CONSUMES
+   gEfiFirmwareVolume2ProtocolGuid   ## SOMETIMES_CONSUMES
