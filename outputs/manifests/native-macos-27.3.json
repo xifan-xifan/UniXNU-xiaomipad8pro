@@ -617,6 +617,19 @@
     "device_tested": false,
     "evidence": "docs/results-2026-11-20-native-display-abi.md"
   },
+  "host_root_assembly_2026_11_20": {
+    "build": "26C5035r",
+    "root_bytes": 20936916992,
+    "root_sha256": "e543c4ed25f77dec07c39b3ba840a0a6887a8a499a1d515eecfb9a0bc6099f2b",
+    "manifest_sha256": "7369d019d035d5cea211c9cca47121c29b06687841b30dfb3bdb0524fb686e03",
+    "apfs_windows_readback_passed": true,
+    "native_boot_shims_present": false,
+    "apple_only_trust_sha256": "002db2e6ee9000c891bad43247bfa9c55ad6d3b2ee62e6c0b9e1965e78926da6",
+    "pinned_bootshim_sha256": "f7ee5e091c70ece86710bcc99256974a66b41134b5b07d77ceea2cfa9f758d16",
+    "live_a_slot_recovery_matches_stock_archive": true,
+    "device_booted": false,
+    "evidence": "docs/results-2026-11-20-root-host-assembly.md"
+  },
   "offline_storage_layout_study_2026_11_20": {
     "logical_block_bytes": 4096,
     "candidate_entry_array_sha256": "ba67d6aa7863835bb019231cfe97054138f649e58e7e06d08abe858da3f9751e",

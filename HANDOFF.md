@@ -18,6 +18,8 @@ A temporary KC header experiment passed the pinned DarwinBoot parser after match
 
 The storage study now has an offline GPT candidate and a byte-exact simulated GPT rollback. The 3.0.309 recovery ramdisk was checked for its F2FS and vendor wipe paths. Confirm the root and seed footprints and qualify recovery on a shortened userdata before proposing GPT writes. [Storage and recovery result](docs/results-2026-11-20-storage-layout-recovery.md)
 
+The Mac built and read back a 20,936,916,992-byte SHNGROOT image, confirming the candidate root footprint. Host artifacts and logs are in `/tmp/piano-root-26C5035r.593r2m` on the Mac. This test image lacks the native mount/fsck shims. The three Apple trust modules and pinned BootShim also passed host checks. The A-slot recovery hash matches the stock package. [Root assembly result](docs/results-2026-11-20-root-host-assembly.md)
+
 ## Current state
 
 - **User data:** the owner reports that HyperOS 3.0.309 was factory-reset before work began and contains no personal data. This is an owner report, not a new device-side verification. No tablet data backup was made.
