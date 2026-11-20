@@ -276,4 +276,3 @@ The original Apple mount, fsck and fsck_apfs passed strict signature verificatio
 The frozen manual-exit maintenance image matched its manifest SHA-256. Its extracted ARM64 BusyBox (SHA-256 `52151e7f322f926b64049cdaa1410dc3ea6485525e0624b05813791c219ae933`) supplied dd, awk, tail, and sha256sum through QEMU user emulation for the host hash tests. Both complete reads matched their expected digests. A missing input and both short reads returned errors without digests. This covers user-space utility behavior on scratch files. ABL write paths and UFS readback remain open on the tablet.
 
 The tablet recovered after the authorized diagnostic RAM boot and now reports HyperOS OS3.0.309.0.WPYCNXM, slot _a, and sys.boot_completed=1 over ADB; see [diagnostic boot recovery](docs/results-2026-11-21-diagnostic-boot-recovery.md). The menu was not observed, so native execution remains unverified.
-

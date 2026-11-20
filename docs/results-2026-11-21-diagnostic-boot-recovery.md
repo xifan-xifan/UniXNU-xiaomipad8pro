@@ -3,3 +3,5 @@
 After the approved RAM diagnostic boot, the tablet re-enumerated over Android ADB as serial `7ccdd855`. Read-only properties confirmed `ro.product.device=piano`, HyperOS `OS3.0.309.0.WPYCNXM`, `ro.boot.slot_suffix=_a`, `sys.boot_completed=1`, and `ro.boot.bootreason=bootloader`.
 
 This proves the device returned to a booted HyperOS userspace after the temporary boot attempt. No flash, erase, GPT, userdata, metadata, ESP, or boot-partition write was issued during recovery. The diagnostic menu itself was not observed, so this is recovery evidence rather than proof of macOS execution.
+
+A subsequent ADB reboot to ABL confirmed `product=piano`, `is-userspace=no`, `snapshot-update-status=none`, `current-slot=a`, `slot-successful:a=yes`, `slot-unbootable:a=no`, and `slot-retry-count:a=6`, matching the preflight. A standard `fastboot reboot` again returned to `OS3.0.309.0.WPYCNXM` on `_a` with `sys.boot_completed=1`.
