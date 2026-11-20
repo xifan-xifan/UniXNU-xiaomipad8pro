@@ -1407,6 +1407,8 @@
     "image_bytes": 21100494848,
     "provisional_extent_bytes": 21474836480,
     "remaining_bytes": 374341632,
+    "host_image_sha256": "529a2c686cc41c8afb86bc3c6c405645a840d30b80125e1136209dc69b4fc14d",
+    "host_image_scope": "Both APFS windows and both hash tables read back on Mac. SystemOS lacks shims and the policies are unsigned.",
     "manifest_sha256": "de43725482e8d17354e75ab1e2b79d706301dfe81ee6db6bbeaf4d236a124948",
     "os_table_sha256": "f10b77a0b2f0475c296a66c69ec3c1d26598dbca3e6b09751a0b1cc31af533b0",
     "systemos_table_sha256": "51c40b9f9d6453e6ded60fcfc357c7a000a4b21c6597580fe7652ef77bca475b",
