@@ -1403,6 +1403,19 @@
     "validation": "Locked DarwinBoot parser and synthetic checks passed",
     "limitations": "Host fixture signing, unshimmed SystemOS, no target execution"
   },
+  "connected_android_baseline_2026-11-20": {
+    "product": "piano",
+    "build": "OS3.0.309.0.WPYCNXM",
+    "slot": "_a",
+    "boot_completed": true,
+    "data_mount": "dm-56 f2fs inlinecrypt",
+    "userdata_by_name": "sda34",
+    "metadata_by_name": "sda20",
+    "virtual_ab": true,
+    "raw_geometry_read": false,
+    "device_state": "android_only_read_only",
+    "evidence": "docs/results-2026-11-20-connected-baseline.md"
+  },
   "esp_host_regression": {
     "tested_commit": "6da1992",
     "mtools_version": "4.0.50",
