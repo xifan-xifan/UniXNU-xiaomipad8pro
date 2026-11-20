@@ -88,11 +88,13 @@ map)
 hash)   # from the medium: the page cache is dropped first
 	sync; { echo 3 > /proc/sys/vm/drop_caches; } 2>/dev/null
 	status=$(mktemp "$P/hash.XXXXXX") || die 'cannot create hash status file'
-	digest=$({ dd if="/dev/$1" bs="${4:-4096}" skip="$2" count="$3" 2>/dev/null; echo "$?" > "$status"; } | sha256sum)
+	digest=$({ LC_ALL=C dd if="/dev/$1" bs="${4:-4096}" skip="$2" count="$3" 2> "$status" && printf '%s\n' 'read-ok' >> "$status"; } | sha256sum)
 	hash_rc=$?
-	read_rc=$(cat "$status")
+	records=$(awk '/^[0-9]+\+[0-9]+ records in$/ {print $1}' "$status")
+	read_status=$(tail -n 1 "$status")
 	rm -f "$status"
-	[ "$read_rc" = 0 ] && [ "$hash_rc" = 0 ] || die 'cannot hash requested device region'
+	[ "$read_status" = read-ok ] && [ "$hash_rc" = 0 ] || die 'cannot hash requested device region'
+	[ "$records" = "$3+0" ] || die 'incomplete read of requested device region'
 	printf 'sha256=%s\n' "${digest%% *}"
 	;;
 zero-sha)

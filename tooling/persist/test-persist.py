@@ -285,6 +285,9 @@ def test_tablet_sh(tmp, hash_only=False):
     check(run('hash', dev, 1, 2, 8192)['sha256'] == hashlib.sha256(data[8192:3 * 8192]).hexdigest(), 'hash with BS')
     failure = run('hash', dev + '.missing', 0, 1)
     check('error' in failure and 'sha256' not in failure, 'failed hash read returns no digest')
+    for skip, count, size in ((63, 2, B), (21, 1, 3 * B)):
+        short = run('hash', dev, skip, count, size)
+        check('error' in short and 'sha256' not in short, 'short hash read returns no digest')
     if hash_only:
         return
     check(run('peek', dev, 1, 16, 8)['hex'] == data[B + 16:B + 24].hex(), 'peek')
