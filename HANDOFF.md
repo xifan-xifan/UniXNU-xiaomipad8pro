@@ -170,3 +170,5 @@ The Mac generated the unsigned 113229824-byte OS.vroot table for the hash-matche
 Mac host assembly passed for the 21,100,494,848-byte SHNGROOT v2 image at /tmp/piano-vroot-layout-yiktynqv/root.host-test.img. The manifest and all four ranges passed readback. The companion verified.json records sizes, offsets and hashes. This image uses the unshimmed SystemOS and unsigned hash tables for host layout verification.
 
 NativeUfs production findRootLayout accepted the actual Mac SHNGROOT v2 header in an UbuntuPiano host harness with a synthetic 20 GiB linux_rootfs GPT. It classified OS and SystemOS as windows and both vroot tables as objects at their expected offsets and lengths. Harness and input are at /tmp/tmp.CyAC1QKrpJ.
+
+On the Mac, the retained VerifiedRoot signer generated an RSA-3072 policy for the actual 26C5035r OS volume using a host fixture key. OpenSSL verified the signature and the signed table SHA-256 matches the previously generated OS.vroot. The report is /tmp/piano-os-policy-test.4cuYw7/signed/manifest.json. The fixture anchor is for host qualification only.
