@@ -292,3 +292,5 @@ The [4 KiB host fixture](docs/results-2026-11-21-f2fs-4k-host.md) passed formatt
 The [GPT rehearsal](docs/results-2026-11-21-gpt-write-rehearsal.md) verified candidate and stock parsing at 4 KiB and restored both original GPT boundaries byte for byte on a host file. The legacy installer still expects the historical layout and a verified backup session.
 
 The Piano catalog audit identified a separate macOS 27.3 XNU pin and a SystemOS retry patch. The public SystemOS host verification hash differs from the retained unshimmed image. ADB confirmed HyperOS booted on slot A. See [catalog audit](docs/results-2026-11-21-catalog-repositories.md).
+
+The retained SystemOS image passed the Mac's read-only APFS check. Its APFS volume UUID matches local metadata and differs from the catalog policy UUID. See [SystemOS APFS check](docs/results-2026-11-21-systemos-apfs.md).
