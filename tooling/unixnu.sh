@@ -10,7 +10,15 @@ U=$R/UniXNU
 cmd=$1; shift
 extra=()
 case $cmd in
-  build|firmware|bootimg|release) extra=(--uefi "$R/Mu-Silicium-piano" --edk2 "$U/out/feeds/mu_basecore-8f10084c") ;;
+  build|firmware|bootimg|release)
+    edk2=${PIANO_EDK2_DIR:-$R/Mu-Silicium-piano/Mu_Basecore}
+    edk2_pin=$(python3 -c 'import sys,tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["source"]["edk2"]["commit"])' "$D/unixnu.lock")
+    edk2_head=$(git -C "$edk2" rev-parse --verify HEAD 2>/dev/null || true)
+    if [ "$edk2_head" != "$edk2_pin" ]; then
+      echo "Mu Basecore at $edk2 must be checked out at $edk2_pin (found ${edk2_head:-no checkout})" >&2
+      exit 1
+    fi
+    extra=(--uefi "$R/Mu-Silicium-piano" --edk2 "$edk2") ;;
 esac
 # UniXNU's own submodule worktrees are empty in this checkout (only their .git files survived the 2026-11-10 history
 # rewrite); the standalone checkouts next to it are the same commits (unixnu.lock), so they stand in as local modules.

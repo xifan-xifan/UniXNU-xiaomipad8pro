@@ -1,8 +1,7 @@
 #!/bin/bash
 # Make the UEFI build checkouts of unixnu.lock under UNIXNU_RESEARCH (default ~/Downloads/XiaomiPad8Pro-Ubuntu/unixnu-research),
 # as piano-uefi's tools/setup-deps.sh does, plus this repository's deltas. Shallow and sparse; safe to rerun.
-#   Mu-Silicium-piano/                 Mu-Silicium e51cd877 + Common/Mu, Mu_OEM_Sample, Silicium-ACPI, openssl (no Mu_Basecore:
-#                                      UniXNU's edk2 feed is the same commit)
+#   Mu-Silicium-piano/                 Mu-Silicium e51cd877 + Common/Mu, Mu_OEM_Sample, Silicium-ACPI, openssl and Mu_Basecore
 #   Mu-Silicium-piano/Binaries/        Device-Binaries a1501e0c, sparse: dodge/MdeModulePkg + the dodge QcomPkg references
 #   piano-uefi-UniXNU-piano/           worktree of piano-uefi 31545f9 (branch unixnu) + firmware/patches/*.patch
 #   UniXNU/                            + firmware/patches/unixnu/*.patch (the UniXNUPkg the FD builds)
@@ -16,7 +15,7 @@ if [ ! -d "$M/.git" ]; then
   git init -q "$M" && git -C "$M" remote add origin "$(pin Mu-Silicium git)"
   git -C "$M" fetch -q --depth 1 origin "$(pin Mu-Silicium commit)" && git -C "$M" checkout -q FETCH_HEAD
 fi
-git -C "$M" submodule update -q --init --depth 1 -- Common/Mu Common/Mu_OEM_Sample Silicium-ACPI Silicon/Silicium/OpensslPkg/Library/OpensslLib/openssl
+git -C "$M" submodule update -q --init --depth 1 -- Common/Mu Common/Mu_OEM_Sample Silicium-ACPI Silicon/Silicium/OpensslPkg/Library/OpensslLib/openssl Mu_Basecore
 B=$M/Binaries
 if [ ! -d "$B/.git" ]; then
   mkdir -p "$B" && git -C "$B" init -q && git -C "$B" remote add origin "$(pin Device-Binaries git)"
