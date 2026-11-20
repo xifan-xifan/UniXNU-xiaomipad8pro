@@ -3,6 +3,22 @@
   "checked_on": "2026-11-20",
   "device_repository": "https://github.com/lenzhang/UniXNU-xiaomipad8pro",
   "device_commit": "2438556c77c90c22c7b76e57eb8b40c44b35f1af",
+  "abl_source_review_2026_11_20": {
+    "repository": "https://git.codelinaro.org/clo/la/abl/tianocore/edk2.git",
+    "tag": "KERNEL.PLATFORM.3.0.r23-02400-kernel.0",
+    "commit": "aef4e86045bd151a54d33bab8ae5e8e62462a8f4",
+    "lineage_source": "OpenHandheldCollective/OpenABL Scripts/fetch.sh",
+    "lineage_source_commit": "2227e24341cae531e1d7e9f3cd710920545879e8",
+    "source_file_sha256_matches": {
+      "QcomModulePkg/Library/FastbootLib/FastbootCmds.c": "a1b53035b3c89c85c5f1f13dde891b5a3e1858cc073311fd5e58649742ae6656",
+      "QcomModulePkg/Library/BootLib/BootLinux.c": "2b578b0344d7c67fcc1126d3a9453ebb2d59f8a0214721c9a5f87aef06f07a01",
+      "QcomModulePkg/Library/BootLib/PartitionTableUpdate.c": "2f089ea344d20ceb1db7e2ac8cb83b96f2656b25f5a376f6bfab10f9928fa58a"
+    },
+    "reference_avb2_rollback_updates": "conditional TrustZone and DeviceInfo update paths identified; device policy and persistence unverified",
+    "device_binary_build_provenance_verified": false,
+    "temporary_boot_write_gate": "not passed",
+    "result": "Qualcomm reference source identity verified; Xiaomi binary build configuration and remaining persistent side effects remain unverified"
+  },
   "main_comparison": {
     "status": "identical",
     "ahead_by": 0,
