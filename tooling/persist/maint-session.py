@@ -302,7 +302,16 @@ class Session:
 
     def esp_record(self, name):
         path = OUT / (name.removesuffix('.img') + '.json')
-        return json.loads(path.read_text()) if path.is_file() else None
+        if not path.is_file():
+            return None
+        record = json.loads(path.read_text())
+        placement = record.get('partition')
+        if placement is not None:
+            expected = {'lun': 0, 'index': common.ESP_INDEX + 1,
+                        'first_lba': common.ESP_FIRST, 'blocks': common.ESP_BLOCKS}
+            if not isinstance(placement, dict) or any(placement.get(key) != value for key, value in expected.items()):
+                raise Stop(f'{path.name}: ESP placement differs from the geometry supported by this maintenance session')
+        return record
 
     def save(self, **values):
         self.state.update(values)
