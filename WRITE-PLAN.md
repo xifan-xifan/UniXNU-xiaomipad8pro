@@ -35,7 +35,7 @@ After authorized storage preparation and successful desktop testing, qualify the
 The official GPT template matches LUN 0 geometry after adjusting the userdata end for disk capacity. Its partition GUIDs and attributes differ from the captured table. Use the verified device captures as the rollback source. [GPT template comparison](docs/results-2026-11-20-stock-gpt-template-comparison.md)
 
 - A failed preflight or readback aborts before reboot.
-- A failed RAM diagnostic returns to ABL Fastboot and uses no persistent write.
+- The temporary boot gate requires evidence for stock ABL ramdisk selection and persistent write behavior. The diagnostic BDS deliberately halts when the menu fails or returns. Before a device attempt, establish the hardware reset and return path to ABL Fastboot.
 - A failed persistent step restores the immediately preceding verified region in reverse dependency order, then reads it back before reboot.
 - Boot-triplet rollback uses only the three verified device-captured A-slot images (`boot_a`, `init_boot_a`, `vendor_boot_a`); the offline verifier checks size and SHA-256. The official package has a different `init_boot` ramdisk and is not interchangeable.
 - The official package `flash_all_except_storage.sh` (SHA-256 `180b79a08b7ffcf66df678c07e4afb3b66cd2c01a3a6bb5b7b855f5d6204de28`) erases `boot_ab`, flashes firmware and system partitions including `init_boot_ab`, `vendor_boot_ab`, `super`, `misc`, recovery and `boot_ab`, sets slot A, then reboots. Static review found no GPT, `userdata` or `metadata` write in this script. It is a broad stock-system recovery operation, not a boot-triplet rollback or GPT restoration procedure.
