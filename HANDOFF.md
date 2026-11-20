@@ -226,3 +226,5 @@ The first-install Data seed matches its recorded UUID and lacks fstab entries. S
 The stock 27.3 build route selects the development NativeUfs policy. The retained host collection's verified symbols and object digest were checked separately. See [verified UFS build route](docs/results-2026-11-20-verified-ufs-build-route.md) for production inputs and the correction to the compiler guard description.
 
 The host SHNGROOT v2 capacity check passed for the retained OS and unshimmed SystemOS. Mac `/tmp/piano-root-tables.LLOseQ` retains both block hash tables and `layout/manifest.bin` (SHA-256 `de43725482e8d17354e75ab1e2b79d706301dfe81ee6db6bbeaf4d236a124948`). See WRITE-PLAN.md for capacity and revalidation against the final SystemOS.
+
+For the separate 27.3 root partition, set K273_ROOT_PART=linux_rootfs in the image builder. A WSL fixture verified the default and explicit partition arguments and rejection of invalid or duplicate selectors. Full image and tablet validation remain pending.
