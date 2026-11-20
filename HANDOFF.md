@@ -22,6 +22,8 @@ The Mac built and read back a 20,936,916,992-byte SHNGROOT image, confirming the
 
 The resumption audit reconfirmed the upstream device baseline, the preserved root hashes, and the missing shim files. The historical c146 checkout documents an Android switch procedure but no dated Android-return or round-trip result; its exact-pinned kernel binary is absent. The user-supplied historical desktop result remains separate from present 3.0.309 qualification. No tablet command or backup was made. [Resumption audit](docs/results-2026-11-20-resume-audit.md)
 
+The follow-up hash audit tied historical `kc-k273-native.bin` (`663e6ef7…`) to six RAM build manifests, but all are marked offline/not device tested, use `data_persist=0`, have `same_seed=false` and unknown installed seed, and record no firmware entries. The sibling checkout has no k27 source tree and its pins differ from the current baseline, so the KC remains provenance-only and is not eligible for the current build. See the added provenance section in the [resumption audit](docs/results-2026-11-20-resume-audit.md).
+
 ## Current state
 
 - **User data:** the owner reports that HyperOS 3.0.309 was factory-reset before work began and contains no personal data. This is an owner report, not a new device-side verification. No tablet data backup was made.

@@ -697,6 +697,27 @@
       "persistent_root_image_present": false,
       "persistent_esp_image_present": false,
       "kc_k273_native_sha256": "663e6ef7f06666829b5d8a0770ea77c18923e1e534ad2b2e5ef2f18d1508459e",
+      "historical_kc_audit": {
+        "path": "out/k27/kc-k273-native.bin",
+        "sha256_verified": true,
+        "sha256": "663e6ef7f06666829b5d8a0770ea77c18923e1e534ad2b2e5ef2f18d1508459e",
+        "same_hash_ram_manifests": [
+          "ram-native",
+          "ram-native-diagnostic",
+          "ram-native-diagnostic2",
+          "ram-native-fd3d40",
+          "ram-native-fd3d40-v2",
+          "ram-native-fd3d40-v3"
+        ],
+        "manifest_status": "OFFLINE_CANDIDATE_NOT_DEVICE_TESTED",
+        "data_persist": 0,
+        "same_seed": false,
+        "installed_seed": null,
+        "firmware_entries": 0,
+        "source_tree_present": false,
+        "current_native_pin_verified": false,
+        "eligibility": "provenance_only_do_not_build_or_boot"
+      },
       "ram_candidate": {
         "path": "out/k27/ram-native-fd3d40-v3/boot-piano-macos-ram-A-bundled.img",
         "bytes": 177512448,
