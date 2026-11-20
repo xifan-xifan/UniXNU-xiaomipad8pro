@@ -24,6 +24,8 @@ The resumption audit reconfirmed the upstream device baseline, the preserved roo
 
 The follow-up hash audit tied historical `kc-k273-native.bin` (`663e6ef7…`) to six RAM build manifests, but all are marked offline/not device tested, use `data_persist=0`, have `same_seed=false` and unknown installed seed, and record no firmware entries. The sibling checkout has no k27 source tree and its pins differ from the current baseline, so the KC remains provenance-only and is not eligible for the current build. See the added provenance section in the [resumption audit](docs/results-2026-11-20-resume-audit.md).
 
+The local iPadOS history points to a same-model upstream home-screen report (iPadOS 17.7.11, touch and A830 Metal), which is bounded hardware evidence only. That repository's separate macOS 27.3 profile uses another UniXNU checkout/XNU lock and its own README reports the kernel does not link or boot because Piano storage/display board inputs are missing. Do not treat its iPadOS result as a native macOS or k27 build result; details are in the [resumption audit](docs/results-2026-11-20-resume-audit.md).
+
 ## Current state
 
 - **User data:** the owner reports that HyperOS 3.0.309 was factory-reset before work began and contains no personal data. This is an owner report, not a new device-side verification. No tablet data backup was made.

@@ -718,6 +718,17 @@
         "current_native_pin_verified": false,
         "eligibility": "provenance_only_do_not_build_or_boot"
       },
+      "related_ipados_evidence": {
+        "repository": "xiaomi-pad-8-pro-development/android_device_xiaomi_piano-unixnu",
+        "revision": "d4f160c8ee60c11b293b5425af375846fcd438ff",
+        "home_screen_report_commit": "2f4bfa676274d8556d8de5ee8df6408cda081f69",
+        "profile": "ipados-17.7.11-21H461",
+        "reported_same_device_state": "home screen, NT36532 touch, Adreno 830 Metal icons at about 25 fps (historical local status record)",
+        "macos_27_3_profile_state": "not booting; kernel does not link per repository README",
+        "macos_xnu_base": "ac9718fb1af618d5ce8678d0dc6e8a58f252216f",
+        "native_k27_pin_match": false,
+        "relevance": "hardware path evidence only; not native macOS validation"
+      },
       "ram_candidate": {
         "path": "out/k27/ram-native-fd3d40-v3/boot-piano-macos-ram-A-bundled.img",
         "bytes": 177512448,
