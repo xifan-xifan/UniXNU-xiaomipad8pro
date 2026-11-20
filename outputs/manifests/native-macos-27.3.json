@@ -142,6 +142,12 @@
       "OS": 3538432,
       "SystemOS": 1572864
     },
+    "fixture_policy_verification": {
+      "anchor_sha256": "1fa06d194c24f1642b7708564bcdb6c0ac96378b1a57284ee94285d0bd4fd6b2",
+      "os_report": "mac:/tmp/piano-os-policy-test.4cuYw7/signed/manifest.json",
+      "systemos_report": "mac:/tmp/piano-os-policy-test.4cuYw7/systemos-signed/manifest.json",
+      "verification": "Both RSA signatures and envelope byte layout verified on the host using a generated test anchor"
+    },
     "assembler_preflight": "54539b7 passed against both retained Mac inputs and rejected a same-size stale table in a host fixture",
     "status": "host readback passed; unsigned hash tables, unshimmed SystemOS"
   },
