@@ -30,7 +30,7 @@ The offline comparison of the official LUN 0 GPT template confirms matching part
 
 The strict FD staging audit found an independent filesystem policy callback in Silicium BootManagerLib. Remove it from the diagnostic profile and constrain generic boot dispatch before repeating host verification. [RAM firmware audit](docs/results-2026-11-20-ram-firmware-audit.md)
 
-The diagnostic-only filesystem policy patch passed application and source checks against locked Mu. Apply `firmware/diagnostic/ram-no-filesystem-policy.patch` to the Mu-Silicium staging checkout and rebuild before using a new image. Generic BDS dispatch and ABL remain open.
+The diagnostic-only filesystem policy patch passed application and source checks against locked Mu. The staged firmware rebuild passed. The new FD, prior FD and build log are in UbuntuPiano under `/tmp/piano-ram-build.0YIaUj/policy-build.fn26ff0_/`. The new FD still needs packed-volume and boot-container verification. Generic BDS dispatch and ABL remain open.
 
 ## Current state
 
