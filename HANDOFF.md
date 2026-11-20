@@ -300,3 +300,5 @@ The GPT host rehearsal now also fault-injects a candidate backup table with a st
 The independent bindfs collection replay matched the retained `owner-cryptex-bindfs.kc` byte for byte in UbuntuPiano. See [the collection replay](docs/results-2026-11-21-owner-collection-replay.md) for the exact input hashes and required working directory. SystemOS helper dispatch and final root authentication remain open before tablet testing.
 
 The latest public SystemOS source check still found no shim sources or downloadable image. The retained Apple SystemOS cryptex DMG matches the comparison tree's hash, but our separately built SystemOS image and UUID do not match its policy. See [latest SystemOS source check](docs/results-2026-11-21-latest-systemos-source.md); do not pair that policy with our image.
+
+The core's pinned VerifiedRoot source is available. Its C parser and OpenSSL provider accepted the signed upstream host fixture and rejected a changed block. See [VerifiedRoot host check](docs/results-2026-11-21-verifiedroot-host.md). Target crypto and final SystemOS policy integration remain pending.
