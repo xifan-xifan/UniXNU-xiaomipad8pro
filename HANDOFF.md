@@ -330,3 +330,5 @@ The mailbox variant `342c310e43df5d0697d2661c519272bb99dd365f48033fa861bd2008163
 The packed tracing FD now has direct host evidence for its RAM-backed EFI variable driver. The retained KC contains the mailbox implementation, and the firmware dump limit covers the 7 MiB range. See [the mailbox and EFI variable audit](docs/results-2026-11-21-mailbox-firmware-audit.md). The Linux maintenance panic setting does not establish XNU behavior. The range mapping, reset retention and direct platform panic paths remain open.
 
 The menu-only image verified the full 7 MiB mailbox upload on this tablet and returned to HyperOS with unchanged ABL slot state. The capture contains no expected XNU header. See [the mailbox readback result](docs/results-2026-11-21-mailbox-readback.md). XNU reset retention and direct platform panic paths remain open.
+
+The prepared XNU source dispatches registered panic callbacks before the base platform expert returns from panic sync. The source's `panic-spin` tunable only covers the ordinary debugger restart path. See [the panic path audit](docs/results-2026-11-21-panic-path.md) for the remaining linked-handler checks before the UFS probe.
