@@ -1,6 +1,6 @@
 # Native macOS Deployment Handoff
 
-Updated 2026-11-20. The independent Mac kernel links and passes the 26C5035r mac17j segment layout check. The preflight for the 26-driver profile resolves retained Apple kext pointer targets. The host probe links all 26 configured drivers, including two provisional display objects. The original probe fails DarwinBoot parsing and its source `__LINKINFO` bytes were overwritten during assembly. The owner reports HyperOS 3.0.309 was factory-reset immediately before this task and contains no user data; no tablet data backup was made. The objective remains deployment while preserving HyperOS and verifying switching and recovery.
+Updated 2026-11-20. The independent Mac kernel links and passes the 26C5035r mac17j segment layout check. The preflight for the 26-driver profile resolves retained Apple kext pointer targets. The host probe links all 26 configured drivers, including two provisional display objects. A corrected host relink passes the pinned DarwinBoot parser and preserves the source `__LINKINFO` byte for byte. The owner reports HyperOS 3.0.309 was factory-reset immediately before this task and contains no user data; no tablet data backup was made. The objective remains deployment while preserving HyperOS and verifying switching and recovery.
 
 The Mac archive inputs, positioned kernel, isolated KC builder, and three native kext builds are preserved under `out/k27-independent-20261120/host-run/`. Resume from the [driver build result](docs/results-2026-11-20-mac-native-drivers.md). The exact author k27 pin remains unavailable. Keep this independent build on its frozen inputs.
 
@@ -14,7 +14,7 @@ The GPU checkpoint now covers 24 drivers and 172 objects, with zero unresolved G
 
 The video build passed its host suites and import checks. The checkpoint covers 25 drivers and 183 objects. The display declaration probe awaits ABI verification before final collection integration. [Video build result](docs/results-2026-11-20-native-video-build.md)
 
-A temporary KC header experiment passed the pinned DarwinBoot parser after matching the CPU subtype and separating two member ranges. Byte comparison showed the linker overwrote source `__LINKINFO` with Apple `__LINKEDIT` bytes. Relink with disjoint ranges and verify the payload before packaging. Display layout and device qualification remain open. [Collection link result](docs/results-2026-11-20-native-collection-probe.md)
+A temporary KC header experiment passed the pinned DarwinBoot parser after matching the CPU subtype and separating two member ranges. Byte comparison showed the linker overwrote source `__LINKINFO` with Apple `__LINKEDIT` bytes. The corrected relink preserves both ranges, passes the pinned parser, and matches the source payload. Next check boot packaging and display layout, and qualify the target storage and recovery path. [Collection link result](docs/results-2026-11-20-native-collection-probe.md)
 
 ## Current state
 

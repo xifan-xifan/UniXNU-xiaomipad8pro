@@ -592,6 +592,16 @@
       "header_only_result": "host parser accepted; source LINKINFO payload remains overwritten",
       "header_only_sha256": "9e6830ad93c4ec31dd14dd0a33c04004ad9a2ef18388cefb05ebd2e094aa37fe"
     },
+    "corrected_host_relink": {
+      "bytes": 135806976,
+      "sha256": "db13a30673c6431f730a10f1a98118f1b74ccff31d4d1fca508f743678d05c2f",
+      "patch_sha256": "e09616b2f5ca567e9dee49bafd741920c0a80e9802f68a8f8bad0e379b6092bc",
+      "log_sha256": "52fd3c9b6f3f4a30893ec8dc590bd0978a4d8831f8821b5cdf3a51b0b087d9de",
+      "source_linkinfo_matches": true,
+      "darwinboot_host_parser_passed": true,
+      "unique_fixup_locations_with_mapped_targets": 364799,
+      "device_tested": false
+    },
     "device_tested": false,
     "evidence": "docs/results-2026-11-20-native-collection-probe.md"
   },
