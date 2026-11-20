@@ -1385,14 +1385,5 @@
     "link_arguments": "owner-dispatch-argv.json",
     "validation": "Locked DarwinBoot parser and synthetic tests passed",
     "limitations": "Host fixture policies, unshimmed SystemOS, no runtime mount or tablet test"
-  },
-  "owner_data_host_collection": {
-    "sha256": "7a13a3fc411635e7d4d56ccedff87abaa320c691a89e999f0f7179a8b77d86e5",
-    "linked_descriptors": 26,
-    "workspace": "UbuntuPiano:/tmp/piano-verified-collection.68bZb6",
-    "artifact": "owner-dispatch.kc",
-    "link_log": "owner-dispatch.log",
-    "validation": "Locked DarwinBoot parser and synthetic tests passed",
-    "limitations": "Fixture signing policies, unshimmed SystemOS, no tablet execution or Data mount runtime verification"
   }
 }
