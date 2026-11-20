@@ -1526,6 +1526,18 @@
     "data_persist": 0,
     "device_tested": false
   },
+  "native_ufs_mailbox_probe_2026_11_21": {
+    "workspace": "UbuntuPiano:/tmp/piano-probe2-mailbox.pBt7YPdh",
+    "image": "boot-piano-macos-ram-probe2-mailbox.img",
+    "bytes": 185733120,
+    "sha256": "342c310e43df5d0697d2661c519272bb99dd365f48033fa861bd200816347463",
+    "build_record": "build-probe2-mailbox.json",
+    "verification_log": "verify.log",
+    "reference_verifier_failures": 0,
+    "mailbox_base": "0x9cb00000",
+    "mailbox_size": "0x700000",
+    "device_tested": false
+  },
   "native_readonly_collection_2026_11_20": {
     "sha256": "00f0ba553e16a42021623d9805f6d77ae95ae09d968c761ae1cae4cb6bb06831",
     "bytes": 135806976,
