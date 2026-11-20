@@ -8,7 +8,21 @@
     "ahead_by": 0,
     "behind_by": 0,
     "live_remote_head": "2438556c77c90c22c7b76e57eb8b40c44b35f1af",
-    "live_query": "ssh mac-lan: git ls-remote https://github.com/lenzhang/UniXNU-xiaomipad8pro.git refs/heads/main (2026-11-19)",
+    "live_query": "git ls-remote from the current workstation and GitHub REST API (2026-11-20)",
+    "recheck_2026_11_20": {
+      "live_main": "2438556c77c90c22c7b76e57eb8b40c44b35f1af",
+      "device_issue_1": "open: requests second-device RAM validation; no partition writes",
+      "device_pr_2": "open: staged macOS-runner packaging draft",
+      "native_k27_commit_search_results": 0,
+      "native_k27_commit_api": "422 No commit found for SHA 11ac316b789d81fc9f734e15645456f536c05141",
+      "native_k27_public_forks_checked": 8,
+      "native_k27_forks_containing_commit": 0,
+      "ubuntu_latest_release": "v1.6.1",
+      "ubuntu_switch_tool_blob": "c504b603ba1cb3629057afeb501afe5740819766",
+      "ubuntu_switch_tool_last_commit": "ec551c584c8080cfbaf20797a0ee00e8978e6538",
+      "gpt_boundary_capture_audit": "PASS on existing E: and F: capture sets; no userdata read or new backup",
+      "evidence": "docs/results-2026-11-20-source-storage-recheck.md"
+    },
     "mac_local_divergent_tracking_ref": {
       "commit": "286f5a594563f863aa448ab21c8d160fdcb95eba",
       "commits_after_baseline": 14,
