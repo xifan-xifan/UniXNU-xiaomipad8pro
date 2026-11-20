@@ -66,6 +66,21 @@ def mkbootimg_id(kernel, ramdisk, dtb):
     return sha.digest()
 
 
+def fat_cluster_count_ok(ramdisk):
+    """Reject undersized FAT32, even when mtools can extract its files."""
+    if len(ramdisk) < 512:
+        return False
+    sector_size, per_cluster, reserved, fats, root_entries, sectors, _, fat16 = struct.unpack_from('<HBHBHHBH', ramdisk, 11)
+    if fat16:
+        return True
+    large_sectors, fat32 = struct.unpack_from('<II', ramdisk, 32)
+    if not per_cluster or not sector_size or not fat32:
+        return False
+    root_sectors = (root_entries * 32 + sector_size - 1) // sector_size
+    data_sectors = (sectors or large_sectors) - reserved - fats * fat32 - root_sectors
+    return data_sectors // per_cluster >= 65525
+
+
 def fat_files(ramdisk):
     env = dict(os.environ, MTOOLS_SKIP_CHECK='1', TZ='UTC')
     with tempfile.TemporaryDirectory() as tmp:
@@ -191,6 +206,7 @@ def main():
                 print(f'  info  warm seed {warm.get("identity", "")[:16]} (pack {warm.get("pack_sha256", "")[:16]}, '
                       f'{warm.get("pack_bytes")} bytes; {warm.get("out")})')
                 check(store.get('data_persist') == 0, f'a warm test seed runs data-persist=0 (this image: {store.get("data_persist")})')
+        check(fat_cluster_count_ok(ramdisk), 'ramdisk FAT cluster count is compatible with firmware')
         ok, files = fat_files(ramdisk)
         check(ok and files, f'ramdisk is a FAT volume with {len(files)} files')
         for name, (size, digest, text) in files.items():

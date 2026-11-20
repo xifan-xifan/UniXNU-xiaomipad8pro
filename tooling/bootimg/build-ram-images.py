@@ -350,13 +350,20 @@ def sensor_pack_addon(adt):
     return blob, {'sha256': digest, 'bytes': len(data), 'private': 'this unit only', 'carrier': 'Payloads/kernel.macho.gpuaddon'}
 
 
-def payload(stage, image, label, size_mib):
+def payload(stage, image, label, size_mib, *, fat16=False):
     # mtools stamps the directories it creates with the current time unless SOURCE_DATE_EPOCH is set (mtools 4.0.50):
     # without it two builds a minute apart differ in two bytes of the FAT.
     os.environ['SOURCE_DATE_EPOCH'] = str(EPOCH)
     for path in [stage, *stage.rglob('*')]:
         os.utime(path, (EPOCH, EPOCH))
-    write_volume(stage, image, label, size_mib)
+    if fat16:
+        with image.open("wb") as volume:
+            volume.truncate(size_mib * MIB)
+        subprocess.run(["mkfs.fat", "--invariant", "-F", "16", "-s", "1", "-n", label, str(image)], check=True)
+        subprocess.run(["mcopy", "-m", "-s", "-i", str(image), str(stage / "EFI"), "::"], check=True,
+                       env=dict(os.environ, TZ="UTC"))
+    else:
+        write_volume(stage, image, label, size_mib)
 
 
 def menu_actions(diagnostic=False):
@@ -375,7 +382,8 @@ def uefi_payload(work, diagnostic=False):
         '# UniXNU RAM menu. The default action restarts the tablet after 60 seconds.\n'
         'version = 1\n[boot]\ntimeout = 60\ndefault = "reset"\n[kits]\nautoload = false\n' + menu_actions(diagnostic))
     image = work / 'payload-uefi.img'
-    payload(stage, image, 'PIANOUEFI', 8)
+    # An 8 MiB FAT32 volume cannot reach the firmware's minimum cluster count.
+    payload(stage, image, 'PIANOUEFI', 8, fat16=True)
     return image
 
 
