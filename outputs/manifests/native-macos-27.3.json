@@ -585,6 +585,13 @@
     "display_subclass_problem_slots": 0,
     "display_field_layout_validated": false,
     "darwinboot_validated": false,
+    "darwinboot_parser_probe": {
+      "revision": "8544957e04bdc43e2aac9243764ac16979f15c42",
+      "original_result": "rejected: outer and kernel member CPU subtypes differ",
+      "matching_subtype_result": "rejected: inner LINKINFO and LINKEDIT overlap",
+      "header_only_result": "host parser accepted; source LINKINFO payload remains overwritten",
+      "header_only_sha256": "9e6830ad93c4ec31dd14dd0a33c04004ad9a2ef18388cefb05ebd2e094aa37fe"
+    },
     "device_tested": false,
     "evidence": "docs/results-2026-11-20-native-collection-probe.md"
   },
