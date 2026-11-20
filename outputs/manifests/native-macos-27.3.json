@@ -605,6 +605,18 @@
     "device_tested": false,
     "evidence": "docs/results-2026-11-20-native-collection-probe.md"
   },
+  "native_display_abi_2026_11_20": {
+    "apple_reference_identity": "vma2macosap 26A434",
+    "apple_reference_member_sha256": "a18374a448e74e2582e643385170fe238c55d5db50502479164d099f42625b7d",
+    "apple_reference_decompressed_sha256": "ca55ea8c4c86170e870380ae5501b8b43adb2d2d3db28be4531b3040653be203",
+    "regenerated_header_lf_sha256": "fb9b925d068581df5223b722f6908f3cfc0dd2519b164ddeb2d2bfdfa017ff62",
+    "header_used_in_link_matches_after_line_ending_normalization": true,
+    "vtable_classes_verified": 3,
+    "mac_host_checks_passed": 1217,
+    "cursor_offsets_not_seen_in_direct_access_pairs": [97, 101],
+    "device_tested": false,
+    "evidence": "docs/results-2026-11-20-native-display-abi.md"
+  },
   "offline_storage_layout_study_2026_11_20": {
     "logical_block_bytes": 4096,
     "candidate_entry_array_sha256": "ba67d6aa7863835bb019231cfe97054138f649e58e7e06d08abe858da3f9751e",
