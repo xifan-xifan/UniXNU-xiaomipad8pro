@@ -141,9 +141,10 @@
     "rules": [
       "parse slot-retry-count:a as an integer in the AOSP 3-bit range 0-7",
       "before reboot require current-slot=a, slot-successful:a=yes, slot-unbootable:a=no",
-      "require slot-retry-count:a unchanged from the recorded abl-check"
+      "require slot-retry-count:a unchanged from the recorded abl-check",
+      "before userdata or GPT operations require snapshot-update-status=none; unknown and active merges block"
     ],
-    "test": "tooling/persist/test-abl-state.py",
+    "test": "tooling/persist/test-abl-state.py; includes unknown, MERGING, SNAPSHOTTED and UNSUPPORTED snapshot status rejection",
     "result": "PASS on mac-lan Python 3.9.6 with fake Fastboot responses; no tablet command executed",
     "scope": "host validation of the repository maintenance flow only; does not qualify or run the external piano-switch.py"
   },
@@ -158,13 +159,41 @@
     },
     "verification": "IPSW member AEA, kernelcache, device-tree, and trustcache files match adjacent member JSON SHA-256 records; decrypted DMGs were independently hashed locally; all listed file sizes and SHA-256 values were rechecked; retained in place; no download performed",
     "files": {
-      "root_aea": {"path": "141-22145-021.dmg.aea", "bytes": 2483027968, "sha256": "00f80636bede8b709d0f6342ebefef3ec25ac43b3db03e544f4ccf692ada736d"},
-      "root_decrypted_dmg": {"path": "decrypted/141-22145-021.dmg", "bytes": 2917138432, "sha256": "14330ed990fe7022114b10718f4defe3049d49b6e5d52fd3ac71a487541cd1f3"},
-      "systemos_aea": {"path": "141-22233-021.dmg.aea", "bytes": 11408506880, "sha256": "b7dbb5c6c3ee18ba43fcccb2e865aee008e4388f634bcfbd611b93bf9907d434"},
-      "systemos_decrypted_dmg": {"path": "decrypted/141-22233-021.dmg", "bytes": 14493417472, "sha256": "40d8282eb8650da9b4d7437a981764c48d47ee4bdc5b8b362248f25ecbce0e70"},
-      "kernelcache_mac17j": {"path": "kernelcache.release.mac17j", "bytes": 32709948, "sha256": "66bbe2fa3edfae6fe7b479ce78a7e3935ea29ae2f155e0f4ef45cd5b03594720"},
-      "device_tree_k114cap": {"path": "DeviceTree.k114cap.im4p", "bytes": 106603, "sha256": "7810505c5da4894725aed79b21ba673d651fc9fddaf04aafce58ab6f8cd65797"},
-      "systemos_trustcache": {"path": "141-22233-021.dmg.aea.trustcache", "bytes": 445681, "sha256": "6bc49e0dffade1c61401fd3e087636627f1ae7eca26df9b8890b1cb78ffb2963"}
+      "root_aea": {
+        "path": "141-22145-021.dmg.aea",
+        "bytes": 2483027968,
+        "sha256": "00f80636bede8b709d0f6342ebefef3ec25ac43b3db03e544f4ccf692ada736d"
+      },
+      "root_decrypted_dmg": {
+        "path": "decrypted/141-22145-021.dmg",
+        "bytes": 2917138432,
+        "sha256": "14330ed990fe7022114b10718f4defe3049d49b6e5d52fd3ac71a487541cd1f3"
+      },
+      "systemos_aea": {
+        "path": "141-22233-021.dmg.aea",
+        "bytes": 11408506880,
+        "sha256": "b7dbb5c6c3ee18ba43fcccb2e865aee008e4388f634bcfbd611b93bf9907d434"
+      },
+      "systemos_decrypted_dmg": {
+        "path": "decrypted/141-22233-021.dmg",
+        "bytes": 14493417472,
+        "sha256": "40d8282eb8650da9b4d7437a981764c48d47ee4bdc5b8b362248f25ecbce0e70"
+      },
+      "kernelcache_mac17j": {
+        "path": "kernelcache.release.mac17j",
+        "bytes": 32709948,
+        "sha256": "66bbe2fa3edfae6fe7b479ce78a7e3935ea29ae2f155e0f4ef45cd5b03594720"
+      },
+      "device_tree_k114cap": {
+        "path": "DeviceTree.k114cap.im4p",
+        "bytes": 106603,
+        "sha256": "7810505c5da4894725aed79b21ba673d651fc9fddaf04aafce58ab6f8cd65797"
+      },
+      "systemos_trustcache": {
+        "path": "141-22233-021.dmg.aea.trustcache",
+        "bytes": 445681,
+        "sha256": "6bc49e0dffade1c61401fd3e087636627f1ae7eca26df9b8890b1cb78ffb2963"
+      }
     },
     "boundary": "Apple inputs only; no claim that the native kernel, root image, Data seed, or boot set is matched or buildable"
   },
@@ -231,9 +260,16 @@
     "recipe_archive_sha256": "f687af31008c76d57978a0712e7c6ec8f3c08dd60acbda5deef2ffbf02437c1d",
     "compiler": "Apple clang 17.0.0 (clang-1700.0.13.5)",
     "native_descriptors_total": 26,
-    "drivers_built": ["PianoBacklight", "PianoDpu", "SoftwareAES"],
+    "drivers_built": [
+      "PianoBacklight",
+      "PianoDpu",
+      "SoftwareAES"
+    ],
     "objects_verified_arm64e": 8,
-    "host_tests_passed": ["PianoBacklight", "PianoDpu"],
+    "host_tests_passed": [
+      "PianoBacklight",
+      "PianoDpu"
+    ],
     "remaining_drivers_unbuilt": 23,
     "kc_linked": false,
     "device_tested": false,
@@ -274,14 +310,74 @@
     "device_tested": false,
     "evidence": "docs/results-2026-11-20-ram-firmware-audit.md"
   },
-  "persistent_write_plan": {"document": "WRITE-PLAN.md", "status": "draft", "layout_overlaps_stock_userdata": true, "stock_recovery_rehearsed": false, "approved": false, "executed": false},
-  "independent_firmware_build": {"sha256": "9c855e120b2770bd773bd8f567364dcf10cd1b5a18e0788ac8326100334298c8", "bytes": 3145728, "device_tested": false, "evidence": "docs/results-2026-11-20-ram-firmware-audit.md"},
-  "ram_diagnostic_preflight_2026_11_20": {"image_bytes": 13766656, "retained_image_hash_matches": true, "reference_verifier_failures": 0, "android_product": "piano", "hyperos": "OS3.0.309.0.WPYCNXM", "active_slot": "a", "boot_completed": true, "slot_success_and_retries": "not queried through Fastboot in this check", "device_boot_attempted": false},
-  "stock_abl_offline": {"sha256": "0ab1245367d84bd4c16418106cefd8884a3e2fdaeab5dcf6584455a7d50e2148", "bytes": 335672, "decoded_bytes": 1179848, "active_slot_a_packaged_elf_prefix_matches": true, "temporary_boot_qualified": false, "failed_menu_behavior": "BDS halts; hardware reset required"},
-  "ram_menu_only_bds": {"fd_sha256": "bfc2417a0f9d98d315193986a4dd7668fefc151040b3f29f43accf9b87d94bf1", "image_sha256": "40482bc38d1566cddc1c4b74dbf9004a616355581f99e399feaf496004aa6dd5", "reference_verifier_failures": 0, "device_tested": false},
-  "ram_filesystem_policy_patch": {"path": "firmware/diagnostic/ram-no-filesystem-policy.patch", "mu_revision": "e51cd877e31c8fbb322032dc4cb6715e83d25ad3", "source_apply_verified": true, "firmware_rebuilt": true, "fd_sha256": "dbc792bd73349b501559db1eb18ca1710603c588b19b92ef199ebc9add63e786", "device_tested": false, "packed_fvmain_byte_match": true, "menu_image_sha256": "08b1ca8511981f202dc7a06f8f3f9bfb8ae7973742570a178f1665ddc144043c", "reference_verifier_failures": 0},
-  "isolated_ram_diagnostic_firmware": {"sha256": "2de05fb939f9fa5998690439288da2977ef7d162e4c5efa66ff2a328d84aa7da", "bytes": 3145728, "packed_volume_verified": true, "menu_image_sha256": "e29f5bd28f62a79b301e0ee0ef0455572676cd5c35f211f9cc2bfe479e690865", "menu_image_reference_verified": true, "device_tested": false, "storage_isolation_verified": false, "patch": "firmware/diagnostic/ram-storage-isolation.patch"},
-  "uefi_only_ram_candidate": {"bytes": 13766656, "sha256": "94273d4f966aece9c4fa54a369f0a8ba1b0f68d4502fe2d194cd8495e53e8dac", "container_sections_checked": true, "ubuntu_reference_comparison_passed": true, "ubuntu_reference_sha256": "54001a50a13fe80c3bd8e926161608b71d91e57e2d6be6b83cdc2bc62b5f6fbc", "device_tested": false},
+  "persistent_write_plan": {
+    "document": "WRITE-PLAN.md",
+    "status": "draft",
+    "layout_overlaps_stock_userdata": true,
+    "stock_recovery_rehearsed": false,
+    "approved": false,
+    "executed": false
+  },
+  "independent_firmware_build": {
+    "sha256": "9c855e120b2770bd773bd8f567364dcf10cd1b5a18e0788ac8326100334298c8",
+    "bytes": 3145728,
+    "device_tested": false,
+    "evidence": "docs/results-2026-11-20-ram-firmware-audit.md"
+  },
+  "ram_diagnostic_preflight_2026_11_20": {
+    "image_bytes": 13766656,
+    "retained_image_hash_matches": true,
+    "reference_verifier_failures": 0,
+    "android_product": "piano",
+    "hyperos": "OS3.0.309.0.WPYCNXM",
+    "active_slot": "a",
+    "boot_completed": true,
+    "slot_success_and_retries": "not queried through Fastboot in this check",
+    "device_boot_attempted": false
+  },
+  "stock_abl_offline": {
+    "sha256": "0ab1245367d84bd4c16418106cefd8884a3e2fdaeab5dcf6584455a7d50e2148",
+    "bytes": 335672,
+    "decoded_bytes": 1179848,
+    "active_slot_a_packaged_elf_prefix_matches": true,
+    "temporary_boot_qualified": false,
+    "failed_menu_behavior": "BDS halts; hardware reset required"
+  },
+  "ram_menu_only_bds": {
+    "fd_sha256": "bfc2417a0f9d98d315193986a4dd7668fefc151040b3f29f43accf9b87d94bf1",
+    "image_sha256": "40482bc38d1566cddc1c4b74dbf9004a616355581f99e399feaf496004aa6dd5",
+    "reference_verifier_failures": 0,
+    "device_tested": false
+  },
+  "ram_filesystem_policy_patch": {
+    "path": "firmware/diagnostic/ram-no-filesystem-policy.patch",
+    "mu_revision": "e51cd877e31c8fbb322032dc4cb6715e83d25ad3",
+    "source_apply_verified": true,
+    "firmware_rebuilt": true,
+    "fd_sha256": "dbc792bd73349b501559db1eb18ca1710603c588b19b92ef199ebc9add63e786",
+    "device_tested": false,
+    "packed_fvmain_byte_match": true,
+    "menu_image_sha256": "08b1ca8511981f202dc7a06f8f3f9bfb8ae7973742570a178f1665ddc144043c",
+    "reference_verifier_failures": 0
+  },
+  "isolated_ram_diagnostic_firmware": {
+    "sha256": "2de05fb939f9fa5998690439288da2977ef7d162e4c5efa66ff2a328d84aa7da",
+    "bytes": 3145728,
+    "packed_volume_verified": true,
+    "menu_image_sha256": "e29f5bd28f62a79b301e0ee0ef0455572676cd5c35f211f9cc2bfe479e690865",
+    "menu_image_reference_verified": true,
+    "device_tested": false,
+    "storage_isolation_verified": false,
+    "patch": "firmware/diagnostic/ram-storage-isolation.patch"
+  },
+  "uefi_only_ram_candidate": {
+    "bytes": 13766656,
+    "sha256": "94273d4f966aece9c4fa54a369f0a8ba1b0f68d4502fe2d194cd8495e53e8dac",
+    "container_sections_checked": true,
+    "ubuntu_reference_comparison_passed": true,
+    "ubuntu_reference_sha256": "54001a50a13fe80c3bd8e926161608b71d91e57e2d6be6b83cdc2bc62b5f6fbc",
+    "device_tested": false
+  },
   "build_blockers": [
     "local k27 pin 11ac316b789d81fc9f734e15645456f536c05141 and inner XNU commit de16623d957cccff6dfb78d8eca4a79842af9702 unavailable; checked WSL XNU trees are dirty and off-pin",
     "independent host driver checkpoint and parser-passing collection probe are not verified equivalent to the locked native source and have not been loaded on-device",
@@ -290,20 +386,46 @@
   ],
   "apple_27_3_input_state": "required IPSW-derived member files already present and SHA-256-verified in D:\\Download\\piano-macos-273-inputs; complete IPSW archive absent but not a reason to redownload verified members",
   "host_validation_2026_11_19": {
-    "result": "PASS: 0 failure(s) for test-k273-only.py; all listed host suites passed",
-    "tests": [
-      "tooling/native/test_piano_input.py",
-      "tooling/native/test_rtc_offset.py",
-      "package/NativeRamBlock/Test/run-tests.sh",
+    "host": "mac-lan",
+    "passed": [
       "package/include/tests/run.sh",
-      "bash tooling/k27/test-piano-bootargs.sh",
+      "tooling/k27/test-piano-bootargs.sh",
       "tooling/k27/test-piano-guard.sh",
       "tooling/k27/test-piano-pm.sh",
       "tooling/k27/check-native-kexts.py --self-test",
-      "tooling/persist/test-k273-only.py with CPython 3.11.18 and GNU mtools 4.0.50"
+      "tooling/metal/check-bundle-paths.py --self-test",
+      "tooling/userland/test-stage.py",
+      "tooling/persist/test-data-store.py",
+      "tooling/persist/test-k273-only.py"
     ],
-    "device_access": false,
-    "scope_limit": "host and fake-tablet validation only; no native image build or boot"
+    "skipped": {
+      "tooling/userland/test-stage.py": "tests 4-7 require PIANO_K27_TREE, unavailable on Mac"
+    },
+    "python": {
+      "version": "3.11.18",
+      "path": "/tmp/cpython311-3.11.18/python/bin/python3.11",
+      "archive_sha256": "73f1ed14486aa278d331e95f7d6d452f5cfb69d90b418e26e62fd4846d53557d"
+    },
+    "unixnu_python_source": {
+      "commit": "d830d23b0d19c9322d906c21afeca1d6c54aeffe",
+      "temporary_checkout": "/tmp/codex-unixnu-d830d23",
+      "working_tree_clean": true
+    },
+    "mtools": {
+      "version": "4.0.50",
+      "archive_sha256": "7f078accae7551c6b3a316ccd8296357329f7bbbc09583dcd1a2bbaeb081a7a4",
+      "signature_sha256": "fc74b396fe532c3e3df85ea1b9fa0cda718d385ebd5c82d8ea12c84e1cd20cc8",
+      "signature": "Good signature from key 51A23D9D7C4DF41AA48FA893E99CF5537790B839; signer identity not locally certified",
+      "mac_build": "Apple clang 17, arm64, temporary prefix; configure --disable-floppyd",
+      "compiler_warnings": "two format warnings in config.c for mt_off_t versus long offsets; build succeeded",
+      "install_prefix": "/tmp/codex-mtools-4.0.50-src/install",
+      "enabled_tests": [
+        "tooling/persist/test-data-store.py",
+        "tooling/persist/test-k273-only.py"
+      ]
+    },
+    "device_io": false,
+    "native_runtime_qualified": false
   },
   "device_test_status": "read_only_baseline_only",
   "writes_performed": false,
@@ -345,9 +467,24 @@
     "usable_recovery_asset": true,
     "scope_limit": "stock OS recovery package only; not a userdata or personal-data backup",
     "archive_verified": true,
-    "recovery_script_audit": {"flash_all_except_storage_sha256": "180b79a08b7ffcf66df678c07e4afb3b66cd2c01a3a6bb5b7b855f5d6204de28", "flash_all_sha256": "8610cf859ab4fdda40acaa81c1c25ef27b233d8622df716587e7c518360ccb10", "executed": false, "except_storage_writes_gpt": false, "except_storage_writes_userdata_metadata": false, "except_storage_erases_boot_ab": true, "flash_all_writes_userdata_metadata": true},
+    "recovery_script_audit": {
+      "flash_all_except_storage_sha256": "180b79a08b7ffcf66df678c07e4afb3b66cd2c01a3a6bb5b7b855f5d6204de28",
+      "flash_all_sha256": "8610cf859ab4fdda40acaa81c1c25ef27b233d8622df716587e7c518360ccb10",
+      "executed": false,
+      "except_storage_writes_gpt": false,
+      "except_storage_writes_userdata_metadata": false,
+      "except_storage_erases_boot_ab": true,
+      "flash_all_writes_userdata_metadata": true
+    },
     "archive_extracted": false,
-    "stock_boot_triplet": {"extraction_directory": "/tmp/piano-stock-triplet.8aaQYP/piano_images_OS3.0.309.0.WPYCNXM_16.0/images", "boot_matches_captured_a": true, "vendor_boot_matches_captured_a": true, "init_boot_matches_captured_a": false, "stock_init_boot_sha256": "156400bb09dc9a9ab438257c4991c8391a1ffbe22afc47bd9968714c7828cde0", "device_restore_tested": false},
+    "stock_boot_triplet": {
+      "extraction_directory": "/tmp/piano-stock-triplet.8aaQYP/piano_images_OS3.0.309.0.WPYCNXM_16.0/images",
+      "boot_matches_captured_a": true,
+      "vendor_boot_matches_captured_a": true,
+      "init_boot_matches_captured_a": false,
+      "stock_init_boot_sha256": "156400bb09dc9a9ab438257c4991c8391a1ffbe22afc47bd9968714c7828cde0",
+      "device_restore_tested": false
+    },
     "restore_script_audit": {
       "flash_all_sh": "writes userdata.img and erases/flashes metadata; not compatible with preserving user data",
       "flash_all_except_storage_sh": "does not write userdata or metadata, but erases boot_ab; flashes firmware, super, boot-chain, misc and recovery partitions; sets slot A and reboots",
@@ -422,59 +559,45 @@
     "kernel_sha256": "3ea8e88cc67b206de0c1753b2abd7c8a42eb68fee0e4d9bd5985abdd4b9ed87a",
     "kernel_release": "6.6.118-android15-8-gc44b714366cc-abogki519650608-4k",
     "kernel_build_utc": "2026-06-04 03:48:35",
-    "embedded_config": ["CONFIG_IKCONFIG=y", "CONFIG_IKCONFIG_PROC=y", "CONFIG_F2FS_FS=y", "CONFIG_F2FS_FS_COMPRESSION=y"],
-    "searched_strings_absent": ["resizable_tail_secno", "pinned_area_max_secno", "/sys/fs/f2fs/features/resizable_tail", "resizable_tail"],
+    "embedded_config": [
+      "CONFIG_IKCONFIG=y",
+      "CONFIG_IKCONFIG_PROC=y",
+      "CONFIG_F2FS_FS=y",
+      "CONFIG_F2FS_FS_COMPRESSION=y"
+    ],
+    "searched_strings_absent": [
+      "resizable_tail_secno",
+      "pinned_area_max_secno",
+      "/sys/fs/f2fs/features/resizable_tail",
+      "resizable_tail"
+    ],
     "interpretation": "no evidence the installed kernel supports reserved-tail online shrink; vendor source is unavailable and a vendor backport cannot be ruled out",
     "shrinkability": "unverified; do not assume support in a WRITE-PLAN"
-  },
-  "host_validation_2026_11_19": {
-    "host": "mac-lan",
-    "passed": [
-      "package/include/tests/run.sh",
-      "tooling/k27/test-piano-bootargs.sh",
-      "tooling/k27/test-piano-guard.sh",
-      "tooling/k27/test-piano-pm.sh",
-      "tooling/k27/check-native-kexts.py --self-test",
-      "tooling/metal/check-bundle-paths.py --self-test",
-      "tooling/userland/test-stage.py",
-      "tooling/persist/test-data-store.py",
-      "tooling/persist/test-k273-only.py"
-    ],
-    "skipped": {
-      "tooling/userland/test-stage.py": "tests 4-7 require PIANO_K27_TREE, unavailable on Mac"
-    },
-    "python": {
-      "version": "3.11.18",
-      "path": "/tmp/cpython311-3.11.18/python/bin/python3.11",
-      "archive_sha256": "73f1ed14486aa278d331e95f7d6d452f5cfb69d90b418e26e62fd4846d53557d"
-    },
-    "unixnu_python_source": {
-      "commit": "d830d23b0d19c9322d906c21afeca1d6c54aeffe",
-      "temporary_checkout": "/tmp/codex-unixnu-d830d23",
-      "working_tree_clean": true
-    },
-    "mtools": {
-      "version": "4.0.50",
-      "archive_sha256": "7f078accae7551c6b3a316ccd8296357329f7bbbc09583dcd1a2bbaeb081a7a4",
-      "signature_sha256": "fc74b396fe532c3e3df85ea1b9fa0cda718d385ebd5c82d8ea12c84e1cd20cc8",
-      "signature": "Good signature from key 51A23D9D7C4DF41AA48FA893E99CF5537790B839; signer identity not locally certified",
-      "mac_build": "Apple clang 17, arm64, temporary prefix; configure --disable-floppyd",
-      "compiler_warnings": "two format warnings in config.c for mt_off_t versus long offsets; build succeeded",
-      "install_prefix": "/tmp/codex-mtools-4.0.50-src/install",
-      "enabled_tests": ["tooling/persist/test-data-store.py", "tooling/persist/test-k273-only.py"]
-    },
-    "device_io": false,
-    "native_runtime_qualified": false
   },
   "readonly_device_captures": {
     "captured_on": "2026-11-19",
     "partitions": {
-      "boot_a": {"bytes": 100663296, "sha256": "7c444a2d6aa930cd79e2d48c569f6c891fbaff054c63fc85c3a57fb61c660ac2"},
-      "vendor_boot_a": {"bytes": 100663296, "sha256": "7f766f1d728c39d779a3fb7cf0ac1310dac4306cd3b37a98a0143dd4fca5bd23"},
-      "init_boot_a": {"bytes": 8388608, "sha256": "56197797f2ec99870a4e42b7a24bbf88407e4409615aba61f401182f13ea5cdc"},
-      "misc": {"bytes": 4194304, "sha256": "d9148e265e838ebc3013ac8537cfbc1a3ef615055fe87562b46fd3b5dfa16540"}
+      "boot_a": {
+        "bytes": 100663296,
+        "sha256": "7c444a2d6aa930cd79e2d48c569f6c891fbaff054c63fc85c3a57fb61c660ac2"
+      },
+      "vendor_boot_a": {
+        "bytes": 100663296,
+        "sha256": "7f766f1d728c39d779a3fb7cf0ac1310dac4306cd3b37a98a0143dd4fca5bd23"
+      },
+      "init_boot_a": {
+        "bytes": 8388608,
+        "sha256": "56197797f2ec99870a4e42b7a24bbf88407e4409615aba61f401182f13ea5cdc"
+      },
+      "misc": {
+        "bytes": 4194304,
+        "sha256": "d9148e265e838ebc3013ac8537cfbc1a3ef615055fe87562b46fd3b5dfa16540"
+      }
     },
-    "locations": ["E:\\piano-verified-readonly-20261119-073450", "F:\\piano-verified-readonly-20261119-073450"],
+    "locations": [
+      "E:\\piano-verified-readonly-20261119-073450",
+      "F:\\piano-verified-readonly-20261119-073450"
+    ],
     "verification": "two independent captures matched by length and SHA-256; fresh device reread matched E: copy",
     "scope_limit": "not a full device backup or verified HyperOS recovery package; GPT images and userdata are not included",
     "slot_control": "standard misc structure failed magic/CRC validation at checked location; queried read-only through Fastboot",
@@ -499,30 +622,126 @@
       "region_blocks_each_end": 256,
       "verification": "E/F captures match by SHA-256; offline primary/backup header CRCs and entry-array CRCs pass; entry arrays match on all six LUNs",
       "scope_limit": "first/last 1 MiB only; not full LUN or userdata backups",
-      "locations": ["E:\\piano-gpt-boundaries-20261119-075429", "F:\\piano-gpt-boundaries-20261119-075429"],
+      "locations": [
+        "E:\\piano-gpt-boundaries-20261119-075429",
+        "F:\\piano-gpt-boundaries-20261119-075429"
+      ],
       "manifest_csv_sha256": "6bed82408cbef8999cf503044046fad7fd5fc503a62a1740d006808c1fd55388",
       "stock_lun0_template_comparison": "Geometry matches after userdata end adjustment. 34 partition GUIDs and four attributes differ. See docs/results-2026-11-20-stock-gpt-template-comparison.md",
       "free_space_audit": {
         "tool": "tooling/persist/audit-gpt-space.py",
-        "capture_sets": ["E:\\piano-gpt-boundaries-20261119-075429", "F:\\piano-gpt-boundaries-20261119-075429"],
+        "capture_sets": [
+          "E:\\piano-gpt-boundaries-20261119-075429",
+          "F:\\piano-gpt-boundaries-20261119-075429"
+        ],
         "result": "both capture sets pass SHA-256, GPT header/entry-array CRC, and primary/backup entry equality checks",
         "free_extents": [
-          {"device":"sda","blocks":124552192,"partitions":34,"extents":[]},
-          {"device":"sdb","blocks":3072,"partitions":5,"extents":[{"first_lba":2262,"last_lba":3066,"bytes":3297280}]},
-          {"device":"sdc","blocks":3072,"partitions":5,"extents":[{"first_lba":2262,"last_lba":3066,"bytes":3297280}]},
-          {"device":"sdd","blocks":2048,"partitions":3,"extents":[{"first_lba":576,"last_lba":2042,"bytes":6008832}]},
-          {"device":"sde","blocks":378880,"partitions":79,"extents":[{"first_lba":374924,"last_lba":378872,"bytes":16175104}]},
-          {"device":"sdf","blocks":16384,"partitions":7,"extents":[{"first_lba":14848,"last_lba":16378,"bytes":6270976}]}
+          {
+            "device": "sda",
+            "blocks": 124552192,
+            "partitions": 34,
+            "extents": []
+          },
+          {
+            "device": "sdb",
+            "blocks": 3072,
+            "partitions": 5,
+            "extents": [
+              {
+                "first_lba": 2262,
+                "last_lba": 3066,
+                "bytes": 3297280
+              }
+            ]
+          },
+          {
+            "device": "sdc",
+            "blocks": 3072,
+            "partitions": 5,
+            "extents": [
+              {
+                "first_lba": 2262,
+                "last_lba": 3066,
+                "bytes": 3297280
+              }
+            ]
+          },
+          {
+            "device": "sdd",
+            "blocks": 2048,
+            "partitions": 3,
+            "extents": [
+              {
+                "first_lba": 576,
+                "last_lba": 2042,
+                "bytes": 6008832
+              }
+            ]
+          },
+          {
+            "device": "sde",
+            "blocks": 378880,
+            "partitions": 79,
+            "extents": [
+              {
+                "first_lba": 374924,
+                "last_lba": 378872,
+                "bytes": 16175104
+              }
+            ]
+          },
+          {
+            "device": "sdf",
+            "blocks": 16384,
+            "partitions": 7,
+            "extents": [
+              {
+                "first_lba": 14848,
+                "last_lba": 16378,
+                "bytes": 6270976
+              }
+            ]
+          }
         ],
         "scope": "offline GPT-unallocated extents only; no device access, userdata content read, or disk write"
       },
       "luns": [
-        {"device":"sda","blocks":124552192,"head_sha256":"0adfb85a53f909df3e77d6b4a9c2e49f7f444163a479be3f3784292945d2e51f","tail_sha256":"dc0eb2ce8fa2c40e8752d5d7dba186ab76152540779920f3815193eb1cae418f"},
-        {"device":"sdb","blocks":3072,"head_sha256":"e7a811b00239caa2155db932b6dc451e4d198819382a2d3c7d320456c3eca701","tail_sha256":"82a8c61dc68244279320f3006fb839ae01d90f979f782314a2a88af3e9c99210"},
-        {"device":"sdc","blocks":3072,"head_sha256":"b1ca5a1733a07b6baa68251267fa237d4c61be4e843772df7caa791c99652141","tail_sha256":"b6e82b6f6d250d13de0b5f314737bb53a4f496f453027c13345267628e3bf4da"},
-        {"device":"sdd","blocks":2048,"head_sha256":"807666ed0f48d2d93583ed60320694c5d05dc4f96ec0b765f5cb75a2464e8214","tail_sha256":"632f8714835baf5a779bd5f42e6a1394e2a5612da37b003658736310bee67316"},
-        {"device":"sde","blocks":378880,"head_sha256":"585599f015837083de42c7c306ccf9c744234d9a43ad5ee6254fa041f8513f47","tail_sha256":"6d98b4d0aae358edb0cf28e4e5b129cf231123271ccaf83cea100b88633b1cf2"},
-        {"device":"sdf","blocks":16384,"head_sha256":"92633c4a20a4e683e0912b9f460944655a5eef18f2c64f75644ccea3043d6b4e","tail_sha256":"eb66f4eb6cb6b6906616701d3eb24380bbca9f72b9fa3b8fb88bcf3e974adef9"}
+        {
+          "device": "sda",
+          "blocks": 124552192,
+          "head_sha256": "0adfb85a53f909df3e77d6b4a9c2e49f7f444163a479be3f3784292945d2e51f",
+          "tail_sha256": "dc0eb2ce8fa2c40e8752d5d7dba186ab76152540779920f3815193eb1cae418f"
+        },
+        {
+          "device": "sdb",
+          "blocks": 3072,
+          "head_sha256": "e7a811b00239caa2155db932b6dc451e4d198819382a2d3c7d320456c3eca701",
+          "tail_sha256": "82a8c61dc68244279320f3006fb839ae01d90f979f782314a2a88af3e9c99210"
+        },
+        {
+          "device": "sdc",
+          "blocks": 3072,
+          "head_sha256": "b1ca5a1733a07b6baa68251267fa237d4c61be4e843772df7caa791c99652141",
+          "tail_sha256": "b6e82b6f6d250d13de0b5f314737bb53a4f496f453027c13345267628e3bf4da"
+        },
+        {
+          "device": "sdd",
+          "blocks": 2048,
+          "head_sha256": "807666ed0f48d2d93583ed60320694c5d05dc4f96ec0b765f5cb75a2464e8214",
+          "tail_sha256": "632f8714835baf5a779bd5f42e6a1394e2a5612da37b003658736310bee67316"
+        },
+        {
+          "device": "sde",
+          "blocks": 378880,
+          "head_sha256": "585599f015837083de42c7c306ccf9c744234d9a43ad5ee6254fa041f8513f47",
+          "tail_sha256": "6d98b4d0aae358edb0cf28e4e5b129cf231123271ccaf83cea100b88633b1cf2"
+        },
+        {
+          "device": "sdf",
+          "blocks": 16384,
+          "head_sha256": "92633c4a20a4e683e0912b9f460944655a5eef18f2c64f75644ccea3043d6b4e",
+          "tail_sha256": "eb66f4eb6cb6b6906616701d3eb24380bbca9f72b9fa3b8fb88bcf3e974adef9"
+        }
       ]
     }
   },
@@ -688,7 +907,10 @@
     "header_used_in_link_matches_after_line_ending_normalization": true,
     "vtable_classes_verified": 3,
     "mac_host_checks_passed": 1217,
-    "cursor_offsets_not_seen_in_direct_access_pairs": [97, 101],
+    "cursor_offsets_not_seen_in_direct_access_pairs": [
+      97,
+      101
+    ],
     "device_tested": false,
     "evidence": "docs/results-2026-11-20-native-display-abi.md"
   },
@@ -709,10 +931,22 @@
     "logical_block_bytes": 4096,
     "candidate_entry_array_sha256": "ba67d6aa7863835bb019231cfe97054138f649e58e7e06d08abe858da3f9751e",
     "candidate_ranges_inclusive": {
-      "userdata": [3632128, 102269695],
-      "linux_rootfs": [102269696, 107512575],
-      "linux_data": [107512576, 124289791],
-      "esp": [124289792, 124551935]
+      "userdata": [
+        3632128,
+        102269695
+      ],
+      "linux_rootfs": [
+        102269696,
+        107512575
+      ],
+      "linux_data": [
+        107512576,
+        124289791
+      ],
+      "esp": [
+        124289792,
+        124551935
+      ]
     },
     "gpt_in_memory_rollback_passed": true,
     "stock_recovery_image_sha256": "4c9710a400100e5da89f6657ba9d7081742d03e8bca92579e9e113b334d24e12",
@@ -860,7 +1094,11 @@
       "xnu_tree": "7373bc69be30fe86af90bedb1324ec87aced9a17",
       "xnu_parent": "2303f45443b49c0ae52f29fec18566a841393941",
       "patch_files": 48,
-      "source_markers": ["GUNYAH_LINUX", "DroidVMDisplay", "DroidVMGpu"],
+      "source_markers": [
+        "GUNYAH_LINUX",
+        "DroidVMDisplay",
+        "DroidVMGpu"
+      ],
       "working_tree_clean": true,
       "locked_native_pin_available": false,
       "scope_limit": "lineage for historical DroidVM runtime reports only; not a native macOS 27.3 source or build"
@@ -873,7 +1111,10 @@
       "native_series_checked": "patches/k27/0053-0070",
       "first_native_patch": "0053",
       "check_result": "failed before applying native patches",
-      "failure_paths": ["bsd/vfs/vfs_subr.c:2661", "osfmk/arm64/machine_routines.c:923"],
+      "failure_paths": [
+        "bsd/vfs/vfs_subr.c:2661",
+        "osfmk/arm64/machine_routines.c:923"
+      ],
       "accepted_as_locked_native": false,
       "scope_limit": "public DroidVM replay is not equivalent to native pin 11ac316b789d81fc9f734e15645456f536c05141 and is excluded from device builds"
     },
@@ -882,7 +1123,11 @@
       "required_branch": "el1/native-variant",
       "required_baseline_patches": "0001-0054",
       "required_inner_xnu_commit": "de16623d957cccff6dfb78d8eca4a79842af9702",
-      "upstream_refs_checked": ["main", "macOS", "wip/hackintosh"],
+      "upstream_refs_checked": [
+        "main",
+        "macOS",
+        "wip/hackintosh"
+      ],
       "upstream_commit_api": "commit object unavailable",
       "global_commit_search_results": 0,
       "public_forks_checked": 9,
@@ -902,14 +1147,20 @@
         ],
         "exact_commit_api_lookup": "11ac316b789d81fc9f734e15645456f536c05141 unavailable in all 8",
         "direct_git_fetch_by_commit": "rejected by upload-pack: not our ref 11ac316b789d81fc9f734e15645456f536c05141",
-        "current_branch_refs": ["main", "macOS", "wip/hackintosh"],
+        "current_branch_refs": [
+          "main",
+          "macOS",
+          "wip/hackintosh"
+        ],
         "all_pull_requests": 0,
         "result": "no newly available source for the locked native variant"
       },
       "local_partial_clone": {
         "path": "E:\\codex\\2026-11-01\\ni\\work\\external\\macOS-DroidVM",
         "head": "9db2f6f263173b660536530c2d102f480280cdb3",
-        "refs": ["main"],
+        "refs": [
+          "main"
+        ],
         "unreachable_commits": 260,
         "unreachable_vm_k27_reexport": {
           "commit": "71405bb427c480916662ed79d4a598fdcf038865",
@@ -919,7 +1170,10 @@
         },
         "local_object_inventory_contains_required_commit_or_tree": false,
         "required_commit_object_available": false,
-        "sparse_checkout_excludes": ["patches", "sources"],
+        "sparse_checkout_excludes": [
+          "patches",
+          "sources"
+        ],
         "generated_out_tree_present": false
       },
       "mac_build_host": {
@@ -937,7 +1191,10 @@
   },
   "historical_droidvm_runtime_evidence": {
     "checkout": "E:\\codex\\2026-11-01\\ni\\work\\external\\macOS-DroidVM",
-    "local_notes": ["TODO.md", "k27/TODO.md"],
+    "local_notes": [
+      "TODO.md",
+      "k27/TODO.md"
+    ],
     "environment": "Android host with crosvm on Gunyah; virtual macOS guest",
     "guest_version": "macOS 27.0.1 (26A434)",
     "reported_results": [
@@ -957,7 +1214,12 @@
         "result": "notes report login/lock screen normal and desktop/video frames; GPU/Metal tuning records include measured frame rates"
       }
     ],
-    "known_limits": ["not native Xiaomi Pad UFS evidence", "not macOS 27.3 (26C5035r)", "microphone access and audio helper scheduling remained unresolved", "GPU memory/resource limits were tracked"],
+    "known_limits": [
+      "not native Xiaomi Pad UFS evidence",
+      "not macOS 27.3 (26C5035r)",
+      "microphone access and audio helper scheduling remained unresolved",
+      "GPU memory/resource limits were tracked"
+    ],
     "evidence_class": "local development notes; reported host-run results, not independently rerun in this task"
   },
   "wsl_xnu_tree_audit_2026_11_20": {

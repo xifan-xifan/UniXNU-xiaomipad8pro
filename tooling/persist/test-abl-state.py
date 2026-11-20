@@ -53,6 +53,7 @@ def preflight_values(retry='6'):
         'battery-soc-ok': 'yes',
         'partition-size:boot_a': '0x6000000',
         'battery-voltage': '4.0V',
+        'snapshot-update-status': 'none',
     })
     return values
 
@@ -75,6 +76,26 @@ def main():
         pass
     else:
         raise AssertionError('abl-check accepted a retry count outside the 3-bit range')
+
+    for status in ('MERGING', 'SNAPSHOTTED', 'UNSUPPORTED', None):
+        values = preflight_values()
+        values['snapshot-update-status'] = status
+        try:
+            maint.abl_check(FakeSession(values))
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f'abl-check accepted snapshot status {status!r}')
+
+    for status in ('MERGING', 'SNAPSHOTTED', 'UNSUPPORTED', None):
+        values = preflight_values()
+        values['snapshot-update-status'] = status
+        try:
+            maint.abl_check(FakeSession(values))
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f'abl-check accepted snapshot status {status!r}')
 
     maint.abl_final(FakeSession(final_values()))
     for bad in ('-1', '8', '0x6', 'unknown', None):
