@@ -244,3 +244,5 @@ For the independent root, the pinned APFS helper overlays only APFS Resources af
 Windows ADB reconfirmed the connected HyperOS 3.0.309 A-slot baseline and inline-encrypted F2FS mount. The existing rooted shell returned stock userdata geometry and three full boot partition hashes matching the retained capture manifest. Both retained rollback directories also passed `verify-android-rollback.py`. A root-only `snapshotctl dump` returned `Update state: none` on slot A with no merge or rollback indicator. See [connected baseline](docs/results-2026-11-20-connected-baseline.md).
 
 The tablet entered stock ABL Fastboot and returned normally to HyperOS 3.0.309. ABL reconfirmed slot A successful and bootable with six retries and no pending snapshot. See [the ABL recheck](docs/results-2026-11-20-abl-recheck.md). The diagnostic image remains untested on the tablet.
+
+The independent Mac checkpoint has a verified arm64e NativeUfs object with root write registration compiled out. See [the build and symbol comparison](docs/results-2026-11-20-native-ufs-readonly-gate.md). Keep the writable checkpoint as the separate persistent build input.
