@@ -35,6 +35,8 @@ The script has no dry-run mode, no boot-success/retry-counter check, and no read
 
 The live 3.0.309 `/vendor/etc/fstab.qcom` lists `/metadata` as a separate F2FS volume with `first_stage_mount` and `formattable`. Its F2FS and MIFS `/data` entries both resolve userdata by partition name. Both entries specify `formattable`, wrapped-key file encryption, wrapped-key metadata encryption with its key directory on `/metadata`, quotas, and `checkpoint=fs`. The device actually mounted F2FS. These settings make stock initialization after a layout change a candidate to evaluate, with encryption and checkpoint validation part of the Android acceptance test. AOSP [`fs_mgr`](https://android.googlesource.com/platform/system/core/+/f01026f963b8689f6b0e046cb7cbe04b86a830fe/fs_mgr/fs_mgr.cpp) conditions formatting on partition state and invokes the encryption path where required. Xiaomi recovery behavior on shortened userdata and the treatment of `/metadata` during rollback remain unverified. The audit read only the vendor mount configuration. See [the device geometry and feature audit](docs/results-2026-11-20-live-userdata.md).
 
+With the local 26C5035r OS window of 14,493,417,472 bytes and the pinned builder's default 6144 MiB SystemOS window, the SHNGROOT manifest and 1 MiB window alignment give a conditional root image size of **20,936,916,992 bytes (5,111,552 logical blocks, 19.499 GiB)**. The SystemOS image still needs to be assembled and checked on the Mac. Recalculate from the assembled image before assigning partition boundaries. Account for Data, ESP and partition alignment separately.
+
 ## Required design before writes
 
 1. Read and validate every relevant LUN's primary and backup GPT; record native logical-sector units, GUIDs, boundaries and CRCs.
