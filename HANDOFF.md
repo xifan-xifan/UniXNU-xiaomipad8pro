@@ -230,3 +230,5 @@ The host SHNGROOT v2 capacity check passed for the retained OS and unshimmed Sys
 For the separate 27.3 root partition, set K273_ROOT_PART=linux_rootfs in the image builder. A WSL fixture verified the default and explicit partition arguments and rejection of invalid or duplicate selectors. Full image and tablet validation remain pending.
 
 The 27.3 RAM builder now rejects a root.json write partition that differs from K273_ROOT_PART. The UbuntuPiano fixture passed for matching and absent write records and rejected the historical linux_data record when linux_rootfs was selected. make-root-image.sh still emits historical geometry for the legacy unsigned layout. The SHNGROOT v2 host layout omits write geometry.
+
+The root image assembler accepts K273_ROOT_PART=linux_rootfs with an explicit K273_ROOT_EXTENT in inclusive 4 KiB LUN 0 LBAs. It checks capacity before allocating the image and records the proposed placement under root_extent. The UbuntuPiano fixture accepted an exact fit and rejected an extent one block short before creating root.img. Tablet validation remains pending.

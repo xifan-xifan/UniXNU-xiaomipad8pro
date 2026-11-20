@@ -11,6 +11,8 @@
 #   OUT/scratch-data.img         the Data seed (default: the 27.0.1 line's out/inputs/scratch-data.img, the installed system's
 #                                Data as it was before the update; K273_SEED names another)
 #
+# Set K273_ROOT_PART=linux_rootfs and K273_ROOT_EXTENT="FIRST LAST" to check
+# an explicit inclusive LUN 0 extent in 4096-byte blocks.
 # K273_VROOT_DIR supplies OS.vroot and SystemOS.vroot tables for signed header-only policies.
 #   make-root-image.sh [OUT]      (default out/inputs/k273/root; inputs in out/inputs/k273/26C5035r)
 set -euo pipefail
@@ -26,6 +28,29 @@ done
 # The OS image as the profile pins it (UniXNU macos-27.3-26C5035r [root] os_image_sha256).
 OS_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha256"])' "$OS.json")
 [ "$OS_SHA" = 40d8282eb8650da9b4d7437a981764c48d47ee4bdc5b8b362248f25ecbce0e70 ] || { echo "$OS: sha256 $OS_SHA is not the profile's" >&2; exit 1; }
+ROOT_PART=${K273_ROOT_PART:-linux_data}
+ROOT_EXTENT=${K273_ROOT_EXTENT:-}
+if [[ $ROOT_PART != linux_data && $ROOT_PART != linux_rootfs ]]; then
+  echo "K273_ROOT_PART must be linux_data or linux_rootfs" >&2; exit 2
+fi
+if [[ -z $ROOT_EXTENT && $ROOT_PART == linux_rootfs ]]; then
+  echo "K273_ROOT_EXTENT is required for linux_rootfs" >&2; exit 2
+fi
+check_extent() {
+  python3 - "$1" "$ROOT_EXTENT" <<'CHECK_EXTENT'
+import sys
+
+size = int(sys.argv[1])
+if sys.argv[2]:
+    extent = sys.argv[2].split()
+    if len(extent) != 2 or any(not x.isascii() or not x.isdecimal() for x in extent):
+        sys.exit('K273_ROOT_EXTENT must contain two decimal LBAs: FIRST LAST')
+    first, last = map(int, extent)
+    if not 0 < first <= last < 2**64 or (size + 4095) // 4096 > last - first + 1:
+        sys.exit('K273_ROOT_EXTENT is invalid or too small for the root image')
+CHECK_EXTENT
+}
+check_extent 0
 policy_args=()
 if [ -n "${K273_VROOT_DIR:-}" ]; then
   [ ! -e "$O/root.img" ] || { echo "policy build requires a fresh root.img output: $O/root.img" >&2; exit 1; }
@@ -66,11 +91,13 @@ if [ -z "${K273_VROOT_DIR:-}" ] && [ -f "$O/root.img.sha256" ] && [ -f "$O/manif
    && python3 -c 'import json,sys; sys.exit(bool(json.load(open(sys.argv[1])).get("objects")))' "$O/manifest/layout.json" \
    && cmp -s <(dd if="$O/root.img" bs=4096 count=1 2> /dev/null) "$O/manifest/manifest.bin"; then
   IMAGE_BYTES=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image_bytes"])' "$O/manifest/layout.json")
+  check_extent "$IMAGE_BYTES"
   ROOT_SHA=$(cat "$O/root.img.sha256")
   echo "root.img: kept (sha256 $ROOT_SHA)"
 else
 python3 tooling/native/make-root-manifest.py "$O/manifest" "OS=$OS" "SystemOS=$SYS" "${policy_args[@]}"
 IMAGE_BYTES=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image_bytes"])' "$O/manifest/layout.json")
+check_extent "$IMAGE_BYTES"
 rm -f "$O/root.img" "$O/root.img.sha256"
 mkfile -n "$IMAGE_BYTES" "$O/root.img"
 dd if="$O/manifest/manifest.bin" of="$O/root.img" bs=4096 count=1 conv=notrunc 2> /dev/null
@@ -91,7 +118,7 @@ fi
 python3 tooling/k273/make-trust.py out/inputs/kernel.macho.trustcache "$M/141-22233-021.dmg.aea.trustcache" \
   "$M/141-22145-021.dmg.aea.trustcache" "$M/141-22106-021.dmg.trustcache" "$O/kernel.macho.trustcache"
 cp "${K273_SEED:-out/inputs/scratch-data.img}" "$O/scratch-data.img"
-python3 - "$O" "$IMAGE_BYTES" "$ROOT_SHA" <<'EOF'
+python3 - "$O" "$IMAGE_BYTES" "$ROOT_SHA" "$ROOT_PART" "$ROOT_EXTENT" <<'EOF'
 import hashlib, json, sys
 from pathlib import Path
 o, size, sha = Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
@@ -101,7 +128,8 @@ sysos = json.loads((o / 'systemos.img.json').read_text())
 # 574316544+422100952 512-byte sectors).
 first, blocks = 71789568, 422100952 // 8
 need = (size + 4095) // 4096
-assert need <= blocks
+if not sys.argv[5] and need > blocks:
+    sys.exit("root image exceeds the historical linux_data extent")
 record = {
     'os_volume_uuid': '84581E99-85BE-4957-AC53-2947E887B3E4', 'systemos_volume_uuid': sysos['volume_uuid'],
     'image_bytes': size, 'image_sha256': sha, 'manifest_sha256': hashlib.sha256((o / 'manifest/manifest.bin').read_bytes()).hexdigest(),
@@ -111,7 +139,12 @@ record = {
     'seed_sha256': hashlib.sha256((o / 'scratch-data.img').read_bytes()).hexdigest(),
     'trust_sha256': hashlib.sha256((o / 'kernel.macho.trustcache').read_bytes()).hexdigest(),
 }
-if 'objects' not in layout:
+if sys.argv[5]:
+    extent_first, extent_last = map(int, sys.argv[5].split())
+    record['root_extent'] = {'partition': sys.argv[4], 'lun': 0, 'lba_bytes': 4096,
+                             'first_lba': extent_first, 'last_lba': extent_last,
+                             'image_last_lba': extent_first + need - 1}
+elif 'objects' not in layout:
     record['write'] = {'partition': 'linux_data', 'lun': 0, 'lba_bytes': 4096, 'partition_first_lba': first, 'partition_blocks': blocks,
               'first_lba': first, 'last_lba': first + need - 1, 'blocks': need,
               'untouched': f'linux_data blocks {need}..{blocks - 1} (the rest of the partition, the later Data store window at its end)'}

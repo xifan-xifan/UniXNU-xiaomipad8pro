@@ -62,9 +62,10 @@ import sys
 path, selected = sys.argv[1:]
 with open(path) as source:
     record = json.load(source)
-write = record.get('write')
-if write is not None and write.get('partition') != selected:
-    sys.exit(f'{path}: write record targets {write.get("partition")!r}, but K273_ROOT_PART selects {selected!r}')
+for key in ('root_extent', 'write'):
+    placement = record.get(key)
+    if placement is not None and placement.get('partition') != selected:
+        sys.exit(f'{path}: {key} record targets {placement.get("partition")!r}, but K273_ROOT_PART selects {selected!r}')
 CHECK_ROOT_PART
     export PIANO_EXTRA_ARGS="native-ufs-root-part=$ROOT_PART ${PIANO_EXTRA_ARGS:-}"
     ;;
