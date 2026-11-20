@@ -12,6 +12,8 @@ The pinned keyboard firmware brought the checkpoint to 23 drivers and 118 object
 
 The GPU checkpoint now covers 24 drivers and 172 objects, with zero unresolved GPU imports. The display ABI probe and video fixture build are the two remaining driver gates. [GPU build result](docs/results-2026-11-20-native-gpu-build.md)
 
+The video build passed its host suites and import checks. The checkpoint covers 25 drivers and 183 objects. The display declaration probe awaits ABI verification before final collection integration. [Video build result](docs/results-2026-11-20-native-video-build.md)
+
 ## Current state
 
 - **User data:** the owner reports that HyperOS 3.0.309 was factory-reset before work began and contains no personal data. This is an owner report, not a new device-side verification. No tablet data backup was made.

@@ -561,6 +561,19 @@
     "device_tested": false,
     "evidence": "docs/results-2026-11-20-native-gpu-build.md"
   },
+  "native_video_build_2026_11_20": {
+    "drivers_with_objects": 25,
+    "objects_verified": 183,
+    "video_objects": 11,
+    "video_unresolved_imports": 0,
+    "ffmpeg": "Ubuntu 7:6.1.1-3ubuntu5",
+    "llvm_objcopy": "Ubuntu 1:20.1.2-0ubuntu1~24.04.3",
+    "inventory_sha256": "1048e50e0c0211f10adf46463328e55b0d67437f5e9bc21b1cca667e503a5973",
+    "logs_sha256": "1aaec128630de28428e9abf0b17949878c0e7882fdb195fbbd4fd203171e4f9c",
+    "kc_linked": false,
+    "device_tested": false,
+    "evidence": "docs/results-2026-11-20-native-video-build.md"
+  },
   "live_userdata_audit_2026_11_20": {
     "evidence": "docs/results-2026-11-20-live-userdata.md",
     "hyperos": "OS3.0.309.0.WPYCNXM",
