@@ -203,6 +203,22 @@
     "result_sha256": "d2b9f17d2b5e1622d87aaef33ee07833afca0d008d435407c053864354933fb4",
     "evidence": "docs/results-2026-11-20-mac-native-drivers.md"
   },
+  "mac_native_driver_checkpoint_latest_2026_11_20": {
+    "repository_commit": "2438556c77c90c22c7b76e57eb8b40c44b35f1af",
+    "driver_checkpoint": "25 of 26 drivers; 183 verified arm64e objects",
+    "separate_display_probe_objects": 2,
+    "collection_descriptors_linked": 26,
+    "collection_bytes": 135806976,
+    "collection_sha256": "db13a30673c6431f730a10f1a98118f1b74ccff31d4d1fca508f743678d05c2f",
+    "darwinboot_pinned_parser_passed": true,
+    "source_equivalence_to_native_pin_11ac316b_verified": false,
+    "device_tested": false,
+    "evidence": [
+      "docs/results-2026-11-20-native-video-build.md",
+      "docs/results-2026-11-20-native-display-abi.md",
+      "docs/results-2026-11-20-native-collection-probe.md"
+    ]
+  },
   "userdata_state_owner_report_2026_11_20": {
     "report": "HyperOS 3.0.309 was factory-reset before this task; owner says no personal data is present",
     "device_reread_by_agent": false,
@@ -211,10 +227,10 @@
     "effect": "does not establish free GPT space or authorize partition/flash writes"
   },
   "build_blockers": [
-    "23 of 26 native kexts remain unbuilt and full KC not linked; driver and kernel ABI compatibility unqualified",
-    "local k27 pin 11ac316b789d81fc9f734e15645456f536c05141 and inner XNU commit de16623d957cccff6dfb78d8eca4a79842af9702 unavailable",
+    "local k27 pin 11ac316b789d81fc9f734e15645456f536c05141 and inner XNU commit de16623d957cccff6dfb78d8eca4a79842af9702 unavailable; checked WSL XNU trees are dirty and off-pin",
+    "independent host driver checkpoint and parser-passing collection probe are not verified equivalent to the locked native source and have not been loaded on-device",
     "no qualified internal root/Data layout; current NativeUfs root and NativeRamBlock persistent store are UFS-specific",
-    "no matched native Data seed/root image or device signing configuration"
+    "current root/SystemOS images lack native mount/fsck shims; no matched native Data seed or signing provenance is available"
   ],
   "apple_27_3_input_state": "required IPSW-derived member files already present and SHA-256-verified in D:\\Download\\piano-macos-273-inputs; complete IPSW archive absent but not a reason to redownload verified members",
   "host_validation_2026_11_19": {
@@ -884,6 +900,25 @@
     ],
     "known_limits": ["not native Xiaomi Pad UFS evidence", "not macOS 27.3 (26C5035r)", "microphone access and audio helper scheduling remained unresolved", "GPU memory/resource limits were tracked"],
     "evidence_class": "local development notes; reported host-run results, not independently rerun in this task"
+  },
+  "wsl_xnu_tree_audit_2026_11_20": {
+    "reviewed_paths": [
+      "/root/piano-native/xnu-k27-final",
+      "/root/piano-native/xnu-k27-patched",
+      "/root/piano-native/xnu-k273-work"
+    ],
+    "xnu_k27_final_head": "c2936efdf3724e3268ee812e6712d9d3b8d5a403",
+    "xnu_k27_prepared_tree_object_present": false,
+    "xnu_apple_base_object_present_in_final_tree": false,
+    "xnu_k27_final_tracked_dirty_files": 60,
+    "xnu_k27_final_diff_insertions": 3898,
+    "xnu_k27_final_diff_deletions": 129,
+    "untracked_probe_backups_present": true,
+    "xnu_k273_work_head": "d18680c1784616b7bc0b2ca5db70886eee3e3c83",
+    "xnu_k273_work_prepared_tree_object_present": false,
+    "xnu_k273_work_tracked_dirty_files": 166,
+    "changed_or_built": false,
+    "reuse_decision": "preserve_forensics_only_not_locked_source"
   },
   "droidvm_to_native_transferability": {
     "display": "NativeGopDisplay reuses the VM-era display kext model but replaces virtio-gpu scanout with the piano GOP framebuffer",
