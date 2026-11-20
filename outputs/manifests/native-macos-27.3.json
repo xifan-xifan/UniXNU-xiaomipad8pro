@@ -482,6 +482,34 @@
     "device_tested": false,
     "evidence": "docs/results-2026-11-20-k273-ram-candidate.md"
   },
+  "native_macos_ram_firmware_addon_candidate": {
+    "host_directory": "UbuntuPiano:/tmp/piano-k273-fw.X1O9k5",
+    "files": {
+      "boot-piano-macos-ram-k273-fw.img": {
+        "bytes": 186781696,
+        "sha256": "aae083633c1ecd75fe8fefa81867e98245a377368c1241fc02d924153fdeb976"
+      },
+      "boot-piano-uefi-ram-k273-fw.img": {
+        "bytes": 13766656,
+        "sha256": "41cf230acbbd628497236a6021420bb12360ac4f4a67d0e0dfe74eacca2333a9"
+      },
+      "build-k273-fw.json": {
+        "bytes": 4797,
+        "sha256": "588902c61b391183cc00c158f908bc939626a90cb03761a1b022d9b7589ecd19"
+      },
+      "verify.log": {
+        "bytes": 10096,
+        "sha256": "25bcdbdb2cd2e71fa3a7b2b576cb6765c11969131f2eb60f18e7e6985b4e6471"
+      }
+    },
+    "kc_sha256": "00f0ba553e16a42021623d9805f6d77ae95ae09d968c761ae1cae4cb6bb06831",
+    "firmware_entries": 2,
+    "firmware_addon_sha256": null,
+    "data_persist": 0,
+    "reference_verifier_failures": 0,
+    "device_tested": false,
+    "evidence": "docs/results-2026-11-20-k273-ram-candidate.md"
+  },
   "build_blockers": [
     "local k27 pin 11ac316b789d81fc9f734e15645456f536c05141 and inner XNU commit de16623d957cccff6dfb78d8eca4a79842af9702 unavailable; checked WSL XNU trees are dirty and off-pin",
     "independent host driver checkpoint and parser-passing collection probe are not verified equivalent to the locked native source and have not been loaded on-device",
