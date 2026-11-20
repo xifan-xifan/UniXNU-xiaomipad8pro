@@ -1,0 +1,5 @@
+# Paired owner boot manifest compile probe (2026-11-20)
+
+A separate arm64e compile of `IOKitBSDInit.cpp` passed on the Mac using the retained 26C5035r compile recipe with `XNU_OWNER_BOOT_MANIFEST=1`. The probe uses the locked UniXNU reference's role-ordered SHA-384 input and rejects identical device IDs or unavailable verified digests. It retains the independent source's handling of the 48-byte zero placeholder specified in `configs/k273-adt.toml`. The compile reported include directory and SDK warnings.
+
+The object exports `native_owner_publish_boot_manifest` and imports `native_verified_block_manifest_sha384`. SHA-256 is `6e32a1faa2a34e3bc093897a2f86f2011a85f831e0b136a710f3f4dd0a20fa34`. The Mac temporary directory `piano-paired-manifest-96e4ec5a` holds the source, compiler arguments and log. The frozen source and linked kernel were preserved. Integration must update the C caller and C++ definition together because the linker symbol is identical for both signatures. Runtime digest lookup and registry publication still require testing.

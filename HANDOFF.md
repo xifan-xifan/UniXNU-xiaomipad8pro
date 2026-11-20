@@ -194,3 +194,5 @@ The GitHub API reported the device upstream main at 2438556c77c90c22c7b76e57eb8b
 The locked core's build-xnu-4k-baseline.sh names the optional provider libBootProgress.a. XNU_BOOT_PROGRESS=1 invokes scripts/build-boot-progress.py and force-loads the archive. Neither input was found in the retained UbuntuPiano dependency tree or its /tmp inventory. The independent Mac checkpoint records 0:disabled. This explains the absent export and identifies the expected provider for an instrumented build.
 
 The frozen independent XNU config enables union mounts and already calls the owner preparation hook before launchd. The device NativeRamBlock also supplies the typed Data lookup ABI. See [SystemOS union and Data provider checks](docs/results-2026-11-20-systemos-provider-checks.md) for the paired manifest and APFS request checks still required.
+
+The paired boot manifest publisher compiled on the Mac with the frozen arm64e recipe. Update its caller and definition together when integrating the authenticated SystemOS mount. See [paired manifest compile probe](docs/results-2026-11-20-paired-manifest.md).
