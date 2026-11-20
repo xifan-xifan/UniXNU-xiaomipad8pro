@@ -26,6 +26,13 @@ for shim in mount fsck; do
     echo "missing, unreadable, or empty native boot shim: $path" >&2
     exit 1
   }
+  rel=overlay/systemos-shims/sbin/$shim
+  expected=$(git -C "$PIANO_K27_TREE" rev-parse --verify "HEAD:$rel") || exit 1
+  actual=$(git -C "$PIANO_K27_TREE" hash-object --no-filters -- "$path") || exit 1
+  if [ "$actual" != "$expected" ]; then
+    echo "native boot shim differs from the locked k27 source: $path" >&2
+    exit 1
+  fi
 done
 [ -e "$OUT" ] && { echo "$OUT exists" >&2; exit 1; }
 WORK=$(mktemp -d /tmp/k273-systemos.XXXXXX)
