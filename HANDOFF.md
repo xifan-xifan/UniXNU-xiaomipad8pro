@@ -234,3 +234,5 @@ The 27.3 RAM builder now rejects a root.json write partition that differs from K
 The root image assembler accepts K273_ROOT_PART=linux_rootfs with an explicit K273_ROOT_EXTENT in inclusive 4 KiB LUN 0 LBAs. It checks capacity before allocating the image and records the proposed placement under root_extent. The UbuntuPiano fixture accepted an exact fit and rejected an extent one block short before creating root.img. Tablet validation remains pending.
 
 The Mac assembled `root-v2-unshimmed.img` beside the retained SHNGROOT v2 manifest. Readback matched the manifest, both APFS images and both SHA-256 tables. Full image SHA-256 is `529a2c686cc41c8afb86bc3c6c405645a840d30b80125e1136209dc69b4fc14d`. The proposed placement ends at LBA 107421183 with 91392 blocks free. Final SystemOS and signed policies remain pending.
+
+The 27.3 ESP builder accepts --esp-first-lba for the provisional layout and checks that the ESP does not overlap the supplied Data extent. UbuntuPiano built and read back a fixture at LBA 124289792, and rejected an aligned overlapping placement. The tablet installer still requires separately qualified geometry checks.

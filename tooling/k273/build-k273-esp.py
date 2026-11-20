@@ -103,6 +103,8 @@ def main():
     p.add_argument('--name', default='esp-k273-only')
     p.add_argument('--out', type=Path, default=common.DEVICE / 'out/persistent')
     p.add_argument('--expect-seed', metavar='HEX', help='refuse unless the entry\'s seed identity starts with HEX (8+ hex digits)')
+    p.add_argument('--esp-first-lba', type=int, default=common.ESP_FIRST,
+                   help='first 4 KiB LUN 0 LBA of the 1 GiB ESP (default: historical layout)')
     p.add_argument('--data-extent', type=int, nargs=2, metavar=('FIRST', 'LAST'),
                    help='inclusive 4 KiB LUN 0 LBAs of the target linux_data partition')
     p.add_argument('--expect-store-lba', type=int, metavar='N', help='refuse unless the line binds the store to LBA N')
@@ -119,6 +121,12 @@ def main():
     p.add_argument('--diag-reset-after', type=int, default=240, metavar='SECS',
                    help='the -diag entry\'s reset (only built when its line stays under 1000 bytes)')
     a = p.parse_args()
+
+    esp_first = a.esp_first_lba
+    if not 0 < esp_first < 2**32 or esp_first % 256:
+        p.error('--esp-first-lba must fit the FAT32 hidden-sector field and be 1 MiB aligned')
+    if a.data_extent and esp_first <= a.data_extent[1] and esp_first + common.ESP_BLOCKS - 1 >= a.data_extent[0]:
+        p.error('ESP overlaps --data-extent')
 
     out = a.out
     if a.base:
@@ -337,7 +345,7 @@ def main():
         out.mkdir(parents=True, exist_ok=True)
         image.unlink(missing_ok=True)
         build_esp.mtools('mformat', '-C', '-F', '-S', '5', '-M', '4096', '-T', str(common.ESP_BLOCKS), '-h', '1', '-s', '1', '-c', '1',
-                         '-H', str(common.ESP_FIRST), '-v', build_esp.LABEL, '-N', build_esp.SERIAL, '-i', str(image), '::')
+                         '-H', str(esp_first), '-v', build_esp.LABEL, '-N', build_esp.SERIAL, '-i', str(image), '::')
         build_esp.mtools('mcopy', '-i', str(image), '-s', '-Q', '-m', str(stage / 'EFI'), '::/')
         minfo = build_esp.mtools('minfo', '-i', str(image), '::').stdout
         back = scratch / 'back'
@@ -353,7 +361,7 @@ def main():
         problems.append('image size')
     if new['sector_bytes'] != 4096 or new['sectors_per_cluster'] != 1 or new['total_sectors'] != common.ESP_BLOCKS:
         problems.append('geometry')
-    if new['hidden_sectors'] != common.ESP_FIRST or new['label'] != build_esp.LABEL or new['serial'] != build_esp.SERIAL:
+    if new['hidden_sectors'] != esp_first or new['label'] != build_esp.LABEL or new['serial'] != build_esp.SERIAL:
         problems.append('hidden sectors, label or serial')
     if got != want or mback != want:
         problems.append('read back differs from the stage')
@@ -386,8 +394,8 @@ def main():
     record = {
         'status': 'OFFLINE_BUILD_NOT_DEVICE_TESTED', 'kind': 'k273-only', 'image': image.name, 'bytes': image.stat().st_size,
         'sha256': common.sha(image),
-        'partition': {'lun': 0, 'index': common.ESP_INDEX + 1, 'first_lba': common.ESP_FIRST, 'blocks': common.ESP_BLOCKS,
-                      'dd': f'bs=1M seek={common.ESP_FIRST * common.LBA >> 20} count={common.ESP_BLOCKS * common.LBA >> 20}'},
+        'partition': {'lun': 0, 'index': common.ESP_INDEX + 1, 'first_lba': esp_first, 'blocks': common.ESP_BLOCKS,
+                      'dd': f'bs=1M seek={esp_first * common.LBA >> 20} count={common.ESP_BLOCKS * common.LBA >> 20}'},
         'about': f'macOS 27.3 only: the {a.entry} entry of {base["image"]} (payload and line byte for byte), fastboot, the actions '
                  '(tooling/k273/build-k273-esp.py)',
         'base_esp': {'image': base['image'], 'sha256': base['sha256'], 'record': base_json.name, 'entry': a.entry},
