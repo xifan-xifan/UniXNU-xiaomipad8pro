@@ -3,6 +3,16 @@
   "checked_on": "2026-11-20",
   "device_repository": "https://github.com/lenzhang/UniXNU-xiaomipad8pro",
   "device_commit": "2438556c77c90c22c7b76e57eb8b40c44b35f1af",
+  "historical_4_gib_seed": {
+    "path": "E:/codex/2026-11-01/ni/work/piano-macos-latest/out/inputs/k273-native/scratch-data.img",
+    "file_sha256": "f87d2ec60a58dba0a1243dbf3bb2353c002c2e50510a8462162d8f4622b44e4a",
+    "identity_sha256": "22244154d2eabf0ea35f6ade2a656d6cebe7c2dc973523fb26c1b6c2a95fa56b",
+    "logical_bytes": 4294967296,
+    "store_blocks": 1048609,
+    "bytes_with_1_gib_reserve": 5368844288,
+    "matching_historical_manifests": 28,
+    "qualification": "Historical offline RAM runs configured with data_persist=0. Persistence and compatibility with the independent 26C5035r build remain unverified."
+  },
   "maintenance_readback_candidate": {
     "release": "Ubuntu piano v1.1.0",
     "path": "D:/Temp/piano-v110-ranges-bc75e4c7-38d0-4bd0-8eb7-f04886abad71/boot-ram-maintenance-efi-pstore-disabled.img",

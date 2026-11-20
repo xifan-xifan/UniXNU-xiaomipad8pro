@@ -132,3 +132,5 @@ Android userspace Fastboot returned `snapshot-update-status=none`, slot A, succe
 Stock ABL Fastboot reported `is-userspace=no`, `snapshot-update-status=none`, slot A, successful=yes, unbootable=no, retry=6. Standard Fastboot reboot returned to `OS3.0.309.0.WPYCNXM` on `_a` with `sys.boot_completed=1` verified over ADB. This was a getvar session without a downloaded boot image.
 
 The ABL preflight and final checks now require `is-userspace=no` and `snapshot-update-status=none` alongside slot checks. UbuntuPiano fixtures passed for clean ABL state and rejection of userspace transport, active merge and missing status.
+
+The historical 4 GiB DBRDISK1 seed passed host structure and identity checks. Both the file digest and seed identity match 28 historical manifests, all marked offline with Data persistence disabled. Its store needs 1,048,609 blocks, or 5,368,844,288 bytes with the 1 GiB reserve. This qualifies the footprint only. Keep the seed as a provenance lead until the target profile and trust inputs are matched.
