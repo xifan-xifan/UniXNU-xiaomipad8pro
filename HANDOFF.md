@@ -278,3 +278,5 @@ The frozen manual-exit maintenance image matched its manifest SHA-256. Its extra
 The tablet recovered after the authorized diagnostic RAM boot and now reports HyperOS OS3.0.309.0.WPYCNXM, slot _a, and sys.boot_completed=1 over ADB; see [diagnostic boot recovery](docs/results-2026-11-21-diagnostic-boot-recovery.md). The menu was not observed, so native execution remains unverified.
 
 The maintenance RAM image now boots on the tablet with USB NCM/root shell. Read-only UFS and A-slot boot hashes match the retained recovery assets, and `piano-maint fastboot` followed by `fastboot reboot` returns to HyperOS with unchanged ABL state. See [maintenance RAM boot](docs/results-2026-11-21-maintenance-ram-boot.md).
+
+The owner authorized persistent writes within the deployment scope and requested no tablet backup. The maintainer baseline and retained Mac inputs were rechecked. The SystemOS helper pair and kernel union mount remain open. See [the deployment input check](docs/results-2026-11-21-deployment-inputs.md).

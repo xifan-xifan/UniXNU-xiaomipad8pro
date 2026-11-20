@@ -1,0 +1,5 @@
+# Deployment input check (2026-11-21)
+
+The maintainer's main branch still resolves to `2438556c77c90c22c7b76e57eb8b40c44b35f1af`, the plan baseline. The Mac responded via the configured `mac` alias after `mac-lan` failed DNS resolution. `/tmp/piano-root-26C5035r.593r2m` retains the Apple inputs, build log, `systemos.unshimmed.img` and `root.unshimmed.img`. The directory search found no `systemos-shims` tree. The clean pinned UniXNU checkout at `/private/tmp/codex-unixnu-d830d23` contains only `apfs_boot_util.c` under `scripts/macos-boot-shims`, so it does not supply the two locked files required by `make-systemos.sh`.
+
+ADB listed the target in Android. No tablet writes were made. The owner authorized persistent writes within the deployment scope and requested no tablet backup. The unresolved dependencies before a desktop deployment are the SystemOS helper pair and the verified SystemOS union mount in the independent kernel. Keep the retained host images intact while checking an independent replacement against the pinned reference and the 26C5035r APFS implementation.
