@@ -134,6 +134,16 @@
     "android_section_id_verified": true,
     "disposition": "historical offline reference; var-only seed and native UFS root dependency"
   },
+  "shngroot_v2_host_readback": {
+    "path": "mac:/tmp/piano-vroot-layout-yiktynqv/root.host-test.img",
+    "bytes": 21100494848,
+    "manifest_sha256": "de43725482e8d17354e75ab1e2b79d706301dfe81ee6db6bbeaf4d236a124948",
+    "verified_blocks": {
+      "OS": 3538432,
+      "SystemOS": 1572864
+    },
+    "status": "host readback passed; unsigned hash tables, unshimmed SystemOS"
+  },
   "target": {
     "macos": "27.3",
     "build": "26C5035r",
