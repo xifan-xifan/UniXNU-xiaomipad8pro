@@ -222,3 +222,5 @@ The embedded 26C5035r launchd configuration defines four required-success tasks 
 The Mac's `fsck_apfs -n` completed with status 0 against both retained read-only root windows. The Apple OS check reported a newer APFS writer version. See [the APFS check and helper inventory](docs/results-2026-11-20-root-apfs-readonly.md). The boot-time repair path and composed root lookup still need qualification.
 
 The first-install Data seed matches its recorded UUID and lacks fstab entries. Static inspection identified Data paths used by the embedded directory cleaner and two RunAtLoad job definitions. The existing RAM-backed overlay accounts for writes routed through the Data device when `data-persist=0`. See [Data startup paths](docs/results-2026-11-20-data-startup-paths.md) for the write audit and remaining checks.
+
+The stock 27.3 build route selects the development NativeUfs policy. The retained host collection's verified symbols and object digest were checked separately. See [verified UFS build route](docs/results-2026-11-20-verified-ufs-build-route.md) for production inputs and the correction to the compiler guard description.
