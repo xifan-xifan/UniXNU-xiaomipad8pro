@@ -198,3 +198,5 @@ The frozen independent XNU config enables union mounts and already calls the own
 The paired boot manifest publisher compiled on the Mac with the frozen arm64e recipe. Update its caller and definition together when integrating the authenticated SystemOS mount. See [paired manifest compile probe](docs/results-2026-11-20-paired-manifest.md).
 
 The positioned kernel host link passed with a one-time NativeUfs authenticator registration interface. The direct link identified 43 Apple storage imports that require NativeUfs to remain a collection member. See [paired manifest and kernel link results](docs/results-2026-11-20-paired-manifest.md).
+
+The 26-driver host collection now links a NativeUfs module entry that registers the authenticator. The locked DarwinBoot parser passed. See [paired manifest and kernel link results](docs/results-2026-11-20-paired-manifest.md) for the build and remaining runtime gates.
