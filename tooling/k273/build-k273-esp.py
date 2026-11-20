@@ -103,6 +103,8 @@ def main():
     p.add_argument('--name', default='esp-k273-only')
     p.add_argument('--out', type=Path, default=common.DEVICE / 'out/persistent')
     p.add_argument('--expect-seed', metavar='HEX', help='refuse unless the entry\'s seed identity starts with HEX (8+ hex digits)')
+    p.add_argument('--data-extent', type=int, nargs=2, metavar=('FIRST', 'LAST'),
+                   help='inclusive 4 KiB LUN 0 LBAs of the target linux_data partition')
     p.add_argument('--expect-store-lba', type=int, metavar='N', help='refuse unless the line binds the store to LBA N')
     p.add_argument('--expect-store-part', metavar='NAME', help='refuse unless the line puts root and store on partition NAME')
     p.add_argument('--kc', type=Path, help='a new kernel collection for the entry (a 27.3 build: tooling/k273/build-k273-image.sh)')
@@ -222,7 +224,11 @@ def main():
                           'full_bytes': len(' '.join(whole)), 'from': 'the base line + the base ADT tail, reassembled'}
             line = ' '.join(whole)
 
-        edits = list(a.arg) + ([f'data-store-lba={common.k273_store_first(seed)}'] if a.seed else [])
+        edits = list(a.arg)
+        if a.data_extent is not None:
+            edits.append(f'data-store-lba={common.data_store_lba(seed, a.data_extent)}')
+        elif a.seed:
+            edits.append(f'data-store-lba={common.k273_store_first(seed)}')
         if a.root_part:
             if a.root_part not in ('linux_data', 'linux_rootfs'):
                 raise SystemExit('--root-part: linux_data or linux_rootfs')
@@ -244,7 +250,7 @@ def main():
             raise SystemExit(f'{a.entry}: its line does not mount a root of its own (native-ufs-root-part={part}): not the 27.3 line')
         if lba is None or named.get('data-persist') != '2':
             raise SystemExit(f'{a.entry}: its line has no bound read-write store (data-store-lba, data-persist=2)')
-        common.check_store_size(seed, args)
+        common.check_store_size(seed, args, data_extent=a.data_extent)
         if a.expect_seed and not seed['identity_sha256'].startswith(a.expect_seed.lower()):
             raise SystemExit(f'{a.entry}\'s seed is {seed["identity_sha256"][:16]}, not {a.expect_seed}')
         if a.expect_store_lba is not None and lba != a.expect_store_lba:
@@ -255,8 +261,11 @@ def main():
                  'bound': True, 'reserve_blocks': common.RESERVE_BLOCKS,
                  'from': f'the {a.entry} line (native-ufs-root-part, data-store-lba) and its seed (store_blocks)'}
         old_k = (base.get('k273') or {}).get('store') or {}
-        if old_k and (old_k.get('first_lba'), old_k.get('partition')) != (lba, part):
-            raise SystemExit(f'{base_json.name}: its k273 store ({old_k.get("partition")} LBA {old_k.get("first_lba")}) is not the line\'s')
+        if old_k and (old_k.get('first_lba'), old_k.get('partition')) != (lba, part) and a.data_extent is None:
+            raise SystemExit(f'{base_json.name}: its k273 store ({old_k.get("partition")} LBA {old_k.get("first_lba")}) is not the line\'s; '
+                             'an explicit --data-extent is required to replace that layout')
+        if a.data_extent is not None:
+            store['from'] = 'explicit --data-extent (inclusive LUN 0 LBAs) and seed store_blocks'
 
         # -- the arguments past DarwinBoot's line: the ADT's /chosen/piano-boot-args-macos (k27 0066) -----------------------------
         split = None

@@ -285,14 +285,24 @@ def entry_uses_rootfs(entry):
     return None
 
 
-def check_store_size(seed, args=()):
-    """SystemExit when SEED (seed_info) would put its store window somewhere else than the installed store's. A store on linux_data
-    (ARGS: native-ufs-root-part=linux_data, the 27.3 line) is not the installed one: any size, but only bound to its window
-    (data-store-lba = k273_store_first(seed)), so it can never open another place."""
+def data_store_lba(seed, extent):
+    """Compute the bound window in an inclusive 4 KiB LBA extent."""
+    first, last = extent
+    window = store_first(last, seed['store_blocks'])
+    if not 0 <= first <= window <= last < LUN0_BLOCKS:
+        raise SystemExit('Data store and reserved tail do not fit the supplied LUN 0 extent')
+    return window
+
+
+def check_store_size(seed, args=(), *, data_extent=None):
+    """Require a store binding derived from the selected linux_data extent, or the pinned default extent."""
     part, lba = store_args_of(args)
+    if data_extent is not None and part != 'linux_data':
+        raise SystemExit('explicit Data extent requires the store on linux_data')
     if part == 'linux_data':
-        if lba != k273_store_first(seed):
-            raise SystemExit(f'a Data store on linux_data needs data-store-lba={k273_store_first(seed)} (its window for this '
+        expected = k273_store_first(seed) if data_extent is None else data_store_lba(seed, data_extent)
+        if lba != expected:
+            raise SystemExit(f'a Data store on linux_data needs data-store-lba={expected} (its window for this '
                              f'{seed["logical_bytes"]}-byte seed), not {lba}: the binding keeps it from opening any other place')
         return
     if part != 'linux_rootfs':
