@@ -42,7 +42,7 @@ The RAM failure clause in WRITE-PLAN.md now reflects the menu-only BDS halt beha
 
 ## Current state
 
-The retained strict RAM menu image still matches its recorded SHA-256. The live Android baseline was reconfirmed through Windows ADB on HyperOS 3.0.309, slot A. ABL and generic BDS remain open in the write path audit. [RAM firmware audit](docs/results-2026-11-20-ram-firmware-audit.md)
+The retained strict RAM menu image still matches its recorded SHA-256. The live Android baseline was reconfirmed through Windows ADB on HyperOS 3.0.309, slot A. The newer menu-only FD and container match the manifest hashes. That candidate narrows BDS dispatch to the UniXNU menu. The stock ABL write path and actual menu execution remain open. [RAM firmware audit](docs/results-2026-11-20-ram-firmware-audit.md)
 
 - **User data:** the owner reports that HyperOS 3.0.309 was factory-reset before work began and contains no personal data. This is an owner report, not a new device-side verification. No tablet data backup was made.
 - **Upstream:** a 2026-11-20 read-only Git/API check from this workstation confirmed live `main` remains the requested baseline `2438556c77c90c22c7b76e57eb8b40c44b35f1af`; Issue #1 remains an open second-device RAM-validation request and PR #2 an open staged packaging draft. The exact native k27 pin is still unavailable from public commit search, the commit endpoint, and eight listed public forks. The Mac checkout's local `origin/main` ref is divergent at `286f5a594563f863aa448ab21c8d160fdcb95eba`; its 14 commits after the baseline change only six audit/documentation files, not source or dependency pins. Details are in `REPRODUCIBILITY.md`, the dated source/storage result, and the manifest.

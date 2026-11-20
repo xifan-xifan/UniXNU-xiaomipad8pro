@@ -1403,6 +1403,23 @@
     "validation": "Locked DarwinBoot parser and synthetic checks passed",
     "limitations": "Host fixture signing, unshimmed SystemOS, no target execution"
   },
+  "esp_host_regression": {
+    "tested_commit": "6da1992",
+    "mtools_version": "4.0.50",
+    "mac_maintenance_fixture": "PASS: 0 failure(s)",
+    "wsl_builder_reproducible": true,
+    "wsl_maintenance_fixture": "failed",
+    "evidence": "docs/results-2026-11-20-esp-regression.md"
+  },
+  "shortened_userdata_host_fixture": {
+    "bytes": 404019478528,
+    "reported_sector_bytes": 512,
+    "f2fs_tools_version": "1.16.0",
+    "format_with_encrypt_feature": "passed",
+    "fsck_dry_run": "passed",
+    "device_recovery_verified": false,
+    "evidence": "docs/results-2026-11-20-storage-layout-recovery.md"
+  },
   "verified_root_capacity_probe": {
     "image_bytes": 21100494848,
     "provisional_extent_bytes": 21474836480,
