@@ -1402,5 +1402,14 @@
     "linked_descriptors": 26,
     "validation": "Locked DarwinBoot parser and synthetic checks passed",
     "limitations": "Host fixture signing, unshimmed SystemOS, no target execution"
+  },
+  "verified_root_capacity_probe": {
+    "image_bytes": 21100494848,
+    "provisional_extent_bytes": 21474836480,
+    "remaining_bytes": 374341632,
+    "manifest_sha256": "de43725482e8d17354e75ab1e2b79d706301dfe81ee6db6bbeaf4d236a124948",
+    "os_table_sha256": "f10b77a0b2f0475c296a66c69ec3c1d26598dbca3e6b09751a0b1cc31af533b0",
+    "systemos_table_sha256": "51c40b9f9d6453e6ded60fcfc357c7a000a4b21c6597580fe7652ef77bca475b",
+    "scope": "Host layout only, with unshimmed SystemOS and unsigned block hash tables"
   }
 }
