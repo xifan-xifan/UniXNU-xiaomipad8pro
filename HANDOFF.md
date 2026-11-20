@@ -309,4 +309,4 @@ The NativeUfs source audit confirmed separate write paths for development root w
 
 The pinned DEBUG firmware routes BDS debug output to the Piano_Log RAM ring via MemorySerialPortLib. The storage-isolation patch removes PianoFastbootStart and PianoFastboot.c, which provide the upstream debuglog reader. The BDS error message immediately before CpuDeadLoop therefore has no demonstrated host retrieval path in the frozen diagnostic profile. PianoDwc3 starts in XNU and cannot report pre-XNU stages. Use an independent firmware-stage output for the next diagnostic.
 
-The rebuilt BDS diagnostic adds three console markers and passed host packaging verification. The tablet screen has yet to confirm the console route. See [BDS console markers](docs/results-2026-11-21-bds-console.md).
+The rebuilt BDS diagnostic adds three console markers and passed host packaging verification. A follow-up build with USB diagnostics reached the built-in UniXNU menu, produced a retrievable log and framebuffer screenshot, and rebooted into HyperOS slot A. XNU was not loaded. See [the hardware result](docs/results-2026-11-21-bds-usb.md).

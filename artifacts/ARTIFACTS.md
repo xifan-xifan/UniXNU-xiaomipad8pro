@@ -132,3 +132,5 @@ All objects have subtype `0xc0000002`. [Build evidence](../docs/results-2026-11-
 The Mac kernel and KC preflight have host evidence in the [dated result](../docs/results-2026-11-20-mac-k27-kc-preflight.md).
 
 The 2026-11-21 BDS console diagnostic FD SHA-256 is `daf8a0d5bd2ee8ecf274fa426f787a51450f2403433c9759180d8bc5ceb139bd`. The temporary RAM boot container SHA-256 is `5640d89d7bfe7b53cb5f0011c299e56455910878876856dd37ce2e16b3489724`. Host verification passed. Tablet screen output is pending.
+
+The follow-up USB diagnostic FD SHA-256 is `970c7ae888c319323ec7d2d66f01f5d82e618f8bcc8d8344167dac71cec387f2`; its RAM boot image SHA-256 is `12802a1c97e75aa473090e3012b8c79592b880454da649c5e990d0a0e598135f`. [Tablet result](../docs/results-2026-11-21-bds-usb.md).
