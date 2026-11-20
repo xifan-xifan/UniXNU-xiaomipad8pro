@@ -681,6 +681,7 @@
     "historical_feeds_toml_sha256": "fbc246637fe07cf61a620c1339a1f7859535c6f81841d07c5ed4046bf0633a83",
     "reported_by_historical_results": "native macOS 27.3 desktop, GPU/input, Wi-Fi networking and persistent Data",
     "current_device_recheck": "2026-11-19 live GPT has no linux_rootfs, linux_data, or ESP; intervening return-to-stock event unknown",
+    "historical_switching_evidence": "persistent-boot.md documents an Android boot-set exchange procedure, but dated results through 2026-11-14 do not record its execution or Android return; current stock-layout transition remains unknown",
     "historical_native_outputs_available": true,
     "historical_native_outputs_scope": "partial mismatched offline candidate only; ARTIFACTS.md records exact-pinned kernel-k27-0054-native.macho sha256 20a5b4fdcf54b6ac6e8f1878856b6049fc800591d6936c204545e15c53ebbfae, but the binary is absent from the preserved output tree; no current-baseline reproducible source, persistent root, or ESP",
     "historical_sibling_checkout": {

@@ -20,6 +20,8 @@ The storage study now has an offline GPT candidate and a byte-exact simulated GP
 
 The Mac built and read back a 20,936,916,992-byte SHNGROOT image, confirming the candidate root footprint. Host artifacts and logs are in `/tmp/piano-root-26C5035r.593r2m` on the Mac. This test image lacks the native mount/fsck shims. The three Apple trust modules and pinned BootShim also passed host checks. The A-slot recovery hash matches the stock package. [Root assembly result](docs/results-2026-11-20-root-host-assembly.md)
 
+The resumption audit reconfirmed the upstream device baseline, the preserved root hashes, and the missing shim files. The historical c146 checkout documents an Android switch procedure but no dated Android-return or round-trip result; its exact-pinned kernel binary is absent. The user-supplied historical desktop result remains separate from present 3.0.309 qualification. No tablet command or backup was made. [Resumption audit](docs/results-2026-11-20-resume-audit.md)
+
 ## Current state
 
 - **User data:** the owner reports that HyperOS 3.0.309 was factory-reset before work began and contains no personal data. This is an owner report, not a new device-side verification. No tablet data backup was made.
@@ -67,7 +69,7 @@ The Mac built and read back a 20,936,916,992-byte SHNGROOT image, confirming the
 
 - Keep the A/B successful/retry values as a timestamped Fastboot observation; recheck only before any future switching plan because bootloader state can change.
 - Do not collect or back up tablet data. Treat the two interrupted `/data` outputs above as unusable partial files; continue only with host-side and public-source research.
-- Find the exact c146 native image set and its k27/input provenance in preserved copies, if present; keep DroidVM assets separate. Determine the documented return-to-Android event without assuming the paused 3.0.308 wipe proposal ran.
+- Historical c146 search: the deployment procedure documents an Android boot-set exchange, but no result captures that exchange or the return-to-stock event. Its exact-pinned kernel binary is absent; the sibling's RAM outputs are not a persistent image set. Keep the event unknown and do not infer compatibility with HyperOS 3.0.309.
 - The exact Ubuntu v1.6.1 `piano-switch.py` was compared with its public release blob. Before any device use, add success-bit/retry gating and readback to a matched switching implementation and test both directions on the host.
 - Determine whether the exact 27.3 Fastboot boot image receives an ABL-replaced ramdisk; if so, prototype the `5b0ddb7` payload handoff against the existing `uefi-sheng` build inputs or use the matching Mu BootShim path, then require a reproducible host build and non-persistent diagnostic-boot plan before device testing.
 - Continue searching for the locked k27 tree only if a new source location or ref appears; current checked local/public sources and direct Git fetch do not expose it. The exact 27.3 Apple IPSW-derived members are already present and SHA-256-verified under `D:\Download\piano-macos-273-inputs`; do not download duplicates. The complete IPSW archive is absent, but this is not the active native-build blocker. Matched native root/Data inputs and device signing configuration also remain unavailable; no private key is requested or copied.
