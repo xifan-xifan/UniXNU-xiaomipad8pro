@@ -148,6 +148,17 @@
     "result": "PASS on UbuntuPiano with fake Fastboot responses",
     "scope": "snapshot-check is a separate read-only preflight; ABL checks retain their slot and retry validation"
   },
+  "stock_abl_fastboot_observation": {
+    "product": "piano",
+    "is_userspace": false,
+    "snapshot_update_status": "none",
+    "slot": "a",
+    "slot_successful": true,
+    "slot_unbootable": false,
+    "slot_retry_count": 6,
+    "return": "ADB confirmed OS3.0.309.0.WPYCNXM, slot _a, sys.boot_completed=1",
+    "downloaded_boot_image": false
+  },
   "userspace_fastboot_observation": {
     "product": "piano",
     "snapshot_update_status": "none",
