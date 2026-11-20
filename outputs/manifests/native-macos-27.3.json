@@ -549,6 +549,18 @@
     "device_tested": false,
     "evidence": "docs/results-2026-11-20-native-keyboard-gpu-inputs.md"
   },
+  "native_gpu_build_2026_11_20": {
+    "drivers_with_objects": 24,
+    "objects_verified": 172,
+    "gpu_objects": 54,
+    "adreno_firmware_test_kit": "20ad3d7aca14bd46aecab6335c780f5413fa054b",
+    "gpu_unresolved_imports": 0,
+    "gpu_inventory_sha256": "ad474e2e088d2feaaf926e78819db165483f1d80832020e05f0bd4a7db9f51d6",
+    "gpu_logs_sha256": "d6df1ec0353e41dc23c70aef789288d7e1603a52b3f910bf5bd0f2d0dd0e2c5c",
+    "kc_linked": false,
+    "device_tested": false,
+    "evidence": "docs/results-2026-11-20-native-gpu-build.md"
+  },
   "live_userdata_audit_2026_11_20": {
     "evidence": "docs/results-2026-11-20-live-userdata.md",
     "hyperos": "OS3.0.309.0.WPYCNXM",

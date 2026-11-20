@@ -10,6 +10,8 @@ After restoring the family headers and pinned SM8750 kit, the Mac checkpoint has
 
 The pinned keyboard firmware brought the checkpoint to 23 drivers and 118 objects. The GPU board inputs and firmware matched their pins. Historical ABI 2 display headers also built a separate two-object probe pending target validation. See [the keyboard and GPU input result](docs/results-2026-11-20-native-keyboard-gpu-inputs.md).
 
+The GPU checkpoint now covers 24 drivers and 172 objects, with zero unresolved GPU imports. The display ABI probe and video fixture build are the two remaining driver gates. [GPU build result](docs/results-2026-11-20-native-gpu-build.md)
+
 ## Current state
 
 - **User data:** the owner reports that HyperOS 3.0.309 was factory-reset before work began and contains no personal data. This is an owner report, not a new device-side verification. No tablet data backup was made.
