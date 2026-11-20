@@ -303,6 +303,7 @@
     "usable_recovery_asset": true,
     "scope_limit": "stock OS recovery package only; not a userdata or personal-data backup",
     "archive_verified": true,
+    "recovery_script_audit": {"flash_all_except_storage_sha256": "180b79a08b7ffcf66df678c07e4afb3b66cd2c01a3a6bb5b7b855f5d6204de28", "flash_all_sha256": "8610cf859ab4fdda40acaa81c1c25ef27b233d8622df716587e7c518360ccb10", "executed": false, "except_storage_writes_gpt": false, "except_storage_writes_userdata_metadata": false, "except_storage_erases_boot_ab": true, "flash_all_writes_userdata_metadata": true},
     "archive_extracted": false,
     "stock_boot_triplet": {"extraction_directory": "/tmp/piano-stock-triplet.8aaQYP/piano_images_OS3.0.309.0.WPYCNXM_16.0/images", "boot_matches_captured_a": true, "vendor_boot_matches_captured_a": true, "init_boot_matches_captured_a": false, "stock_init_boot_sha256": "156400bb09dc9a9ab438257c4991c8391a1ffbe22afc47bd9968714c7828cde0", "device_restore_tested": false},
     "restore_script_audit": {
