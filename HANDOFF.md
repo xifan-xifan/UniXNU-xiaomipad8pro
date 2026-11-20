@@ -82,3 +82,5 @@ The local iPadOS history points to a same-model upstream home-screen report (iPa
 - Request user physical interaction only if access to the Mac developer-tools installer or tablet bootloader is required; continue independent source and recovery research meanwhile.
 
 See [DEVICE-BASELINE.md](DEVICE-BASELINE.md), [REPRODUCIBILITY.md](REPRODUCIBILITY.md), and [MIGRATION-DIFF.md](MIGRATION-DIFF.md). The dated read-only device record is [docs/results-2026-11-19.md](docs/results-2026-11-19.md); the machine-readable source lock is [outputs/manifests/native-macos-27.3.json](outputs/manifests/native-macos-27.3.json).
+
+- The [RAM firmware audit](docs/results-2026-11-20-ram-firmware-audit.md) found UFS fallback during configuration discovery. Qualify variable storage and the final FD's UFS behavior before a RAM boot under the no-persistent-write authorization.
