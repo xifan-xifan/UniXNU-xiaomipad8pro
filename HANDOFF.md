@@ -34,7 +34,7 @@ The diagnostic-only filesystem policy patch passed application and source checks
 
 The diagnostic-only BDS patch directs execution to the UniXNU application in the BDS firmware volume and stops if it returns or fails. Exact packed BDS bytes and the RAM boot container passed host checks. The firmware, image and logs are in UbuntuPiano under `/tmp/piano-ram-build.0YIaUj/menu-bds-final.ac77mrn7/`. Stock ABL and menu execution remain unverified.
 
-The stock 3.0.309 archive ABL is fingerprinted and its compressed section decodes. The decoded strings give a starting point for checking the temporary boot path. The A-slot partition prefix matches the complete archive ELF by hash. Temporary boot write behavior remains open. [Stock ABL inspection](docs/results-2026-11-20-stock-abl.md)
+The stock 3.0.309 archive ABL is fingerprinted, and its ELF hash matches the on-device A-slot prefix. Public Qualcomm reference source shows that `fastboot boot` calls `ClearUnbootable()` and can write primary/backup GPT if the active-slot flag changes; the previously captured successful A-slot state would make that call a no-op if still current. The reference source is not mapped to this exact binary. Ramdisk selection, boot-stat/log backends, and other persistent side effects remain open, so no diagnostic boot was attempted. [Stock ABL inspection](docs/results-2026-11-20-stock-abl.md)
 
 The RAM failure clause in WRITE-PLAN.md now reflects the menu-only BDS halt behavior. Do not expect automatic return to Fastboot if the diagnostic menu fails.
 
