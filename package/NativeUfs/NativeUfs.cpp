@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Native sheng SM8550 UFS bring-up. Default-off: no MMIO is touched unless
 // native-ufs-probe=1 is present. This is a register probe, not a storage driver.
+#if defined(NATIVE_VERIFIED_BLOCK) && NATIVE_VERIFIED_BLOCK && \
+    defined(NATIVE_UFS_UNVERIFIED_ROOT) && NATIVE_UFS_UNVERIFIED_ROOT
+#error "Verified NativeUfs root windows cannot enable development writes"
+#endif
+
 #include <IOKit/IOService.h>
 #include <IOKit/IOKitKeys.h>
 #include <IOKit/IOPlatformExpert.h>
