@@ -308,3 +308,5 @@ The archived DroidVM Git history contains the legacy mount and fsck shims. Their
 The NativeUfs source audit confirmed separate write paths for development root windows, the Data store and persistent logs. A read-only root build must still account for the latter two paths. The exact launchd filesystem dispatch and target results remain open. [NativeUfs write audit](docs/results-2026-11-21-native-ufs-writes.md)
 
 The pinned DEBUG firmware routes BDS debug output to the Piano_Log RAM ring via MemorySerialPortLib. The storage-isolation patch removes PianoFastbootStart and PianoFastboot.c, which provide the upstream debuglog reader. The BDS error message immediately before CpuDeadLoop therefore has no demonstrated host retrieval path in the frozen diagnostic profile. PianoDwc3 starts in XNU and cannot report pre-XNU stages. Use an independent firmware-stage output for the next diagnostic.
+
+The rebuilt BDS diagnostic adds three console markers and passed host packaging verification. The tablet screen has yet to confirm the console route. See [BDS console markers](docs/results-2026-11-21-bds-console.md).

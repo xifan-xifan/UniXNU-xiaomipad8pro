@@ -1,6 +1,6 @@
 --- a/MdeModulePkg/Universal/BdsDxe/BdsEntry.c
 +++ b/MdeModulePkg/Universal/BdsDxe/BdsEntry.c
-@@ -734,4 +734,39 @@
+@@ -734,4 +734,48 @@
    gBS->CalculateCrc32 ((VOID *)gST, sizeof (EFI_SYSTEM_TABLE), &gST->Hdr.CRC32);
  
 +  // Dispatch only the UniXNU application from this firmware volume.
@@ -14,6 +14,9 @@
 +    PlatformBootManagerBeforeConsole ();
 +    EfiBootManagerConnectAllDefaultConsoles ();
 +    PlatformBootManagerAfterConsole ();
++    if (gST->ConOut != NULL) {
++      gST->ConOut->OutputString (gST->ConOut, L"\r\nPiano diagnostic: BDS console ready\r\n");
++    }
 +    Status = gBS->HandleProtocol (gImageHandle, &gEfiLoadedImageProtocolGuid, (VOID **)&Loaded);
 +    if (!EFI_ERROR (Status) && (DevicePathFromHandle (Loaded->DeviceHandle) != NULL)) {
 +      Node.Header.Type = MEDIA_DEVICE_PATH;
@@ -29,12 +32,18 @@
 +          if (!EFI_ERROR (Status)) {
 +            Loaded->LoadOptions = FirmwareMarker;
 +            Loaded->LoadOptionsSize = sizeof (FirmwareMarker);
++            if (gST->ConOut != NULL) {
++              gST->ConOut->OutputString (gST->ConOut, L"\r\nPiano diagnostic: starting menu\r\n");
++            }
 +            Status = gBS->StartImage (Menu, NULL, NULL);
 +          }
 +        }
 +      }
 +    }
 +    DEBUG ((DEBUG_ERROR, "[Bds] Diagnostic menu returned or failed: %r\n", Status));
++    if (gST->ConOut != NULL) {
++      gST->ConOut->OutputString (gST->ConOut, L"\r\nPiano diagnostic: menu failed or returned\r\n");
++    }
 +    CpuDeadLoop ();
 +  }
 +
