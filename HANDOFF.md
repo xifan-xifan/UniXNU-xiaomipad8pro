@@ -28,6 +28,8 @@ The local iPadOS history points to a same-model upstream home-screen report (iPa
 
 The offline comparison of the official LUN 0 GPT template confirms matching partition geometry after the capacity adjustment, with 34 differing partition GUIDs and four differing attributes. Use the verified device captures for exact GPT rollback. [GPT template comparison](docs/results-2026-11-20-stock-gpt-template-comparison.md)
 
+The strict FD staging audit found an independent filesystem policy callback in Silicium BootManagerLib. Remove it from the diagnostic profile and constrain generic boot dispatch before repeating host verification. [RAM firmware audit](docs/results-2026-11-20-ram-firmware-audit.md)
+
 ## Current state
 
 The retained strict RAM menu image still matches its recorded SHA-256. The live Android baseline was reconfirmed through Windows ADB on HyperOS 3.0.309, slot A. ABL and generic BDS remain open in the write path audit. [RAM firmware audit](docs/results-2026-11-20-ram-firmware-audit.md)
