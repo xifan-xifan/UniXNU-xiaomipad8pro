@@ -7,3 +7,9 @@ The November 15 historical RAM bring-up report records the same FD in its watchd
 The Mac responded through SSH alias `mac` and still retains both unshimmed images under `/private/tmp/piano-root-26C5035r.593r2m`. The Windows `mac-lan` lookup failed. No tablet commands were issued in this audit.
 
 Fresh SHA-256 reads on the Mac matched the retained metadata for SystemOS (c970de1b385486b2893c7a03a236ad612fb2f89fc45e48e9a7a80374d247487d) and root (e543c4ed25f77dec07c39b3ba840a0a6887a8a499a1d515eecfb9a0bc6099f2b).
+
+## Embedded collection and build inputs
+
+Direct reads from the FAT payload matched the recorded KC, ADT, trust cache and scratch Data image hashes. The embedded KC also matches `kernel/kernel.macho` under `/root/piano-native/UniXNU/out/piano/macos-27.3-26C5035r/piano_macos` (142,393,344 bytes). In that output tree, `tree/.cache/xnu-work` points at `/root/piano-native/xnu-k27-final`, whose HEAD is `c2936efdf3724e3268ee812e6712d9d3b8d5a403` with 60 tracked files differing from HEAD.
+
+The retained `kernel/kernel.json` names an Apple collection (`d1003b51…`) and linked XNU (`fba33f3f…`), both present and hash-verified. Its declared output (`1f86bacf…`) differs from the embedded KC (`afe7646e…`) and the report sets both `loadable` and `runtime_qualified` to false for its declared output. The sibling `payload.json` names another KC (`d36b8047…`) despite matching the fips4b ADT, trust and scratch hashes. The build reports therefore provide source and input leads, with the transformation to `afe7646e…` still unaccounted for.
