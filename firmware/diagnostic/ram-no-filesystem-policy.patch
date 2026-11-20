@@ -1,0 +1,12 @@
+--- a/Silicon/Silicium/SiliciumPkg/Library/BootManagerLib/BootManager.c
++++ b/Silicon/Silicium/SiliciumPkg/Library/BootManagerLib/BootManager.c
+@@ -229,8 +229,3 @@
+ {
+-  EFI_STATUS Status;
+-
+-  // Setup Secure Boot
+-  Status = SetupSecureBoot ();
+-  ASSERT_EFI_ERROR (Status);
+-
++  // Skip filesystem policy registration in the RAM diagnostic.
+   // Update ACPI Tables
