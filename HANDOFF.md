@@ -208,3 +208,5 @@ The deployment manifest now references owner-dispatch.kc with the early Data mou
 Correction: the upstream macOS 27.3 owner-data-firmlinks patch supplies the required Data mount point, cross-device firmlinks, and cryptex view. Our prior /private/var host probe omits this required path and must not be treated as a desktop candidate. The patch has not yet been qualified against the prepared XNU source.
 
 The corrected macOS Data mount and firmlink lookup compiled and linked into owner-firmlink.kc. DarwinBoot parser tests passed. See the paired manifest report for the artifact and pending cryptex integration.
+
+The 26-driver owner-cryptex.kc host collection passed DarwinBoot parser tests. Its macOS cryptex helper creates mount directories under Data and requests read-only bind mounts. The bindfs boot exception requires PID 1 and MNT_RDONLY. The Mac source and recipes are under /private/tmp/piano-cryptex-uk1_iur7. GPU add-on integration and runtime mount validation remain pending.
