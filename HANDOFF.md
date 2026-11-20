@@ -150,3 +150,5 @@ The 27.3 ESP builder supports an explicit target `linux_data` extent and derives
 The Qualcomm ABL reference computes the ramdisk and DTB relocation addresses from the reserved kernel window and actual payload size. The historical v2 header address gap does not establish an overlap. The Xiaomi binary path and its reserved window remain open. See [ABL relocation audit](docs/results-2026-11-20-abl-relocation.md).
 
 The retained OS image supplies the original mount, fsck and fsck_apfs binaries. The staged SystemOS contains a byte-identical mount.real and lacks the other three paths. See [SystemOS boot helper comparison](docs/results-2026-11-20-systemos-helpers.md).
+
+The independent kernel's pre-launchd owner root check does not mount SystemOS where the pinned reference does. Check the complete boot path for equivalent mount behavior before pairing that collection with the composed root. See [SystemOS startup audit](docs/results-2026-11-20-systemos-startup.md).
