@@ -1,2 +1,3 @@
+*.sh text eol=lf
 firmware/diagnostic/ram-no-filesystem-policy.patch -text whitespace=cr-at-eol
 firmware/diagnostic/ram-menu-only-bds.patch -text whitespace=cr-at-eol,-blank-at-eol
