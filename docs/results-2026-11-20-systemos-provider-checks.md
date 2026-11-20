@@ -1,0 +1,7 @@
+# SystemOS union and Data provider checks (2026-11-20)
+
+The frozen Mac compile input `bsd/DEVELOPMENT/config.DEVELOPMENT_ARM64` enables `CONFIG_UNION_MOUNTS`. The retained XNU `bsd/vfs/vfs_syscalls.c` includes the `MNT_UNION` path. The existing `load_init_program` call already invokes `native_owner_cache_prepare` before launchd. This identifies an existing insertion point and confirms that the kernel configuration includes the required VFS feature.
+
+The pinned reference verifies the lower OS before mounting, resolves the signed SystemOS device by UUID, then checks the mounted device, read-only and union flags, filesystem type, and lower-root relationship. It also rechecks lower OS authorization. The port needs to preserve these checks and pass both verified volume identities to the boot manifest. The reference APFS request layout still needs qualification against the paired 26C5035r APFS implementation.
+
+The current NativeRamBlock source exports the reference `native_ram_block_volume_seed` ABI. It selects a unique IOMedia UUID, walks to the NativeRamBlock provider and calls `attachStore` before returning the seed identity. `attachStore` gates the UFS open on a nonzero store mode. At zero mode this path skips opening the store. This is a source result for the Data provider path. Bootloader, other kernel and userland write paths still need separate qualification on the exact proposed image. Mount execution and both volume identities remain unverified at runtime.
