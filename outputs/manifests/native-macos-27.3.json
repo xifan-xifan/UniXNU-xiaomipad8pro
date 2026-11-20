@@ -451,6 +451,32 @@
       ]
     }
   },
+  "live_userdata_audit_2026_11_20": {
+    "evidence": "docs/results-2026-11-20-live-userdata.md",
+    "hyperos": "OS3.0.309.0.WPYCNXM",
+    "active_slot": "a",
+    "userdata_device": "sda34",
+    "userdata_bytes": 495288561664,
+    "mapped_device_bytes": 495288561664,
+    "lun_logical_block_bytes": 4096,
+    "userdata_first_lba": 3632128,
+    "userdata_last_lba": 124552186,
+    "statfs_blocks_4096": 120919547,
+    "statfs_available_blocks_4096": 115225716,
+    "f2fs_enabled_features": [
+      "encryption",
+      "extra_attr",
+      "projquota",
+      "quota_ino",
+      "verity",
+      "casefold",
+      "pin_file"
+    ],
+    "inlinecrypt": true,
+    "reserved_tail_exposed": false,
+    "persistent_writes": false,
+    "tablet_backup": false
+  },
   "historical_deployment_evidence": {
     "checkout": "E:\\codex\\2026-11-01\\ni\\work\\piano-macos-c146",
     "commit": "c146dfc6ce1a24c9b85df9b70003d6ecbe9fba63",
