@@ -11,3 +11,6 @@ With the device's rooted `su` shell, read-only checks also returned a 4 KiB logi
 
 
 The offline rollback verifier was rerun against both retained capture directories (`E:/piano-verified-readonly-20261119-073450` and `F:/piano-verified-readonly-20261119-073450`). Both verified all three A-slot images by exact length and SHA-256. This remains rollback preparation only; no image was written back to the tablet.
+
+
+A root-only `snapshotctl dump` returned `Update state: none`, current slot `_a`, no merge or rollback indicator, and no userspace snapshot service active. This is a read-only snapshot preflight and does not authorize GPT or userdata changes.
