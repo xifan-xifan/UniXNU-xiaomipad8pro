@@ -98,3 +98,5 @@ The isolated RAM diagnostic FD built under UbuntuPiano at `/tmp/piano-ram-build.
 The connected tablet answered ADB with product `piano`, build `OS3.0.309.0.WPYCNXM`, slot `_a`, and `sys.boot_completed=1`. The stock shell did not expose `bootctl`, so neither slot success bits nor retry counts were obtained from Android. The diagnostic FD now has packed-volume verification. Its retained `PianoDtbInstall()` still enumerates Simple File System handles, so check the source of those handles before authorizing a temporary boot.
 
 The menu-only revision removes PianoDtbInstall and its filesystem scan. The rebuilt FD in the same staging path has SHA-256 8a0a2e8cf2a6c8f23fbdbed08d8146c97000bde095400a62cb5705cdd4669c87. Its packed volume matches FVMAIN. Device behavior remains unverified.
+
+Menu-only image: /tmp/piano-ram-build.0YIaUj/menu-image.KdcWfS/boot-piano-uefi-ram-menu-isolated.img. SHA-256 e730e57e14a050634ad9ae3c68ce5aea0639e7b45e9b94db3508f3dbafa7e577. The Ubuntu reference verifier passed with zero failures. Generic boot option discovery and reset remain under review before tablet testing.
