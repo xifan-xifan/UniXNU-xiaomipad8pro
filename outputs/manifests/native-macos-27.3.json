@@ -155,7 +155,7 @@
     "slot_successful": "no",
     "slot_unbootable": "no",
     "slot_retry_count": "unsupported",
-    "return": "Fastboot acknowledged reboot; Android startup was not confirmed over ADB"
+    "return": "ADB confirmed piano, OS3.0.309.0.WPYCNXM, slot _a, sys.boot_completed=1 and /data mounted as F2FS after reboot. Windows ADB recovered using ADB_LIBUSB=1 on an isolated server."
   },
   "apple_27_3_inputs": {
     "build": "26C5035r",
