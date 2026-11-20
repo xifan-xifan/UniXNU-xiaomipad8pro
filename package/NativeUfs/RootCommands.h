@@ -628,7 +628,7 @@ static bool hostLogOpen (uint64_t first, uint64_t blocks)
   return true;
 }
 
-#if defined(NATIVE_UFS_UNVERIFIED_ROOT) && NATIVE_UFS_UNVERIFIED_ROOT
+#if defined(NATIVE_UFS_UNVERIFIED_ROOT) && NATIVE_UFS_UNVERIFIED_ROOT && !defined(NATIVE_UFS_READ_ONLY_ROOT)
 // UniXNU-piano development build: the root windows are written in place, as k27's virtio disks are in the VM.
 struct UfsDevWritable { uint64_t first, blocks; };
 static UfsDevWritable gDevWritable[4];
@@ -643,7 +643,7 @@ static bool hostDevWritableOpen (uint64_t first, uint64_t blocks)
 
 static bool hostInWindow (uint64_t lba, uint32_t blocks)
 {
-#if defined(NATIVE_UFS_UNVERIFIED_ROOT) && NATIVE_UFS_UNVERIFIED_ROOT
+#if defined(NATIVE_UFS_UNVERIFIED_ROOT) && NATIVE_UFS_UNVERIFIED_ROOT && !defined(NATIVE_UFS_READ_ONLY_ROOT)
   for (unsigned i = 0; i < gDevWritableCount; ++i)
     if (lba >= gDevWritable[i].first && lba - gDevWritable[i].first < gDevWritable[i].blocks &&
         blocks <= gDevWritable[i].blocks - (lba - gDevWritable[i].first)) return true;
@@ -697,7 +697,7 @@ static IOReturn hostWrite4k (uint8_t lun, uint64_t lba, uint32_t blocks, const v
 // Whether any window of LUN 0 takes writes (the store, the log, the development build's root windows): what a cache sync is for.
 static bool hostAnyWritable (void)
 {
-#if defined(NATIVE_UFS_UNVERIFIED_ROOT) && NATIVE_UFS_UNVERIFIED_ROOT
+#if defined(NATIVE_UFS_UNVERIFIED_ROOT) && NATIVE_UFS_UNVERIFIED_ROOT && !defined(NATIVE_UFS_READ_ONLY_ROOT)
   return gStoreOpen || gLogOpen || gDevWritableCount;
 #else
   return gStoreOpen || gLogOpen;
