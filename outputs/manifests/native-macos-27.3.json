@@ -142,11 +142,20 @@
       "parse slot-retry-count:a as an integer in the AOSP 3-bit range 0-7",
       "before reboot require current-slot=a, slot-successful:a=yes, slot-unbootable:a=no",
       "require slot-retry-count:a unchanged from the recorded abl-check",
-      "require snapshot-update-status=none at abl-check and abl-final before storage operations or reboot"
+      "check snapshot-update-status=none separately in Android userspace Fastboot"
     ],
-    "test": "tooling/persist/test-abl-state.py; fake Fastboot accepts none and rejects unknown, MERGING, SNAPSHOTTED and UNSUPPORTED at both checks",
-    "result": "PASS on UbuntuPiano Python 3.12.3; fake Fastboot only, no tablet Fastboot query executed",
-    "scope": "host validation of the repository maintenance flow only; does not qualify or run the external piano-switch.py"
+    "test": "tooling/persist/test-abl-state.py",
+    "result": "PASS on UbuntuPiano with fake Fastboot responses",
+    "scope": "snapshot-check is a separate read-only preflight; ABL checks retain their slot and retry validation"
+  },
+  "userspace_fastboot_observation": {
+    "product": "piano",
+    "snapshot_update_status": "none",
+    "slot": "a",
+    "slot_successful": "no",
+    "slot_unbootable": "no",
+    "slot_retry_count": "unsupported",
+    "return": "Fastboot acknowledged reboot; Android startup was not confirmed over ADB"
   },
   "apple_27_3_inputs": {
     "build": "26C5035r",

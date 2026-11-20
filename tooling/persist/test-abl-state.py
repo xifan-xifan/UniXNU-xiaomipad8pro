@@ -22,8 +22,7 @@ class FakeSession:
 
     def fastboot(self, *args, **kwargs):
         var = args[1]
-        default = 'none' if var == 'snapshot-update-status' else None
-        return f'(bootloader) {var}: {self.values.get(var, default)}'
+        return f'(bootloader) {var}: {self.values.get(var)}'
 
     def need(self, condition, what):
         self.checks.append((condition, what))
@@ -36,6 +35,29 @@ class FakeSession:
     def log(self, message):
         self.logs.append(message)
 
+
+
+class FakeSnapshotSession:
+    execute = True
+
+    def __init__(self, userspace='yes', status='none'):
+        self.userspace, self.status = userspace, status
+        self.state = {}
+        self.logs = []
+
+    def fastboot(self, *args, **kwargs):
+        values = {'is-userspace': self.userspace, 'snapshot-update-status': self.status}
+        return f'(bootloader) {args[1]}: {values[args[1]]}'
+
+    def need(self, condition, what):
+        if not condition:
+            raise AssertionError(what)
+
+    def save(self, **values):
+        self.state.update(values)
+
+    def log(self, message):
+        self.logs.append(message)
 
 def final_values(retry='6', successful='yes', unbootable='no', slot='a'):
     return {
@@ -54,7 +76,6 @@ def preflight_values(retry='6'):
         'battery-soc-ok': 'yes',
         'partition-size:boot_a': '0x6000000',
         'battery-voltage': '4.0V',
-        'snapshot-update-status': 'none',
     })
     return values
 
@@ -78,33 +99,23 @@ def main():
     else:
         raise AssertionError('abl-check accepted a retry count outside the 3-bit range')
 
-    for status in ('MERGING', 'SNAPSHOTTED', 'UNSUPPORTED', None):
-        values = preflight_values()
-        values['snapshot-update-status'] = status
-        try:
-            maint.abl_check(FakeSession(values))
-        except AssertionError:
-            pass
-        else:
-            raise AssertionError(f'abl-check accepted snapshot status {status!r}')
-
     maint.abl_final(FakeSession(final_values()))
-    for status in ('MERGING', 'SNAPSHOTTED', 'UNSUPPORTED', None):
-        values = final_values()
-        values['snapshot-update-status'] = status
-        try:
-            maint.abl_final(FakeSession(values))
-        except AssertionError:
-            pass
-        else:
-            raise AssertionError(f'abl-final accepted snapshot status {status!r}')
     for bad in ('-1', '8', '0x6', 'unknown', None):
         must_reject(final_values(retry=bad))
     must_reject(final_values(retry='5'))
     must_reject(final_values(successful='no'))
     must_reject(final_values(unbootable='yes'))
     must_reject(final_values(slot='b'))
-    print('PASS: successful/bootable slot and unchanged retry count gates')
+    good = FakeSnapshotSession()
+    maint.snapshot_check(good)
+    for userspace, status in (('no', 'none'), ('yes', 'MERGING'), ('yes', 'SNAPSHOTTED'), ('yes', 'UNSUPPORTED'), ('yes', None)):
+        try:
+            maint.snapshot_check(FakeSnapshotSession(userspace, status))
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f'snapshot-check accepted userspace={userspace!r}, status={status!r}')
+    print('PASS: A/B state and userspace Virtual A/B snapshot preflight gates')
 
 
 if __name__ == '__main__':

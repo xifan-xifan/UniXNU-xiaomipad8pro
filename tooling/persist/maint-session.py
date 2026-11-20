@@ -78,7 +78,7 @@ UFS_LUN0_VENDOR = '860845C1-BE09-4355-8BC1-30D64FF8E63A'
 RAM_PAYLOAD_VENDOR = 'A9C6827C-1BD8-410C-885A-C46500F7D836'
 ABL_EXPECT = {'product': 'piano', 'unlocked': 'yes', 'current-slot': 'a', 'slot-successful:a': 'yes', 'slot-unbootable:a': 'no',
               'battery-soc-ok': 'yes', 'partition-size:boot_a': '0x6000000'}
-ABL_SHOW = ('slot-retry-count:a', 'battery-voltage', 'snapshot-update-status')
+ABL_SHOW = ('slot-retry-count:a', 'battery-voltage')
 SMALL = 128 * MiB            # backups up to this size are also kept in out/persistent/session/
 # A slow USB link (the big regions: rootfs-backup, rootfs-clear and its rollback): the slowest rate the time limits allow for, and how
 # long a stream may stall before its piece counts as failed (then retried).
@@ -1220,9 +1220,23 @@ def k273_store_grow_back(s):
     s.save(k273_store_grown=None)
 
 
+@step('snapshot-check', 'Android userspace Fastboot, read only')
+def snapshot_check(s):
+    """Require Android userspace Fastboot and snapshot-update-status=none before leaving Android for storage work."""
+    userspace = s.fastboot('getvar', 'is-userspace')
+    m = re.search(r'is-userspace:\s*(\S+)', userspace or '')
+    s.need(bool(m and m.group(1) == 'yes') if s.execute else None,
+           f'userspace Fastboot is active (got {m.group(1) if m else None})')
+    out = s.fastboot('getvar', 'snapshot-update-status')
+    m = re.search(r'snapshot-update-status:\s*(\S+)', out or '')
+    status = m.group(1) if m else None
+    s.need(status == 'none' if s.execute else None,
+           f'snapshot-update-status = none (got {status})')
+
+
 @step('abl-check', 'ABL fastboot, read only')
 def abl_check(s):
-    """fastboot getvar from ABL (read only): identity, unlock, slot A state, snapshot status, battery and boot_a size."""
+    """fastboot getvar from ABL (read only): identity, unlock, slot A state, battery and boot_a size."""
     values = {}
     for var in list(ABL_EXPECT) + list(ABL_SHOW):
         out = s.fastboot('getvar', var, check=False)
@@ -1231,9 +1245,6 @@ def abl_check(s):
         if var == 'slot-retry-count:a':
             values[var] = int(m.group(1)) if m and re.fullmatch(r'[0-7]', m.group(1)) else None
             s.need(values[var] is not None if s.execute else None, 'slot-retry-count:a is an integer from 0 through 7')
-        if var == 'snapshot-update-status':
-            s.need(values[var] == 'none' if s.execute else None,
-                   f'snapshot-update-status = none before storage or userdata operations (got {values[var]})')
         if var in ABL_EXPECT and var != 'slot-successful:a':
             s.need(values[var] == ABL_EXPECT[var] if s.execute else None, f'{var} = {ABL_EXPECT[var]} (got {values[var]})')
         else:
@@ -2034,7 +2045,7 @@ def slot_back(s):
 
 @step('abl-final', 'ABL fastboot, read only')
 def abl_final(s):
-    """Before reboot: clean snapshot state, slot A current/successful/bootable, and retry count unchanged."""
+    """Before reboot: slot A current/successful/bootable, and retry count unchanged."""
     for var, want in (('current-slot', 'a'), ('slot-successful:a', 'yes'), ('slot-unbootable:a', 'no')):
         out = s.fastboot('getvar', var, check=False)
         m = re.search(rf'{re.escape(var)}:\s*(\S+)', out or '')
@@ -2046,12 +2057,6 @@ def abl_final(s):
     s.need(count is not None if s.execute else None, f'{var} is an integer from 0 through 7 (got {m.group(1) if m else None})')
     before = (s.state.get('abl') or {}).get(var)
     s.need(count == before if s.execute else None, f'{var} unchanged since abl-check ({before} -> {count})')
-    var = 'snapshot-update-status'
-    out = s.fastboot('getvar', var, check=False)
-    m = re.search(rf'{re.escape(var)}:\s*(\S+)', out or '')
-    status = m.group(1) if m else None
-    s.need(status == 'none' if s.execute else None,
-           f'{var} = none before reboot (got {status})')
 
 
 @step('reboot', 'ABL fastboot -> slot A (macOS)')
