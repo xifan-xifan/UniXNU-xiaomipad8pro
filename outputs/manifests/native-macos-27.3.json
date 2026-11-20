@@ -452,6 +452,36 @@
     "ubuntu_reference_sha256": "54001a50a13fe80c3bd8e926161608b71d91e57e2d6be6b83cdc2bc62b5f6fbc",
     "device_tested": false
   },
+  "native_macos_ram_manual_reset_candidate": {
+    "host_directory": "UbuntuPiano:/tmp/piano-k273-manual.ReVqww",
+    "files": {
+      "boot-piano-macos-ram-k273-manual.img": {
+        "bytes": 185733120,
+        "sha256": "b99eac50488cd8d24938965987f51be16e41af1257c09a294c8ec1fcccd7704a"
+      },
+      "boot-piano-uefi-ram-k273-manual.img": {
+        "bytes": 13766656,
+        "sha256": "4e8736a9d227e5a476d55bec7a2379532ff6a5d959ecb7c599094801615d1fce"
+      },
+      "build-k273-manual.json": {
+        "bytes": 4661,
+        "sha256": "f949d3ff156d7abd2bbbfb3a500f5270a6dda54647987dbf042ab0bb62dd58a3"
+      },
+      "verify.log": {
+        "bytes": 9633,
+        "sha256": "4ccedccae94838fe46bfbe2a602bc8ae01c5005a51d55c70e70db8f36241f4ec"
+      }
+    },
+    "kc_sha256": "00f0ba553e16a42021623d9805f6d77ae95ae09d968c761ae1cae4cb6bb06831",
+    "adt_bytes": 8589934592,
+    "reference_verifier_failures": 0,
+    "data_persist": 0,
+    "reset_arguments_present_in_build_record": false,
+    "log_argument_present_in_build_record": false,
+    "firmware_entries": 0,
+    "device_tested": false,
+    "evidence": "docs/results-2026-11-20-k273-ram-candidate.md"
+  },
   "build_blockers": [
     "local k27 pin 11ac316b789d81fc9f734e15645456f536c05141 and inner XNU commit de16623d957cccff6dfb78d8eca4a79842af9702 unavailable; checked WSL XNU trees are dirty and off-pin",
     "independent host driver checkpoint and parser-passing collection probe are not verified equivalent to the locked native source and have not been loaded on-device",
