@@ -9,7 +9,14 @@ R=${UNIXNU_RESEARCH:-$HOME/Downloads/XiaomiPad8Pro-Ubuntu/unixnu-research}
 INC=$(mktemp -d); trap 'rm -rf "$INC"' EXIT
 ln -s "$R/UniXNU-sm8750-common/kits/Sm8750Platform" "$INC/Sm8750Platform"
 # The development build (NATIVE_UFS_UNVERIFIED_ROOT) needs neither VerifiedRoot nor NativeVirtioBlock's VerifiedBlockPolicy.h.
+# Keep the unverified root publication path, but deny writable root windows for diagnostics.
+ROOT_FLAGS=()
+case "${PIANO_UFS_READ_ONLY_ROOT:-0}" in
+  0) ;;
+  1) ROOT_FLAGS=(-D NATIVE_UFS_READ_ONLY_ROOT=1) ;;
+  *) echo 'PIANO_UFS_READ_ONLY_ROOT must be 0 or 1' >&2; exit 2 ;;
+esac
 python3 "$D/tooling/k27/build-native-kext.py" NativeUfs "$D/package/NativeUfs/NativeUfs.cpp" "$D/tooling/k27/NativeKextGlue.cpp" \
   -I "$D/package/NativeUfs" -I "$INC" -I "$K/out/x12377/storage-abi/include" -I "$K/out/x12377/xnu-m/osfmk" \
   -D U:TARGET_OS_OSX -D TARGET_OS_OSX=1 -D NATIVE_UFS_SM8750=1 -D 'UFS_ROOT_PARTITION="linux_rootfs"' -D NATIVE_UFS_POLL_ONLY=1 -D NATIVE_UFS_UNVERIFIED_ROOT=1 \
-  --obj "${K27_OBJ:-k27-native-obj}"
+  "${ROOT_FLAGS[@]}" --obj "${K27_OBJ:-k27-native-obj}"

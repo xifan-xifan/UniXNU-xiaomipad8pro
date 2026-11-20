@@ -2250,7 +2250,7 @@ bool NativeUfsBlock::configure (const char *name, uint64_t absoluteOffset, uint6
   // policy; without a matching policy the device is never published.
   return configureVerification ();
 #else
-#if defined(NATIVE_UFS_UNVERIFIED_ROOT) && NATIVE_UFS_UNVERIFIED_ROOT
+#if defined(NATIVE_UFS_UNVERIFIED_ROOT) && NATIVE_UFS_UNVERIFIED_ROOT && !defined(NATIVE_UFS_READ_ONLY_ROOT)
   // Development build: the windows are writable in place (the OS volume is the live root, as on the VM's virtio disk).
   writable = !(absolute % 4096) && !(bytes % 4096) && hostDevWritableOpen (absolute / 4096, bytes / 4096);
   IOLog ("NativeUfs: %s window %s\n", label, writable ? "writable (development build)" : "read-only");
