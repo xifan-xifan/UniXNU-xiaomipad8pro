@@ -158,3 +158,5 @@ Both pinned SystemOS patch variants fail the independent source apply check. The
 The independent positioned kernel lacks the owner startup symbols checked with nm. Its conditional link compatibility functions also differ from the authenticated storage path required by the Piano configuration. See [owner startup configuration audit](docs/results-2026-11-20-owner-startup-configuration.md).
 
 A retained Piano driver submodule contains the three verified volume interfaces and calls the UFS provider during media lookup. Its exact source identity and the remaining verified-root build dependency are in [the volume resolver audit](docs/results-2026-11-20-volume-resolver.md).
+
+The retained VerifiedRoot kit passed all seven host test groups under UbuntuPiano. The report and test scope are in the volume resolver audit.
