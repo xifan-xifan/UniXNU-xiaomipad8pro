@@ -162,3 +162,5 @@ A retained Piano driver submodule contains the three verified volume interfaces 
 The retained VerifiedRoot kit passed all seven host test groups under UbuntuPiano. The report and test scope are in the volume resolver audit.
 
 The host SHNGROOT manifest generator can now describe v2 policy table objects such as OS.vroot. Fixture checks verified v1 and v2 encoding, byte lengths, hashes and duplicate rejection. The 27.3 image assembler still emits v1 and the deployment still needs signed policies paired with the final root volumes.
+
+The 27.3 assembler accepts paired OS.vroot and SystemOS.vroot objects through K273_VROOT_DIR. It requires a fresh root image and omits historical write coordinates for this layout. Host fixture readback matched all four ranges. Final signed policies and deployment volume integration remain pending.

@@ -11,6 +11,7 @@
 #   OUT/scratch-data.img         the Data seed (default: the 27.0.1 line's out/inputs/scratch-data.img, the installed system's
 #                                Data as it was before the update; K273_SEED names another)
 #
+# K273_VROOT_DIR supplies OS.vroot and SystemOS.vroot tables for signed header-only policies.
 #   make-root-image.sh [OUT]      (default out/inputs/k273/root; inputs in out/inputs/k273/26C5035r)
 set -euo pipefail
 D=$(cd "$(dirname "$0")/../.." && pwd); cd "$D"
@@ -25,15 +26,25 @@ done
 # The OS image as the profile pins it (UniXNU macos-27.3-26C5035r [root] os_image_sha256).
 OS_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha256"])' "$OS.json")
 [ "$OS_SHA" = 40d8282eb8650da9b4d7437a981764c48d47ee4bdc5b8b362248f25ecbce0e70 ] || { echo "$OS: sha256 $OS_SHA is not the profile's" >&2; exit 1; }
+policy_args=()
+if [ -n "${K273_VROOT_DIR:-}" ]; then
+  [ ! -e "$O/root.img" ] || { echo "policy build requires a fresh root.img output: $O/root.img" >&2; exit 1; }
+  for label in OS SystemOS; do
+    table=$K273_VROOT_DIR/$label.vroot
+    [ -s "$table" ] || { echo "missing or empty policy table: $table" >&2; exit 1; }
+    policy_args+=(--object "$label.vroot=$table")
+  done
+fi
 mkdir -p "$O/manifest"
 # An image assembled from the same windows (the manifest's layout names their sha256s) is kept: a later run only redoes the rest.
-if [ -f "$O/root.img.sha256" ] && [ -f "$O/manifest/layout.json" ] && [ "$O/root.img.sha256" -nt "$SYS" ] && [ "$O/root.img.sha256" -nt "$OS" ] \
+if [ -z "${K273_VROOT_DIR:-}" ] && [ -f "$O/root.img.sha256" ] && [ -f "$O/manifest/layout.json" ] && [ "$O/root.img.sha256" -nt "$SYS" ] && [ "$O/root.img.sha256" -nt "$OS" ] \
+   && python3 -c 'import json,sys; sys.exit(bool(json.load(open(sys.argv[1])).get("objects")))' "$O/manifest/layout.json" \
    && cmp -s <(dd if="$O/root.img" bs=4096 count=1 2> /dev/null) "$O/manifest/manifest.bin"; then
   IMAGE_BYTES=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image_bytes"])' "$O/manifest/layout.json")
   ROOT_SHA=$(cat "$O/root.img.sha256")
   echo "root.img: kept (sha256 $ROOT_SHA)"
 else
-python3 tooling/native/make-root-manifest.py "$O/manifest" "OS=$OS" "SystemOS=$SYS"
+python3 tooling/native/make-root-manifest.py "$O/manifest" "OS=$OS" "SystemOS=$SYS" "${policy_args[@]}"
 IMAGE_BYTES=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image_bytes"])' "$O/manifest/layout.json")
 rm -f "$O/root.img" "$O/root.img.sha256"
 mkfile -n "$IMAGE_BYTES" "$O/root.img"
@@ -42,7 +53,7 @@ python3 - "$O/manifest/layout.json" "$O/root.img" <<'EOF'
 import json, sys
 layout, image = json.load(open(sys.argv[1])), sys.argv[2]
 with open(image, 'r+b') as target:
-    for w in layout['windows']:
+    for w in layout['windows'] + layout.get('objects', []):
         target.seek(w['offset'])
         with open(w['image'], 'rb') as source:
             while chunk := source.read(64 << 20):
@@ -69,13 +80,16 @@ assert need <= blocks
 record = {
     'os_volume_uuid': '84581E99-85BE-4957-AC53-2947E887B3E4', 'systemos_volume_uuid': sysos['volume_uuid'],
     'image_bytes': size, 'image_sha256': sha, 'manifest_sha256': hashlib.sha256((o / 'manifest/manifest.bin').read_bytes()).hexdigest(),
+    **({'objects': [{k: w[k] for k in ('name', 'offset', 'size', 'sha256')}
+                    for w in layout['objects']]} if 'objects' in layout else {}),
     'windows': [{k: w[k] for k in ('name', 'offset', 'size', 'sha256')} for w in layout['windows']],
-    'write': {'partition': 'linux_data', 'lun': 0, 'lba_bytes': 4096, 'partition_first_lba': first, 'partition_blocks': blocks,
-              'first_lba': first, 'last_lba': first + need - 1, 'blocks': need,
-              'untouched': f'linux_data blocks {need}..{blocks - 1} (the rest of the partition, the later Data store window at its end)'},
     'seed_sha256': hashlib.sha256((o / 'scratch-data.img').read_bytes()).hexdigest(),
     'trust_sha256': hashlib.sha256((o / 'kernel.macho.trustcache').read_bytes()).hexdigest(),
 }
+if 'objects' not in layout:
+    record['write'] = {'partition': 'linux_data', 'lun': 0, 'lba_bytes': 4096, 'partition_first_lba': first, 'partition_blocks': blocks,
+              'first_lba': first, 'last_lba': first + need - 1, 'blocks': need,
+              'untouched': f'linux_data blocks {need}..{blocks - 1} (the rest of the partition, the later Data store window at its end)'}
 (o / 'root.json').write_text(json.dumps(record, indent=2) + '\n')
 print(json.dumps(record, indent=2))
 EOF
