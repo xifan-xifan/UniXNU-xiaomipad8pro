@@ -294,3 +294,5 @@ The [GPT rehearsal](docs/results-2026-11-21-gpt-write-rehearsal.md) verified can
 The Piano catalog audit identified a separate macOS 27.3 XNU pin and a SystemOS retry patch. The public SystemOS host verification hash differs from the retained unshimmed image. ADB confirmed HyperOS booted on slot A. See [catalog audit](docs/results-2026-11-21-catalog-repositories.md).
 
 The retained SystemOS image passed the Mac's read-only APFS check. Its APFS volume UUID matches local metadata and differs from the catalog policy UUID. See [SystemOS APFS check](docs/results-2026-11-21-systemos-apfs.md).
+
+The GPT host rehearsal now also fault-injects a candidate backup table with a stock primary, then restores and byte-compares the original backup tail. This confirms only host parser behavior for that interruption state; device GPT selection and recovery remain unqualified. See [GPT rehearsal](docs/results-2026-11-21-gpt-write-rehearsal.md).
