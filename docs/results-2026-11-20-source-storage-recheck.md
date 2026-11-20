@@ -13,3 +13,5 @@ The existing E: and F: GPT boundary capture sets both passed `tooling/persist/au
 No concrete storage WRITE-PLAN can yet specify final ranges: the matching root image, its exact size/hash, compatible Data seed/store sizing, and completed boot/KC set are not available. Online F2FS shrink remains unqualified. Do not begin a desktop boot that assumes the missing UFS root/Data, or a partition/write operation based on the author's historical LBAs or sizes.
 
 The configured mac-lan alias failed name resolution during this check. The later [resumption audit](results-2026-11-20-resume-audit.md) records successful read-only Mac access through the alternate SSH configuration and the remaining source and image dependencies.
+
+PR #2 confirms the k27 tree is intentionally a local-only input. Its CI workflow accepts an optional `PIANO_K27_TREE_URL`, skips the k27 stage when unset, and documents that the public runner cannot reconstruct the tree. The workflow has not published a URL or artifact in the reviewed draft. This is direct upstream evidence that the missing source is an external dependency, not a checkout step omitted locally.
