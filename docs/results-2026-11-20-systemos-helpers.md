@@ -1,0 +1,3 @@
+# SystemOS boot helper comparison (2026-11-20)
+
+Read-only attachments on the Mac compared the retained 26C5035r OS input `141-22233-021.dmg` and `systemos.unshimmed.img`. The staged `/sbin/mount.real` matches Apple `/sbin/mount` by SHA-256 (`0d6429c5017fd96818795c9ffe74c011b3e9e8f2871496a6319e97db664f8126`). The OS input contains `/sbin/fsck` and `/sbin/fsck_apfs`. The staged SystemOS contains neither of those paths and lacks `/sbin/mount`. Both attachments were detached. The original Apple helpers remain available in the retained OS input. The native shim dispatch and the visibility of the helpers after the kernel mounts the SystemOS layer still require verification before assembling a deployment image.

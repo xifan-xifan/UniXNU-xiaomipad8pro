@@ -148,3 +148,5 @@ The verified packed first-install seed also lives at `out/inputs/k273/first-inst
 The 27.3 ESP builder supports an explicit target `linux_data` extent and derives its store LBA from that extent plus the seed size. Host integration tests pass for the provisional 64 GiB region and reject an undersized extent. The ordinary maintained-layout behavior remains unchanged when no extent is supplied.
 
 The Qualcomm ABL reference computes the ramdisk and DTB relocation addresses from the reserved kernel window and actual payload size. The historical v2 header address gap does not establish an overlap. The Xiaomi binary path and its reserved window remain open. See [ABL relocation audit](docs/results-2026-11-20-abl-relocation.md).
+
+The retained OS image supplies the original mount, fsck and fsck_apfs binaries. The staged SystemOS contains a byte-identical mount.real and lacks the other three paths. See [SystemOS boot helper comparison](docs/results-2026-11-20-systemos-helpers.md).
