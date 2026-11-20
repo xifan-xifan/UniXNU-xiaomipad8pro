@@ -142,10 +142,10 @@
       "parse slot-retry-count:a as an integer in the AOSP 3-bit range 0-7",
       "before reboot require current-slot=a, slot-successful:a=yes, slot-unbootable:a=no",
       "require slot-retry-count:a unchanged from the recorded abl-check",
-      "before userdata or GPT operations require snapshot-update-status=none; unknown and active merges block"
+      "require snapshot-update-status=none at abl-check and abl-final before storage operations or reboot"
     ],
-    "test": "tooling/persist/test-abl-state.py; includes unknown, MERGING, SNAPSHOTTED and UNSUPPORTED snapshot status rejection",
-    "result": "PASS on mac-lan Python 3.9.6 with fake Fastboot responses; no tablet command executed",
+    "test": "tooling/persist/test-abl-state.py; fake Fastboot accepts none and rejects unknown, MERGING, SNAPSHOTTED and UNSUPPORTED at both checks",
+    "result": "PASS on UbuntuPiano Python 3.12.3; fake Fastboot only, no tablet Fastboot query executed",
     "scope": "host validation of the repository maintenance flow only; does not qualify or run the external piano-switch.py"
   },
   "apple_27_3_inputs": {

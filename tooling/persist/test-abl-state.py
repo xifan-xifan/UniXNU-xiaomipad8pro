@@ -22,7 +22,8 @@ class FakeSession:
 
     def fastboot(self, *args, **kwargs):
         var = args[1]
-        return f'(bootloader) {var}: {self.values.get(var)}'
+        default = 'none' if var == 'snapshot-update-status' else None
+        return f'(bootloader) {var}: {self.values.get(var, default)}'
 
     def need(self, condition, what):
         self.checks.append((condition, what))
@@ -87,17 +88,16 @@ def main():
         else:
             raise AssertionError(f'abl-check accepted snapshot status {status!r}')
 
+    maint.abl_final(FakeSession(final_values()))
     for status in ('MERGING', 'SNAPSHOTTED', 'UNSUPPORTED', None):
-        values = preflight_values()
+        values = final_values()
         values['snapshot-update-status'] = status
         try:
-            maint.abl_check(FakeSession(values))
+            maint.abl_final(FakeSession(values))
         except AssertionError:
             pass
         else:
-            raise AssertionError(f'abl-check accepted snapshot status {status!r}')
-
-    maint.abl_final(FakeSession(final_values()))
+            raise AssertionError(f'abl-final accepted snapshot status {status!r}')
     for bad in ('-1', '8', '0x6', 'unknown', None):
         must_reject(final_values(retry=bad))
     must_reject(final_values(retry='5'))

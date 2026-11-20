@@ -2034,7 +2034,7 @@ def slot_back(s):
 
 @step('abl-final', 'ABL fastboot, read only')
 def abl_final(s):
-    """Before the first boot from boot_a: slot A current, successful and bootable; retry count unchanged since abl-check."""
+    """Before reboot: clean snapshot state, slot A current/successful/bootable, and retry count unchanged."""
     for var, want in (('current-slot', 'a'), ('slot-successful:a', 'yes'), ('slot-unbootable:a', 'no')):
         out = s.fastboot('getvar', var, check=False)
         m = re.search(rf'{re.escape(var)}:\s*(\S+)', out or '')
@@ -2046,6 +2046,12 @@ def abl_final(s):
     s.need(count is not None if s.execute else None, f'{var} is an integer from 0 through 7 (got {m.group(1) if m else None})')
     before = (s.state.get('abl') or {}).get(var)
     s.need(count == before if s.execute else None, f'{var} unchanged since abl-check ({before} -> {count})')
+    var = 'snapshot-update-status'
+    out = s.fastboot('getvar', var, check=False)
+    m = re.search(rf'{re.escape(var)}:\s*(\S+)', out or '')
+    status = m.group(1) if m else None
+    s.need(status == 'none' if s.execute else None,
+           f'{var} = none before reboot (got {status})')
 
 
 @step('reboot', 'ABL fastboot -> slot A (macOS)')

@@ -170,7 +170,7 @@ P=tooling/persist/maint-session.py
 python3 $P --dry-run abl-check maint-boot map backup gpt store esp check maint-exit     # read it first
 # ABL fastboot (power + volume-down), read only:
 python3 $P abl-check            # product piano, unlocked yes, current-slot a, slot-unbootable:a no, battery-soc-ok yes,
-                                # partition-size:boot_a 0x6000000; requires snapshot-update-status none; shows slot-successful:a, slot-retry-count:a, battery-voltage
+                                # partition-size:boot_a 0x6000000; requires snapshot-update-status none at abl-check and abl-final; shows slot-successful:a, slot-retry-count:a, battery-voltage
 # session 1, maintenance RAM image (boot_a untouched):
 python3 $P maint-boot map backup gpt store esp check maint-exit
 # session 2, RAM tests (nothing written; each takes ~240 s + the dump):
