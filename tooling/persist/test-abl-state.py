@@ -61,6 +61,8 @@ class FakeSnapshotSession:
 
 def final_values(retry='6', successful='yes', unbootable='no', slot='a'):
     return {
+        'is-userspace': 'no',
+        'snapshot-update-status': 'none',
         'current-slot': slot,
         'slot-successful:a': successful,
         'slot-unbootable:a': unbootable,
@@ -106,6 +108,17 @@ def main():
     must_reject(final_values(successful='no'))
     must_reject(final_values(unbootable='yes'))
     must_reject(final_values(slot='b'))
+    for key, value in (('is-userspace', 'yes'), ('snapshot-update-status', 'merging'),
+                       ('snapshot-update-status', None)):
+        values = preflight_values()
+        values[key] = value
+        must_reject(values)
+        try:
+            maint.abl_check(FakeSession(values))
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f'abl-check accepted {key}={value!r}')
     good = FakeSnapshotSession()
     maint.snapshot_check(good)
     for userspace, status in (('no', 'none'), ('yes', 'MERGING'), ('yes', 'SNAPSHOTTED'), ('yes', 'UNSUPPORTED'), ('yes', None)):

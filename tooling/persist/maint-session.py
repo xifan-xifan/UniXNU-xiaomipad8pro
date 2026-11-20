@@ -1234,10 +1234,21 @@ def snapshot_check(s):
            f'snapshot-update-status = none (got {status})')
 
 
+def abl_snapshot_state(s):
+    values = {}
+    for var, expected in (('is-userspace', 'no'), ('snapshot-update-status', 'none')):
+        out = s.fastboot('getvar', var)
+        m = re.search(rf'{re.escape(var)}:[ \t]*(\S+)', out or '')
+        values[var] = m.group(1) if m else None
+        s.need(values[var] == expected if s.execute else None,
+               f'{var} = {expected} (got {values[var]})')
+    return values
+
+
 @step('abl-check', 'ABL fastboot, read only')
 def abl_check(s):
     """fastboot getvar from ABL (read only): identity, unlock, slot A state, battery and boot_a size."""
-    values = {}
+    values = abl_snapshot_state(s)
     for var in list(ABL_EXPECT) + list(ABL_SHOW):
         out = s.fastboot('getvar', var, check=False)
         m = re.search(rf'{re.escape(var)}:\s*(\S+)', out or '')
@@ -2046,6 +2057,7 @@ def slot_back(s):
 @step('abl-final', 'ABL fastboot, read only')
 def abl_final(s):
     """Before reboot: slot A current/successful/bootable, and retry count unchanged."""
+    abl_snapshot_state(s)
     for var, want in (('current-slot', 'a'), ('slot-successful:a', 'yes'), ('slot-unbootable:a', 'no')):
         out = s.fastboot('getvar', var, check=False)
         m = re.search(rf'{re.escape(var)}:\s*(\S+)', out or '')
