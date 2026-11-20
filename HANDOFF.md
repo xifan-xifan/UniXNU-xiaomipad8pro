@@ -106,3 +106,5 @@ The current diagnostic build omits the Qualcomm extra application include. The r
 The --diagnostic-menu image at /tmp/piano-ram-build.0YIaUj/menu-actions.04qt9t passed the Ubuntu reference verifier. Its FAT configuration exposes restart and shutdown only. Built-in fallback and generic BDS are still pending review.
 
 The strict RAM configuration build in /tmp/piano-ram-build.0YIaUj/menu-strict.yAtgPM passed the Ubuntu reference verifier. Apply firmware/diagnostic/ram-config-only.patch to the pinned UniXNU checkout after the ordinary core patches. The menu connects only the RAM payload block handle and skips filesystem EFI fallback discovery. The generic firmware BDS path and tablet behavior remain unverified.
+
+The official 3.0.309 boot triplet has been extracted and compared with the retained A-slot captures. Boot and vendor_boot match. The stock and captured init_boot ramdisks differ in content and length. See docs/results-2026-11-20-storage-layout-recovery.md before choosing a rollback input.
