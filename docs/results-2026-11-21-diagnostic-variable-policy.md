@@ -1,0 +1,3 @@
+# Diagnostic variable policy review (2026-11-21)
+
+The diagnostic Mu-Silicium build sets `PcdEmuVariableNvModeEnable|TRUE` and includes `VariableRuntimeDxe`. Its `InitNonVolatileVariableStore()` therefore selects `InitEmuNonVolatileVariableStore()` instead of the real firmware variable store. The RAM BDS calls `EfiBootManagerUpdateConsoleVariable()` for ConIn, ConOut and ErrOut, and registers default boot options, so variable writes still occur in the emulated store. The source review supports a RAM-only variable store for this diagnostic build, but does not qualify Xiaomi ABL writes before the image is loaded or platform-specific firmware backends outside this build.
