@@ -87,6 +87,14 @@
    # UniXNU (unixnu.com): boot menu, boot option, XNU loader, RAM payload
  !ifdef UNIXNU
    INF UniXNUPkg/Application/UniXNU/UniXNU.inf
+@@ -120,7 +116,6 @@
+ 
+   # Device Tree: none yet. Linux boots with its own DTB from the ESP.
+ 
+-  !include QcomPkg/Extra.fdf.inc
+ 
+ [FV.FVMAIN_COMPACT]
+ FvAlignment        = 8
 --- a/uefi/pianoPkg/piano.dsc
 +++ b/uefi/pianoPkg/piano.dsc
 @@ -159,28 +159,6 @@
