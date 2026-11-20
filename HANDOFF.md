@@ -296,3 +296,5 @@ The Piano catalog audit identified a separate macOS 27.3 XNU pin and a SystemOS 
 The retained SystemOS image passed the Mac's read-only APFS check. Its APFS volume UUID matches local metadata and differs from the catalog policy UUID. See [SystemOS APFS check](docs/results-2026-11-21-systemos-apfs.md).
 
 The GPT host rehearsal now also fault-injects a candidate backup table with a stock primary, then restores and byte-compares the original backup tail. This confirms only host parser behavior for that interruption state; device GPT selection and recovery remain unqualified. See [GPT rehearsal](docs/results-2026-11-21-gpt-write-rehearsal.md).
+
+The independent bindfs collection replay matched the retained `owner-cryptex-bindfs.kc` byte for byte in UbuntuPiano. See [the collection replay](docs/results-2026-11-21-owner-collection-replay.md) for the exact input hashes and required working directory. SystemOS helper dispatch and final root authentication remain open before tablet testing.
