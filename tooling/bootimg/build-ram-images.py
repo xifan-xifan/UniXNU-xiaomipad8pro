@@ -359,18 +359,21 @@ def payload(stage, image, label, size_mib):
     write_volume(stage, image, label, size_mib)
 
 
-def menu_actions():
-    return ('[[entry]]\nid = "reset"\ntitle = "Restart (back to Ubuntu)"\ntype = "action"\naction = "reset"\n'
-            '[[entry]]\nid = "shutdown"\ntitle = "Power off"\ntype = "action"\naction = "shutdown"\n'
-            '[[entry]]\nid = "tools"\ntitle = "Tools"\ntype = "action"\naction = "tools"\n')
+def menu_actions(diagnostic=False):
+    restart_title = 'Restart tablet' if diagnostic else 'Restart (back to Ubuntu)'
+    actions = (f'[[entry]]\nid = "reset"\ntitle = "{restart_title}"\ntype = "action"\naction = "reset"\n'
+               '[[entry]]\nid = "shutdown"\ntitle = "Power off"\ntype = "action"\naction = "shutdown"\n')
+    if not diagnostic:
+        actions += '[[entry]]\nid = "tools"\ntitle = "Tools"\ntype = "action"\naction = "tools"\n'
+    return actions
 
 
-def uefi_payload(work):
+def uefi_payload(work, diagnostic=False):
     stage = work / 'uefi-stage'
     (stage / 'EFI/UniXNU').mkdir(parents=True)
     (stage / 'EFI/UniXNU/unixnu.toml').write_text(
-        '# piano M1: the UniXNU menu from a RAM boot, no OS entry. Untouched for 60 s it restarts (ABL then boots Ubuntu).\n'
-        'version = 1\n[boot]\ntimeout = 60\ndefault = "reset"\n[kits]\nautoload = false\n' + menu_actions())
+        '# UniXNU RAM menu. The default action restarts the tablet after 60 seconds.\n'
+        'version = 1\n[boot]\ntimeout = 60\ndefault = "reset"\n[kits]\nautoload = false\n' + menu_actions(diagnostic))
     image = work / 'payload-uefi.img'
     payload(stage, image, 'PIANOUEFI', 8)
     return image
@@ -496,6 +499,7 @@ def main():
     p.add_argument('--fd-name', required=True, help='A-bundled or B-own303')
     p.add_argument('--dtb', type=Path, default=DEVICE / 'out/inputs/piano-boot.dtb')
     p.add_argument('--out', type=Path, required=True)
+    p.add_argument('--diagnostic-menu', action='store_true', help='Offer only restart and shutdown in the UEFI RAM menu')
     p.add_argument('--kc', type=Path)
     p.add_argument('--trust', type=Path)
     p.add_argument('--seed', type=Path)
@@ -520,7 +524,7 @@ def main():
         report['ram_window'] = {'adt_bytes': window, 'fd_bound': bound}
     with tempfile.TemporaryDirectory(prefix='piano-ram-') as scratch:
         work = Path(scratch)
-        ramdisk = uefi_payload(work)
+        ramdisk = uefi_payload(work, a.diagnostic_menu)
         image, info = pack(a.out, a.fd, a.dtb, ramdisk, work, f'boot-piano-uefi-ram-{a.fd_name}')
         report['images'][image.name] = {**info, 'payload_sha256': sha(ramdisk), 'payload_bytes': ramdisk.stat().st_size,
                                         'sha256': sha(image), 'bytes': image.stat().st_size}

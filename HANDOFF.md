@@ -102,3 +102,5 @@ The menu-only revision removes PianoDtbInstall and its filesystem scan. The rebu
 Menu-only image: /tmp/piano-ram-build.0YIaUj/menu-image.KdcWfS/boot-piano-uefi-ram-menu-isolated.img. SHA-256 e730e57e14a050634ad9ae3c68ce5aea0639e7b45e9b94db3508f3dbafa7e577. The Ubuntu reference verifier passed with zero failures. Generic boot option discovery and reset remain under review before tablet testing.
 
 The current diagnostic build omits the Qualcomm extra application include. The rebuilt image is /tmp/piano-ram-build.0YIaUj/menu-no-extra.IYarRw/boot-piano-uefi-ram-menu-isolated.img. Its manifest and verifier log are in that directory. Generic boot option processing and reset still require review.
+
+The --diagnostic-menu image at /tmp/piano-ram-build.0YIaUj/menu-actions.04qt9t passed the Ubuntu reference verifier. Its FAT configuration exposes restart and shutdown only. Built-in fallback and generic BDS are still pending review.
