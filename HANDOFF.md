@@ -320,3 +320,5 @@ The generated FAT16 diagnostic container passed the complete Ubuntu reference ve
 Historical fips4b image hashes, distinct November 15 boot observations, and current Mac reachability are recorded in [the fips4b inventory](docs/results-2026-11-21-fips4b-inventory.md).
 
 The [historical KC loader audit](docs/results-2026-11-21-historical-kc-contract.md) records a host pass for the 79-member fips4b collection and identifies differences from its archived predecessor that the CPU subtype helper cannot reproduce.
+
+The retained 26-driver RAM payloads match their recorded image hashes and carry the 27.3 root identity. The extracted menu starts XNU immediately in UFS root mode, and its FD differs from the tablet-tested isolation FD. See [the retained payload audit](docs/results-2026-11-21-retained-ram-payload.md) before preparing a register probe or a desktop image.
