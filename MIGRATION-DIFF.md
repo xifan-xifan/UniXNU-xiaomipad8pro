@@ -46,3 +46,5 @@ With the local 26C5035r OS window of 14,493,417,472 bytes and the pinned builder
 5. Produce a concrete `WRITE-PLAN.md` with target, range, hashes, commands, readback and rollback for each write. Any userdata clear/rebuild, GPT change or persistent boot write remains gated on explicit confirmation of that specific plan.
 
 The subsequent baseline verified the current GPT maps and existing A-slot boot triplet copies. The independent kernel host build on 2026-11-20 leaves the stock storage layout intact. No usable internal extent or external root/Data path has been qualified, so there is still no concrete write plan. See the [kernel result](docs/results-2026-11-20-independent-k27.md).
+
+A host-only study verified a candidate 20 GiB root, 64 GiB Data-partition and 1 GiB ESP layout against both stock GPT captures, including a byte-for-byte simulated GPT rollback. Stock recovery names the Android partitions and supplies F2FS tools. Its Xiaomi-specific pre-wipe and post-wipe handling still needs qualification, and the root image and seed must fit the chosen sizes. See [the storage and stock recovery study](docs/results-2026-11-20-storage-layout-recovery.md).

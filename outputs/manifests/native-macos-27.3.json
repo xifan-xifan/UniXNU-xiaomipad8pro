@@ -605,6 +605,22 @@
     "device_tested": false,
     "evidence": "docs/results-2026-11-20-native-collection-probe.md"
   },
+  "offline_storage_layout_study_2026_11_20": {
+    "logical_block_bytes": 4096,
+    "candidate_entry_array_sha256": "ba67d6aa7863835bb019231cfe97054138f649e58e7e06d08abe858da3f9751e",
+    "candidate_ranges_inclusive": {
+      "userdata": [3632128, 102269695],
+      "linux_rootfs": [102269696, 107512575],
+      "linux_data": [107512576, 124289791],
+      "esp": [124289792, 124551935]
+    },
+    "gpt_in_memory_rollback_passed": true,
+    "stock_recovery_image_sha256": "4c9710a400100e5da89f6657ba9d7081742d03e8bca92579e9e113b334d24e12",
+    "stock_userdata_sparse_expanded_bytes": 48318382080,
+    "stock_metadata_sparse_expanded_bytes": 67108864,
+    "device_tested": false,
+    "evidence": "docs/results-2026-11-20-storage-layout-recovery.md"
+  },
   "live_userdata_audit_2026_11_20": {
     "evidence": "docs/results-2026-11-20-live-userdata.md",
     "hyperos": "OS3.0.309.0.WPYCNXM",

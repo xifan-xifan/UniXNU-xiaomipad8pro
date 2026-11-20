@@ -16,6 +16,8 @@ The video build passed its host suites and import checks. The checkpoint covers 
 
 A temporary KC header experiment passed the pinned DarwinBoot parser after matching the CPU subtype and separating two member ranges. Byte comparison showed the linker overwrote source `__LINKINFO` with Apple `__LINKEDIT` bytes. The corrected relink preserves both ranges, passes the pinned parser, and matches the source payload. Next check boot packaging and display layout, and qualify the target storage and recovery path. [Collection link result](docs/results-2026-11-20-native-collection-probe.md)
 
+The storage study now has an offline GPT candidate and a byte-exact simulated GPT rollback. The 3.0.309 recovery ramdisk was checked for its F2FS and vendor wipe paths. Confirm the root and seed footprints and qualify recovery on a shortened userdata before proposing GPT writes. [Storage and recovery result](docs/results-2026-11-20-storage-layout-recovery.md)
+
 ## Current state
 
 - **User data:** the owner reports that HyperOS 3.0.309 was factory-reset before work began and contains no personal data. This is an owner report, not a new device-side verification. No tablet data backup was made.
