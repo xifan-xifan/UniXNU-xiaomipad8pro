@@ -318,3 +318,5 @@ The firmware now reads the diagnostic RAM configuration on the tablet. Its FAT d
 The generated FAT16 diagnostic container passed the complete Ubuntu reference verification and tablet test. Android returned on slot A with unchanged ABL state. See [the packaging replay](docs/results-2026-11-21-fat16-packaging-replay.md).
 
 Historical fips4b image hashes, distinct November 15 boot observations, and current Mac reachability are recorded in [the fips4b inventory](docs/results-2026-11-21-fips4b-inventory.md).
+
+The [historical KC loader audit](docs/results-2026-11-21-historical-kc-contract.md) records a host pass for the 79-member fips4b collection and identifies differences from its archived predecessor that the CPU subtype helper cannot reproduce.

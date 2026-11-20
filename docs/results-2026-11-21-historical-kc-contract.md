@@ -1,0 +1,5 @@
+# Historical KC loader audit (2026-11-21)
+
+The historical `audit-kernel-contract.py` passed the Mach-O fileset checks for `afe7646e…` and `717e2e7a…`. Both have 79 members. Their entry addresses are `0xfffffff00bb9c488` and `0xfffffff00bb97488`, respectively. Kernel segment sizes also differ. The archived `fix-cpusubtype.py` only changes the kernel member's CPU subtype, so that helper cannot account for the entry and segment differences between these two files. The inputs used for the reported `1f86bacf…` output still lack a verified transformation to `afe7646e…`.
+
+The `stall1` image hashes to `8d6ef963279b00b03e464dd98e854e9332cb4752933b01f85abd40a1cac4beb3`, matching its manifest. Its manifest records the same FD, KC, ADT, trust cache and Data seed as fips4b. The boot arguments add stall diagnostics and change the timestamp. This gives a separate diagnostic configuration for the same recorded collection. Its runtime result remains unverified. The audit ran on the host and covers the loader format only. The archived 91-member image and its on-device hang remain separate evidence.
