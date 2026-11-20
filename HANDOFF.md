@@ -246,3 +246,5 @@ Windows ADB reconfirmed the connected HyperOS 3.0.309 A-slot baseline and inline
 The tablet entered stock ABL Fastboot and returned normally to HyperOS 3.0.309. ABL reconfirmed slot A successful and bootable with six retries and no pending snapshot. See [the ABL recheck](docs/results-2026-11-20-abl-recheck.md). The diagnostic image remains untested on the tablet.
 
 The independent Mac checkpoint has a verified arm64e NativeUfs object with root write registration compiled out. See [the build and symbol comparison](docs/results-2026-11-20-native-ufs-readonly-gate.md). Keep the writable checkpoint as the separate persistent build input.
+
+The read-only NativeUfs object is now relinked into the full 26-driver host KC. DarwinBoot parser, vtable and native-kext checks pass; the collection remains host-only. See [the full relink result](docs/results-2026-11-20-native-ufs-readonly-gate.md).
