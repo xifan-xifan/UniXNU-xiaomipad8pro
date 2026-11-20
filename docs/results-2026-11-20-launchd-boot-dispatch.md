@@ -1,0 +1,7 @@
+# Launchd boot helper dispatch in 26C5035r (2026-11-20)
+
+A read-only attachment of the retained Apple OS image exposed embedded launchd command strings for `/sbin/mount -uw /`, `/sbin/mount -P 1`, `/sbin/mount -P 2`, and `/sbin/mount -vat nonfs`. The binary also contains embedded `/sbin/fsck` references. The installed LaunchDaemons and LaunchAgents plist scan found only the separate NFS configuration job among commands matching these helper names. The embedded strings establish call sites for further inspection. They do not establish execution order, predicates, or the arguments passed to fsck. Both read-only attachments were detached successfully.
+
+Apple's mount binary embeds `/System/Library/Filesystems/apfs.fs/Contents/Resources/apfs_boot_util` and messages for skipping it on a non-APFS boot and for failed execution. Any candidate based on the locked UniXNU APFS helper needs to account for this dispatch path as well as the other mount modes and the fsck references. The two native k27 overlay inputs remain unavailable.
+
+The retained UniXNU `d830d23` helper source has Git blob `5aef2d6f3c493de88820fd758707d726340ed474`. The arm64 host build passed the phase 1 and 2 checks. The arm64e target build passed static signing inspection and has SHA-256 `37400273910613daa929e38582e301f3eb4964e3c5473678a57e3156d2bb9250`. A direct host invocation of that target build exited with status 137. The cause and target boot behavior remain unverified.

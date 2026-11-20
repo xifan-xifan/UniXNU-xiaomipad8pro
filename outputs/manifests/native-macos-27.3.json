@@ -1393,5 +1393,13 @@
     "linked_descriptors": 26,
     "validation": "DarwinBoot parser and synthetic tests passed",
     "limitations": "Host fixture policies and unshimmed SystemOS. Runtime mounting and GPU add-on pending."
+  },
+  "owner_cryptex_bindfs_host_collection": {
+    "sha256": "e5c72beb67784d985736b0c2719968727878288eab38e8d0c41a33de1eb92462",
+    "artifact": "owner-cryptex-bindfs.kc",
+    "workspace": "UbuntuPiano:/tmp/piano-verified-collection.68bZb6",
+    "linked_descriptors": 26,
+    "validation": "Locked DarwinBoot parser and synthetic checks passed",
+    "limitations": "Host fixture signing, unshimmed SystemOS, no target execution"
   }
 }
