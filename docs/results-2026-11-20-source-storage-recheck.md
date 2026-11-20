@@ -15,3 +15,5 @@ No concrete storage WRITE-PLAN can yet specify final ranges: the matching root i
 The configured mac-lan alias failed name resolution during this check. The later [resumption audit](results-2026-11-20-resume-audit.md) records successful read-only Mac access through the alternate SSH configuration and the remaining source and image dependencies.
 
 PR #2 confirms the k27 tree is intentionally a local-only input. Its CI workflow accepts an optional `PIANO_K27_TREE_URL`, skips the k27 stage when unset, and documents that the public runner cannot reconstruct the tree. The workflow has not published a URL or artifact in the reviewed draft. This is direct upstream evidence that the missing source is an external dependency, not a checkout step omitted locally.
+
+A fresh API check shows PR #2 is still open and draft, unchanged since 2026-11-16 15:26:10 UTC. It still contains only the workflow, CI packaging note, and fetch-pins script. Issue #1 has one maintainer comment pointing to that draft and no k27 source or artifact attachment. No new upstream source became available.
