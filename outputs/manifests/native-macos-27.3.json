@@ -3,6 +3,16 @@
   "checked_on": "2026-11-20",
   "device_repository": "https://github.com/lenzhang/UniXNU-xiaomipad8pro",
   "device_commit": "2438556c77c90c22c7b76e57eb8b40c44b35f1af",
+  "first_install_data_candidate": {
+    "path": "mac:/tmp/piano-seed-review.HVxAnP/first-install.dbr",
+    "sha256": "48dbc08d5955a20255268aadc3f79660a62c395a68b358e349bbc3ea8f8b25e0",
+    "identity_sha256": "7e9bd39b72da851d9e4174258b3b2eb2277ef74e75fcb42f0bc07d662448e93b",
+    "logical_gib": 24,
+    "store_blocks": 6291649,
+    "bytes_with_reserve": 26844336128,
+    "volume_uuid": "1B4CEC84-35B3-4AAD-88D0-200DD0956637",
+    "scope": "First-install candidate only. Read-only Mac mount confirmed all three firmlink targets. No native boot or persistence validation."
+  },
   "historical_4_gib_seed": {
     "path": "E:/codex/2026-11-01/ni/work/piano-macos-latest/out/inputs/k273-native/scratch-data.img",
     "file_sha256": "f87d2ec60a58dba0a1243dbf3bb2353c002c2e50510a8462162d8f4622b44e4a",
