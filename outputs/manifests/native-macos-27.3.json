@@ -18,6 +18,13 @@
     "host_verification": "Android v2 field comparison and release manifest payload hash checks passed",
     "device_status": "pending ABL write-path audit and hardware qualification"
   },
+  "maintenance_manual_exit_candidate": {
+    "path": "D:/Temp/piano-v110-ranges-bc75e4c7-38d0-4bd0-8eb7-f04886abad71/boot-ram-maintenance-manual-exit.img",
+    "bytes": 49164288,
+    "sha256": "932be704d5450fe7fbe722d074a96c2764862627862496ad7dd82fd82d1799e2",
+    "initrd_sha256": "f769360787673cc0e301ae038db03de822e7f3438c1ef878969b303d06b71d1d",
+    "device_status": "host candidate only; pending ABL audit and hardware qualification"
+  },
   "abl_source_review_2026_11_20": {
     "repository": "https://git.codelinaro.org/clo/la/abl/tianocore/edk2.git",
     "tag": "KERNEL.PLATFORM.3.0.r23-02400-kernel.0",
