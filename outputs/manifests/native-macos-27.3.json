@@ -920,6 +920,27 @@
     "changed_or_built": false,
     "reuse_decision": "preserve_forensics_only_not_locked_source"
   },
+  "upstream_native_boot_report_recheck_2026_11_20": {
+    "repository_main": "2438556c77c90c22c7b76e57eb8b40c44b35f1af",
+    "evidence_source": "README.md and docs/persistent-boot.md at the exact baseline",
+    "maintainer_reports_macOS_27_3_desktop": true,
+    "maintainer_reports_persistent_install": true,
+    "maintainer_reported_install_is_macOS_only": true,
+    "maintainer_reports_restart_panic": true,
+    "preserves_current_hyperos_3_0_309": false,
+    "android_macos_round_trip_evidence": false,
+    "locally_reproduced": false,
+    "evidence_class": "upstream maintainer report; not independently verified on the current device"
+  },
+  "mac_k27_source_availability_recheck_2026_11_20": {
+    "checkout_head": "2438556c77c90c22c7b76e57eb8b40c44b35f1af",
+    "checkout_worktree_clean": true,
+    "checkout_origin_main": "286f5a594563f863aa448ab21c8d160fdcb95eba",
+    "locked_k27_git_object_present": false,
+    "PIANO_K27_TREE_configured": false,
+    "other_codex_git_checkouts_found": 0,
+    "changed_or_built": false
+  },
   "droidvm_to_native_transferability": {
     "display": "NativeGopDisplay reuses the VM-era display kext model but replaces virtio-gpu scanout with the piano GOP framebuffer",
     "gpu": "plugin/Turnip lineage reused; native transport is physical Adreno 830 ABI v2; VM v1 ABI is incompatible",
