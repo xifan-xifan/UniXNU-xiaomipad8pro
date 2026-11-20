@@ -142,11 +142,11 @@
       "parse slot-retry-count:a as an integer in the AOSP 3-bit range 0-7",
       "before reboot require current-slot=a, slot-successful:a=yes, slot-unbootable:a=no",
       "require slot-retry-count:a unchanged from the recorded abl-check",
-      "check snapshot-update-status=none separately in Android userspace Fastboot"
+      "require is-userspace=no and snapshot-update-status=none at both ABL checks"
     ],
     "test": "tooling/persist/test-abl-state.py",
     "result": "PASS on UbuntuPiano with fake Fastboot responses",
-    "scope": "snapshot-check is a separate read-only preflight; ABL checks retain their slot and retry validation"
+    "scope": "ABL transport and snapshot gates passed host fixtures. The individual ABL getvars were verified on the tablet. The full script has not run on-device."
   },
   "stock_abl_fastboot_observation": {
     "product": "piano",
