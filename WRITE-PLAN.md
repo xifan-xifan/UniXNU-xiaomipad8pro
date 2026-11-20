@@ -44,3 +44,5 @@ The official GPT template matches LUN 0 geometry after adjusting the userdata en
 - The plan cannot be executed until the exact image set, free-space/layout proof, recovery set, and write-specific hashes are recorded in the manifest.
 
 Before approving boot-triplet rollback, run tooling/persist/verify-android-rollback.py against the selected capture directory. Both retained capture directories passed. Substituting the official init_boot under the captured filename failed the hash check.
+
+The post-write readback transport remains unqualified. Inspection of the pinned Qualcomm reference command source and the decompressed stock ABL strings found no `fetch` command marker. This search cannot establish the device command set. Qualify a read-only path for all three complete partitions before relying on this check. The host-only ABL slot fixture and offline verification of both retained Android triplets passed on 2026-11-20.
