@@ -283,6 +283,8 @@ def test_tablet_sh(tmp):
     data = disk.read_bytes()
     check(run('hash', dev, 2, 3)['sha256'] == hashlib.sha256(data[2 * B:5 * B]).hexdigest(), 'hash DEV SKIP COUNT')
     check(run('hash', dev, 1, 2, 8192)['sha256'] == hashlib.sha256(data[8192:3 * 8192]).hexdigest(), 'hash with BS')
+    failure = run('hash', dev + '.missing', 0, 1)
+    check('error' in failure and 'sha256' not in failure, 'failed hash read returns no digest')
     check(run('peek', dev, 1, 16, 8)['hex'] == data[B + 16:B + 24].hex(), 'peek')
     check(run('zero-sha', 2)['sha256'] == hashlib.sha256(bytes(2 * B)).hexdigest(), 'zero-sha')
     expect = bytearray(data)

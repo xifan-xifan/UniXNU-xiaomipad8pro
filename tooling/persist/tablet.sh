@@ -87,7 +87,13 @@ map)
 	;;
 hash)   # from the medium: the page cache is dropped first
 	sync; { echo 3 > /proc/sys/vm/drop_caches; } 2>/dev/null
-	dd if="/dev/$1" bs="${4:-4096}" skip="$2" count="$3" 2>/dev/null | sha256sum | cut -d' ' -f1 | sed 's/^/sha256=/'
+	status=$(mktemp "$P/hash.XXXXXX") || die 'cannot create hash status file'
+	digest=$({ dd if="/dev/$1" bs="${4:-4096}" skip="$2" count="$3" 2>/dev/null; echo "$?" > "$status"; } | sha256sum)
+	hash_rc=$?
+	read_rc=$(cat "$status")
+	rm -f "$status"
+	[ "$read_rc" = 0 ] && [ "$hash_rc" = 0 ] || die 'cannot hash requested device region'
+	printf 'sha256=%s\n' "${digest%% *}"
 	;;
 zero-sha)
 	dd if=/dev/zero bs="${2:-4096}" count="$1" 2>/dev/null | sha256sum | cut -d' ' -f1 | sed 's/^/sha256=/'
