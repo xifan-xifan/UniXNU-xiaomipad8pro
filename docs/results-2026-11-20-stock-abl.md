@@ -1,0 +1,3 @@
+# Stock ABL inspection (2026-11-20)
+
+Read `images/abl.elf` from the retained HyperOS 3.0.309 archive on the Mac. The 335,672-byte ELF has SHA-256 `0ab1245367d84bd4c16418106cefd8884a3e2fdaeab5dcf6584455a7d50e2148`. Its LZMA-guided section decoded to 1,179,848 bytes. The decoded data contains fastboot, ramdisk and vendor_boot strings. The package hash identifies this offline sample. Active-slot ABL identity, ramdisk selection and possible persistent writes during temporary boot remain unverified. String inspection cannot establish the handler control flow or rule out writes through a protocol pointer.
