@@ -1412,7 +1412,10 @@
     "userdata_by_name": "sda34",
     "metadata_by_name": "sda20",
     "virtual_ab": true,
-    "raw_geometry_read": false,
+    "raw_geometry_read": true,
+    "userdata_start_4k_lba": 29057024,
+    "userdata_size_4k_sectors": 967360472,
+    "boot_triplet_readback": "matches readonly_device_captures",
     "device_state": "android_only_read_only",
     "evidence": "docs/results-2026-11-20-connected-baseline.md"
   },
