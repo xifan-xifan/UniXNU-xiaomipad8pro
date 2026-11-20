@@ -160,3 +160,5 @@ The independent positioned kernel lacks the owner startup symbols checked with n
 A retained Piano driver submodule contains the three verified volume interfaces and calls the UFS provider during media lookup. Its exact source identity and the remaining verified-root build dependency are in [the volume resolver audit](docs/results-2026-11-20-volume-resolver.md).
 
 The retained VerifiedRoot kit passed all seven host test groups under UbuntuPiano. The report and test scope are in the volume resolver audit.
+
+The host SHNGROOT manifest generator can now describe v2 policy table objects such as OS.vroot. Fixture checks verified v1 and v2 encoding, byte lengths, hashes and duplicate rejection. The 27.3 image assembler still emits v1 and the deployment still needs signed policies paired with the final root volumes.
