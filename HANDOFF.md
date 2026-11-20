@@ -59,6 +59,8 @@ The local iPadOS history points to a same-model upstream home-screen report (iPa
 
 ## Next actions
 
+- The [draft WRITE-PLAN](WRITE-PLAN.md) records the offline LUN 0 ranges and the limits of GPT rollback after F2FS tail overwrite. Final image hashes, stock recovery rehearsal, and explicit approval remain pending.
+
 - Host reproducibility update: GNU mtools 4.0.50 is built in WSL and in a temporary Mac prefix; on the Mac, `test-data-store.py` and `test-k273-only.py` both pass with their ESP fixture paths enabled. The persistence suite's remaining red cases are Linux/test-fixture limitations (`F_NOCACHE`, fake sysfs size, and expected backup-stop continuation), not tablet results. Mac host checks passed on 2026-11-19 under isolated CPython 3.11.18. Rerun staging tests 4–7 once the locked k27 tree is available. See `REPRODUCIBILITY.md` for test-by-test results.
 - F2FS storage research: upstream f2fs-tools `83fd39a` offline shrink compiled and passed a basic synthetic shrink/grow exercise in `UbuntuPiano`; a checkpoint warning and lack of payload readback/crash testing limit the result. The tablet's Android feature set is not matched, so no device shrink or WRITE-PLAN follows from this host test. See `docs/results-2026-11-19-f2fs-tools.md`.
 - External storage research: USB mass storage is included in a gated host-stack build, but its first tablet probe and stick-mount test remain unrun; NativeUfs root and NativeRamBlock persistent Data still depend on UFS. Do not treat USB as a current no-GPT solution. See `docs/results-2026-11-19-storage-backends.md`.
