@@ -13,21 +13,27 @@ This document defines the gate before any GPT, boot, ESP, root, Data, or boot-tr
 5. Add a switching wrapper that checks Fastboot product, unlock state, A slot, success bit, retry count, partition sizes, input hashes, and post-write whole-partition readback. Preserve the checked A-slot triplet and GPT boundary captures.
 6. Validate a RAM-only diagnostic image and every firmware/configuration path. The final FD must be proven not to fall through to UFS configuration when the RAM payload is absent.
 
-## Planned write order after approval
+## Candidate layout and execution gates
 
-1. Enter ABL Fastboot and record product, serial, slot, success bit, retry count, userspace state, partition sizes, and current hashes.
-2. Write only the explicitly approved target regions. Never write XBL, ABL, TZ, HYP, VBMeta, DTBO, persist, firmware/calibration, any B partition, or userdata without a separate approved plan.
-3. Read back every written region byte-for-byte and compare against the intended hashes before rebooting.
-4. Keep the device in Fastboot for a RAM diagnostic boot. Capture pstore, USB console, root, Data, mount, and userland write paths.
-5. If diagnostic acceptance passes, perform the approved persistent layout transition with GPT primary and backup tables written as one validated pair. Read back both tables and run `sgdisk -v`.
-6. Verify the macOS root/Data pair, seed binding, ESP selector, A-slot success bit, and retry count. Reboot only after all checks pass.
-7. Test Android recovery using the verified 3.0.309 set, then read back the same state and verify slot success/retries. Repeat macOS to Android and Android to macOS twice.
-8. Test normal restart, hard reset, file write followed by reboot, three cold starts, and required desktop, input, network, audio and video checks.
+The offline GPT study uses 4 KiB sectors and proposes these inclusive LUN 0 ranges. See [the stock recovery and storage study](docs/results-2026-11-20-storage-layout-recovery.md) for its CRC and rollback evidence.
+
+| Region | First LBA | Last LBA |
+|---|---:|---:|
+| Shortened userdata | 3,632,128 | 102,269,695 |
+| macOS root | 102,269,696 | 107,512,575 |
+| macOS Data | 107,512,576 | 124,289,791 |
+| ESP | 124,289,792 | 124,551,935 |
+
+The last three regions overlap the current userdata partition. The current encrypted F2FS filesystem must never be mounted against a shortened block device until a qualified migration or recreation procedure has completed. Restoring the stock GPT restores partition geometry only. If any writes replace the existing F2FS tail, restoring geometry cannot recover those bytes. Under the no-backup instruction, a layout that overwrites those bytes requires a verified stock reinitialization procedure and explicit approval of the resulting data loss.
+
+The diagnostic boot gate comes before any device write. Once the temporary firmware path is qualified, test only the diagnostic stages that can run with the stock layout. A desktop test requires the root storage expected by its matched image set. If that storage requires persistent preparation, finalize the affected ranges, pre-write evidence, readback hashes, and failure recovery before requesting approval. The provisional ranges above do not authorize any write.
+
+After authorized storage preparation and successful desktop testing, qualify the paired boot images, ESP and Data binding before installing a persistent selector. Verify the A-slot success and retry state before and after the switch, then record three cold starts, two Android/macOS round trips, Data readback after reboot, normal restart, hard-reset recovery and the v2 daily-use checks.
 
 ## Rollback
 
 - A failed preflight or readback aborts before reboot.
 - A failed RAM diagnostic returns to ABL Fastboot and uses no persistent write.
 - A failed persistent step restores the immediately preceding verified region in reverse dependency order, then reads it back before reboot.
-- Android recovery restores the verified A-slot boot triplet and approved GPT/root regions only. It does not erase userdata or use `flash_all.sh`.
+- Boot-triplet rollback and full stock-layout recovery are separate procedures. Boot-triplet rollback restores the verified Android A-slot images. Full stock-layout recovery may also require restoring both GPT copies and reinitializing `/data` and `/metadata` after displaced userdata sectors have been overwritten. Qualify the exact stock recovery sequence and its vendor hooks before approval. The wholesale `flash_all.sh` script is outside this plan.
 - The plan cannot be executed until the exact image set, free-space/layout proof, recovery set, and write-specific hashes are recorded in the manifest.
