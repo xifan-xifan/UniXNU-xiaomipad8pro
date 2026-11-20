@@ -1536,6 +1536,12 @@
     "reference_verifier_failures": 0,
     "mailbox_base": "0x9cb00000",
     "mailbox_size": "0x700000",
+    "menu_only_device_readback": {
+      "bytes": 7340032,
+      "sha256": "9517a0311440b8e0bc75c6afdaa01a24726d1bbb58518688829304f749c69d86",
+      "xnu_header_found": false,
+      "evidence": "docs/results-2026-11-21-mailbox-readback.md"
+    },
     "device_tested": false
   },
   "native_readonly_collection_2026_11_20": {
