@@ -142,6 +142,7 @@
       "OS": 3538432,
       "SystemOS": 1572864
     },
+    "assembler_preflight": "54539b7 passed against both retained Mac inputs and rejected a same-size stale table in a host fixture",
     "status": "host readback passed; unsigned hash tables, unshimmed SystemOS"
   },
   "target": {
