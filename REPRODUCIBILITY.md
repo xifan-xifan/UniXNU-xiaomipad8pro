@@ -100,3 +100,5 @@ Read-only follow-up on the existing 52,839,244,759-byte `F:\piano-backup\data-da
 ## Reproduction gate
 
 **Not reproducible yet.** Apple `26C5035r` payload inputs are now located and hash-checked, but the blocking inputs remain the exact local k27 tree and generated build state, a complete device-matched firmware/calibration and userland set, a native seed/root, verified signing/boot profile, and missing Mac host tools. Do not download duplicates or mix newer pins into this locked set.
+
+The device repository recheck on 2026-11-20 found `main` at `2438556c77c90c22c7b76e57eb8b40c44b35f1af`, with no tags or releases. The SorasakiHinaHusband fork at `7bbcdca02ec1501d5268da8f8a1893b6b3eaaf58` returned a complete 1,261-entry tree with no `systemos-shims`, `mount` or `fsck` path. Both locked commit queries returned HTTP 422 there. Upstream PR #2 at `7228bb953ad8ed1817cd2324166af90f0abb439d` changes only the packaging workflow, its documentation and the dependency fetch script. The PR explicitly identifies the local k27 source as an unavailable CI input and reports no execution beyond firmware packaging. Keep the existing pins.
