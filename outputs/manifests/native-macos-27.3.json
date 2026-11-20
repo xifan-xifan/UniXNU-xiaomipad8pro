@@ -46,7 +46,8 @@
     "bytes": 49164288,
     "sha256": "932be704d5450fe7fbe722d074a96c2764862627862496ad7dd82fd82d1799e2",
     "initrd_sha256": "f769360787673cc0e301ae038db03de822e7f3438c1ef878969b303d06b71d1d",
-    "device_status": "host candidate only; pending ABL audit and hardware qualification"
+    "device_status": "RAM-booted on HyperOS 3.0.309 tablet; USB NCM, A-slot whole-partition readback and return to HyperOS verified",
+    "device_result": "docs/results-2026-11-21-maintenance-ram-boot.md"
   },
   "abl_source_review_2026_11_20": {
     "repository": "https://git.codelinaro.org/clo/la/abl/tianocore/edk2.git",
