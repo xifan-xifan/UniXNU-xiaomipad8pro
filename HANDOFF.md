@@ -196,3 +196,5 @@ The locked core's build-xnu-4k-baseline.sh names the optional provider libBootPr
 The frozen independent XNU config enables union mounts and already calls the owner preparation hook before launchd. The device NativeRamBlock also supplies the typed Data lookup ABI. See [SystemOS union and Data provider checks](docs/results-2026-11-20-systemos-provider-checks.md) for the paired manifest and APFS request checks still required.
 
 The paired boot manifest publisher compiled on the Mac with the frozen arm64e recipe. Update its caller and definition together when integrating the authenticated SystemOS mount. See [paired manifest compile probe](docs/results-2026-11-20-paired-manifest.md).
+
+The positioned kernel host link passed with a one-time NativeUfs authenticator registration interface. The direct link identified 43 Apple storage imports that require NativeUfs to remain a collection member. See [paired manifest and kernel link results](docs/results-2026-11-20-paired-manifest.md).
