@@ -1,0 +1,3 @@
+# Diagnostic firmware policy rebuild (2026-11-20)
+
+The diagnostic patch removes the filesystem policy registration from the locked Silicium boot manager. Source application and firmware build passed. The decompressed FD contains the complete generated 5,103,616-byte FVMAIN. The repacked image preserves the prior shim, DTB and menu payload and has a recomputed Android boot header ID. The Ubuntu reference verifier reports zero failures. Staging artifacts and logs are under `/tmp/piano-ram-build.0YIaUj/policy-build.fn26ff0_/` in UbuntuPiano. Generic BDS and stock ABL remain open. Device validation is pending.
