@@ -422,7 +422,10 @@
     "fd_sha256": "bfc2417a0f9d98d315193986a4dd7668fefc151040b3f29f43accf9b87d94bf1",
     "image_sha256": "40482bc38d1566cddc1c4b74dbf9004a616355581f99e399feaf496004aa6dd5",
     "reference_verifier_failures": 0,
-    "device_tested": false
+    "device_tested": true,
+    "device_result": "ABL accepted the image; menu and execution stage unobserved",
+    "recovery_result": "HyperOS OS3.0.309.0.WPYCNXM booted on slot A; slot successful, bootable, six retries and no pending snapshot",
+    "evidence": "docs/results-2026-11-21-diagnostic-boot-recovery.md"
   },
   "ram_filesystem_policy_patch": {
     "path": "firmware/diagnostic/ram-no-filesystem-policy.patch",
