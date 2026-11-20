@@ -110,6 +110,19 @@ The kernel is a host sizing artifact. The mac17j layout check failed. [Measureme
 
 The Apple clang object checkpoint archive SHA-256 is `3c04ed4434e30a079fd604872334c63d4d4d846229b7078f296e7b679c42e09b`. [Mac object verification](../docs/results-2026-11-20-mac-k27-objects.md).
 
+## Mac native kext objects, 2026-11-20
+
+| Local artifact | SHA-256 |
+| --- | --- |
+| PianoBacklight.o | `b38bcf5384aaa595cad11ab90fcf594c9844569c2aa2b69f976c1267b73ec634` |
+| NativeKextGlue.o (shared by the three kexts) | `0c8a17d0da036f256a89657e9e41841d2f86014ad57427431c27408329b2e68a` |
+| DpuFlip.o | `49c6c1ff1382245fa3690ce7a8220652cff109b58bd3aaec29d4e87b1986f9e0` |
+| DpuSlices.o | `da2aaf95fe53c73c30c886885e15d46da520a4e6ba78950a21a692fd64060fb6` |
+| PianoDpu.o | `d3495c3ae5ef61e6ae424ceecf9c8f0bb9abc1475a625027b4c27bc45f1a0576` |
+| NativeAES.o | `04df3b94746f41bfe08607833bf4721d53073018d1bc8ade40a2f5a19d64bccf` |
+
+All objects have subtype `0xc0000002`. [Build evidence](../docs/results-2026-11-20-mac-native-drivers.md).
+
 | Local artifact | SHA-256 |
 | --- | --- |
 | Mac external archive build inputs | `7488a65a0fc7637bf5905011bfb8e5bdac6fb56e8e8596ac5a0aea6faaf6fb12` |

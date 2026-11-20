@@ -2,9 +2,9 @@
 
 Audit dates: 2026-11-19 and 2026-11-20. Execution baseline: `lenzhang/UniXNU-xiaomipad8pro` commit `2438556c77c90c22c7b76e57eb8b40c44b35f1af`, targeting macOS 27.3 build `26C5035r`.
 
-The independent host build links from a frozen local XNU source archive, generated headers, toolchain and external libraries. The Apple clang relink passes 26C5035r mac17j segment layout after a 32 KiB boundary adjustment. The [KC preflight](docs/results-2026-11-20-mac-k27-kc-preflight.md) resolves retained Apple pointer targets for the configured device profile. Driver object linking and full kernel collection validation remain open. The [dated result](docs/results-2026-11-20-independent-k27.md) records the method, input digests and remaining gaps.
+The independent Mac build links from frozen local XNU sources, generated headers, toolchain and external libraries. Apple clang rebuilt the external archives and relinked the kernel; it passes 26C5035r mac17j segment layout after a 32 KiB boundary adjustment. The [KC preflight](docs/results-2026-11-20-mac-k27-kc-preflight.md) resolves retained Apple pointer targets for the configured device profile. Three native kexts now compile and their host suites pass, but the full native collection is not built. The [driver result](docs/results-2026-11-20-mac-native-drivers.md) records its compiler compatibility adjustment and object hashes.
 
-The [Mac object checkpoint](docs/results-2026-11-20-mac-k27-objects.md) records a second compiler target with all 1,093 objects built. Linking and the layout measurement for that target are pending.
+The earlier [Mac object checkpoint](docs/results-2026-11-20-mac-k27-objects.md) is superseded by the later Mac kernel link and KC preflight. Its object archive remains the frozen input record.
 
 ## Upstream comparison
 

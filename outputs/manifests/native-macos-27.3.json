@@ -173,8 +173,31 @@
     "device_tested": false,
     "evidence": "docs/results-2026-11-20-mac-k27-kc-preflight.md"
   },
+  "mac_native_driver_build_2026_11_20": {
+    "repository_commit": "2438556c77c90c22c7b76e57eb8b40c44b35f1af",
+    "xnu_source_sha256": "119dc3f35273084c1629d2fc7744442fb11b0c47638d340c17e7e38d2ee41576",
+    "recipe_archive_sha256": "f687af31008c76d57978a0712e7c6ec8f3c08dd60acbda5deef2ffbf02437c1d",
+    "compiler": "Apple clang 17.0.0 (clang-1700.0.13.5)",
+    "native_descriptors_total": 26,
+    "drivers_built": ["PianoBacklight", "PianoDpu", "SoftwareAES"],
+    "objects_verified_arm64e": 8,
+    "host_tests_passed": ["PianoBacklight", "PianoDpu"],
+    "remaining_drivers_unbuilt": 23,
+    "kc_linked": false,
+    "device_tested": false,
+    "log_sha256": "0d29f7ddf2f736b78c85a28fdb643783f4055fae8884bcd305436f012050c89e",
+    "result_sha256": "d2b9f17d2b5e1622d87aaef33ee07833afca0d008d435407c053864354933fb4",
+    "evidence": "docs/results-2026-11-20-mac-native-drivers.md"
+  },
+  "userdata_state_owner_report_2026_11_20": {
+    "report": "HyperOS 3.0.309 was factory-reset before this task; owner says no personal data is present",
+    "device_reread_by_agent": false,
+    "tablet_data_backup_created": false,
+    "userdata_partition_still_occupies_lun0_extent": true,
+    "effect": "does not establish free GPT space or authorize partition/flash writes"
+  },
   "build_blockers": [
-    "native kext objects and full KC not linked; driver and kernel ABI compatibility unqualified",
+    "23 of 26 native kexts remain unbuilt and full KC not linked; driver and kernel ABI compatibility unqualified",
     "local k27 pin 11ac316b789d81fc9f734e15645456f536c05141 and inner XNU commit de16623d957cccff6dfb78d8eca4a79842af9702 unavailable",
     "no qualified internal root/Data layout; current NativeUfs root and NativeRamBlock persistent store are UFS-specific",
     "no matched native Data seed/root image or device signing configuration"

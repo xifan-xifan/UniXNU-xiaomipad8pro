@@ -1,11 +1,12 @@
 # Native macOS Deployment Handoff
 
-Updated 2026-11-20. The independent Mac kernel links and passes the 26C5035r mac17j segment layout check. The preflight for the 26-driver profile also resolves the retained Apple kext pointer targets. Native driver compilation and final kernel collection validation are the next build gates. The objective remains deployment on the tablet while preserving HyperOS 3.0.309 and verifying switching and recovery.
+Updated 2026-11-20. The independent Mac kernel links and passes the 26C5035r mac17j segment layout check. The preflight for the 26-driver profile resolves retained Apple kext pointer targets. Apple clang has compiled three native kexts with their host suites passing; the final collection and remaining driver objects are open. The owner reports HyperOS 3.0.309 was factory-reset immediately before this task and contains no user data; no tablet data backup was made. The objective remains deployment while preserving HyperOS and verifying switching and recovery.
 
-The Mac archive inputs, positioned kernel and isolated KC builder are preserved under `out/k27-independent-20261120/host-run/`. Resume from the [KC preflight](docs/results-2026-11-20-mac-k27-kc-preflight.md). The exact author k27 pin remains unavailable. Keep this independent build on its frozen inputs.
+The Mac archive inputs, positioned kernel, isolated KC builder, and three native kext builds are preserved under `out/k27-independent-20261120/host-run/`. Resume from the [driver build result](docs/results-2026-11-20-mac-native-drivers.md). The exact author k27 pin remains unavailable. Keep this independent build on its frozen inputs.
 
 ## Current state
 
+- **User data:** the owner reports that HyperOS 3.0.309 was factory-reset before work began and contains no personal data. This is an owner report, not a new device-side verification. No tablet data backup was made.
 - **Upstream:** live GitHub `refs/heads/main`, queried through `ssh mac-lan` on 2026-11-19, resolves to the requested baseline `2438556c77c90c22c7b76e57eb8b40c44b35f1af`. The Mac checkout's local `origin/main` ref is divergent at `286f5a594563f863aa448ab21c8d160fdcb95eba`; its 14 commits after the baseline change only six audit/documentation files, not source or dependency pins. Do not treat that local ref as the live upstream head. Details are in `REPRODUCIBILITY.md` and the manifest.
 - **Alternate upstream evidence:** current UniXNU device records list a separate OnePlus-13T-derived piano port (`donyanchen/UniXNU-piano`, revision `a596eb2e`) reporting staged payload publication and a UEFI menu, but explicitly no captured XNU boot. The separate code002 records are CI-only/not booted. These are research leads, not replacements for this repo's 27.3 source set; details and exact revisions are in `REPRODUCIBILITY.md`.
 - **Tablet:** read-only ADB audit confirms `piano`, `SM8750P`, `OS3.0.309.0.WPYCNXM`, Android 16, unlocked bootloader, root available, active slot A. No device writes or reboot occurred.
@@ -27,8 +28,8 @@ The Mac archive inputs, positioned kernel and isolated KC builder are preserved 
 
 1. **Read-only baseline and source lock:** device identity and upstream commit confirmed; all six GPTs validated; A-slot boot triplet and misc read-only captured twice and reread-verified; Fastboot slot state/capacities read and normal Android return confirmed. Full recovery qualification remains open.
 2. **Reproducibility and migration reports:** first versions created in this change; missing inputs and stock-to-upstream layout differences recorded.
-3. **Complete rollback set and write design:** the official 3.0.309 OS package is now verified; still blocked on the matched macOS image set, a concrete storage plan, and write-specific rollback/recovery design. No tablet data backup is planned.
-4. **Kernel and matched build.** All 1,093 kernel objects compiled and linked for the independent candidate. The Apple clang relink passes the segment check with a 32 KiB boundary shift. Native patch coverage, driver ABI and linking, matched storage, and userland/signing remain open.
+3. **Complete rollback set and write design:** the official 3.0.309 OS package and GPT-boundary recovery captures are verified. The owner reports userdata is empty; this has not been independently re-read. A concrete partition layout and write-specific recovery sequence remain open. No userdata backup is planned.
+4. **Kernel and matched build:** the independent Mac kernel and segment layout pass. Three of 26 native kexts are compiled and their host tests pass. Native patch coverage, the remaining driver objects, driver ABI and full KC linking, matched storage, and userland/signing remain open.
 5. **Diagnostic boot and desktop qualification:** not started; storage root dependency must be resolved first.
 6. **Persistence, switching, recovery and daily-use acceptance:** not started; requires an approved concrete write plan and paired image sets.
 
