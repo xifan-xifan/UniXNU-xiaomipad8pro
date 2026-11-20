@@ -304,3 +304,5 @@ The latest public SystemOS source check still found no shim sources or downloada
 The core's pinned VerifiedRoot source is available. Its C parser and OpenSSL provider accepted the signed upstream host fixture and rejected a changed block. See [VerifiedRoot host check](docs/results-2026-11-21-verifiedroot-host.md). Target crypto and final SystemOS policy integration remain pending.
 
 The archived DroidVM Git history contains the legacy mount and fsck shims. Their no-op paths and the hashes of two matching historical SystemOS images are documented in [historical SystemOS provenance](docs/results-2026-11-21-historical-systemos.md). Native filesystem task behavior remains open.
+
+The NativeUfs source audit confirmed separate write paths for development root windows, the Data store and persistent logs. A read-only root build must still account for the latter two paths. The exact launchd filesystem dispatch and target results remain open. [NativeUfs write audit](docs/results-2026-11-21-native-ufs-writes.md)
