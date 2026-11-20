@@ -172,3 +172,5 @@ Mac host assembly passed for the 21,100,494,848-byte SHNGROOT v2 image at /tmp/p
 NativeUfs production findRootLayout accepted the actual Mac SHNGROOT v2 header in an UbuntuPiano host harness with a synthetic 20 GiB linux_rootfs GPT. It classified OS and SystemOS as windows and both vroot tables as objects at their expected offsets and lengths. Harness and input are at /tmp/tmp.CyAC1QKrpJ.
 
 On the Mac, the retained VerifiedRoot signer generated an RSA-3072 policy for the actual 26C5035r OS volume using a host fixture key. OpenSSL verified the signature and the signed table SHA-256 matches the previously generated OS.vroot. The report is /tmp/piano-os-policy-test.4cuYw7/signed/manifest.json. The fixture anchor is for host qualification only.
+
+The same host fixture anchor also signed the unshimmed SystemOS volume. OpenSSL verified the signature and the generated table matched the assembled image table byte for byte. The paired host-only reports are in /tmp/piano-os-policy-test.4cuYw7/signed and /tmp/piano-os-policy-test.4cuYw7/systemos-signed.
