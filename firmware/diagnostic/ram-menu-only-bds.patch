@@ -1,0 +1,42 @@
+--- a/MdeModulePkg/Universal/BdsDxe/BdsEntry.c
++++ b/MdeModulePkg/Universal/BdsDxe/BdsEntry.c
+@@ -734,4 +734,39 @@
+   gBS->CalculateCrc32 ((VOID *)gST, sizeof (EFI_SYSTEM_TABLE), &gST->Hdr.CRC32);
+ 
++  // Dispatch only the UniXNU application from this firmware volume.
++  {
++    EFI_LOADED_IMAGE_PROTOCOL          *Loaded;
++    MEDIA_FW_VOL_FILEPATH_DEVICE_PATH  Node;
++    EFI_HANDLE                         Menu;
++    STATIC CHAR16                      FirmwareMarker[] = L"unixnu:firmware";
++    EFI_GUID                           MenuFile = { 0x9b665204, 0xa133, 0x47a2, { 0x93, 0x96, 0x9e, 0x2b, 0x37, 0x0a, 0x4e, 0x25 } };
++
++    PlatformBootManagerBeforeConsole ();
++    EfiBootManagerConnectAllDefaultConsoles ();
++    PlatformBootManagerAfterConsole ();
++    Status = gBS->HandleProtocol (gImageHandle, &gEfiLoadedImageProtocolGuid, (VOID **)&Loaded);
++    if (!EFI_ERROR (Status) && (DevicePathFromHandle (Loaded->DeviceHandle) != NULL)) {
++      Node.Header.Type = MEDIA_DEVICE_PATH;
++      Node.Header.SubType = MEDIA_PIWG_FW_FILE_DP;
++      SetDevicePathNodeLength (&Node.Header, sizeof (Node));
++      CopyGuid (&Node.FvFileName, &MenuFile);
++      FilePath = AppendDevicePathNode (DevicePathFromHandle (Loaded->DeviceHandle), &Node.Header);
++      if (FilePath != NULL) {
++        Status = gBS->LoadImage (FALSE, gImageHandle, FilePath, NULL, 0, &Menu);
++        FreePool (FilePath);
++        if (!EFI_ERROR (Status)) {
++          Status = gBS->HandleProtocol (Menu, &gEfiLoadedImageProtocolGuid, (VOID **)&Loaded);
++          if (!EFI_ERROR (Status)) {
++            Loaded->LoadOptions = FirmwareMarker;
++            Loaded->LoadOptionsSize = sizeof (FirmwareMarker);
++            Status = gBS->StartImage (Menu, NULL, NULL);
++          }
++        }
++      }
++    }
++    DEBUG ((DEBUG_ERROR, "[Bds] Diagnostic menu returned or failed: %r\n", Status));
++    CpuDeadLoop ();
++  }
++
+   //
+   // Validate Variable.
