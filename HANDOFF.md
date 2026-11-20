@@ -228,3 +228,5 @@ The stock 27.3 build route selects the development NativeUfs policy. The retaine
 The host SHNGROOT v2 capacity check passed for the retained OS and unshimmed SystemOS. Mac `/tmp/piano-root-tables.LLOseQ` retains both block hash tables and `layout/manifest.bin` (SHA-256 `de43725482e8d17354e75ab1e2b79d706301dfe81ee6db6bbeaf4d236a124948`). See WRITE-PLAN.md for capacity and revalidation against the final SystemOS.
 
 For the separate 27.3 root partition, set K273_ROOT_PART=linux_rootfs in the image builder. A WSL fixture verified the default and explicit partition arguments and rejection of invalid or duplicate selectors. Full image and tablet validation remain pending.
+
+The 27.3 RAM builder now rejects a root.json write partition that differs from K273_ROOT_PART. The UbuntuPiano fixture passed for matching and absent write records and rejected the historical linux_data record when linux_rootfs was selected. make-root-image.sh still emits historical geometry for the legacy unsigned layout. The SHNGROOT v2 host layout omits write geometry.
