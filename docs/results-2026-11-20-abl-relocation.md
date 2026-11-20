@@ -1,0 +1,3 @@
+# Qualcomm ABL reference relocation (2026-11-20)
+
+The hash-verified Qualcomm `BootLinux.c` reference computes relocation destinations in `UpdateBootParams()` (lines 229–337). It gets the reserved kernel window from `QueryBootParams()` or platform PCDs, subtracts the page-rounded combined ramdisk size plus a guard page from the window end, then reserves 2 MiB plus a page below the resulting ramdisk address for the device tree. It rejects a device-tree destination at or below the kernel load address. The historical v2 header fields `ramdisk_addr=0x01000000` and `dtb_addr=0x01f00000` therefore do not establish a relocation overlap in this reference implementation. The actual Xiaomi window and corresponding binary path remain unverified.
