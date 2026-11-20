@@ -120,6 +120,20 @@
     },
     "applicability": "research lead only; distinct OS profile, XNU/UEFI pins and image path; no source or artifact imported into the locked 27.3 build"
   },
+  "historical_ram_container_readback": {
+    "path": "E:/codex/2026-11-01/ni/work/piano-macos-latest/out/k27/ram-native-fd3d40-v3/boot-piano-macos-ram-A-bundled.img",
+    "sha256": "1040b921835a14bcfb2bb5a51872613a3dba5ad45e4caa7b0077be9f5eaf1c99",
+    "android_header_version": 2,
+    "page_size": 4096,
+    "kernel_bytes": 3293276,
+    "ramdisk_bytes": 174063616,
+    "dtb_bytes": 147436,
+    "trailing_bytes": 0,
+    "ramdisk_address": "0x1000000",
+    "dtb_address": "0x1f00000",
+    "android_section_id_verified": true,
+    "disposition": "historical offline reference; var-only seed and native UFS root dependency"
+  },
   "target": {
     "macos": "27.3",
     "build": "26C5035r",
