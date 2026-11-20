@@ -12,7 +12,7 @@
     "bytes_with_1_gib_reserve": 5368844288,
     "matching_historical_manifests": 28,
     "host_apfs_readonly": {"volume": "Data", "volume_uuid": "98FD0A57-D19D-4C68-815D-60C6CF1459EB", "top_level": "var-style directories", "detached": true},
-    "qualification": "Historical offline RAM runs configured with data_persist=0. Persistence and compatibility with the independent 26C5035r build remain unverified."
+    "qualification": "Historical offline RAM runs configured with data_persist=0. The volume lacks the private, Library and Users directories required by the pinned full-volume firmlink layout. Excluded from desktop deployment under that layout."
   },
   "maintenance_readback_candidate": {
     "release": "Ubuntu piano v1.1.0",
