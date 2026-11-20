@@ -1364,5 +1364,16 @@
     "implements_post_write_readback": false,
     "operation_attempted": false,
     "reason_not_run": "no matched macOS image set or verified 3.0.309 recovery set; no WRITE-PLAN approval"
+  },
+  "verified_ufs_full_host_collection": {
+    "sha256": "375b54bc4b473dec14e3240531c5b57a75ab5596bea9ebd36a2235e00e4a309d",
+    "bytes": 135806976,
+    "linked_descriptors": 26,
+    "workspace": "UbuntuPiano:/tmp/piano-verified-collection.68bZb6",
+    "link_log": "full-host-link.log",
+    "descriptor_list_sha256": "eb0af6fd7711101b4ce4ef8b5580fe8b20db692799b13f709da76c26e5f2cc28",
+    "object_inventory_sha256": "e265fd0ad27a216c72b54cea3836e6a52dd11631b951eff4584ace06e8cc45f9",
+    "validation": "Locked DarwinBoot parser and synthetic tests passed on host",
+    "limitations": "Fixture signing anchor, unshimmed SystemOS, no-op boot_progress_poll, no tablet execution"
   }
 }
