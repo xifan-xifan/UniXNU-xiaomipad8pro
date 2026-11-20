@@ -1,0 +1,3 @@
+# SystemOS patch compatibility (2026-11-20)
+
+On the retained independent source, `git apply --check` rejected both pinned `offline-owner-systemos-mount.patch` variants. The `xnu` variant failed in `bsd/kern/kern_exec.c` at patch context line 183. The `xnu-12377` variant failed at line 7940. A source search under `bsd` and `iokit` found no `native_verified_block_volume_device` or `native_owner_data_prepare`. The retained manifest publisher also takes two arguments, while the pinned SystemOS patch calls a four-argument publisher. Porting the mount call therefore requires reconciling verified volume lookup, boot manifest publication, and Data setup together. Both checks left the retained tree intact.

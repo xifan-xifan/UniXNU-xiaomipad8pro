@@ -152,3 +152,5 @@ The Qualcomm ABL reference computes the ramdisk and DTB relocation addresses fro
 The retained OS image supplies the original mount, fsck and fsck_apfs binaries. The staged SystemOS contains a byte-identical mount.real and lacks the other three paths. See [SystemOS boot helper comparison](docs/results-2026-11-20-systemos-helpers.md).
 
 The independent kernel's pre-launchd owner root check does not mount SystemOS where the pinned reference does. Check the complete boot path for equivalent mount behavior before pairing that collection with the composed root. See [SystemOS startup audit](docs/results-2026-11-20-systemos-startup.md).
+
+Both pinned SystemOS patch variants fail the independent source apply check. The verified volume resolver and Data setup are absent from the inspected directories, and manifest publication has a different interface. See [SystemOS patch compatibility](docs/results-2026-11-20-systemos-patch-compatibility.md).
