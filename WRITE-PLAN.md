@@ -32,6 +32,8 @@ After authorized storage preparation and successful desktop testing, qualify the
 
 ## Rollback
 
+The official GPT template matches LUN 0 geometry after adjusting the userdata end for disk capacity. Its partition GUIDs and attributes differ from the captured table. Use the verified device captures as the rollback source. [GPT template comparison](docs/results-2026-11-20-stock-gpt-template-comparison.md)
+
 - A failed preflight or readback aborts before reboot.
 - A failed RAM diagnostic returns to ABL Fastboot and uses no persistent write.
 - A failed persistent step restores the immediately preceding verified region in reverse dependency order, then reads it back before reboot.

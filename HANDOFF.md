@@ -26,6 +26,8 @@ The follow-up hash audit tied historical `kc-k273-native.bin` (`663e6ef7…`) to
 
 The local iPadOS history points to a same-model upstream home-screen report (iPadOS 17.7.11, touch and A830 Metal), which is bounded hardware evidence only. That repository's separate macOS 27.3 profile uses another UniXNU checkout/XNU lock and its own README reports the kernel does not link or boot because Piano storage/display board inputs are missing. Do not treat its iPadOS result as a native macOS or k27 build result; details are in the [resumption audit](docs/results-2026-11-20-resume-audit.md).
 
+The offline comparison of the official LUN 0 GPT template confirms matching partition geometry after the capacity adjustment, with 34 differing partition GUIDs and four differing attributes. Use the verified device captures for exact GPT rollback. [GPT template comparison](docs/results-2026-11-20-stock-gpt-template-comparison.md)
+
 ## Current state
 
 - **User data:** the owner reports that HyperOS 3.0.309 was factory-reset before work began and contains no personal data. This is an owner report, not a new device-side verification. No tablet data backup was made.

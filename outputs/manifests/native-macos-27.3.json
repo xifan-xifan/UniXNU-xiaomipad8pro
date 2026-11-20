@@ -459,6 +459,7 @@
       "scope_limit": "first/last 1 MiB only; not full LUN or userdata backups",
       "locations": ["E:\\piano-gpt-boundaries-20261119-075429", "F:\\piano-gpt-boundaries-20261119-075429"],
       "manifest_csv_sha256": "6bed82408cbef8999cf503044046fad7fd5fc503a62a1740d006808c1fd55388",
+      "stock_lun0_template_comparison": "Geometry matches after userdata end adjustment. 34 partition GUIDs and four attributes differ. See docs/results-2026-11-20-stock-gpt-template-comparison.md",
       "free_space_audit": {
         "tool": "tooling/persist/audit-gpt-space.py",
         "capture_sets": ["E:\\piano-gpt-boundaries-20261119-075429", "F:\\piano-gpt-boundaries-20261119-075429"],
