@@ -1447,5 +1447,13 @@
     "os_table_sha256": "f10b77a0b2f0475c296a66c69ec3c1d26598dbca3e6b09751a0b1cc31af533b0",
     "systemos_table_sha256": "51c40b9f9d6453e6ded60fcfc357c7a000a4b21c6597580fe7652ef77bca475b",
     "scope": "Host layout only, with unshimmed SystemOS and unsigned block hash tables"
+  },
+  "native_readonly_collection_2026_11_20": {
+    "sha256": "00f0ba553e16a42021623d9805f6d77ae95ae09d968c761ae1cae4cb6bb06831",
+    "bytes": 135806976,
+    "native_kexts": 26,
+    "darwinboot_parser_passed": true,
+    "native_kext_log_check_passed": true,
+    "device_tested": false
   }
 }
