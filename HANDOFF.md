@@ -302,3 +302,5 @@ The independent bindfs collection replay matched the retained `owner-cryptex-bin
 The latest public SystemOS source check still found no shim sources or downloadable image. The retained Apple SystemOS cryptex DMG matches the comparison tree's hash, but our separately built SystemOS image and UUID do not match its policy. See [latest SystemOS source check](docs/results-2026-11-21-latest-systemos-source.md); do not pair that policy with our image.
 
 The core's pinned VerifiedRoot source is available. Its C parser and OpenSSL provider accepted the signed upstream host fixture and rejected a changed block. See [VerifiedRoot host check](docs/results-2026-11-21-verifiedroot-host.md). Target crypto and final SystemOS policy integration remain pending.
+
+The archived DroidVM Git history contains the legacy mount and fsck shims. Their no-op paths and the hashes of two matching historical SystemOS images are documented in [historical SystemOS provenance](docs/results-2026-11-21-historical-systemos.md). Native filesystem task behavior remains open.

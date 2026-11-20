@@ -1,0 +1,5 @@
+# Historical SystemOS shim provenance (2026-11-21)
+
+The archived DroidVM Git history contains both helper scripts at `4e52db7e58587f4e5f443cf739c09e581619613a`. Their behavior remains the same at `50af2d5c303d51e68a308febe5a4622ca862395e`, immediately before the legacy build removal in `3811d11`. The historical `fsck` returns success for every invocation without checking a filesystem. The historical `mount` returns success for any first argument of `-P` and delegates other calls to `/sbin/mount.real`. The documented assumption is that the DroidVM kernel already mounts Data. These behaviors cannot establish that the native launchd filesystem checks ran or that the two mount phases satisfied their prerequisites.
+
+Two archived `systemos.img` copies under `dl/macos27` and `release27` are both 2,879,389,696 bytes and hash to `5fea3f16f856f3aa1b3f88aa3cedfe75977a36f70a17041d6cf6349ba9a0e4d2`. The hash identifies duplicate copies. Image contents and their provenance relative to the shim commit were not established. The locked native source and its concrete filesystem task behavior remain to be qualified for 26C5035r. No device commands were issued.
