@@ -20,7 +20,13 @@ OS=$1 CX=$2 APP=$3 OUT=$4 SIZE_MIB=${5:-6144}
 D=$(cd "$(dirname "$0")/../.." && pwd)
 . "$D/tooling/k27/k27-tree.sh"
 SHIMS=$PIANO_K27_TREE/overlay/systemos-shims
-[ -d "$SHIMS/sbin" ] || { echo "no $SHIMS/sbin (the k27 tree's boot shims)" >&2; exit 1; }
+for shim in mount fsck; do
+  path=$SHIMS/sbin/$shim
+  [ -f "$path" ] && [ -r "$path" ] && [ -s "$path" ] || {
+    echo "missing, unreadable, or empty native boot shim: $path" >&2
+    exit 1
+  }
+done
 [ -e "$OUT" ] && { echo "$OUT exists" >&2; exit 1; }
 WORK=$(mktemp -d /tmp/k273-systemos.XXXXXX)
 DISKS=()
