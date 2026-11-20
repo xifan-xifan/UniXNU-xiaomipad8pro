@@ -288,3 +288,5 @@ The current HyperOS mount, encryption, and Data capacity reference is in [the re
 The [piano device catalog audit](docs/results-2026-11-21-device-catalog.md) records the repository revisions, a SystemOS media publication timing lead, and the related UEFI AndroidBoot and restore scope. It did not recover the native k27 tree or SystemOS shims.
 
 The [4 KiB host fixture](docs/results-2026-11-21-f2fs-4k-host.md) passed formatting and dry-run fsck at the proposed userdata capacity. Xiaomi Recovery and Android encryption initialization remain to be verified on hardware.
+
+The [GPT rehearsal](docs/results-2026-11-21-gpt-write-rehearsal.md) verified candidate and stock parsing at 4 KiB and restored both original GPT boundaries byte for byte on a host file. The legacy installer still expects the historical layout and a verified backup session.
