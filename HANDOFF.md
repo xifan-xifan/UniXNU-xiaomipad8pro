@@ -34,7 +34,7 @@ The diagnostic-only filesystem policy patch passed application and source checks
 
 The diagnostic-only BDS patch directs execution to the UniXNU application in the BDS firmware volume and stops if it returns or fails. Exact packed BDS bytes and the RAM boot container passed host checks. The firmware, image and logs are in UbuntuPiano under `/tmp/piano-ram-build.0YIaUj/menu-bds-final.ac77mrn7/`. Stock ABL and menu execution remain unverified.
 
-The stock 3.0.309 archive ABL is fingerprinted and its compressed section decodes. The decoded strings give a starting point for checking the temporary boot path. Active-slot identity and write behavior remain open. [Stock ABL inspection](docs/results-2026-11-20-stock-abl.md)
+The stock 3.0.309 archive ABL is fingerprinted and its compressed section decodes. The decoded strings give a starting point for checking the temporary boot path. The A-slot partition prefix matches the complete archive ELF by hash. Temporary boot write behavior remains open. [Stock ABL inspection](docs/results-2026-11-20-stock-abl.md)
 
 ## Current state
 
