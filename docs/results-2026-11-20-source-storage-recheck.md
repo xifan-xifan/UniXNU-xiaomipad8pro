@@ -12,4 +12,4 @@ The existing E: and F: GPT boundary capture sets both passed `tooling/persist/au
 
 No concrete storage WRITE-PLAN can yet specify final ranges: the matching root image, its exact size/hash, compatible Data seed/store sizing, and completed boot/KC set are not available. Online F2FS shrink remains unqualified. Do not begin a desktop boot that assumes the missing UFS root/Data, or a partition/write operation based on the author's historical LBAs or sizes.
 
-The Mac build host is currently unreachable from this workstation because its configured SSH hostname does not resolve. No build process is running. Resume the frozen Mac build when name resolution is restored; preserve the existing inputs and object checkpoints.
+The configured mac-lan alias failed name resolution during this check. The later [resumption audit](results-2026-11-20-resume-audit.md) records successful read-only Mac access through the alternate SSH configuration and the remaining source and image dependencies.
