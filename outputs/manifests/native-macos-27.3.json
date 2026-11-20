@@ -514,6 +514,41 @@
     "device_tested": false,
     "evidence": "docs/results-2026-11-20-native-driver-headers.md"
   },
+  "native_driver_keyboard_checkpoint_2026_11_20": {
+    "drivers_with_objects": 23,
+    "objects_verified": 118,
+    "keyboard_objects": [
+      {
+        "name": "PianoKeyboard.o",
+        "bytes": 152384,
+        "subtype": "0xc0000002",
+        "sha256": "63fa92de8ec6c13a562e55495ea9071d8f2f9dabc4bca90ebc736f020ab38a1d"
+      },
+      {
+        "name": "NativeKextGlue.o",
+        "bytes": 432,
+        "subtype": "0xc0000002",
+        "sha256": "0c8a17d0da036f256a89657e9e41841d2f86014ad57427431c27408329b2e68a"
+      },
+      {
+        "name": "PianoKeyboardFirmware.o",
+        "bytes": 83976,
+        "subtype": "0xc0000002",
+        "sha256": "89225f42a27a1f9cbaaec50ad9e7f8c00f75f724367095d6d0f8548353843a1e"
+      }
+    ],
+    "keyboard_log_sha256": "822c6fa2a08668ea60658b80995a794d649f2cdb48887c2a57bd6695effbf1f2",
+    "keyboard_inventory_sha256": "06bce275bf64836da743b6942210c786cc1f63b52e0902f2574de858f86114a6",
+    "firmware_source_tag": "v1.6.1",
+    "gpu_boot_dtb_sha256": "50636effb5f54306ec0ab9a3061cd163d7f003d8797e04585a33205918856840",
+    "gpu_board_input_check": "passed on WSL with Python 3.12 and dtc",
+    "gpu_firmware_files_matching_pins": 4,
+    "display_probe_objects": 2,
+    "display_probe_target_abi_validated": false,
+    "kc_linked": false,
+    "device_tested": false,
+    "evidence": "docs/results-2026-11-20-native-keyboard-gpu-inputs.md"
+  },
   "live_userdata_audit_2026_11_20": {
     "evidence": "docs/results-2026-11-20-live-userdata.md",
     "hyperos": "OS3.0.309.0.WPYCNXM",

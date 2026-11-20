@@ -8,6 +8,8 @@ The isolated Mac checkpoint is reachable again. The resumed build verified 98 ar
 
 After restoring the family headers and pinned SM8750 kit, the Mac checkpoint has 115 verified objects across 22 drivers. See [the header checkpoint](docs/results-2026-11-20-native-driver-headers.md) for the four remaining build inputs.
 
+The pinned keyboard firmware brought the checkpoint to 23 drivers and 118 objects. The GPU board inputs and firmware matched their pins. Historical ABI 2 display headers also built a separate two-object probe pending target validation. See [the keyboard and GPU input result](docs/results-2026-11-20-native-keyboard-gpu-inputs.md).
+
 ## Current state
 
 - **User data:** the owner reports that HyperOS 3.0.309 was factory-reset before work began and contains no personal data. This is an owner report, not a new device-side verification. No tablet data backup was made.
