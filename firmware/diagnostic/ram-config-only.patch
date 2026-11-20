@@ -1,0 +1,194 @@
+--- a/package/UniXNUPkg/Library/UniXNULib/Config.c
++++ b/package/UniXNUPkg/Library/UniXNULib/Config.c
+@@ -1271,97 +1271,6 @@
+   }
+ }
+ 
+-//
+-// Add an entry for the removable-media loader of every other volume and
+-// return how many were found.
+-//
+-STATIC
+-UINTN
+-AddFallbackLoaders (
+-  IN UNIXNU_CONFIG   *Config,
+-  IN EFI_HANDLE  ImageHandle
+-  )
+-{
+-  EFI_STATUS                 Status;
+-  EFI_HANDLE                 *Handles;
+-  UINTN                      Count;
+-  UINTN                      Index;
+-  EFI_LOADED_IMAGE_PROTOCOL  *Self;
+-  CHAR16                     *SelfPath;
+-  UNIXNU_ENTRY                   *Entry;
+-  UNIXNU_ENTRY                   Saved[3];
+-  UINTN                      Actions;
+-  UINTN                      Found;
+-  CHAR16                     Title[48];
+-
+-  Self     = NULL;
+-  SelfPath = NULL;
+-  if (!EFI_ERROR (gBS->HandleProtocol (ImageHandle, &gEfiLoadedImageProtocolGuid, (VOID **)&Self)) &&
+-      (Self->FilePath != NULL))
+-  {
+-    SelfPath = ConvertDevicePathToText (Self->FilePath, FALSE, FALSE);
+-  }
+-
+-  Status = gBS->LocateHandleBuffer (ByProtocol, &gEfiSimpleFileSystemProtocolGuid, NULL, &Count, &Handles);
+-  if (EFI_ERROR (Status)) {
+-    Count   = 0;
+-    Handles = NULL;
+-  }
+-
+-  //
+-  // The built-in action entries stay at the end of the list.
+-  //
+-  Actions = MIN (Config->EntryCount, ARRAY_SIZE (Saved));
+-  CopyMem (Saved, Config->Entries + Config->EntryCount - Actions, Actions * sizeof (UNIXNU_ENTRY));
+-  Config->EntryCount -= Actions;
+-
+-  Found = 0;
+-  for (Index = 0; Index < Count; Index++) {
+-    if (!UniXNUFileExists (Handles[Index], UNIXNU_FALLBACK_LOADER)) {
+-      continue;
+-    }
+-
+-    if ((Self != NULL) && (Handles[Index] == Self->DeviceHandle) && (SelfPath != NULL) &&
+-        (UniXNUStriCmp (SelfPath, UNIXNU_FALLBACK_LOADER) == 0))
+-    {
+-      continue;
+-    }
+-
+-    Entry = GrowArray ((VOID **)&Config->Entries, &Config->EntryCount, sizeof (UNIXNU_ENTRY));
+-    if (Entry == NULL) {
+-      break;
+-    }
+-
+-    Found++;
+-    UnicodeSPrint (Title, sizeof (Title), L"EFI loader on volume %u", (UINT32)Found);
+-    Entry->Id     = AsciiDup ("removable");
+-    Entry->Title  = AllocateCopyPool (StrSize (Title), Title);
+-    Entry->Type   = UniXNUEntryEfi;
+-    Entry->Volume = Handles[Index];
+-    Entry->Path   = AllocateCopyPool (sizeof (UNIXNU_FALLBACK_LOADER), UNIXNU_FALLBACK_LOADER);
+-  }
+-
+-  for (Index = 0; Index < Actions; Index++) {
+-    Entry = GrowArray ((VOID **)&Config->Entries, &Config->EntryCount, sizeof (UNIXNU_ENTRY));
+-    if (Entry != NULL) {
+-      CopyMem (Entry, &Saved[Index], sizeof (UNIXNU_ENTRY));
+-    }
+-  }
+-
+-  if (Handles != NULL) {
+-    FreePool (Handles);
+-  }
+-
+-  if (SelfPath != NULL) {
+-    FreePool (SelfPath);
+-  }
+-
+-  return Found;
+-}
+-
+-// ---------------------------------------------------------------------------
+-// Top level
+-// ---------------------------------------------------------------------------
+ 
+ STATIC
+ VOID
+@@ -1579,44 +1488,24 @@
+   )
+ {
+   EFI_STATUS                 Status;
+-  EFI_LOADED_IMAGE_PROTOCOL  *Self;
+-  EFI_HANDLE                 *Handles;
+-  UINTN                      Count;
+-  UINTN                      Index;
+-  UINTN                      Pass;
+-  BOOLEAN                    Loaded;
+-  TOML_NODE                  *Root;
+-  CHAR8                      Error[96];
+-  CHAR16                     Label[64];
++  EFI_HANDLE *Handles;
++  UINTN Count;
++  BOOLEAN Loaded;
++  TOML_NODE *Root;
++  CHAR8 Error[96];
++  CHAR16 Label[64];
+ 
+   ZeroMem (Config, sizeof (*Config));
+   Loaded = FALSE;
+-
+-  //
+-  // The volume UniXNU was started from wins; then the boot image's RAM payload; then every other volume.
+-  //
+-  if (!EFI_ERROR (gBS->HandleProtocol (ImageHandle, &gEfiLoadedImageProtocolGuid, (VOID **)&Self))) {
+-    Loaded = TryVolume (Config, Self->DeviceHandle);
+-  }
+-
+-  if (!Loaded && (Config->Error[0] == '\0')) {
+-    Status = gBS->LocateHandleBuffer (ByProtocol, &gEfiSimpleFileSystemProtocolGuid, NULL, &Count, &Handles);
+-    if (!EFI_ERROR (Status)) {
+-      //
+-      // UniXNU-piano: pass 0 tries only the RAM payload's volume, pass 1 every other volume in firmware order. The UFS
+-      // LUNs are published (UFSDxe is APRIORI) before the RAM disk, so without pass 0 a "fastboot boot" image would boot
+-      // the payload of a FAT ESP on UFS instead of its own.
+-      //
+-      for (Pass = 0; Pass < 2 && !Loaded && Config->Error[0] == '\0'; Pass++) {
+-        for (Index = 0; Index < Count && !Loaded && Config->Error[0] == '\0'; Index++) {
+-          if (IsRamPayloadVolume (Handles[Index]) == (Pass == 0)) {
+-            Loaded = TryVolume (Config, Handles[Index]);
+-          }
+-        }
+-      }
+-
+-      FreePool (Handles);
+-    }
++  Status = gBS->LocateHandleBuffer (ByProtocol, &gEfiBlockIoProtocolGuid, NULL, &Count, &Handles);
++  if (!EFI_ERROR (Status)) {
++    for (UINTN Index = 0; Index < Count && !Loaded && Config->Error[0] == '\0'; Index++) {
++      if (IsRamPayloadVolume (Handles[Index])) {
++        gBS->ConnectController (Handles[Index], NULL, NULL, FALSE);
++        Loaded = TryVolume (Config, Handles[Index]);
++      }
++    }
++    FreePool (Handles);
+   }
+ 
+   if (Loaded) {
+@@ -1639,15 +1528,6 @@
+       TomlFree (Root);
+     }
+ 
+-    if (AddFallbackLoaders (Config, ImageHandle) == 0) {
+-      //
+-      // Only the actions are left. Say so instead of showing a menu that
+-      // looks complete.
+-      //
+-      AsciiStrCpyS (Config->Notice, sizeof (Config->Notice), "no boot entry found");
+-      UniXNULog ("config: no boot entry found");
+-    }
+-
+     Config->DefaultIndex = 0;
+     UnicodeSPrint (Label, sizeof (Label), L"built-in configuration");
+     UniXNULog ("config: none found, using built-in configuration");
+--- a/package/UniXNUPkg/Library/UniXNULib/Main.c
++++ b/package/UniXNUPkg/Library/UniXNULib/Main.c
+@@ -74,15 +74,6 @@
+     (gST->FirmwareVendor != NULL) ? gST->FirmwareVendor : L"?",
+     gST->FirmwareRevision
+     );
+-
+-  //
+-  // Storage may not be connected yet, whichever way UniXNU was entered. Started
+-  // from BDS it is because nothing has connected the controllers; started as a
+-  // DXE driver it is because the ramdisk BlockIo is dispatched before
+-  // UniXNURamDiskDxe installs it, so without this the initrd volume never gets a
+-  // SimpleFileSystem and payload discovery reports that no payload exists.
+-  //
+-  UniXNUConnectAll ();
+ 
+   UniXNUConfigLoad (ImageHandle, &Config);
+   UniXNULog (

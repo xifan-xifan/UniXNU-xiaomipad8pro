@@ -104,3 +104,5 @@ Menu-only image: /tmp/piano-ram-build.0YIaUj/menu-image.KdcWfS/boot-piano-uefi-r
 The current diagnostic build omits the Qualcomm extra application include. The rebuilt image is /tmp/piano-ram-build.0YIaUj/menu-no-extra.IYarRw/boot-piano-uefi-ram-menu-isolated.img. Its manifest and verifier log are in that directory. Generic boot option processing and reset still require review.
 
 The --diagnostic-menu image at /tmp/piano-ram-build.0YIaUj/menu-actions.04qt9t passed the Ubuntu reference verifier. Its FAT configuration exposes restart and shutdown only. Built-in fallback and generic BDS are still pending review.
+
+The strict RAM configuration build in /tmp/piano-ram-build.0YIaUj/menu-strict.yAtgPM passed the Ubuntu reference verifier. Apply firmware/diagnostic/ram-config-only.patch to the pinned UniXNU checkout after the ordinary core patches. The menu connects only the RAM payload block handle and skips filesystem EFI fallback discovery. The generic firmware BDS path and tablet behavior remain unverified.
