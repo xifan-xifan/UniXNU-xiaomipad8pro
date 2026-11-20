@@ -204,3 +204,5 @@ The 26-driver host collection now links a NativeUfs module entry that registers 
 The host collection now includes the early Data mount hook for the retained 24 GiB seed. All 26 descriptors linked and DarwinBoot parser tests passed. The seed callback target still requires relocation verification. See [paired manifest and kernel link results](docs/results-2026-11-20-paired-manifest.md).
 
 The deployment manifest now references owner-dispatch.kc with the early Data mount interface. Host parser success does not establish Data mount runtime or write-path safety.
+
+Correction: the upstream macOS 27.3 owner-data-firmlinks patch supplies the required Data mount point, cross-device firmlinks, and cryptex view. Our prior /private/var host probe omits this required path and must not be treated as a desktop candidate. The patch has not yet been qualified against the prepared XNU source.
