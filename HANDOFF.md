@@ -14,6 +14,8 @@ The GPU checkpoint now covers 24 drivers and 172 objects, with zero unresolved G
 
 The video build passed its host suites and import checks. The checkpoint covers 25 drivers and 183 objects. The display declaration probe awaits ABI verification before final collection integration. [Video build result](docs/results-2026-11-20-native-video-build.md)
 
+A host-only collection probe linked all 26 descriptors using provisional display objects. The runtime gates are display field layout, DarwinBoot loading, and device qualification. [Collection link result](docs/results-2026-11-20-native-collection-probe.md)
+
 ## Current state
 
 - **User data:** the owner reports that HyperOS 3.0.309 was factory-reset before work began and contains no personal data. This is an owner report, not a new device-side verification. No tablet data backup was made.

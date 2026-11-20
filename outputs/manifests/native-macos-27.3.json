@@ -574,6 +574,20 @@
     "device_tested": false,
     "evidence": "docs/results-2026-11-20-native-video-build.md"
   },
+  "native_collection_probe_2026_11_20": {
+    "native_descriptors": 26,
+    "provisional_display_objects": 2,
+    "linked": true,
+    "bytes": 135806976,
+    "sha256": "47da294b467a3996ec8277728212566360b428f43292f94bee73533f0c8b72dc",
+    "chained_pointers": 364799,
+    "log_sha256": "caa8ce714fafa8677b4c2558acaf2a0cb692ea5991d0ed1c29f244fda62ddd02",
+    "display_subclass_problem_slots": 0,
+    "display_field_layout_validated": false,
+    "darwinboot_validated": false,
+    "device_tested": false,
+    "evidence": "docs/results-2026-11-20-native-collection-probe.md"
+  },
   "live_userdata_audit_2026_11_20": {
     "evidence": "docs/results-2026-11-20-live-userdata.md",
     "hyperos": "OS3.0.309.0.WPYCNXM",
