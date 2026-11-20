@@ -236,3 +236,5 @@ The root image assembler accepts K273_ROOT_PART=linux_rootfs with an explicit K2
 The Mac assembled `root-v2-unshimmed.img` beside the retained SHNGROOT v2 manifest. Readback matched the manifest, both APFS images and both SHA-256 tables. Full image SHA-256 is `529a2c686cc41c8afb86bc3c6c405645a840d30b80125e1136209dc69b4fc14d`. The proposed placement ends at LBA 107421183 with 91392 blocks free. Final SystemOS and signed policies remain pending.
 
 The 27.3 ESP builder accepts --esp-first-lba for the provisional layout and checks that the ESP does not overlap the supplied Data extent. UbuntuPiano built and read back a fixture at LBA 124289792, and rejected an aligned overlapping placement. The tablet installer still requires separately qualified geometry checks.
+
+The 27.3 ESP builder produced identical images from identical inputs with mtools 4.0.50. The complete maintenance fixture suite passed on the Mac. Next, qualify SystemOS mount and fsck in the composed root namespace. See [ESP host regression](docs/results-2026-11-20-esp-regression.md).
