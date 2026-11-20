@@ -1,0 +1,7 @@
+# Maintenance RAM boot and recovery (2026-11-21)
+
+The frozen maintenance image `D:/Temp/piano-v110-ranges-bc75e4c7-38d0-4bd0-8eb7-f04886abad71/boot-ram-maintenance-manual-exit.img` was checked at SHA-256 `932be704d5450fe7fbe722d074a96c2764862627862496ad7dd82fd82d1799e2` and loaded once with `fastboot boot`. ABL reported `product=piano`, `is-userspace=no`, `snapshot-update-status=none`, current slot A, successful=yes, unbootable=no, and retry count 6 before the load.
+
+The maintenance kernel enumerated a USB NCM host interface and exposed its root shell at `192.168.88.2:2323`. It reported kernel `7.2.15-piano58`, RAM rootfs, UFS `/dev/sda` size `510165778432` bytes, and userdata `/dev/sda34` size `495288561664` bytes. Read-only hashes of the A-slot Android partitions matched the retained captures: `boot_a` 100663296 bytes `7c444a2d6aa930cd79e2d48c569f6c891fbaff054c63fc85c3a57fb61c660ac2`, `init_boot_a` 8388608 bytes `56197797f2ec99870a4e42b7a24bbf88407e4409615aba61f401182f13ea5cdc`, and `vendor_boot_a` 100663296 bytes `7f766f1d728c39d779a3fb7cf0ac1310dac4306cd3b37a98a0143dd4fca5bd23`.
+
+The maintenance shell command terminated when it requested `piano-maint fastboot`; the host then observed ABL Fastboot with unchanged slot/snapshot values. A normal `fastboot reboot` returned to HyperOS `OS3.0.309.0.WPYCNXM` on `_a` with `sys.boot_completed=1`. No flash, erase, GPT, userdata, metadata, ESP, or Android boot-partition write was issued.
