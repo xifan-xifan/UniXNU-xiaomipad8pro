@@ -37,6 +37,7 @@ if [ -n "${K273_VROOT_DIR:-}" ]; then
     table=$K273_VROOT_DIR/$label.vroot
     [ -s "$table" ] || { echo "missing or empty policy table: $table" >&2; exit 1; }
     python3 - "$window" "$table" <<'CHECK_TABLE'
+import hashlib
 import os
 import sys
 
@@ -45,6 +46,16 @@ expected = ((os.path.getsize(window) + 4095) // 4096) * 32
 actual = os.path.getsize(table)
 if actual != expected:
     sys.exit(f"{table}: expected {expected} hash table bytes for {window}, got {actual}")
+with open(window, 'rb') as image, open(table, 'rb') as hashes:
+    for first in range(0, expected // 32, 2048):
+        data = image.read(2048 * 4096)
+        expected_hashes = hashes.read(min(2048, expected // 32 - first) * 32)
+        block_hashes = b''.join(hashlib.sha256(data[i:i + 4096]).digest()
+                                for i in range(0, len(data), 4096))
+        if block_hashes != expected_hashes:
+            sys.exit(f"{table}: hash table does not match {window} starting at block {first}")
+    if image.read(1) or hashes.read(1):
+        sys.exit(f"{table}: input grew during verification")
 CHECK_TABLE
     policy_args+=(--object "$label.vroot=$table")
   done
