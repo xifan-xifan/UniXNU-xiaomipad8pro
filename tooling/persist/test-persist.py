@@ -269,7 +269,7 @@ def fake_tablet(root, pp, argv):
 
 # ---------------------------------------------------------------------------------------------------------------------------
 
-def test_tablet_sh(tmp):
+def test_tablet_sh(tmp, hash_only=False):
     print('== tablet.sh on a scratch file')
     disk = tmp / 'disk.bin'
     disk.write_bytes(os.urandom(64 * B))
@@ -285,6 +285,8 @@ def test_tablet_sh(tmp):
     check(run('hash', dev, 1, 2, 8192)['sha256'] == hashlib.sha256(data[8192:3 * 8192]).hexdigest(), 'hash with BS')
     failure = run('hash', dev + '.missing', 0, 1)
     check('error' in failure and 'sha256' not in failure, 'failed hash read returns no digest')
+    if hash_only:
+        return
     check(run('peek', dev, 1, 16, 8)['hex'] == data[B + 16:B + 24].hex(), 'peek')
     check(run('zero-sha', 2)['sha256'] == hashlib.sha256(bytes(2 * B)).hexdigest(), 'zero-sha')
     expect = bytearray(data)
@@ -663,6 +665,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument('--fake-shell', nargs=2)
     p.add_argument('--keep', type=Path)
+    p.add_argument('--hash-only', action='store_true', help='run the scratch-file hash checks without maintenance assets')
     a = p.parse_args()
     if a.fake_shell:
         sys.stdout.write(fake_shell(a.fake_shell[0]))
@@ -670,10 +673,11 @@ def main():
     tmp = Path(tempfile.mkdtemp(prefix='piano-persist-test-')) if not a.keep else a.keep
     tmp.mkdir(parents=True, exist_ok=True)
     try:
-        test_tablet_sh(tmp)
-        test_session(tmp)
-        (tmp / 'pair').mkdir()
-        test_pair_rule(tmp / 'pair')
+        test_tablet_sh(tmp, hash_only=a.hash_only)
+        if not a.hash_only:
+            test_session(tmp)
+            (tmp / 'pair').mkdir()
+            test_pair_rule(tmp / 'pair')
     finally:
         if not a.keep:
             shutil.rmtree(tmp, ignore_errors=True)
