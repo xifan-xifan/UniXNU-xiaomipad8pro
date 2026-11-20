@@ -316,3 +316,5 @@ The retained USB diagnostic image has its FAT boot sector at file offset 4263936
 The firmware now reads the diagnostic RAM configuration on the tablet. Its FAT driver rejected the undersized 8 MiB FAT32 volume, and FAT16 restored access with the same FD and menu contents. The tablet returned to HyperOS 3.0.309 with unchanged ABL slot values. See [the FAT16 hardware result](docs/results-2026-11-21-ram-config-fat16.md). The next native test still requires audited payload, root and SystemOS pairing.
 
 The generated FAT16 diagnostic container passed the complete Ubuntu reference verification and tablet test. Android returned on slot A with unchanged ABL state. See [the packaging replay](docs/results-2026-11-21-fat16-packaging-replay.md).
+
+Historical fips4b image hashes, distinct November 15 boot observations, and current Mac reachability are recorded in [the fips4b inventory](docs/results-2026-11-21-fips4b-inventory.md).
