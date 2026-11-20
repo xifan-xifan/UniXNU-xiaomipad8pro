@@ -86,3 +86,5 @@ The local iPadOS history points to a same-model upstream home-screen report (iPa
 See [DEVICE-BASELINE.md](DEVICE-BASELINE.md), [REPRODUCIBILITY.md](REPRODUCIBILITY.md), and [MIGRATION-DIFF.md](MIGRATION-DIFF.md). The dated read-only device record is [docs/results-2026-11-19.md](docs/results-2026-11-19.md); the machine-readable source lock is [outputs/manifests/native-macos-27.3.json](outputs/manifests/native-macos-27.3.json).
 
 - The [RAM firmware audit](docs/results-2026-11-20-ram-firmware-audit.md) found UFS fallback during configuration discovery. Qualify variable storage and the final FD's UFS behavior before a RAM boot under the no-persistent-write authorization.
+
+- The independent WSL FD build succeeded with the populated pinned EDK2 feed. Its SHA-256 is in the deployment manifest. Generated VariableRuntimeDxe settings show emulation enabled and a zero reserved-store address in the staging build tree. Device qualification and RAM-only configuration enforcement remain open.
