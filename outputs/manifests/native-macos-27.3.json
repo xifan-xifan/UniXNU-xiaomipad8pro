@@ -451,6 +451,33 @@
       ]
     }
   },
+  "native_driver_resume_2026_11_20": {
+    "drivers": [
+      "ARMPlatformStandIn",
+      "PianoAudio",
+      "PianoBacklight",
+      "PianoBluetooth",
+      "PianoCamera",
+      "PianoDp",
+      "PianoDpu",
+      "PianoPolicy",
+      "PianoPower",
+      "PianoSensors",
+      "PianoThermal",
+      "PianoTorch",
+      "PianoUsbHost",
+      "PianoWifi",
+      "SoftwareAES"
+    ],
+    "objects_verified": 98,
+    "arm64e_subtype": "0xc0000002",
+    "inventory_sha256": "1e14057d405cbab7644105cbd2684e693833d6354886920d235cb2932a95dce3",
+    "logs_archive_sha256": "354ba13be1af932a63624b8ea3b0f057b98e27a1046b26e18d4596bf0ea89c82",
+    "thermal_unresolved_imports": 0,
+    "kc_linked": false,
+    "device_tested": false,
+    "evidence": "docs/results-2026-11-20-native-driver-resume.md"
+  },
   "live_userdata_audit_2026_11_20": {
     "evidence": "docs/results-2026-11-20-live-userdata.md",
     "hyperos": "OS3.0.309.0.WPYCNXM",

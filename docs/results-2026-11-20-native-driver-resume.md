@@ -1,0 +1,7 @@
+# Mac native driver build resumed (2026-11-20)
+
+An existing SSH configuration reached the Mac using its verified host key. The isolated driver checkout and frozen Apple clang 17 inputs were intact. This run verified 98 Mach-O object headers with arm64e subtype `0xc0000002` across 15 of the 26 configured native drivers. The object inventory and logs are under `out/k27-independent-20261120/host-run/`.
+
+Thermal originally imported `___muloti4` from the signed 128-bit multiplication in the NTC polynomial. Its inputs and coefficients are nonnegative and the products fit in 128 bits across the input range. The unsigned calculation preserves the formula. Apple clang rebuilt all four Thermal objects. The thermal, ADC, shared IRQ and uplow host tests passed. The import check against the positioned kernel reported 353 kernel imports, 3 expected library imports and zero unresolved imports. Policy passed 22,267 host checks. Power built 21 objects after its host tests passed.
+
+The missing object sets are NativeUfs and NativeRamBlock (storage headers), PianoDwc3, PianoInput, PianoKeyboard and PianoTouch (HID headers), PianoNullEthernet and PianoWifiEthernet (network headers), NativeGopDisplay (missing reference collection), PianoA830 (Python parser rejects the generator), and PianoVideo (missing FFmpeg). The remaining integration includes matching family headers to the frozen build, the collection link and fixups, and verifying startup and storage on hardware.

@@ -4,6 +4,8 @@ Updated 2026-11-20. The independent Mac kernel links and passes the 26C5035r mac
 
 The Mac archive inputs, positioned kernel, isolated KC builder, and three native kext builds are preserved under `out/k27-independent-20261120/host-run/`. Resume from the [driver build result](docs/results-2026-11-20-mac-native-drivers.md). The exact author k27 pin remains unavailable. Keep this independent build on its frozen inputs.
 
+The isolated Mac checkpoint is reachable again. The resumed build verified 98 arm64e objects from 15 of the 26 configured drivers. The Thermal import check passes after an arithmetic compatibility fix. See [the resumed build result](docs/results-2026-11-20-native-driver-resume.md) for the remaining input gaps.
+
 ## Current state
 
 - **User data:** the owner reports that HyperOS 3.0.309 was factory-reset before work began and contains no personal data. This is an owner report, not a new device-side verification. No tablet data backup was made.
