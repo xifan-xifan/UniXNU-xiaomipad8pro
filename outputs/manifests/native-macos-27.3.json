@@ -7,6 +7,7 @@
     "path": "mac:/tmp/piano-seed-review.HVxAnP/first-install.dbr",
     "workspace_copy": "out/inputs/k273/first-install/scratch-data.img",
     "sha256": "48dbc08d5955a20255268aadc3f79660a62c395a68b358e349bbc3ea8f8b25e0",
+    "raw_sha256": "7ca2f7b65b0c3c121c4660d25b6d802af4cc2680d2f62a305cb16eb3e664b1b9",
     "identity_sha256": "7e9bd39b72da851d9e4174258b3b2eb2277ef74e75fcb42f0bc07d662448e93b",
     "logical_gib": 24,
     "store_blocks": 6291649,
