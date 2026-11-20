@@ -1511,6 +1511,21 @@
     "systemos_table_sha256": "51c40b9f9d6453e6ded60fcfc357c7a000a4b21c6597580fe7652ef77bca475b",
     "scope": "Host layout only, with unshimmed SystemOS and unsigned block hash tables"
   },
+  "native_ufs_register_probe_2026_11_21": {
+    "workspace": "UbuntuPiano:/tmp/piano-probe2.cCVb3GOH",
+    "image": "boot-piano-macos-ram-probe2.img",
+    "bytes": 185733120,
+    "sha256": "0532e78217c660123b710a87513842a7775b7e85774c3628f23499f571aa0fc6",
+    "fd_sha256": "d8a41ebb9f1e54490db012a0d412cfd143cccd8803efa40c9b38043fd9230e96",
+    "dtb_sha256": "ed6e1a3c663fda03e833297170542ad6916791999fc685a6597672a2535ce76b",
+    "kc_sha256": "00f0ba553e16a42021623d9805f6d77ae95ae09d968c761ae1cae4cb6bb06831",
+    "build_record": "build-probe2.json",
+    "verification_log": "verify.log",
+    "reference_verifier_failures": 0,
+    "ufs_probe": 2,
+    "data_persist": 0,
+    "device_tested": false
+  },
   "native_readonly_collection_2026_11_20": {
     "sha256": "00f0ba553e16a42021623d9805f6d77ae95ae09d968c761ae1cae4cb6bb06831",
     "bytes": 135806976,
