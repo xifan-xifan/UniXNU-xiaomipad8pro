@@ -304,6 +304,7 @@
     "scope_limit": "stock OS recovery package only; not a userdata or personal-data backup",
     "archive_verified": true,
     "archive_extracted": false,
+    "stock_boot_triplet": {"extraction_directory": "/tmp/piano-stock-triplet.8aaQYP/piano_images_OS3.0.309.0.WPYCNXM_16.0/images", "boot_matches_captured_a": true, "vendor_boot_matches_captured_a": true, "init_boot_matches_captured_a": false, "stock_init_boot_sha256": "156400bb09dc9a9ab438257c4991c8391a1ffbe22afc47bd9968714c7828cde0", "device_restore_tested": false},
     "restore_script_audit": {
       "flash_all_sh": "writes userdata.img and erases/flashes metadata; not compatible with preserving user data",
       "flash_all_except_storage_sh": "does not write userdata or metadata, but erases boot_ab; flashes firmware, super, boot-chain, misc and recovery partitions; sets slot A and reboots",
