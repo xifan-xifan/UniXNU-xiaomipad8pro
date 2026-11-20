@@ -174,3 +174,5 @@ NativeUfs production findRootLayout accepted the actual Mac SHNGROOT v2 header i
 On the Mac, the retained VerifiedRoot signer generated an RSA-3072 policy for the actual 26C5035r OS volume using a host fixture key. OpenSSL verified the signature and the signed table SHA-256 matches the previously generated OS.vroot. The report is /tmp/piano-os-policy-test.4cuYw7/signed/manifest.json. The fixture anchor is for host qualification only.
 
 The same host fixture anchor also signed the unshimmed SystemOS volume. OpenSSL verified the signature and the generated table matched the assembled image table byte for byte. The paired host-only reports are in /tmp/piano-os-policy-test.4cuYw7/signed and /tmp/piano-os-policy-test.4cuYw7/systemos-signed.
+
+The Mac assembled both 544-byte fixture policy envelopes and their shared public anchor into an arm64e policy object. The required three symbols, the two pointer relocations, and a relocatable link passed. The object is /tmp/piano-policy-object.3k6bzo/policies.o with SHA-256 d12109bf41f59bbbfeca3adbffc3debc264f795b45fa2df69c3a98dd823c65a1. The verified NativeUfs kext and kernel collection link still require qualification.
