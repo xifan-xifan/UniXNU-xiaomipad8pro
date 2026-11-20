@@ -284,3 +284,5 @@ The owner authorized persistent writes within the deployment scope and requested
 The Mac persistence simulation passed with zero failures on the maintainer fixture geometry. See [host persistence regression](docs/results-2026-11-21-persistence-host.md).
 
 The current HyperOS mount, encryption, and Data capacity reference is in [the recovery acceptance baseline](docs/results-2026-11-21-hyperos-recovery-baseline.md).
+
+The [piano device catalog audit](docs/results-2026-11-21-device-catalog.md) records the repository revisions, a SystemOS media publication timing lead, and the related UEFI AndroidBoot and restore scope. It did not recover the native k27 tree or SystemOS shims.
