@@ -226,6 +226,16 @@
     "userdata_partition_still_occupies_lun0_extent": true,
     "effect": "does not establish free GPT space or authorize partition/flash writes"
   },
+  "ram_firmware_variable_audit": {
+    "board_revision": "31545f9392d5f5c2acae14cec2fa3a0aa1de51d4",
+    "mu_silicium_revision": "e51cd877e31c8fbb322032dc4cb6715e83d25ad3",
+    "mu_basecore_revision": "cfb93724a06ff86ff5ba971413368a7809ee42a5",
+    "source_enables_emulated_nv_store": true,
+    "reserved_store_address_package_default": 0,
+    "deployment_fd_verified": false,
+    "device_tested": false,
+    "evidence": "docs/results-2026-11-20-ram-firmware-audit.md"
+  },
   "build_blockers": [
     "local k27 pin 11ac316b789d81fc9f734e15645456f536c05141 and inner XNU commit de16623d957cccff6dfb78d8eca4a79842af9702 unavailable; checked WSL XNU trees are dirty and off-pin",
     "independent host driver checkpoint and parser-passing collection probe are not verified equivalent to the locked native source and have not been loaded on-device",
