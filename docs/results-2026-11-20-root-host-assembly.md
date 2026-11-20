@@ -11,3 +11,7 @@ All three 26C5035r Apple trust-cache inputs matched their manifest digests and p
 The locked BootShim source was recovered by Git object hash and built using the pinned piano firmware geometry. The 192-byte binary has SHA-256 `f7ee5e091c70ece86710bcc99256974a66b41134b5b07d77ceea2cfa9f758d16`. Its ARM64 header size covers the shim and 3 MiB FD. Historical WSL FD copies match each other and the separate EFI binaries contain the expected RAM-payload and memory-window markers. Their original build used a different UniXNU checkout state, so the existing FD still needs provenance verification or a pinned rebuild.
 
 The live A-slot recovery partition matched the 3.0.309 archive recovery image SHA-256 during a read-only ADB check. The user-data boundary change and recovery behavior remain untested on the tablet.
+
+## Cross-port shim check
+
+The public UniXNU-Dizi-Ruan tree at `a87e14fab568a78a6a40b95b96579a1557381783` returned a complete recursive GitHub tree listing with no `mount` or `fsck` shim paths. Its `scripts/build-userdata-root-image.py` packages the OS and SystemOS images byte for byte. The `-noautofsck` flag in that script applies to host-side image attachment. The documented iPadOS boot therefore supplies no shim implementation for the Piano recipe, which installs both files and retains Apple's `mount` as `mount.real`. The retained Mac SystemOS host image still lacks the two required shims. Their native dispatch arguments and exit behavior remain unverified.
