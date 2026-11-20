@@ -6,7 +6,7 @@ This document defines the gate before any GPT, boot, ESP, root, Data, or boot-tr
 
 ## Preconditions
 
-1. Obtain the exact native k27 checkout at `11ac316b789d81fc9f734e15645456f536c05141` and prepared XNU tree `de16623d957cccff6dfb78d8eca4a79842af9702`.
+1. Reproduce the upstream native k27 checkout and prepared XNU tree, or freeze and document the independently prepared source, patch series, build inputs and hashes. Qualify the resulting kernel against the 26C5035r collection and its startup, storage and driver contracts.
 2. Build and hash one matched set of 26C5035r kernel, KC, DTB, trust cache, SystemOS, root, Data seed, ESP, and firmware FD inputs.
 3. Prove the root and Data layout fits the current device without relying on the author's historical LBAs. Current captures show no free LUN 0 GPT extent and no qualified shrink of encrypted HyperOS userdata.
 4. Define an Android recovery set from the verified OS3.0.309 package. The external v1.6.1 switch bundle targets 3.0.303 and is not an approved recovery set.
