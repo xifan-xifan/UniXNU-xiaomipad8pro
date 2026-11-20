@@ -504,7 +504,7 @@
     },
     "kc_sha256": "00f0ba553e16a42021623d9805f6d77ae95ae09d968c761ae1cae4cb6bb06831",
     "firmware_entries": 2,
-    "firmware_addon_sha256": null,
+    "firmware_addon_sha256": "758d62a4b3240364877fb9bba1874136fa02ee439591f5ee321c11b011260fb6",
     "data_persist": 0,
     "reference_verifier_failures": 0,
     "device_tested": false,
