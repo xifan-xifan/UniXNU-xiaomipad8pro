@@ -36,6 +36,8 @@ The diagnostic-only BDS patch directs execution to the UniXNU application in the
 
 The stock 3.0.309 archive ABL is fingerprinted and its compressed section decodes. The decoded strings give a starting point for checking the temporary boot path. The A-slot partition prefix matches the complete archive ELF by hash. Temporary boot write behavior remains open. [Stock ABL inspection](docs/results-2026-11-20-stock-abl.md)
 
+The RAM failure clause in WRITE-PLAN.md now reflects the menu-only BDS halt behavior. Do not expect automatic return to Fastboot if the diagnostic menu fails.
+
 ## Current state
 
 The retained strict RAM menu image still matches its recorded SHA-256. The live Android baseline was reconfirmed through Windows ADB on HyperOS 3.0.309, slot A. ABL and generic BDS remain open in the write path audit. [RAM firmware audit](docs/results-2026-11-20-ram-firmware-audit.md)
