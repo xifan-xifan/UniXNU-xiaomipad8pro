@@ -478,6 +478,42 @@
     "device_tested": false,
     "evidence": "docs/results-2026-11-20-native-driver-resume.md"
   },
+  "native_driver_header_checkpoint_2026_11_20": {
+    "drivers": [
+      "ARMPlatformStandIn",
+      "NativeRamBlock",
+      "NativeUfs",
+      "PianoAudio",
+      "PianoBacklight",
+      "PianoBluetooth",
+      "PianoCamera",
+      "PianoDp",
+      "PianoDpu",
+      "PianoDwc3",
+      "PianoInput",
+      "PianoNullEthernet",
+      "PianoPolicy",
+      "PianoPower",
+      "PianoSensors",
+      "PianoThermal",
+      "PianoTorch",
+      "PianoTouch",
+      "PianoUsbHost",
+      "PianoWifi",
+      "PianoWifiEthernet",
+      "SoftwareAES"
+    ],
+    "objects_verified": 115,
+    "artifact_sha256": {
+      "native-driver-headers-result.json": "256e6048a26f99f8c6be97048dd0a619ab787f2c1579f92223c1b73aa2b484b4",
+      "native-driver-headers-logs.tar.gz": "457f53c6cad82361062a194a91a5024eeef68f877bbabf0a8bf478a78b0a4f0d",
+      "historical-driver-headers.tar.gz": "885d510c24daa19e8b08733ef600f9919094ced097acd221663956c35872faae",
+      "sm8750-pinned-kit.tar": "4b17bbf38462dc3db38bda3f6034065cba71ae036f96d63cee3bf74948a2a160"
+    },
+    "kc_linked": false,
+    "device_tested": false,
+    "evidence": "docs/results-2026-11-20-native-driver-headers.md"
+  },
   "live_userdata_audit_2026_11_20": {
     "evidence": "docs/results-2026-11-20-live-userdata.md",
     "hyperos": "OS3.0.309.0.WPYCNXM",

@@ -6,6 +6,8 @@ The Mac archive inputs, positioned kernel, isolated KC builder, and three native
 
 The isolated Mac checkpoint is reachable again. The resumed build verified 98 arm64e objects from 15 of the 26 configured drivers. The Thermal import check passes after an arithmetic compatibility fix. See [the resumed build result](docs/results-2026-11-20-native-driver-resume.md) for the remaining input gaps.
 
+After restoring the family headers and pinned SM8750 kit, the Mac checkpoint has 115 verified objects across 22 drivers. See [the header checkpoint](docs/results-2026-11-20-native-driver-headers.md) for the four remaining build inputs.
+
 ## Current state
 
 - **User data:** the owner reports that HyperOS 3.0.309 was factory-reset before work began and contains no personal data. This is an owner report, not a new device-side verification. No tablet data backup was made.
