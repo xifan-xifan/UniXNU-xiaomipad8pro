@@ -1,0 +1,7 @@
+# Latest public SystemOS source check (2026-11-21)
+
+The GitHub API still resolves `code002-2/piano-macos-unixnu` `main` to `e9ff4f0a8dc53fcf0c7e274589ef3ba159106106`. Its complete tree contains the `zzz-systemos-volume-retry.patch` and the 26C5035r SystemOS policy metadata, but no `overlay/systemos-shims`, `mount`, `fsck`, or built SystemOS image. The repository reports zero releases and zero Actions artifacts. This confirms that these public records do not supply the missing runtime shim pair or a downloadable image.
+
+The retained Mac SystemOS cryptex input `/private/tmp/piano-root-26C5035r.593r2m/141-22145-021.dmg` hashes to `14330ed990fe7022114b10718f4defe3049d49b6e5d52fd3ac71a487541cd1f3`, matching the comparison tree's SystemOS policy input. The locally retained `systemos.unshimmed.img` remains a different image (`c970de1b385486b2893c7a03a236ad612fb2f89fc45e48e9a7a80374d247487d`), with its own volume UUID. The comparison tree's SystemOS policy cannot authenticate this local image. Do not pair the comparison policy with the local image.
+
+No tablet operations were performed. The exact native k27 commit and the `mount`/`fsck` shim sources remain unresolved. The next viable input is an authoritative shim-bearing source tree or a reproducible, reviewed implementation that handles the recorded launchd filesystem tasks and is verified against this image's APFS UUID and bytes. The affirmative `fsck -fy` path still requires a proven device-selection and write-boundary design before the candidate can be boot-tested.
