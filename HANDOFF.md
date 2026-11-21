@@ -452,3 +452,5 @@ The old task archive identifies d36b8047 as the local 2026-11-14 candidate and r
 Historical ESP run evidence shows the retained candidate reached the UniXNU menu but DarwinBoot refused with Load Error before XNU handoff. See [historical ESP run](docs/results-2026-11-21-historical-esp-run.md).
 
 The working-copy DarwinBoot parser rejects the original d36b8047 collection and accepts the archived subtype-2 and loose afe7646e collections. See [host parser replay](docs/results-2026-11-21-retained-parser-replay.md).
+
+A byte comparison found the archived subtype-2 correction at offset 0xb. It makes the outer and embedded kernel CPU subtype words equal, satisfying the current DarwinBoot parser. See [retained subtype mismatch](docs/results-2026-11-21-retained-subtype-mismatch.md).
