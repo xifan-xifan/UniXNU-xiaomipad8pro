@@ -1640,6 +1640,8 @@
     "image": "out/boot-piano-witness-watchdog-gate.img",
     "sha256": "ea520f9ad88b890cb1c5d0e449b17d7d3401cbff6610eab0c48edd1d654b3ecc",
     "fd_sha256": "453bf2d80b10dd4ed2fcd401141c80f471139a123d095736d49542768033bbd3",
+    "embedded_kc_sha256": "80da9440d3ec0f610dc3721d10f4fc36cad72c88e14a00f09f79cdc73165d18d",
+    "embedded_kc_identity": "readonly-inspect.kc",
     "status": "host qualified packaging only",
     "gate": "DarwinBoot and APRIORI match archived witness. Default menu retains piano-reset-after=90. Archived DarwinBoot stops before invoking XNU. Cold reset on watchdog setup failure and firmware write-path audit remain open.",
     "device_tested": false
