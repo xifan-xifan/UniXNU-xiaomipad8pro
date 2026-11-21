@@ -352,3 +352,5 @@ A read-only ordinary ABL Fastboot session on 2026-11-21 recorded slot A successf
 The 3.0.309 GPT pair checker passed against both frozen pairs and rejected the mixed pair expected after an interrupted backup-first update. See [WRITE-PLAN.md](WRITE-PLAN.md) for the readback command and the historical writer's layout mismatch.
 
 The GPT pair checker also recognized both live LUN 0 fragments as stock over root ADB. See [the GPT fragment result](docs/results-2026-11-21-candidate-gpt-fragments.md).
+
+The backup-first GPT routine also completed stock → candidate → stock on a 510,165,778,432-byte UbuntuPiano sparse file, with `fsync` and byte-for-byte readback at each offset. The in-memory failure cases and remaining maintenance integration are recorded in [WRITE-PLAN.md](WRITE-PLAN.md).
