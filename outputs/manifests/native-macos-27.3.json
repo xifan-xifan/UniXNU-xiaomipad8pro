@@ -1650,7 +1650,7 @@
     "image": "out/boot-piano-watchdog-enter-no-poll.img",
     "sha256": "1c4feecd143e8c990e42dc022a32100094917a05570efd825429faddba33d90a",
     "fd_sha256": "56b0d02d4a0d80cbfd976f70a22be8f1b75bf640aa86ec5852ca6b9d3ad32975",
-    "status": "built, v2 boot ID and unchanged FAT and DTB verified; firmware inventory and independent XNU entry witness pending",
+    "status": "built, v2 boot ID and unchanged FAT and DTB verified; FVMAIN confirms DarwinBoot payload change and BdsDxe timestamp only. Independent XNU entry witness pending",
     "device_tested": false
   },
   "darwinboot_watchdog_stop": {
