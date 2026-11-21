@@ -140,3 +140,5 @@ The generated FAT16 diagnostic container SHA-256 is `708d0e79ffa8adae5227eae5dbd
 ## Historical fips4b inventory (2026-11-21)
 
 See [the image inventory](../docs/results-2026-11-21-fips4b-inventory.md) for the macOS RAM image and its provenance limits. The paired UEFI image SHA-256 is c5b513b5ed5b3f154110b330f932991310fcaefcc8989853d0a1d22d65053c6e. The manifest SHA-256 is 92e1459df7560e55c3b292b20098f913d6c5f181b354f0d0cef0c38719bdb363.
+
+- 2026-11-21 NativeUfs probe 2 host KC, `readonly-inspect.kc` (135806976 bytes), SHA-256 `80da9440d3ec0f610dc3721d10f4fc36cad72c88e14a00f09f79cdc73165d18d`.

@@ -213,7 +213,8 @@ void NativeUfs::inspect (void)
   uintptr_t gcc = mapPhys (GCC_BASE + 0x77000, 0x1000, gccMap);
   uintptr_t memPhy = mapPhys (GCC_BASE + 0x9e000, 0x1000, memPhyMap);
   if (!gcc || !memPhy) {
-    panic ("NATIVE_UFS inspect: GCC map failed gcc=%p memphy=%p", (void *) gcc, (void *) memPhy);
+    IOLog ("NativeUfs: inspect GCC map failed gcc=%p memphy=%p\n", (void *) gcc, (void *) memPhy);
+    return;
   }
   uint32_t gdsc = read32 (gcc, GCC_UFS_PHY_GDSCR - 0x77000);
   uint32_t axi = read32 (gcc, GCC_UFS_PHY_AXI_ENABLE - 0x77000);
@@ -242,12 +243,8 @@ void NativeUfs::inspect (void)
       readHc = 1;
     }
   }
-  panic ("NATIVE_UFS inspect\n"
-         "gdsc=%08x memphygdsc=%08x\n"
-         "axi=%08x ahb=%08x unipro=%08x\n"
-         "txsym=%08x rxsym=%08x aux=%08x\n"
-         "hc_read=%u cap=%08x ver=%08x\n"
-         "is=%08x hcs=%08x hce=%08x utrlba=%08x",
+  IOLog ("NativeUfs: inspect gdsc=%08x memphygdsc=%08x axi=%08x ahb=%08x unipro=%08x "
+         "txsym=%08x rxsym=%08x aux=%08x hc_read=%u cap=%08x ver=%08x is=%08x hcs=%08x hce=%08x utrlba=%08x\n",
          gdsc, memGdsc, axi, ahb, unipro, txs, rxs, aux, readHc, cap, ver, is, hcs, hce, utrlba);
 }
 
@@ -3317,6 +3314,10 @@ bool NativeUfs::start (IOService *provider)
   if ((!probe && !rootMode) || !OSDynamicCast (IOPlatformExpertDevice, provider)) {
     return false;
   }
+  if (probe == 2) {
+    inspect ();
+    return false;
+  }
   if (!gScratch) {
     gScratch = static_cast<uint8_t *> (IOMallocAligned (kDataMax, 4096));
     if (!gScratch) {
@@ -3371,9 +3372,6 @@ bool NativeUfs::start (IOService *provider)
   unsigned diagnostic = 0;
   PE_parse_boot_argn ("native-ufs-diagnostics", &diagnostic, sizeof (diagnostic));
   gRootDiagnosticEnabled = diagnostic == 1;
-  if (probe == 2) {
-    inspect ();
-  }
   if (probe == 8) {
     inspectContextBanks ();
   }

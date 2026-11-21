@@ -332,3 +332,5 @@ The packed tracing FD now has direct host evidence for its RAM-backed EFI variab
 The menu-only image verified the full 7 MiB mailbox upload on this tablet and returned to HyperOS with unchanged ABL slot state. The capture contains no expected XNU header. See [the mailbox readback result](docs/results-2026-11-21-mailbox-readback.md). XNU reset retention and direct platform panic paths remain open.
 
 The prepared XNU source dispatches registered panic callbacks before the base platform expert returns from panic sync. The source's `panic-spin` tunable only covers the ordinary debugger restart path. See [the panic path audit](docs/results-2026-11-21-panic-path.md) for the remaining linked-handler checks before the UFS probe.
+
+The revised NativeUfs probe 2 logs and returns before starting the UFS service. The replacement object and KC passed the host link checks. The isolated replay and remaining boot gates are recorded in [the probe 2 result](docs/results-2026-11-21-native-ufs-inspect.md).
