@@ -1606,5 +1606,13 @@
     "automatic_selection_verified": true,
     "xnu_handoff_verified": false,
     "device_result": "docs/results-2026-11-21-auto8-handoff.md"
+  },
+  "native_ufs_auto8_darwinboot_probe": {
+    "image": "out/boot-piano-macos-ram-auto8-darwinboot.img",
+    "sha256": "2d53fcd8bc784b60e003490f807755509068d8f2c48cd82b610870f93616c2db",
+    "host_verifier_failures": 0,
+    "abl_accepted": true,
+    "xnu_handoff_verified": false,
+    "device_result": "docs/results-2026-11-21-auto8-darwinboot.md"
   }
 }
