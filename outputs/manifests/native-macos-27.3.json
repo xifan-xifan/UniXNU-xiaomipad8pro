@@ -1687,6 +1687,12 @@
     "device_tested": false,
     "result": "docs/results-2026-11-21-subtype2-container-verifier.md"
   },
+  "cached_apfs_phase_helper": {
+    "source_sha256": "98ee74b7ef2ec93368bad64d38696f6aefdd8c953a609edef94d1311da2248ec",
+    "qualified_for_native_boot": false,
+    "reason": "assumes Data is mounted and returns success unconditionally; does not implement fsck tasks",
+    "result": "docs/results-2026-11-22-apfs-phase-helper.md"
+  },
   "callback_binding_check": {
     "kernel_collection": "out/verified-no-poll-23aca0b8/verified.kc",
     "ufs_install_target": "0xfffffff00c268174",
