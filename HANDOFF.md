@@ -392,3 +392,5 @@ The direct BDS lookup confirmed DarwinBoot protocol availability. Stock ABL acce
 ADB verified HyperOS and its marker after the first lookup-auto8 probe. The prearmed second probe staged a firmware log, but the host watcher stopped before download. See [the capture retest](docs/results-2026-11-21-darwin-lookup-auto8-retest.md).
 
 A third prearmed auto8 run captured a 128-byte log showing DarwinBoot protocol registration, BDS console readiness and menu start; it showed no XNU handoff. HostUSB disappeared afterward. See [the capture retest](docs/results-2026-11-21-darwin-lookup-auto8-retest.md). The Windows watcher remains local and must be corrected and exercised on the next UEFI window before relying on it.
+
+Latest lookup-auto8 follow-up: ADB confirmed completed HyperOS 3.0.309 on A and the unchanged marker. The reset trigger remains unknown. For unattended runs, verify recovery across the ABL-to-UEFI transition and preserve firmware DEBUG ring captures. USB disappearance alone cannot establish XNU entry. See docs/results-2026-11-21-darwin-lookup-auto8-retest.md.
