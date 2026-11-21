@@ -1596,6 +1596,13 @@
     "host_verifier_failures": 0,
     "device_tested": false
   },
+  "darwinboot_watchdog_stop": {
+    "image": "out/boot-piano-darwinboot-watchdog-stop.img",
+    "sha256": "1adc49c0a613beb7775f4276978cfa55528e911cff02211d72e5b085e36a9e4c",
+    "android_return_verified": true,
+    "loader_stop_verified": false,
+    "result": "docs/results-2026-11-21-darwinboot-watchdog-return.md"
+  },
   "darwin_lookup_auto8_probe": {
     "image": "out/boot-piano-darwin-lookup-auto8.img",
     "sha256": "de26c50d2a73dd57b1d70fb40b9085450d386a24ef156b36341a133aae1ec0b1",

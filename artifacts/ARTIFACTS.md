@@ -158,3 +158,5 @@ See [the image inventory](../docs/results-2026-11-21-fips4b-inventory.md) for th
 - Post-ExitBootServices watchdog RAM diagnostic, `out/boot-piano-watchdog-post-ebs.img` (13,766,656 bytes), SHA-256 `6709d0fd6b4569f03e62146cd6d21ebae2b94645a15ee932e8ec0c92bf1a2183`. Linked FD SHA-256 `2ed78a1f52b147ac32e5259aa6e8bf992031a320fc5fa0040bb41d24949ccc82`. Build log `UbuntuPiano:/tmp/piano-post-ebs.mIk1NZN0/build-retry.log`. See [tablet result](../docs/results-2026-11-21-watchdog-post-ebs.md).
 
 - DarwinBoot watchdog stop FFS (host build only), `UbuntuPiano:/tmp/darwinboot-post-ebs.ffs`, SHA-256 `6563739a80454379e850bc9fa5d08bc01fff23c408902e75e338cb9badfbf034`.
+
+- Combined DarwinBoot watchdog RAM image, out/boot-piano-darwinboot-watchdog-stop.img, SHA-256 1adc49c0a613beb7775f4276978cfa55528e911cff02211d72e5b085e36a9e4c. FD SHA-256 31f490b6e1f4589f5d6657f18128822ab1ea01340b0b370ec37a14577cdd0ce3.
