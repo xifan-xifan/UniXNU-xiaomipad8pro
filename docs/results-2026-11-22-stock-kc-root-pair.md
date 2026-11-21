@@ -1,0 +1,7 @@
+# Stock 26C5035r collection and root pairing
+
+The configured `mac` SSH alias reached the Mac while `mac-lan` failed DNS resolution. A fresh full-image hash of `/private/tmp/piano-stock-root.1ubLtk/root.img` matched the deployment manifest (`db3629e5…`). The 17,547,919,360-byte image fits the documented 20 GiB candidate root extent with 3,926,917,120 bytes remaining. Current Android ADB confirmed completed HyperOS `OS3.0.309.0.WPYCNXM` on `_a`. The ordinary ADB shell could not read `/proc/partitions`.
+
+The independent KC matched SHA-256 `72e5240f…` and the first-install Data image matched `48dbc08d…`. Reading the public trust anchor and the two signed headers from the Mac's existing stock root policy directory yielded exactly one byte-for-byte match apiece in that KC. Offsets are `0xf3ee30` for the 395-byte anchor, `0xf3efbb` for the 544-byte OS header and `0xf3f1db` for the 544-byte SystemOS header. The signed capacities are 14,493,417,472 and 2,917,138,432 bytes, respectively, matching the root layout. The preserved host verification report records passing block authentication for both windows with that anchor.
+
+This establishes the stock root policy inputs paired with the unsigned no-poll KC. Qualification still requires effective runtime policy selection, a Data mount path with bounded writes, and unattended recovery. The Mac's retained APFS shim directory contains compiled utilities, with no assembled shimmed SystemOS image in that directory. Substituting a modified SystemOS would require its own signed policy and renewed pairing checks.

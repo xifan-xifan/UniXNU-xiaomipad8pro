@@ -530,3 +530,5 @@ The retained no-poll KC now has a byte-level ARM64 BL relocation audit: UFS star
 2026-11-22: The no-poll KC prelink metadata lists NativeUfs and NativeRamBlock as Root bundles and declares NativeUfs as a NativeRamBlock dependency. The authenticated kmod start fixups resolve to 0xfffffff008b5d170 and 0xfffffff008b648d8, respectively. Each enters the registration routine whose branch target was checked above. The first root and Data lookup timestamps still require device evidence.
 
 2026-11-22: The [CrossDarwin recovery review](docs/results-2026-11-22-crossdarwin-recovery-review.md) confirms a sheng-specific root-unmount failure distinct from the historical piano platform reset trace. The UbuntuPiano retained payload hash matches the already audited parser-rejected candidate. Continue pairing the independent no-poll KC.
+
+2026-11-22: [Stock KC/root pairing](docs/results-2026-11-22-stock-kc-root-pair.md) verifies exact public anchor and signed header bytes in the no-poll KC against the Mac's existing root policy set. The configured `mac` alias works while `mac-lan` fails DNS. Continue with runtime Data selection and unattended recovery.
