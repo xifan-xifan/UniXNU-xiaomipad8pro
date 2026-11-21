@@ -414,3 +414,5 @@ The Gunyah watchdog expiry RAM trial returned to completed HyperOS on A without 
 The Windows USB observer captured Android, stock ABL, and completed HyperOS in a host-directed control. See [the observer result](docs/results-2026-11-21-usb-observer.md). Start it before a RAM trial and wait for its first baseline line.
 
 The expiry replay captured UEFI Fastboot loss and later verified completed HyperOS on A with the original marker. See [the replay](docs/results-2026-11-21-watchdog-usb-replay.md). Use a longer observation window for the post-ExitBootServices stall trial.
+
+The [post-ExitBootServices firmware trial](docs/results-2026-11-21-watchdog-post-ebs.md) displayed its green and magenta marker and returned unattended to completed HyperOS on A with the original marker hash. Move the recovery control to DarwinBoot before DarwinEnter next.

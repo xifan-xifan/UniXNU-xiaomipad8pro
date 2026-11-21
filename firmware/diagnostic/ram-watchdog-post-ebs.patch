@@ -1,0 +1,79 @@
+--- a/uefi/Platforms/Xiaomi/pianoPkg/Library/DeviceBootManagerLib/DeviceBootManager.c
++++ b/uefi/Platforms/Xiaomi/pianoPkg/Library/DeviceBootManagerLib/DeviceBootManager.c
+@@ -3,6 +3,8 @@
+ 
+   SPDX-License-Identifier: BSD-2-Clause
+ **/
++#include <Library/CacheMaintenanceLib.h>
++#include <Protocol/GraphicsOutput.h>
+ #include <Library/DebugLib.h>
+ #include <Library/BaseMemoryLib.h>
+ #include <Library/UefiBootServicesTableLib.h>
+@@ -37,6 +39,57 @@
+   return NULL;
+ }
+ 
++// This control exercises ExitBootServices without launching DarwinBoot or XNU.
++STATIC UINT64 mTrialMap[8192];
++
++STATIC
++VOID
++TrialExitBootServices (VOID)
++{
++  EFI_GRAPHICS_OUTPUT_PROTOCOL *Gop;
++  EFI_STATUS Status;
++  UINTN Size, Key, DescriptorSize, Attempt, Stride, Row, Column;
++  UINT32 Version;
++  UINT32 *Frame;
++
++  Status = gBS->LocateProtocol (&gEfiGraphicsOutputProtocolGuid, NULL, (VOID **)&Gop);
++  if (EFI_ERROR (Status) || Gop->Mode == NULL || Gop->Mode->Info == NULL ||
++      Gop->Mode->Info->PixelFormat >= PixelBitMask || Gop->Mode->FrameBufferBase == 0 ||
++      Gop->Mode->Info->HorizontalResolution < 128 ||
++      Gop->Mode->Info->VerticalResolution < 32) {
++    return;
++  }
++  Stride = Gop->Mode->Info->PixelsPerScanLine;
++  if (Stride < 128 || Gop->Mode->FrameBufferSize / sizeof (UINT32) / Stride < 32) {
++    return;
++  }
++  Frame = (UINT32 *)(UINTN)Gop->Mode->FrameBufferBase;
++  for (Attempt = 0; Attempt < 3; ++Attempt) {
++    Size = sizeof (mTrialMap);
++    Status = gBS->GetMemoryMap (&Size, (EFI_MEMORY_DESCRIPTOR *)mTrialMap, &Key, &DescriptorSize, &Version);
++    if (EFI_ERROR (Status)) {
++      break;
++    }
++    Status = gBS->ExitBootServices (gImageHandle, Key);
++    if (!EFI_ERROR (Status)) {
++      // Green and magenta are invariant under RGB/BGR channel order.
++      for (Row = 0; Row < 32; ++Row) {
++        for (Column = 0; Column < 128; ++Column) {
++          ((volatile UINT32 *)Frame)[Row * Stride + Column] = Column < 64 ? 0x0000ff00 : 0x00ff00ff;
++        }
++        WriteBackDataCacheRange (Frame + Row * Stride, 128 * sizeof (UINT32));
++      }
++      break;
++    }
++    if (Status != EFI_INVALID_PARAMETER) {
++      break;
++    }
++  }
++  // The independently armed firmware watchdog is the only reset path here.
++  CpuDeadLoop ();
++}
++
++
+ EFI_DEVICE_PATH_PROTOCOL**
+ EFIAPI
+ DeviceBootManagerAfterConsole ()
+@@ -60,6 +113,9 @@
+         X0 = 0x86000005; X1 = 3; X2 = 0; X3 = 0;
+         __asm__ volatile ("smc #0" : "+r" (X0), "+r" (X1), "+r" (X2), "+r" (X3) : : "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+         DEBUG ((DEBUG_ERROR, "piano watchdog trial: ENABLE=%Lx; no pet armed\n", X0));
++        if (X0 == 0) {
++          TrialExitBootServices ();
++        }
+       }
+     }
+   }
