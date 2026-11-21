@@ -1679,6 +1679,7 @@
     "sha256": "db3629e5da012ce76e64c0f42739ada9541ed8cca5adaab32256fc9b64b34ef7",
     "manifest_sha256": "d286c86cd939916455d9e09f6b0141d523ad6c7b5ef611ccc73447765ab40b23",
     "window_and_table_readback": "pass",
+    "verified_root_host_block_authentication": {"OS": 3538432, "SystemOS": 712192, "altered_blocks_rejected": true},
     "device_tested": false,
     "result": "docs/results-2026-11-21-stock-root-v2-assembly.md"
   }
