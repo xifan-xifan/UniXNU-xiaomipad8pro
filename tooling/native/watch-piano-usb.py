@@ -22,7 +22,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tools", type=Path, required=True)
     parser.add_argument("--serial", required=True)
-    parser.add_argument("--seconds", type=int, default=90)
+    parser.add_argument("--seconds", type=int, default=120)
     parser.add_argument("--log", type=Path, required=True)
     args = parser.parse_args()
     if args.seconds < 1:
