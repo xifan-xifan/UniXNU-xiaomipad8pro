@@ -466,3 +466,5 @@ The [subtype-2 container verifier](docs/results-2026-11-21-subtype2-container-ve
 The [subtype-2 root pairing audit](docs/results-2026-11-21-subtype2-root-pairing.md) matches the ADT selector to the Apple OS window and confirms that the separate SystemOS window requires its own authentication policy.
 
 The [NativeUfs host tests](docs/results-2026-11-21-native-ufs-host-tests.md) passed all eight plain and ASan/UBSan combinations. They cover the development storage path only; authenticated root and tablet execution remain open.
+
+The [retained SystemOS input check](docs/results-2026-11-21-systemos-stock-policy-input.md) confirms the stock 26C5035r image matches the archived policy digest and size. Full policy and native userland qualification remain open.
