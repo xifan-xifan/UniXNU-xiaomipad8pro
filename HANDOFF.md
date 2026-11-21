@@ -390,3 +390,5 @@ The final maintenance writer image (SHA-256 `ef9e4d27e921d96b371ac6487814fb758a1
 The direct BDS lookup confirmed DarwinBoot protocol availability. Stock ABL accepted the updated eight-core RAM candidate, but host USB was absent afterward. Recover device access before another boot and verify HyperOS and the Android marker. See [the lookup and probe result](docs/results-2026-11-21-darwin-lookup-auto8.md).
 
 ADB verified HyperOS and its marker after the first lookup-auto8 probe. The prearmed second probe staged a firmware log, but the host watcher stopped before download. See [the capture retest](docs/results-2026-11-21-darwin-lookup-auto8-retest.md).
+
+A third prearmed auto8 run captured a 128-byte log showing DarwinBoot protocol registration, BDS console readiness and menu start; it showed no XNU handoff. HostUSB disappeared afterward. See [the capture retest](docs/results-2026-11-21-darwin-lookup-auto8-retest.md). The Windows watcher remains local and must be corrected and exercised on the next UEFI window before relying on it.
