@@ -464,3 +464,5 @@ The [archived subtype-2 firmware and root audit](docs/results-2026-11-21-subtype
 The [subtype-2 container verifier](docs/results-2026-11-21-subtype2-container-verifier.md) found two legacy header fields and passed after normalizing those fields in a separate host copy. Root pairing and unattended device recovery remain pending.
 
 The [subtype-2 root pairing audit](docs/results-2026-11-21-subtype2-root-pairing.md) matches the ADT selector to the Apple OS window and confirms that the separate SystemOS window requires its own authentication policy.
+
+The [NativeUfs host tests](docs/results-2026-11-21-native-ufs-host-tests.md) passed all eight plain and ASan/UBSan combinations. They cover the development storage path only; authenticated root and tablet execution remain open.
