@@ -422,3 +422,5 @@ The [DarwinBoot post-ExitBootServices stop](docs/results-2026-11-21-darwinboot-w
 The combined DarwinBoot watchdog RAM image returned unattended to HyperOS A with the Android marker intact. The loader stop itself lacks a framebuffer or log witness. See [the tablet result](docs/results-2026-11-21-darwinboot-watchdog-return.md).
 
 The [DarwinBoot witness trial](docs/results-2026-11-21-darwinboot-witness.md) captured the loader immediately before the final ExitBootServices sequence with the watchdog armed. HyperOS A returned unattended and the marker matched. Post-exit evidence and XNU watchdog takeover remain pending.
+
+The [DarwinBoot build replay](docs/results-2026-11-21-darwinboot-build-replay.md) linked from the retained cache after restoring the FD macros. The unpacked FVMAIN comparison found only PcdDxe debug metadata and the BdsDxe build time differences among the 174 FFS files. DarwinBoot matches byte for byte. Use the retained tablet-tested FD for the next controlled comparison.

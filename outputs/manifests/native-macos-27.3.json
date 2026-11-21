@@ -1596,6 +1596,15 @@
     "host_verifier_failures": 0,
     "device_tested": false
   },
+  "darwinboot_witness_build_replay": {
+    "fd_sha256": "5506f1aa4035013108ddbebf0ae620e06a1118864ee5fcca0744f8677ce8f304",
+    "reference_fd_sha256": "bf9ff0d490c8aaeecba0f09c4bb359688db4ea08003b7722bf51d08bf419f27f",
+    "fvmain_non_padding_ffs_count": 174,
+    "fvmain_differing_ffs": ["PcdDxe", "BdsDxe"],
+    "darwinboot_ffs_identical": true,
+    "tablet_tested": false,
+    "result": "docs/results-2026-11-21-darwinboot-build-replay.md"
+  },
   "darwinboot_watchdog_witness": {
     "image": "out/boot-piano-darwinboot-witness.img",
     "sha256": "a74a9e605283aa68c6f5cecf6e1e1fd624e0a1c767774ee302fde868a3f945aa",

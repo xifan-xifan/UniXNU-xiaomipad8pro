@@ -1,0 +1,9 @@
+# DarwinBoot witness build replay
+
+On November 21, 2026, the retained UbuntuPiano build cache linked a 3 MiB DEBUG CLANGPDB FD. The replay command is in `out/build-darwinboot-handoff.sh`. It recovers the package paths and BaseTools location from the retained witness log and passes `UNIXNU=TRUE`, `FD_BASE=0xA7100000`, `FD_SIZE=0x300000`, `FD_BLOCKS=0x300`, `ENABLE_SECUREBOOT=0` and `DEVICE_MODEL=0`. The first replay stopped at FDF parsing because the FD macros were missing. The corrected build reached `Done` in 22 seconds. The log is `UbuntuPiano:/tmp/darwinboot-post-ebs.tzsdzOfC/replay.log`.
+
+The rebuilt FD has SHA-256 `5506f1aa4035013108ddbebf0ae620e06a1118864ee5fcca0744f8677ce8f304`. The retained tablet-tested FD still hashes to `bf9ff0d490c8aaeecba0f09c4bb359688db4ea08003b7722bf51d08bf419f27f`. Both build logs report 5,113,776 bytes used in FVMAIN. FVMAIN_COMPACT used 88 fewer bytes in the replay. Decompressing the LZMA section in each FD exposed the same 174 non-padding FFS GUIDs. Of those files, 172 match byte for byte. PcdDxe differs by eight bytes in its CodeView identifier, and BdsDxe differs by three bytes in its embedded build time. DarwinBoot is identical in both volumes. The whole FD still has a different hash, and the replay has not run on the tablet. The separate `witness.fd` remains the reference.
+
+The prior ring records a 3200 by 2136 framebuffer with a 12800-byte row stride and 32-bit pixels. Those values meet the size checks in the cyan and white DarwinBoot marker. Stock HyperOS ADB runs as `shell`; the stock system has no available `su`. An unattended post-exit marker needs a qualified readback transport, such as the existing maintenance RAM shell, with retention confirmed over the intended reset and boot sequence.
+
+A separate read-only ADB check confirmed completed HyperOS OS3.0.309.0.WPYCNXM on slot A and the original SHA-256 of /data/local/tmp/piano-layout-20261121-check. This check did not start a new boot.

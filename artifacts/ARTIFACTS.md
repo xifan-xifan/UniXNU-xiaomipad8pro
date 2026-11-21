@@ -162,3 +162,4 @@ See [the image inventory](../docs/results-2026-11-21-fips4b-inventory.md) for th
 - Combined DarwinBoot watchdog RAM image, out/boot-piano-darwinboot-watchdog-stop.img, SHA-256 1adc49c0a613beb7775f4276978cfa55528e911cff02211d72e5b085e36a9e4c. FD SHA-256 31f490b6e1f4589f5d6657f18128822ab1ea01340b0b370ec37a14577cdd0ce3.
 
 - DarwinBoot witness RAM image, out/boot-piano-darwinboot-witness.img, SHA-256 a74a9e605283aa68c6f5cecf6e1e1fd624e0a1c767774ee302fde868a3f945aa. See [tablet result](../docs/results-2026-11-21-darwinboot-witness.md).
+- DarwinBoot witness FD replay, UbuntuPiano build cache `Build/pianoPkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd`, SHA-256 `5506f1aa4035013108ddbebf0ae620e06a1118864ee5fcca0744f8677ce8f304`. [Host comparison](../docs/results-2026-11-21-darwinboot-build-replay.md).
