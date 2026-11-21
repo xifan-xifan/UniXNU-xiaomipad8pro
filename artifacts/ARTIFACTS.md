@@ -146,3 +146,5 @@ See [the image inventory](../docs/results-2026-11-21-fips4b-inventory.md) for th
 - 2026-11-21 probe 2 mailbox RAM candidate, boot-piano-macos-ram-inspect-mailbox.img (185733120 bytes), SHA-256 56c84e6547c1b21a18854a8acc754f050c1a1cbb6595977899b3d6c94e61a536.
 
 - Probe 2 mailbox verifier log: `/tmp/piano-inspect-relink.BlbwS0/verify.log`; SHA-256 `649d7e15522fdae4bfadb8ec3b39a5d0e95d0a8d820b21f00578e18ebf21187f`.
+
+- 2026-11-21 4 KiB F2FS mkfs log, `/tmp/piano-f2fs-loop.c99i5s/mkfs.log` SHA-256 `2ff21545b367c68cfe4ee2453031aaa5f22abe19f25493295889b6273ff1ed83`; dry-run fsck log `/tmp/piano-f2fs-loop.c99i5s/fsck.log` SHA-256 `8128dbcc3085fa8289f8dd95a27112f9afbcf991ff696ea24fb52d8275e9aed3`.

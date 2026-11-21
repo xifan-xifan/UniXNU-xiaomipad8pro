@@ -338,3 +338,5 @@ The revised NativeUfs probe 2 logs and returns before starting the UFS service. 
 The repacked probe 2 mailbox image and its verifier log are in the same scratch directory as the host KC. Before selecting XNU, finish auditing the boot path after the probe returns and take a fresh ABL slot baseline.
 
 The new probe 2 mailbox package audit is in [the NativeUfs probe result](docs/results-2026-11-21-native-ufs-inspect.md). It confirms only the KC changed within the FAT payload, menu timeout waits indefinitely, and the data/log write paths are disabled for this diagnostic. The tablet has not received the image.
+
+A host F2FS rehearsal now uses a 4096-byte loop logical sector and the exact proposed shortened userdata size; mkfs.f2fs and dry-run fsck.f2fs passed. It corrects the earlier 512-byte regular-file trial but does not qualify device recovery or encryption. See [the 4 KiB result](docs/results-2026-11-21-f2fs-4k-host.md).
