@@ -450,3 +450,5 @@ The retained boot payload's ADT, Apple trust cache and 4 GiB packed APFS scratch
 The old task archive identifies d36b8047 as the local 2026-11-14 candidate and records only a first-192-MiB ESP write/readback; its own README says it was not tablet-booted. See [historical d36b8047 source](docs/results-2026-11-21-historical-d36b8047-source.md).
 
 Historical ESP run evidence shows the retained candidate reached the UniXNU menu but DarwinBoot refused with Load Error before XNU handoff. See [historical ESP run](docs/results-2026-11-21-historical-esp-run.md).
+
+The working-copy DarwinBoot parser rejects the original d36b8047 collection and accepts the archived subtype-2 and loose afe7646e collections. See [host parser replay](docs/results-2026-11-21-retained-parser-replay.md).
