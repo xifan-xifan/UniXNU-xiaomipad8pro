@@ -162,10 +162,14 @@ piano-309-gpt-preflight|piano-309-gpt-readback|piano-309-gpt-write)
 	echo "lun0=$l"
 	echo 'gpt_preflight=ready'
 	;;
-hash)   # from the medium: the page cache is dropped first
-	sync; { echo 3 > /proc/sys/vm/drop_caches; } 2>/dev/null
+hash|hash-direct)
+	if [ "$cmd" = hash-direct ]; then
+		set -- "$1" "$2" "$3" "${4:-4096}" iflag=direct
+	else
+		sync; { echo 3 > /proc/sys/vm/drop_caches; } 2>/dev/null
+	fi
 	status=$(mktemp "$P/hash.XXXXXX") || die 'cannot create hash status file'
-	digest=$({ LC_ALL=C dd if="/dev/$1" bs="${4:-4096}" skip="$2" count="$3" 2> "$status" && printf '%s\n' 'read-ok' >> "$status"; } | sha256sum)
+	digest=$({ LC_ALL=C dd if="/dev/$1" bs="${4:-4096}" skip="$2" count="$3" ${5:+"$5"} 2> "$status" && printf '%s\n' 'read-ok' >> "$status"; } | sha256sum)
 	hash_rc=$?
 	records=$(awk '/^[0-9]+\+[0-9]+ records in$/ {print $1}' "$status")
 	read_status=$(tail -n 1 "$status")

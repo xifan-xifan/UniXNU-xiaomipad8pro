@@ -417,10 +417,11 @@ class Session:
                 self.shell('piano-maint keepalive')
         raise Stop(f'tablet job {name} still running after {timeout} s')
 
-    def region_sha(self, dev, skip, count, bs=B, name='hash'):
+    def region_sha(self, dev, skip, count, bs=B, name='hash', direct=False):
         """SHA-256 of a region read from the medium (tablet.sh hash drops the page cache first)."""
         big = count * bs > 256 * MiB
-        r = self.job(name, 'hash', dev, skip, count, bs, timeout=7200) if big else self.t('hash', dev, skip, count, bs)
+        command = 'hash-direct' if direct else 'hash'
+        r = self.job(name, command, dev, skip, count, bs, timeout=7200) if big else self.t(command, dev, skip, count, bs)
         return r and r['sha256']
 
     # -- host services -------------------------------------------------------------------------------------------------
@@ -920,9 +921,9 @@ def piano_309_root(s):
     dev = check_target()
     tail_count = total - count
     blank_tail = s.job('root-zero-tail', 'zero-sha', tail_count, B)['sha256']
-    tail = s.region_sha(dev, count, tail_count, name='root-tail-before')
+    tail = s.region_sha(dev, count, tail_count, name='root-tail-before', direct=True)
     s.need(tail == blank_tail, 'candidate root tail is blank')
-    prefix = s.region_sha(dev, 0, count, name='root-prefix-before')
+    prefix = s.region_sha(dev, 0, count, name='root-prefix-before', direct=True)
     if prefix != digest:
         blank_prefix = s.job('root-zero-prefix', 'zero-sha', count, B)['sha256']
         s.need(prefix == blank_prefix, 'candidate root prefix is blank')
@@ -944,8 +945,8 @@ def piano_309_root(s):
             else:
                 s.serve({'root.img': img})
                 s.job(name, 'restore-bounded', 'root.img', dev, count, s.a.http_port, timeout=4 * 3600)
-        s.need(s.region_sha(dev, 0, count, name='root-prefix-after') == digest, 'full root readback matches source')
-    s.need(s.region_sha(dev, count, tail_count, name='root-tail-after') == tail, 'root tail hash is unchanged')
+        s.need(s.region_sha(dev, 0, count, name='root-prefix-after', direct=True) == digest, 'full root readback matches source')
+    s.need(s.region_sha(dev, count, tail_count, name='root-tail-after', direct=True) == tail, 'root tail hash is unchanged')
     s.need(check_target() == dev, 'candidate GPT and root target verified after readback')
     s.save(piano_309_root_verified={'target': dev, 'sha256': digest, 'tail_sha256': tail})
 
