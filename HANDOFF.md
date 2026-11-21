@@ -1,5 +1,7 @@
 # Native macOS Deployment Handoff
 
+The watchdog-gate reset build links ArmPsciResetSystemLib. Its complete piano platform source has no caller of PianoResetHookInstall, so the stock block flush hook is not installed by that path. ResetSystemRuntimeDxe still invokes registered callbacks before PSCI SYSTEM_RESET. The older watchdog-status image returned to HyperOS through firmware Fastboot reboot using the same UEFI cold-reset API, but that does not demonstrate the gate failure branch before Fastboot starts. Keep this candidate separate from hardware-qualified recovery.
+
 The [retained k27 baseline replay](docs/results-2026-11-22-k27-baseline-replay.md) reproduced the clean c2936ef tree from the 47 local patches. Native 0053 still requires three different file revisions. Preserve the replay as a separate reconstruction input.
 
 The [CrossDarwin profile comparison](docs/results-2026-11-22-crossdarwin-profile.md) verified the same Apple XNU base and 26C5035r target. The public patch series is a reconstruction reference. The prepared k27 tree and piano runtime compatibility remain unverified.
