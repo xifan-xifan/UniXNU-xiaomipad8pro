@@ -534,3 +534,6 @@ The retained no-poll KC now has a byte-level ARM64 BL relocation audit: UFS star
 2026-11-22: [Stock KC/root pairing](docs/results-2026-11-22-stock-kc-root-pair.md) verifies exact public anchor and signed header bytes in the no-poll KC against the Mac's existing root policy set. The configured `mac` alias works while `mac-lan` fails DNS. Continue with runtime Data selection and unattended recovery.
 
 The [first-install Data host test](docs/results-2026-11-22-first-install-ramblock-tests.md) passed all nine NativeRamBlock tests on the Mac and independently reproduced the seed identity. The mode-0 profile uses writable volatile Data. Target startup and automatic recovery remain open.
+
+The 2026-11-22 GitHub API recheck resolved CrossDarwin's default test_27 to `4a671773c2ee289735ab526eda7c9628131250df` and the piano upstream main to `2438556c77c90c22c7b76e57eb8b40c44b35f1af`. The reviewed pins still apply. The retained DarwinBoot stop image hashes to `1adc49c0a613beb7775f4276978cfa55528e911cff02211d72e5b085e36a9e4c`. Its automatic return remains tied to the existing tablet record, which lacks a post-EBS witness. The stop patch stalls before DarwinEnter, so XNU reset behavior requires a distinct candidate and device test.
+
