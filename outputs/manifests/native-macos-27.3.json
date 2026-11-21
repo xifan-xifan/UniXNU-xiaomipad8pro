@@ -1669,6 +1669,8 @@
     "fd_sha256": "6ff14fee948b0003b3620f22a2348a81765dc8d3b44e35f01c30923f95d71d94",
     "cvp_sha256": "a932a0a2a889162d081e705b2b81f936778886fc5d937594812cb8cf3153bb0f",
     "valid_ebs_records": 9,
+    "packed_kc_sha256": "72e5240f8a3286d9233136a540c7129dab4c66fc3d2789c8c5287f6e18332601",
+    "entry_audit": "docs/results-2026-11-22-xnu-early-marker-audit.md",
     "xnu_entry_verified": false,
     "android_return_verified": true,
     "result": "docs/results-2026-11-22-enter-mailbox-abl.md"

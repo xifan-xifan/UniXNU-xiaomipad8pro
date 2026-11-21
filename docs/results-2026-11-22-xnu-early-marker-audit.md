@@ -1,0 +1,7 @@
+# XNU early marker audit
+
+Extracted `EFI/UniXNU/Payloads/kernel.macho` from the FAT ramdisk in `out/boot-piano-enter-mailbox-abl.img` using mtools. The extracted KC hashes to `72e5240f8a3286d9233136a540c7129dab4c66fc3d2789c8c5287f6e18332601`, matching the frozen no-poll collection. The embedded kernel's `LC_UNIXTHREAD` PC is `0xFFFFFFF00BC06488`. Its bytes match the earlier firmware ring dump, including `b +0x1bd4`. The destination `0xFFFFFFF00BC0805C` is `_start_first_cpu` in the Mac link map.
+
+The first stage stores repeated `0x0101` words at physical `0xA3508000` before the low exception vector is installed. The following stages also write within that region. The retained Mac source at `/private/tmp/piano-k27-independent.zbovHflG/src/osfmk/arm64/start.s` contains the matching blocks, labeled `piano 0070`. These labels refer to the retained source's diagnostic lineage. The published device patch numbered 0070 concerns code signing. The existing firmware map assigns this region to `Display_Demura`, and earlier Ubuntu observations found it unsuitable for retention.
+
+Prepare a control by removing the pre-MMU probes from a separate copy of the retained source, rebuilding the same collection and preserving the EBS checkpoints and watchdog return path. Review the loaded image for surviving writes into that region before another RAM boot. Static inspection establishes the instructions and ownership overlap. It leaves CPU arrival and the effect of those stores unverified.

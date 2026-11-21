@@ -1,5 +1,7 @@
 # Native macOS Deployment Handoff
 
+The [XNU early marker audit](docs/results-2026-11-22-xnu-early-marker-audit.md) traced the actual packed entry to the retained Mac start.s. Prepare the next control without the pre-MMU Display_Demura writes.
+
 The [DarwinEnter mailbox trial](docs/results-2026-11-22-enter-mailbox-abl.md) recovered nine matching EBS success records, with no XNU log. HyperOS A returned. Instrument the assembly handoff and kernel entry separately.
 
 The [XNU entry trial](docs/results-2026-11-22-xnu-entry-abl.md) returned to ABL and recovered a complete pre-Android CVP capture without an XNU log. Preserve the EBS mailbox checkpoints in the next DarwinEnter candidate.
