@@ -606,3 +606,5 @@ The stock Android transport is currently authorized (ADB enabled, `ro.adb.secure
 2026-11-22: The [USB diagnostic tablet trial](docs/results-2026-11-22-watchdog-enter-usb.md) returned unattended to completed HyperOS on A. Independent Windows PnP capture did not sample the expected XNU gadget. Prioritize an earlier checkpoint and verified retrieval before another trial.
 
 2026-11-22: The [CVP retention control](docs/results-2026-11-22-cvp-retention-control.md) recovered a known RAM word at 0x9D1F5000 after maintenance rebooted into ABL and before Android started. The reader then returned to completed HyperOS on A. This qualifies the readback route for that reset path. Gunyah watchdog retention and XNU reset routing remain to be tested.
+
+2026-11-22: The [XNU restart routing trial](docs/results-2026-11-22-xnu-reset-routing.md) returned to HyperOS without observable stock ABL, so the qualified CVP reader did not run. The remaining question is whether DarwinBoot completes the handoff. Move the next observation upstream of the XNU restart hook.
