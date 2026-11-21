@@ -2,7 +2,7 @@
 
 Stock Recovery entry succeeded, but remote reboot attempts returned to Recovery. The tablet awaits the on-device Reboot to System action. See [the Recovery entry result](docs/results-2026-11-21-stock-recovery-entry.md).
 
-`out/maintenance-gpt/readback.img` embeds `piano-309-gpt-readback`. The deployment manifest records its repeatable build and host fixture results. Run it on the tablet after verifying that stock Recovery can return to HyperOS. Independent media readback after a write still needs qualification.
+`out/maintenance-gpt/readback-direct.img` embeds `piano-309-gpt-readback`. The deployment manifest records its repeatable build and host fixture results. Run it on the tablet after verifying that stock Recovery can return to HyperOS. The readback bypasses the Linux page cache with O_DIRECT. Post-write flush and UFS readback still need device qualification.
 
 The maintenance image with the packaged checker passed on the tablet. The maintenance writer and stock Recovery remain separate storage gates. See [the packaged preflight result](docs/results-2026-11-21-packaged-gpt-preflight.md).
 

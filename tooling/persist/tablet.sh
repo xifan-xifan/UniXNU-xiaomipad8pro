@@ -108,8 +108,8 @@ piano-309-gpt-preflight|piano-309-gpt-readback)
 		umask 077
 		work=$(mktemp -d /run/piano-gpt.XXXXXX) || die 'cannot allocate RAM readback directory'
 		trap 'rm -f "$work/primary" "$work/backup"; rmdir "$work"' EXIT
-		dd if="/dev/$l" of="$work/primary" bs=4096 count=6 || die 'cannot read primary GPT'
-		dd if="/dev/$l" of="$work/backup" bs=4096 skip=124552187 count=5 || die 'cannot read backup GPT'
+		dd if="/dev/$l" of="$work/primary" bs=4096 iflag=direct count=6 || die 'cannot read primary GPT'
+		dd if="/dev/$l" of="$work/backup" bs=4096 iflag=direct skip=124552187 count=5 || die 'cannot read backup GPT'
 		[ "$(wc -c < "$work/primary")" -eq 24576 ] || die 'short primary GPT read'
 		[ "$(wc -c < "$work/backup")" -eq 20480 ] || die 'short backup GPT read'
 		primary=$(sha256sum "$work/primary") || die 'cannot hash primary GPT'

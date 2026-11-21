@@ -57,11 +57,11 @@
     "device_result": "docs/results-2026-11-21-packaged-gpt-preflight.md"
   },
   "maintenance_gpt_readback_candidate": {
-    "path": "out/maintenance-gpt/readback.img",
+    "path": "out/maintenance-gpt/readback-direct.img",
     "bytes": 49172480,
-    "sha256": "1986776ccdb0404c423ec4834f33a98274095cfdad8d57d0e8a824c7781d14ba",
-    "tablet_script_sha256": "0ca20d1b59b72dc6d3e3ab6c71e7d438c59c8ea52a8ad30136927171cc963ab0",
-    "host_verification": "Two byte-identical builds. Verified stock hashes, mount rejection, short reads and cleanup on a sparse disk fixture. Compared the embedded script and all other payloads.",
+    "sha256": "e568d44958b9f47934d084b373d198d9e7ad7637a45f87c54381b4a7ac743225",
+    "tablet_script_sha256": "ee9b2b780fcb481e61a49c5e53cadc4697e63178415f8bdefe36920d1f1879d9",
+    "host_verification": "Two byte-identical builds. Verified stock hashes, mount rejection, short reads and cleanup on a sparse disk fixture. The extracted ARM64 BusyBox read both stock fragments using O_DIRECT under QEMU.",
     "device_status": "Pending hardware execution and independent media readback after a write."
   },
   "abl_source_review_2026_11_20": {
