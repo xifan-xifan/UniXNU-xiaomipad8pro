@@ -1,6 +1,6 @@
 # Native macOS Deployment Handoff
 
-The [packed DarwinBoot audit](docs/results-2026-11-21-mailbox-packed-driver.md) confirmed that the mailbox trial marker is in the packaged PE32 executable. Historical reset captures show bit corruption, but did not exercise the current watchdog-to-HyperOS-to-UEFI route. Qualify that route with a known RAM marker before interpreting the all-zero capture.
+The [packed DarwinBoot audit](docs/results-2026-11-21-mailbox-packed-driver.md) confirmed that the mailbox trial marker is in the packaged PE32 executable. The [packed DTB audit](docs/results-2026-11-21-cvp-ownership.md) identified the CVP consumer, and stock HyperOS exposes a live msm_cvp driver binding for that node. Qualify retention before HyperOS initializes the region or use an independently qualified reservation.
 
 The [DarwinBoot APRIORI control](docs/results-2026-11-21-darwin-apriori.md) built successfully and enumerated as UEFI Fastboot in an action-only RAM boot. HyperOS returned on A with the original marker. A follow-up captured the staged log before reboot. The capture stops at menu launch and does not establish loader registration. Check the protocol directly at the BDS boundary. The retained candidate is `out/boot-piano-darwin-apriori-menu.img`.
 
