@@ -1,0 +1,3 @@
+# DarwinBoot mailbox baseline comparison (2026-11-21)
+
+The 7,340,032-byte mailbox dump from the DarwinBoot trial was compared with the earlier menu-only mailbox dump of the same size. The expected record window at offset `0x6F5000` is identical between the two dumps, including all eleven zeroed checkpoint pages. The complete dumps differ in 29,996 bytes, while the known nonzero tail marker at `0x6FEFF8` is identical. This confirms that the reader transfers the expected CVP address range and that the trial did not leave a recognizable record in that range. It still cannot distinguish a missing write from post-trial clearing.
