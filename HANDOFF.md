@@ -486,3 +486,5 @@ The retained Mac build tree successfully rebuilt NativeUfs after adding the exac
 The stock-window policy replay succeeded: the real OS/SystemOS 544-byte headers and shared 395-byte anchor from piano-stock-root were assembled into an arm64e policy object, then linked with the retained verified NativeUfs, VerifiedRoot and XNU crypto objects. The resulting stock-policy UFS object exports the policy symbols and defines vr_open; only boot_progress_poll remains unresolved for collection integration. See docs/results-2026-11-21-stock-policy-object-replay.md.
 
 A host KC replay now consumes the real stock-root v2 policy object instead of fixture headers. The retained 26-driver owner recipe linked successfully to a 135,806,976-byte KC, SHA-256 a927b53d3ebca0e257d945d89a6ba0594835834a30f2a2bef374c83c1a178fbe. It is unsigned and host-only; packaging and device qualification remain open.
+
+The locked DarwinBoot parser accepted the stock-policy KC replay and passed its synthetic malformed-range and arm64/arm64e tests. This is a structural host check only; signing, root mount and device execution remain open.
