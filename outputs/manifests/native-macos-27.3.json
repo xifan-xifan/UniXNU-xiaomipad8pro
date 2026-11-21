@@ -1636,6 +1636,14 @@
     "android_return_verified": true,
     "result": "docs/results-2026-11-21-darwinboot-witness.md"
   },
+  "darwinboot_watchdog_menu_gate": {
+    "image": "out/boot-piano-witness-watchdog-gate.img",
+    "sha256": "ea520f9ad88b890cb1c5d0e449b17d7d3401cbff6610eab0c48edd1d654b3ecc",
+    "fd_sha256": "453bf2d80b10dd4ed2fcd401141c80f471139a123d095736d49542768033bbd3",
+    "status": "host qualified packaging only",
+    "gate": "DarwinBoot and APRIORI match archived witness. Default menu retains piano-reset-after=90. Archived DarwinBoot stops before invoking XNU. Cold reset on watchdog setup failure and firmware write-path audit remain open.",
+    "device_tested": false
+  },
   "darwinboot_watchdog_stop": {
     "image": "out/boot-piano-darwinboot-watchdog-stop.img",
     "sha256": "1adc49c0a613beb7775f4276978cfa55528e911cff02211d72e5b085e36a9e4c",
