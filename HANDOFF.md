@@ -1,5 +1,7 @@
 # Native macOS Deployment Handoff
 
+Stock Recovery entry succeeded, but remote reboot attempts returned to Recovery. The tablet awaits the on-device Reboot to System action. See [the Recovery entry result](docs/results-2026-11-21-stock-recovery-entry.md).
+
 The maintenance image with the packaged checker passed on the tablet. The maintenance writer and stock Recovery remain separate storage gates. See [the packaged preflight result](docs/results-2026-11-21-packaged-gpt-preflight.md).
 
 The frozen maintenance RAM image read both stock GPT copies from unmounted LUN 0 and returned to HyperOS 3.0.309 with the same ABL baseline. See [the maintenance GPT result](docs/results-2026-11-21-maintenance-gpt-preflight.md). The packaged checker, maintenance writer backend and stock Recovery entry still need qualification.
