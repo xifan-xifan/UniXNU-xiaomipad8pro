@@ -460,3 +460,5 @@ The subtype-2 ESP payload and its padded readback match. Both retained corrected
 A host-only v2 RAM image was assembled with the parser-passing subtype-2 payload (d12691e0…), existing kernel field/DTB, and recomputed section ID. Image SHA-256 begins 47125fbd; it has not been signed or sent to the tablet. See [offline subtype-2 RAM image](docs/results-2026-11-21-offline-subtype2-ram-image.md).
 
 The [archived subtype-2 firmware and root audit](docs/results-2026-11-21-subtype2-fd-root.md) recovered the FD by matching its archived build hash and confirmed the ADT's 27.3 root selector. Effective storage defaults and the authenticated root pairing remain open.
+
+The [subtype-2 container verifier](docs/results-2026-11-21-subtype2-container-verifier.md) found two legacy header fields and passed after normalizing those fields in a separate host copy. Root pairing and unattended device recovery remain pending.
