@@ -1746,6 +1746,14 @@
     "host_fixture_object": "host-poll.o",
     "result": "docs/results-2026-11-21-stock-policy-kc-replay.md"
   },
+  "device_stock_root_v2": {
+    "partition": "LUN 0 linux_rootfs (sda35)",
+    "bytes": 17547919360,
+    "direct_readback_sha256": "db3629e5da012ce76e64c0f42739ada9541ed8cca5adaab32256fc9b64b34ef7",
+    "tail_and_both_gpt_copies_unchanged": true,
+    "hyperos_return": "OS3.0.309.0.WPYCNXM, slot A, boot completed",
+    "result": "docs/results-2026-11-22-native-root-install.md"
+  },
   "host_stock_root_v2": {
     "host": "mac",
     "path": "/private/tmp/piano-stock-root.1ubLtk/root.img",

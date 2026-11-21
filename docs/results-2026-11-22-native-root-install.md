@@ -1,0 +1,5 @@
+# Native macOS root installation on the candidate GPT
+
+Windows streamed the frozen 26C5035r root over USB NCM into blocks 0 through 4284159 of LUN 0 `linux_rootfs` (`sda35`). Preflight verified both candidate GPT copies, the unmounted target extent and a blank prefix and tail. The writer returned success. Independent direct readback of all 17,547,919,360 written bytes matched SHA-256 `db3629e5da012ce76e64c0f42739ada9541ed8cca5adaab32256fc9b64b34ef7`. The 958720-block tail still matched its preflight SHA-256, and both GPT copies matched their frozen digests after the write.
+
+The host exited RAM maintenance into stock ABL without physical input. ABL reported slot A successful and bootable with six retries and snapshot state `none`. A host reboot then returned to HyperOS `OS3.0.309.0.WPYCNXM`, slot `_a`, `sys.boot_completed=1`. The local run log and recorded state are under `out/piano-309-root-live-20261122/`. This phase wrote the root image only. Native XNU handoff, a desktop, persistent Data and dual boot remain unverified.
