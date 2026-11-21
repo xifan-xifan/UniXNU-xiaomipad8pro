@@ -542,3 +542,5 @@ The [packed GOP inventory](docs/results-2026-11-22-packed-gop-inventory.md) conf
 The [packed dispatch audit](docs/results-2026-11-22-packed-gop-inventory.md) also confirms that the historical auto8, witness and mailbox images share the exact FAT payload. The witness uses a different FD and reached the final EBS preparation with those inputs. Prioritize the FD and loader runtime differences when diagnosing the auto8 refusal.
 
 The [witness replay identity check](docs/results-2026-11-22-witness-replay-identity.md) found identical APRIORI files and different DarwinBoot driver bytes. Use the archived FD as the witness reference.
+
+The witness replay inventory also found BdsDxe and PcdDxe changes. A host-only decoded section derived from the archive moves DarwinBoot to first in APRIORI while preserving all bytes outside the GUID list. The result and its hash are in the witness replay identity record.
