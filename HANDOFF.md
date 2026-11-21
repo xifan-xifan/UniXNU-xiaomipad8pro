@@ -1,5 +1,7 @@
 # Native macOS Deployment Handoff
 
+The [retained k27 baseline replay](docs/results-2026-11-22-k27-baseline-replay.md) reproduced the clean c2936ef tree from the 47 local patches. Native 0053 still requires three different file revisions. Preserve the replay as a separate reconstruction input.
+
 The [CrossDarwin profile comparison](docs/results-2026-11-22-crossdarwin-profile.md) verified the same Apple XNU base and 26C5035r target. The public patch series is a reconstruction reference. The prepared k27 tree and piano runtime compatibility remain unverified.
 
 The [ABL slot and snapshot readback](docs/results-2026-11-22-abl-snapshot-readback.md) confirmed A active/successful, retry 6, and snapshot status none in userspace Fastboot and ABL; the tablet returned to HyperOS. Slot B reports unbootable and was not changed. No native Darwin recovery evidence yet.
