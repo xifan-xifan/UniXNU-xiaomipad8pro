@@ -462,3 +462,5 @@ A host-only v2 RAM image was assembled with the parser-passing subtype-2 payload
 The [archived subtype-2 firmware and root audit](docs/results-2026-11-21-subtype2-fd-root.md) recovered the FD by matching its archived build hash and confirmed the ADT's 27.3 root selector. Effective storage defaults and the authenticated root pairing remain open.
 
 The [subtype-2 container verifier](docs/results-2026-11-21-subtype2-container-verifier.md) found two legacy header fields and passed after normalizing those fields in a separate host copy. Root pairing and unattended device recovery remain pending.
+
+The [subtype-2 root pairing audit](docs/results-2026-11-21-subtype2-root-pairing.md) matches the ADT selector to the Apple OS window and confirms that the separate SystemOS window requires its own authentication policy.
