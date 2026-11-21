@@ -23,7 +23,12 @@
     "store_blocks": 1048609,
     "bytes_with_1_gib_reserve": 5368844288,
     "matching_historical_manifests": 28,
-    "host_apfs_readonly": {"volume": "Data", "volume_uuid": "98FD0A57-D19D-4C68-815D-60C6CF1459EB", "top_level": "var-style directories", "detached": true},
+    "host_apfs_readonly": {
+      "volume": "Data",
+      "volume_uuid": "98FD0A57-D19D-4C68-815D-60C6CF1459EB",
+      "top_level": "var-style directories",
+      "detached": true
+    },
     "qualification": "Historical offline RAM runs configured with data_persist=0. The volume lacks the private, Library and Users directories required by the pinned full-volume firmlink layout. Excluded from desktop deployment under that layout."
   },
   "maintenance_readback_candidate": {
@@ -1482,7 +1487,11 @@
   "owner_cryptex_bindfs_host_collection": {
     "sha256": "e5c72beb67784d985736b0c2719968727878288eab38e8d0c41a33de1eb92462",
     "artifact": "owner-cryptex-bindfs.kc",
-    "replay": {"byte_identical": true, "working_directory": "UbuntuPiano:/tmp/piano-linkinfo-relink.yab5k88c", "evidence": "docs/results-2026-11-21-owner-collection-replay.md"},
+    "replay": {
+      "byte_identical": true,
+      "working_directory": "UbuntuPiano:/tmp/piano-linkinfo-relink.yab5k88c",
+      "evidence": "docs/results-2026-11-21-owner-collection-replay.md"
+    },
     "workspace": "UbuntuPiano:/tmp/piano-verified-collection.68bZb6",
     "linked_descriptors": 26,
     "validation": "Locked DarwinBoot parser and synthetic checks passed",
@@ -1600,7 +1609,10 @@
     "fd_sha256": "5506f1aa4035013108ddbebf0ae620e06a1118864ee5fcca0744f8677ce8f304",
     "reference_fd_sha256": "bf9ff0d490c8aaeecba0f09c4bb359688db4ea08003b7722bf51d08bf419f27f",
     "fvmain_non_padding_ffs_count": 174,
-    "fvmain_differing_ffs": ["PcdDxe", "BdsDxe"],
+    "fvmain_differing_ffs": [
+      "PcdDxe",
+      "BdsDxe"
+    ],
     "darwinboot_ffs_identical": true,
     "tablet_tested": false,
     "result": "docs/results-2026-11-21-darwinboot-build-replay.md"
@@ -1655,7 +1667,10 @@
     "abl_accepted": true,
     "xnu_handoff_verified": false,
     "menu_return_status": "Unsupported",
-    "menu_driver_count": {"loaded": 0, "failed": 0},
+    "menu_driver_count": {
+      "loaded": 0,
+      "failed": 0
+    },
     "usb_enumerated_after_menu_return": false,
     "hyperos_recovery_verified": true,
     "hyperos_recovery_trigger_observed": false,
@@ -1679,7 +1694,11 @@
     "sha256": "db3629e5da012ce76e64c0f42739ada9541ed8cca5adaab32256fc9b64b34ef7",
     "manifest_sha256": "d286c86cd939916455d9e09f6b0141d523ad6c7b5ef611ccc73447765ab40b23",
     "window_and_table_readback": "pass",
-    "verified_root_host_block_authentication": {"OS": 3538432, "SystemOS": 712192, "altered_blocks_rejected": true},
+    "verified_root_host_block_authentication": {
+      "OS": 3538432,
+      "SystemOS": 712192,
+      "altered_blocks_rejected": true
+    },
     "device_tested": false,
     "result": "docs/results-2026-11-21-stock-root-v2-assembly.md"
   },
@@ -1688,6 +1707,6 @@
     "path": "out/IOStorageFamily-e45fbe30a7879e0b16e26dddb78538f1b00e0bff.tar.gz",
     "bytes": 5183875,
     "sha256": "ec28dca0231ef58c7d347153cf572c60440bf25e198095af02a19bf0167b8438",
-    "qualification": "Archive extracted successfully. The pinned build helper requires a clean Git checkout at the exact commit. Header preparation and ABI qualification are pending."
+    "qualification": "Exact upstream commit object reconstructed from the verified archive: tree 6e9060023b750feae81727e756a0577f5829baa1. Mac checkout reports exact HEAD e45fbe30a7879e0b16e26dddb78538f1b00e0bff, clean status, and prepare-storage-headers.py passed with 19 public headers."
   }
 }
