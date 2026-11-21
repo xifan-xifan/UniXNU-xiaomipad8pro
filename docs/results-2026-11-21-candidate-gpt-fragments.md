@@ -7,3 +7,5 @@ The 24,576-byte primary fragment SHA-256 is `12710135635beee2a5de1dd910924a3d2d2
 This host result qualifies the candidate bytes and parsing, not maintenance writer behavior, device GPT selection during a partial update, Recovery entry, or Android recreation on the shortened userdata geometry.
 
 The same fixture then restored the original backup tail first and primary head second. Direct reads from the sparse disk matched the 20,480-byte and 24,576-byte retained stock fragments byte for byte. A read-only 4 KiB loop-device `sgdisk -v` found no GPT problems after restoration. As expected, the restored stock table has no unallocated usable LBAs and reports the inherited 64-entry-array and stock userdata-alignment warnings. This remains host-only evidence.
+
+A live Android root ADB read on 2026-11-21 confirmed build `OS3.0.309.0.WPYCNXM` and LUN 0 geometry of 996,417,536 sectors of 512 bytes with 4,096-byte logical blocks. The checker recognized the 24,576-byte primary readback and 20,480-byte backup readback as `primary=stock backup=stock`. This was a read from Android userspace. Maintenance environment readback and candidate writer qualification are still pending.
