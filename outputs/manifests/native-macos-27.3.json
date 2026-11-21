@@ -1671,5 +1671,15 @@
     "signed": false,
     "device_tested": false,
     "result": "docs/results-2026-11-21-subtype2-container-verifier.md"
+  },
+  "host_stock_root_v2": {
+    "host": "mac",
+    "path": "/private/tmp/piano-stock-root.1ubLtk/root.img",
+    "bytes": 17547919360,
+    "sha256": "db3629e5da012ce76e64c0f42739ada9541ed8cca5adaab32256fc9b64b34ef7",
+    "manifest_sha256": "d286c86cd939916455d9e09f6b0141d523ad6c7b5ef611ccc73447765ab40b23",
+    "window_and_table_readback": "pass",
+    "device_tested": false,
+    "result": "docs/results-2026-11-21-stock-root-v2-assembly.md"
   }
 }
