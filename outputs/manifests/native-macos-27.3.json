@@ -1716,6 +1716,8 @@
     "host_parser": "pass",
     "deployment_eligible": false,
     "device_tested": false,
+    "stock_root_policy_pairing": "Byte-for-byte public anchor and both signed header matches against host_stock_root_v2",
+    "stock_root_policy_result": "docs/results-2026-11-22-stock-kc-root-pair.md",
     "result": "docs/results-2026-11-21-verified-ufs-without-poll.md"
   },
   "host_stock_policy_kc": {
