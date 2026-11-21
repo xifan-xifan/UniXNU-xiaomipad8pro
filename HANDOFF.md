@@ -1,5 +1,7 @@
 # Native macOS Deployment Handoff
 
+The [DarwinBoot mailbox trial](docs/results-2026-11-22-darwinboot-ebs-abl.md) captured eight matching EFI_SUCCESS records before Android started. HyperOS A returned. The probe stopped before DarwinEnter. Next isolate the kernel branch and use the same return route.
+
 The [watchdog ABL retention control](docs/results-2026-11-22-watchdog-abl-retention.md) read back the CVP marker before Android started and returned to completed HyperOS A. Apply the qualified route to the separate DarwinBoot ExitBootServices mailbox image and capture its result before Android starts.
 
 The [live firmware ring](docs/results-2026-11-22-enter-ring-live.md) confirms unattended menu selection and the final marker before ExitBootServices. HyperOS returned on slot A. The next device trial needs an independent checkpoint after ExitBootServices; XNU entry remains unproved.
