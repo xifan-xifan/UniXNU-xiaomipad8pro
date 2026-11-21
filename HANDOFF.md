@@ -537,3 +537,4 @@ The [first-install Data host test](docs/results-2026-11-22-first-install-rambloc
 
 The 2026-11-22 GitHub API recheck resolved CrossDarwin's default test_27 to `4a671773c2ee289735ab526eda7c9628131250df` and the piano upstream main to `2438556c77c90c22c7b76e57eb8b40c44b35f1af`. The reviewed pins still apply. The retained DarwinBoot stop image hashes to `1adc49c0a613beb7775f4276978cfa55528e911cff02211d72e5b085e36a9e4c`. Its automatic return remains tied to the existing tablet record, which lacks a post-EBS witness. The stop patch stalls before DarwinEnter, so XNU reset behavior requires a distinct candidate and device test.
 
+The [packed GOP inventory](docs/results-2026-11-22-packed-gop-inventory.md) confirmed SimpleFbDxe in the retained auto8, witness, and mailbox containers. The menu refusal remains ambiguous. The APRIORI witness provides a confirmed loader-dispatch baseline for the next diagnostic.
