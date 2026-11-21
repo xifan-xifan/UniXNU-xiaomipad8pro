@@ -1595,5 +1595,13 @@
     "menu_default": "macos-8cpu",
     "host_verifier_failures": 0,
     "device_tested": false
+  },
+  "native_ufs_inspect_auto8_reset90_probe": {
+    "image": "out/boot-piano-macos-ram-inspect-auto8-reset90.img",
+    "build_record": "out/boot-piano-macos-ram-inspect-auto8-reset90.json",
+    "sha256": "384fe14b6bc799fe5eb84f329d7b63d4b8614b289fb2ba792c12bba7cf17e010",
+    "xnu_reset_seconds": 90,
+    "host_verifier_failures": 0,
+    "device_tested": false
   }
 }
