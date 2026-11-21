@@ -554,3 +554,5 @@ The [watchdog dispatch audit](docs/results-2026-11-22-watchdog-dispatch-gate.md)
 The diagnostic [watchdog menu gate](firmware/diagnostic/ram-watchdog-menu-gate.patch) built in UbuntuPiano. FD SHA-256 is `453bf2d80b10dd4ed2fcd401141c80f471139a123d095736d49542768033bbd3`. The build log is `/tmp/darwinboot-post-ebs.tzsdzOfC/watchdog-gate.log`. The 174-entry FVMAIN inventory retains the archived order and byte-identical APRIORI and DarwinBoot files. BdsDxe and PcdDxe differ. The fallback cold reset on watchdog setup failure awaits hardware verification.
 
 The watchdog-gate image's packed variable driver uses emulated NV variables with zero flash storage base and size. The reset driver matches the linked output. See [storage audit](docs/results-2026-11-22-watchdog-gate-storage.md).
+
+The [watchdog callback audit](docs/results-2026-11-22-watchdog-reset-callbacks.md) excludes the identified open-source logger, TPM and NVMe callback drivers from the menu-gate FVMAIN. The failure reset runs before diagnostic Fastboot is available. Early reset and proprietary callbacks remain unverified.
