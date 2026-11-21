@@ -1,0 +1,48 @@
+--- a/DarwinBootPkg/Driver/DarwinBoot.c
++++ b/DarwinBootPkg/Driver/DarwinBoot.c
+@@ -40,6 +40,23 @@
+   UINT64   End;
+   UINT64   Entry;
+ } KERNEL;
++
++// Diagnostic-only checkpoint in the piano CVP carveout. Keep eleven page-
++// separated copies so the host can identify the stage after a warm reset.
++STATIC
++VOID
++RecordPianoExit (UINT32 Stage, UINTN Attempt, EFI_STATUS Status)
++{
++  for (UINTN Copy = 0; Copy < 11; ++Copy) {
++    volatile UINT64 *Record = (volatile UINT64 *)(UINTN)(0x9D1F5000 + Copy * 0x1000);
++    Record[0] = 0x315342454F4E4150ULL; // PANO EBS1, little endian
++    Record[1] = ((UINT64)Attempt << 32) | Stage;
++    Record[2] = Status;
++    Record[3] = ~Record[1];
++    WriteBackDataCacheRange ((VOID *)(UINTN)Record, 4 * sizeof (UINT64));
++  }
++  __asm__ volatile ("dsb sy" ::: "memory");
++}
+ 
+ STATIC EFI_HANDLE  mImage;
+ UINT64 EFIAPI DarwinCurrentEl (VOID);
+@@ -846,16 +863,19 @@
+           READ_SYSREG (id_aa64mmfr0_el1) & 0xF, (((READ_SYSREG (id_aa64mmfr0_el1) >> 28) & 0xF) == 0xF) ? "NOT supported" : "supported"));
+   DEBUG ((DEBUG_ERROR, "ID_AA64PFR0_EL1  0x%lx\n", READ_SYSREG (id_aa64pfr0_el1)));
+   DEBUG ((DEBUG_ERROR, "\nExiting boot services. A green bar across the top\nmarks the loader handoff before the kernel branch.\n"));
+-  DEBUG ((DEBUG_ERROR, "PIANO: DarwinBoot ready for ExitBootServices\n"));
+-  gBS->Stall (5000000);
++  DEBUG ((DEBUG_ERROR, "PIANO: DarwinBoot starting EBS mailbox trial\n"));
+   for (Attempt = 0; Attempt < 3; Attempt++) {
++    RecordPianoExit (1, Attempt, EFI_NOT_READY);
+     MapSize = Capacity;
+     Status = gBS->GetMemoryMap (&MapSize, Map, &Key, &Stride, &Version);
+     if (EFI_ERROR (Status)) {
++      RecordPianoExit (4, Attempt, Status);
+       if (Attempt == 0) { goto Fail; }
+       CpuDeadLoop ();
+     }
++    RecordPianoExit (2, Attempt, EFI_NOT_READY);
+     Status = gBS->ExitBootServices (mImage, Key);
++    RecordPianoExit (3, Attempt, Status);
+     if (!EFI_ERROR (Status)) {
+       // Diagnostic only. The platform watchdog must already be armed.
+       // Paint cyan and white after ExitBootServices, then let the watchdog expire.

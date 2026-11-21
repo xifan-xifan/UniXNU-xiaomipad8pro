@@ -1605,6 +1605,13 @@
     "tablet_tested": false,
     "result": "docs/results-2026-11-21-darwinboot-build-replay.md"
   },
+  "darwinboot_ebs_mailbox": {
+    "image": "out/boot-piano-darwinboot-mailbox.img",
+    "sha256": "978d5a787b1bbcc44ff33d0471fef54947a8f96b8c0a20c8f8df3cba895db42f",
+    "fd_sha256": "777b2cedd454fc7f65a1ad77c11d7dc473044d18f5ec4cc0405b16958307d102",
+    "tablet_tested": false,
+    "result": "docs/results-2026-11-21-darwinboot-mailbox.md"
+  },
   "darwinboot_watchdog_witness": {
     "image": "out/boot-piano-darwinboot-witness.img",
     "sha256": "a74a9e605283aa68c6f5cecf6e1e1fd624e0a1c767774ee302fde868a3f945aa",

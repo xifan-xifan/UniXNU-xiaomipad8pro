@@ -163,3 +163,5 @@ See [the image inventory](../docs/results-2026-11-21-fips4b-inventory.md) for th
 
 - DarwinBoot witness RAM image, out/boot-piano-darwinboot-witness.img, SHA-256 a74a9e605283aa68c6f5cecf6e1e1fd624e0a1c767774ee302fde868a3f945aa. See [tablet result](../docs/results-2026-11-21-darwinboot-witness.md).
 - DarwinBoot witness FD replay, UbuntuPiano build cache `Build/pianoPkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd`, SHA-256 `5506f1aa4035013108ddbebf0ae620e06a1118864ee5fcca0744f8677ce8f304`. [Host comparison](../docs/results-2026-11-21-darwinboot-build-replay.md).
+
+- DarwinBoot EBS mailbox diagnostic FD SHA-256 `777b2cedd454fc7f65a1ad77c11d7dc473044d18f5ec4cc0405b16958307d102`. `out/boot-piano-darwinboot-mailbox.img` SHA-256 `978d5a787b1bbcc44ff33d0471fef54947a8f96b8c0a20c8f8df3cba895db42f`. [Host result](../docs/results-2026-11-21-darwinboot-mailbox.md).
