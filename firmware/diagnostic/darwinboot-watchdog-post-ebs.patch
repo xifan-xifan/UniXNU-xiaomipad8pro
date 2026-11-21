@@ -1,0 +1,39 @@
+--- a/DarwinBootPkg/Driver/DarwinBoot.c
++++ b/DarwinBootPkg/Driver/DarwinBoot.c
+@@ -3,6 +3,7 @@
+ #include <Guid/FileInfo.h>
+ #include <Library/BaseLib.h>
+ #include <Library/BaseMemoryLib.h>
++#include <Library/CacheMaintenanceLib.h>
+ #include <Library/DebugLib.h>
+ #include <Library/MemoryAllocationLib.h>
+ #include <Library/UefiBootServicesTableLib.h>
+@@ -854,7 +855,17 @@
+     }
+     Status = gBS->ExitBootServices (mImage, Key);
+     if (!EFI_ERROR (Status)) {
+-      DarwinEnter (ArgsAddress, Address + Kernel.Entry - Kernel.Base, Address, WindowSize, Video[0], Video[2] * Video[4]);
++      // Diagnostic only. The platform watchdog must already be armed.
++      // Paint cyan and white after ExitBootServices, then let the watchdog expire.
++      if (Video[0] != 0 && Video[3] >= 128 && Video[4] >= 32) {
++        for (UINTN Row = 0; Row < 32; ++Row) {
++          volatile UINT32 *Pixels = (volatile UINT32 *)(UINTN)(Video[0] + Row * Video[2]);
++          for (UINTN Column = 0; Column < 128; ++Column) {
++            Pixels[Column] = Column < 64 ? 0x0000ffff : 0x00ffffff;
++          }
++          WriteBackDataCacheRange ((VOID *)(UINTN)Pixels, 128 * sizeof (UINT32));
++        }
++      }
+       CpuDeadLoop ();
+     }
+     if (Status != EFI_INVALID_PARAMETER) { CpuDeadLoop (); }
+--- a/DarwinBootPkg/Driver/DarwinBoot.inf
++++ b/DarwinBootPkg/Driver/DarwinBoot.inf
+@@ -22,6 +22,7 @@
+ [LibraryClasses]
+   BaseLib
+   BaseMemoryLib
++  CacheMaintenanceLib
+   DebugLib
+   MemoryAllocationLib
+   PrintLib

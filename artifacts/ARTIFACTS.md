@@ -156,3 +156,5 @@ See [the image inventory](../docs/results-2026-11-21-fips4b-inventory.md) for th
 - Gunyah watchdog expiry diagnostic, `out/boot-piano-watchdog-expiry.img` (13,766,656 bytes), SHA-256 `09a30114856cb3712158577292bfc3056e294c8194818ccd33f7adc7c4542e46`. Linked FD SHA-256 `83a7b411dfc553afc2964fd9eeee12246796b382177954797cde84d10072576d`. Android v2 ID and FD-only payload difference verified. See [tablet result](../docs/results-2026-11-21-uefi-watchdog-expiry.md).
 
 - Post-ExitBootServices watchdog RAM diagnostic, `out/boot-piano-watchdog-post-ebs.img` (13,766,656 bytes), SHA-256 `6709d0fd6b4569f03e62146cd6d21ebae2b94645a15ee932e8ec0c92bf1a2183`. Linked FD SHA-256 `2ed78a1f52b147ac32e5259aa6e8bf992031a320fc5fa0040bb41d24949ccc82`. Build log `UbuntuPiano:/tmp/piano-post-ebs.mIk1NZN0/build-retry.log`. See [tablet result](../docs/results-2026-11-21-watchdog-post-ebs.md).
+
+- DarwinBoot watchdog stop FFS (host build only), `UbuntuPiano:/tmp/darwinboot-post-ebs.ffs`, SHA-256 `6563739a80454379e850bc9fa5d08bc01fff23c408902e75e338cb9badfbf034`.
