@@ -346,3 +346,5 @@ The frozen mailbox image was rehashed directly in UbuntuPiano WSL at the recorde
 The A-slot recovery partition matches the verified 3.0.309 package image. Both slot hashes and capacities are recorded in [the live recovery result](docs/results-2026-11-21-live-recovery-slots.md).
 
 The explicit candidate GPT fragments generated from the retained stock captures passed `sgdisk -v` on a fresh, read-only 4 KiB-sector host fixture. Their hashes and limitations are recorded in [the candidate fragment result](docs/results-2026-11-21-candidate-gpt-fragments.md). The candidate output and byte diffs remain in ignored `out/rollback-3.0.309-gpt/candidate/` and are not approved for device use until owner approval and maintenance writer qualification.
+
+A read-only ordinary ABL Fastboot session on 2026-11-21 recorded slot A successful and bootable with retries 6, slot B marked unbootable with retries 6, and `snapshot-update-status=none`. Normal Fastboot reboot returned to completed HyperOS 3.0.309 on A. See [the dated ABL state result](docs/results-2026-11-21-abl-read-return.md). This does not qualify `fastboot boot`.

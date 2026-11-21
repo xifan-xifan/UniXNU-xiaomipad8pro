@@ -103,3 +103,5 @@ The verified GPT-only recovery fragments are materialized under ignored `out/rol
 ### Candidate GPT fragment host verification (2026-11-21)
 
 Exact primary and backup candidate fragments have been generated from the verified captures and independently parsed from a fresh sparse host disk using 4 KiB sectors. See [the dated host result](docs/results-2026-11-21-candidate-gpt-fragments.md) for SHA-256 and parser output. This still does not qualify device selection or writer/rollback execution.
+
+The latest read-only ABL baseline is recorded in [the ABL return result](docs/results-2026-11-21-abl-read-return.md). The A-slot values match the prior baseline. Slot B is successful=yes but unbootable=yes, retries=6; the test stayed on A. No temporary image boot was attempted.
