@@ -1606,6 +1606,7 @@
     "result": "docs/results-2026-11-21-darwinboot-build-replay.md"
   },
   "darwinboot_ebs_mailbox": {
+    "packed_driver_audit": "docs/results-2026-11-21-mailbox-packed-driver.md",
     "image": "out/boot-piano-darwinboot-mailbox.img",
     "sha256": "978d5a787b1bbcc44ff33d0471fef54947a8f96b8c0a20c8f8df3cba895db42f",
     "fd_sha256": "777b2cedd454fc7f65a1ad77c11d7dc473044d18f5ec4cc0405b16958307d102",
