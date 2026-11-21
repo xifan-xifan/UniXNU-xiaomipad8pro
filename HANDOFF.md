@@ -402,3 +402,5 @@ Prepared lookup-auto2 for a dispatch capture before the previously observed USB 
 The lookup-auto2 RAM boot was accepted by ABL and presented a roughly one-second UEFI USB window. The host captured no ring. Android return and XNU entry remain unverified. See [the result and reset coverage review](docs/results-2026-11-21-darwin-lookup-auto2.md).
 
 The first Gunyah firmware probe is firmware/diagnostic/ram-watchdog-status.patch. It logs the current exception level and queries watchdog status at EL1 before starting diagnostic Fastboot. The patched boot manager compiled with the retained AArch64 DEBUG toolchain and flags. Firmware linking, RAM packaging and tablet execution remain pending.
+
+The Gunyah watchdog status diagnostic now links and packages successfully. The retained WSL build log is UbuntuPiano:/tmp/piano-watchdog-status.zvGZxXmN/build.log. The Windows RAM image and FD hashes are in artifacts/ARTIFACTS.md. Windows PnP, ADB and Fastboot still showed no tablet after packaging. The firmware status query awaits a tablet run.
