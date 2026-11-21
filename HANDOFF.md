@@ -1,8 +1,8 @@
 # Native macOS Deployment Handoff
 
-Candidate GPT was written and independently verified on the tablet. The last observed state was stock Recovery, which [enumerated the candidate layout](docs/results-2026-11-21-candidate-recovery-geometry.md). HyperOS subsequently completed boot on slot A, and a synced Android test file survived a new boot. See [the HyperOS candidate result](docs/results-2026-11-21-candidate-hyperos.md). See [the trial result](docs/results-2026-11-21-candidate-gpt-tablet.md).
+Candidate GPT was written and independently verified on the tablet. Stock Recovery [enumerated the candidate layout](docs/results-2026-11-21-candidate-recovery-geometry.md). HyperOS subsequently completed boot on slot A, and a synced Android test file survived a new boot. See the [GPT trial](docs/results-2026-11-21-candidate-gpt-tablet.md) and [HyperOS persistence result](docs/results-2026-11-21-candidate-hyperos.md).
 
-The frozen writer image verified `primary=stock backup=stock` on the tablet using its read-only command. See `out/maintenance-gpt/writer-readback.log`. Explicit exit returned through ABL to completed HyperOS on slot A. Candidate write and rollback remain pending.
+The frozen writer image verified `primary=stock backup=stock` on the tablet using its read-only command. See `out/maintenance-gpt/writer-readback.log`. Explicit exit returned through ABL to completed HyperOS on slot A. The subsequent candidate write passed. Stock GPT rollback remains pending.
 
 Stock Recovery entry succeeded, but remote reboot attempts returned to Recovery. ADB subsequently observed completed HyperOS on slot A; the specific Recovery exit action was not observed. See [the Recovery entry result](docs/results-2026-11-21-stock-recovery-entry.md).
 
@@ -93,7 +93,7 @@ The retained strict RAM menu image still matches its recorded SHA-256. The live 
 
 ## Next actions
 
-- The [draft WRITE-PLAN](WRITE-PLAN.md) records the offline LUN 0 ranges and the limits of GPT rollback after F2FS tail overwrite. Final image hashes, stock recovery rehearsal, and explicit approval remain pending.
+- The [draft WRITE-PLAN](WRITE-PLAN.md) records the offline LUN 0 ranges and the limits of GPT rollback after F2FS tail overwrite. Final image hashes and stock GPT rollback qualification remain pending.
 
 - Host reproducibility update: GNU mtools 4.0.50 is built in WSL and in a temporary Mac prefix; on the Mac, `test-data-store.py` and `test-k273-only.py` both pass with their ESP fixture paths enabled. The persistence suite's remaining red cases are Linux/test-fixture limitations (`F_NOCACHE`, fake sysfs size, and expected backup-stop continuation), not tablet results. Mac host checks passed on 2026-11-19 under isolated CPython 3.11.18. Rerun staging tests 4–7 once the locked k27 tree is available. See `REPRODUCIBILITY.md` for test-by-test results.
 - F2FS storage research: upstream f2fs-tools `83fd39a` offline shrink compiled and passed a basic synthetic shrink/grow exercise in `UbuntuPiano`; a checkpoint warning and lack of payload readback/crash testing limit the result. The tablet's Android feature set is not matched, so no device shrink or WRITE-PLAN follows from this host test. See `docs/results-2026-11-19-f2fs-tools.md`.
