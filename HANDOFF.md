@@ -1,5 +1,7 @@
 # Native macOS Deployment Handoff
 
+The frozen writer image verified `primary=stock backup=stock` on the tablet using its read-only command. See `out/maintenance-gpt/writer-readback.log`. Explicit exit returned through ABL to completed HyperOS on slot A. Candidate write and rollback remain pending.
+
 Stock Recovery entry succeeded, but remote reboot attempts returned to Recovery. ADB subsequently observed completed HyperOS on slot A; the specific Recovery exit action was not observed. See [the Recovery entry result](docs/results-2026-11-21-stock-recovery-entry.md).
 
 `out/maintenance-gpt/readback-direct.img` embeds `piano-309-gpt-readback`. The deployment manifest records its repeatable build and host fixture results. The packaged command passed on the tablet: both GPT digests matched stock, and ABL reboot returned to completed HyperOS on slot A. See [the direct GPT result](docs/results-2026-11-21-direct-gpt-readback.md). The readback bypasses the Linux page cache with O_DIRECT. Post-write flush and UFS readback still need device qualification.
