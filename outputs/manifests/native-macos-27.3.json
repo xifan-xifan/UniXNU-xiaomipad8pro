@@ -1613,6 +1613,10 @@
     "host_verifier_failures": 0,
     "abl_accepted": true,
     "xnu_handoff_verified": false,
+    "menu_return_status": "Unsupported",
+    "menu_driver_count": {"loaded": 0, "failed": 0},
+    "usb_enumerated_after_menu_return": false,
+    "hyperos_recovery_verified": false,
     "device_result": "docs/results-2026-11-21-auto8-darwinboot.md"
   }
 }
