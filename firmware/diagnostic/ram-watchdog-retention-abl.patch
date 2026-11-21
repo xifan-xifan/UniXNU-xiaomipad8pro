@@ -1,0 +1,69 @@
+--- a/Platforms/Xiaomi/pianoPkg/Library/DeviceBootManagerLib/DeviceBootManager.c
++++ b/Platforms/Xiaomi/pianoPkg/Library/DeviceBootManagerLib/DeviceBootManager.c
+@@ -38,6 +38,53 @@
+   return NULL;
+ }
+
++// Diagnostic only: mirror the owned SDAM restart-reason path from k27 0057.
++STATIC
++BOOLEAN
++PianoSdamDone (volatile UINT32 *Channel)
++{
++  for (UINTN Index = 0; Index < 100000; ++Index) {
++    UINT32 Status = Channel[2];
++    if ((Status & 1) != 0) {
++      return (Status & 0xE) == 0;
++    }
++  }
++  return FALSE;
++}
++
++STATIC
++BOOLEAN
++PianoRequestAbl (VOID)
++{
++  volatile UINT32 *Core = (volatile UINT32 *)(UINTN)0x0C400000;
++  volatile UINT32 *Owners = (volatile UINT32 *)(UINTN)0x0C42D000;
++  UINT32 Count = Core[1] & 0x7FF;
++  if ((Core[0] >> 28) != 7 || Count == 0 || Count > 1024) {
++    return FALSE;
++  }
++  for (UINT32 Index = 0; Index < Count; ++Index) {
++    if (((Core[0x800 + Index] >> 8) & 0xFFF) != 0x071 || (Owners[Index] & 7) != 0) {
++      continue;
++    }
++    volatile UINT32 *Read = (volatile UINT32 *)(UINTN)(0x0C440000 + 0x20 * Index);
++    volatile UINT32 *Write = (volatile UINT32 *)(UINTN)(0x0C500000 + 0x1000 * Index);
++    Read[0] = (1U << 27) | (0x48U << 4);
++    if (!PianoSdamDone (Read)) {
++      return FALSE;
++    }
++    UINT32 Expected = (Read[6] & 1U) | 4U;
++    Write[4] = Expected;
++    __asm__ volatile ("dsb sy" ::: "memory");
++    Write[0] = 0x48U << 4;
++    if (!PianoSdamDone (Write)) {
++      return FALSE;
++    }
++    Read[0] = (1U << 27) | (0x48U << 4);
++    return PianoSdamDone (Read) && (Read[6] & 0xFFU) == Expected;
++  }
++  return FALSE;
++}
++
+ EFI_DEVICE_PATH_PROTOCOL**
+ EFIAPI
+ DeviceBootManagerAfterConsole ()
+@@ -63,6 +110,12 @@
+         WriteBackDataCacheRange ((VOID *)(UINTN)Marker, sizeof (*Marker));
+         __asm__ volatile ("dsb sy" ::: "memory");
+         DEBUG ((DEBUG_ERROR, "piano watchdog checkpoint: %08x\n", *Marker));
++        if (!PianoRequestAbl ()) {
++          DEBUG ((DEBUG_ERROR, "piano watchdog checkpoint: ABL route unverified; watchdog skipped\n"));
++          PianoFastbootStart ();
++          return NULL;
++        }
++        DEBUG ((DEBUG_ERROR, "piano watchdog checkpoint: ABL restart reason verified\n"));
+         X0 = 0x86000005; X1 = 3; X2 = 0; X3 = 0;
+         __asm__ volatile ("smc #0" : "+r" (X0), "+r" (X1), "+r" (X2), "+r" (X3) : : "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+         DEBUG ((DEBUG_ERROR, "piano watchdog trial: ENABLE=%Lx; no pet armed\n", X0));
