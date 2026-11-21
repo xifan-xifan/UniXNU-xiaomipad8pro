@@ -38,7 +38,6 @@ The tablet side is tooling/persist/tablet.sh (served over HTTP from the host's U
 checked); commands go through tooling/native/maint-shell.py (PIANO_MAINT_HOST). State: out/persistent/session/state.json.
 """
 import argparse
-import fcntl
 import hashlib
 import http.server
 import json
@@ -141,6 +140,8 @@ PART_KEYS = {'linux_rootfs': 'rootfs', 'linux_data': 'linux_data', 'esp': 'esp'}
 def read_nocache(path, digest=None):
     """A file's bytes in 4 MiB chunks, read with the page cache off (F_NOCACHE): the backup as stored, not the bytes just written.
     DIGEST (a hashlib object) is fed them."""
+    import fcntl
+
     fd = os.open(path, os.O_RDONLY)
     try:
         fcntl.fcntl(fd, fcntl.F_NOCACHE, 1)
@@ -549,6 +550,8 @@ class Session:
     @staticmethod
     def sha_nocache(path):
         """SHA-256 of a file read with the page cache off (F_NOCACHE): the NAS copy as stored, not the bytes just sent."""
+        import fcntl
+
         h = hashlib.sha256()
         fd = os.open(path, os.O_RDONLY)
         try:
@@ -896,7 +899,7 @@ def piano_309_root(s):
     if not s.execute:
         s.log('  check source SHA-256, live GPT, blank target, bounded write and independent readback')
         return
-    s.need(s.sha_nocache(img) == digest, 'frozen root image SHA-256')
+    s.need(common.sha(img) == digest, 'frozen root image SHA-256')
 
     def check_target():
         gpt = s.t('piano-309-gpt-readback')
@@ -1332,6 +1335,11 @@ def maint_boot(s):
         raise Stop('ABL fastboot not found (power + volume-down 15-20 s)')
     s.fastboot('boot', str(MAINT_IMAGE), timeout=180)
     s.wait_shell()
+    maint_attach(s)
+
+
+@step('maint-attach', 'maintenance, attach host tools to an existing RAM session')
+def maint_attach(s):
     s.shell('piano-maint idle 3600')
     out = s.shell('. /etc/piano-network; echo "host_ip=$PIANO_HOST_IP"')
     if out is not None:
