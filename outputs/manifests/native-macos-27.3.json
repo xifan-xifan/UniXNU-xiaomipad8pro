@@ -1573,5 +1573,16 @@
     "darwinboot_parser_passed": true,
     "native_kext_log_check_passed": true,
     "device_tested": false
+  },
+  "native_ufs_inspect_mailbox_probe": {
+    "image": "out/boot-piano-macos-ram-inspect-mailbox.img",
+    "bytes": 185733120,
+    "sha256": "56c84e6547c1b21a18854a8acc754f050c1a1cbb6595977899b3d6c94e61a536",
+    "kc_sha256": "80da9440d3ec0f610dc3721d10f4fc36cad72c88e14a00f09f79cdc73165d18d",
+    "workspace": "UbuntuPiano:/tmp/piano-inspect-relink.BlbwS0",
+    "device_result": "docs/results-2026-11-21-probe2-uefi-entry.md",
+    "uefi_entry_verified": true,
+    "android_return_verified": true,
+    "xnu_handoff_verified": false
   }
 }
