@@ -28,13 +28,16 @@ boot_ram() { local rc=0 marker=${LOOP_STATUS_FILE:-$L/status}.boot-inflight
 [ ! -e /tmp/piano-tablet.recovery-required ] || { log "FATAL recovery required; no boot attempted"; exit 3; }
 RESET=$(strings "$IMG" | grep -o 'piano-reset-after=[0-9][0-9]*' | head -1 | cut -d= -f2 || true); RESET=${RESET:-45}
 log "image $(shasum -a 256 "$IMG" | cut -c1-16), reset after ${RESET} s; dump image $(shasum -a 256 "$DUMP" | cut -c1-16)"
-wait_for abl 240 || { log "no ABL fastboot (parked kernel? power + volume-down 15-20 s)"; exit 1; }
+wait_for abl 240 || { log "no ABL fastboot before start deadline"; exit 1; }
 t0=$(date +%s)
 boot_ram "$IMG" > "$L/fastboot.log" 2>&1 || { cat "$L/fastboot.log"; exit 1; }
 wait_for uefi 40 || { log "our UEFI did not appear"; exit 1; }
-wait_for "eval ! uefi" 40 || true
-log "XNU started after $(( $(date +%s) - t0 )) s"
-wait_for abl $((RESET + 150)) || { log "no ABL fastboot within $((RESET + 150)) s (parked? power + volume-down 15-20 s)"; exit 2; }
+if wait_for "eval ! uefi" 40; then
+  log "UEFI USB disappeared after $(( $(date +%s) - t0 )) s; XNU entry unverified"
+else
+  log "UEFI USB remained visible through the transition deadline"
+fi
+wait_for abl $((RESET + 150)) || { log "no ABL fastboot within $((RESET + 150)) s; unattended return unverified"; exit 2; }
 log "back in ABL fastboot after $(( $(date +%s) - t0 )) s; checking dump eligibility"
 abl_answers || { log "FATAL ABL enumerates but does not answer after the test; no dump attempted"; exit 3; }
 # Optional mailbox export must never trade away the only working recovery path.

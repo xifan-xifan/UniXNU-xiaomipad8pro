@@ -6,8 +6,9 @@
   ... --execs                                                          (every exec and exit too)
 
 T (seconds from XNU's start) comes from usb-console.py's .times.txt (the Mac's clock when each line arrived), anchored on the run's
-own `piano-reset-after: N s reached` line (printed at mach time N, which counts from XNU's start), else on the loop's "XNU started"
-time (loop.log, local HH:MM:SS, +-1 s). Lines from before the Mac opened the port arrive in one burst when it does (PianoDwc3 replays
+own `piano-reset-after: N s reached` line (printed at mach time N, which counts from XNU's start), else on an
+explicit start time. Legacy loop logs offer only an approximate USB transition timestamp. Lines from before the Mac opened the port
+arrive in one burst when it does (PianoDwc3 replays
 the console mailbox from its start): their T is only an upper bound, marked '<='. Every reconnect replays the mailbox again, so only
 the first arrival of a line counts. A log without times (the decoded mailbox, a .txt capture) gives the order and line numbers only;
 launchd's own lines carry the 1970 calendar, which starts at XNU's uptime (no RTC), so with -v they read as T directly.
@@ -67,24 +68,26 @@ def xnu_start(rows, a):
         if t is not None and m:
             return t - int(m.group(1)), 'the reset line'
     loop = a.xnu_start
-    if a.loop:
+    source = 'explicit XNU start time'
+    if a.loop and not loop:
         m = re.search(r'^(\d\d:\d\d:\d\d) XNU started', Path(a.loop).read_text(), re.M)
         loop = m and m.group(1)
+        source = 'legacy UEFI USB transition (approximate)'
     if loop and rows and rows[0][0] is not None:
         first = datetime.datetime.fromtimestamp(rows[0][0])
         hh, mm, ss = map(int, loop.split(':'))
         start = first.replace(hour=hh, minute=mm, second=ss, microsecond=0)
         if start.timestamp() > rows[0][0] + 600:
             start -= datetime.timedelta(days=1)
-        return start.timestamp(), 'loop.log "XNU started"'
+        return start.timestamp(), source
     return None, None
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('log', type=Path)
-    p.add_argument('--xnu-start', metavar='HH:MM:SS', help="the loop's local time of \"XNU started\"")
-    p.add_argument('--loop', type=Path, help='the run\'s loop.log (its "XNU started" line)')
+    p.add_argument('--xnu-start', metavar='HH:MM:SS', help="observed local XNU start time")
+    p.add_argument('--loop', type=Path, help='a legacy loop.log with an approximate USB transition time')
     p.add_argument('--execs', action='store_true', help='list every exec and exit')
     a = p.parse_args()
     rows = read(a.log)
