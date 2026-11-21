@@ -1,5 +1,7 @@
 # Native macOS Deployment Handoff
 
+The frozen maintenance RAM image read both stock GPT copies from unmounted LUN 0 and returned to HyperOS 3.0.309 with the same ABL baseline. See [the maintenance GPT result](docs/results-2026-11-21-maintenance-gpt-preflight.md). The packaged checker, maintenance writer backend and stock Recovery entry still need qualification.
+
 On 2026-11-21 ABL acknowledged the frozen diagnostic RAM image. Menu execution remains unobserved. A subsequent stock ABL check matched the preflight slot and snapshot values and the tablet returned to HyperOS 3.0.309 on slot A. [First diagnostic RAM boot attempt](docs/results-2026-11-21-diagnostic-boot.md)
 
 Updated 2026-11-20. The independent Mac kernel links and passes the 26C5035r mac17j segment layout check. The preflight for the 26-driver profile resolves retained Apple kext pointer targets. The host probe links all 26 configured drivers, including two provisional display objects. A corrected host relink passes the pinned DarwinBoot parser and preserves the source `__LINKINFO` byte for byte. The owner reports HyperOS 3.0.309 was factory-reset immediately before this task and contains no user data; no tablet data backup was made. The objective remains deployment while preserving HyperOS and verifying switching and recovery.
