@@ -336,3 +336,5 @@ The prepared XNU source dispatches registered panic callbacks before the base pl
 The revised NativeUfs probe 2 logs and returns before starting the UFS service. The replacement object and KC passed the host link checks. The isolated replay and remaining boot gates are recorded in [the probe 2 result](docs/results-2026-11-21-native-ufs-inspect.md).
 
 The repacked probe 2 mailbox image and its verifier log are in the same scratch directory as the host KC. Before selecting XNU, finish auditing the boot path after the probe returns and take a fresh ABL slot baseline.
+
+The new probe 2 mailbox package audit is in [the NativeUfs probe result](docs/results-2026-11-21-native-ufs-inspect.md). It confirms only the KC changed within the FAT payload, menu timeout waits indefinitely, and the data/log write paths are disabled for this diagnostic. The tablet has not received the image.

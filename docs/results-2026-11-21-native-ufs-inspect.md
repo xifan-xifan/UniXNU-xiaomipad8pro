@@ -7,3 +7,7 @@ The isolated replay in `/tmp/piano-inspect-relink.BlbwS0` changed the NativeUfs 
 The collection awaits mailbox image packaging and tablet verification. Probe 2 returns to the surrounding boot path, which still needs review for logging, storage access and reset behavior before test execution.
 
 The mailbox container was then repacked in the same scratch directory by replacing only the KC in a copy of the previous FAT payload and recomputing the Android header ID. The FAT file inventory and hashes confirmed that the menu, ADT, trust cache and seed matched the prior candidate. The Ubuntu reference verifier reported zero failures and confirmed both XNU entries carry probe 2 and volatile Data. The image is 185733120 bytes. ADB confirmed piano, HyperOS OS3.0.309.0.WPYCNXM, slot _a and boot completed. No XNU device run has taken place.
+
+The extracted menu has timeout=-1 and defaults to reset. Neither XNU entry passes log=1, piano-reset-after or piano-reset-to. Probe 2 exits before creating the UFS root service, and Data mode 0 skips opening a UFS store. The stock ABL persistence paths remain an open gate in WRITE-PLAN.md.
+
+A fresh ABL visit reported product=piano, is-userspace=no, snapshot-update-status=none, current-slot=a, slot-successful:a=yes, slot-unbootable:a=no and slot-retry-count:a=6. A normal Fastboot reboot returned to HyperOS OS3.0.309.0.WPYCNXM with sys.boot_completed=1. Only the stock boot path ran during this baseline check.

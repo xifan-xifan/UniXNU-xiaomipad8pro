@@ -144,3 +144,5 @@ See [the image inventory](../docs/results-2026-11-21-fips4b-inventory.md) for th
 - 2026-11-21 NativeUfs probe 2 host KC, `readonly-inspect.kc` (135806976 bytes), SHA-256 `80da9440d3ec0f610dc3721d10f4fc36cad72c88e14a00f09f79cdc73165d18d`.
 
 - 2026-11-21 probe 2 mailbox RAM candidate, boot-piano-macos-ram-inspect-mailbox.img (185733120 bytes), SHA-256 56c84e6547c1b21a18854a8acc754f050c1a1cbb6595977899b3d6c94e61a536.
+
+- Probe 2 mailbox verifier log: `/tmp/piano-inspect-relink.BlbwS0/verify.log`; SHA-256 `649d7e15522fdae4bfadb8ec3b39a5d0e95d0a8d820b21f00578e18ebf21187f`.
