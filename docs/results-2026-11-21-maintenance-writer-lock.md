@@ -1,0 +1,3 @@
+# Maintenance writer lock rehearsal (2026-11-21)
+
+The final maintenance writer image (SHA-256 `ef9e4d27e921d96b371ac6487814fb758a1af226334ba6fd8d3edddcb8d02722`) passed a write-lock rehearsal on UbuntuPiano. The script extracted from the ramdisk used fixture paths for device, sysfs, proc and runtime files. An existing lock rejected the command and preserved both stock GPT copies and the existing lock. A 512-byte sector preflight failure released the acquired lock and preserved both stock copies. Candidate application and stock restoration each released the lock, and both GPT boundaries matched their expected bytes after each operation. Tablet GPT writes remain unverified.

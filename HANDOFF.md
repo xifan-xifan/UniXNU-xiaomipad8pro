@@ -366,3 +366,5 @@ The 3.0.309 GPT pair checker passed against both frozen pairs and rejected the m
 The GPT pair checker also recognized both live LUN 0 fragments as stock over root ADB. See [the GPT fragment result](docs/results-2026-11-21-candidate-gpt-fragments.md).
 
 The backup-first GPT routine also completed stock → candidate → stock on a 510,165,778,432-byte UbuntuPiano sparse file, with `fsync` and byte-for-byte readback at each offset. The in-memory failure cases and remaining maintenance integration are recorded in [WRITE-PLAN.md](WRITE-PLAN.md).
+
+The final maintenance writer image (SHA-256 `ef9e4d27e921d96b371ac6487814fb758a1af226334ba6fd8d3edddcb8d02722`) passed a write-lock rehearsal on UbuntuPiano. The script extracted from the ramdisk used fixture paths for device, sysfs, proc and runtime files. An existing lock rejected the command and preserved both stock GPT copies and the existing lock. A 512-byte sector preflight failure released the acquired lock and preserved both stock copies. Candidate application and stock restoration each released the lock, and both GPT boundaries matched their expected bytes after each operation. Tablet GPT writes remain unverified.
