@@ -564,3 +564,5 @@ The [unattended Recovery exit](docs/results-2026-11-22-unattended-recovery-exit.
 The [stock Recovery wipe review](docs/results-2026-11-22-stock-recovery-wipe-inputs.md) identified four option names and Xiaomi pre/post wipe hooks in the retained ELF. The bootloader-message option that formats both userdata and metadata remains unverified.
 
 The [stock Recovery UI extension trace](docs/results-2026-11-22-stock-recovery-ui-extension.md) identifies two inert defaults and the Xiaomi extension that supplies wipe handlers. Resolve its dynamic vtable relocations and confirm device factory selection before the stock-layout trial.
+
+The Recovery extension trace now resolves the factory loader and the conditional metadata erase. The stock fstab contains both format targets. The stock-layout trial still needs live evidence that the vendor factory loaded, both volumes formatted, and the encrypted Android mount came back without manual intervention.
