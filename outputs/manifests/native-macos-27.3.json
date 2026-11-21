@@ -1616,7 +1616,10 @@
     "menu_return_status": "Unsupported",
     "menu_driver_count": {"loaded": 0, "failed": 0},
     "usb_enumerated_after_menu_return": false,
-    "hyperos_recovery_verified": false,
+    "hyperos_recovery_verified": true,
+    "hyperos_recovery_trigger_observed": false,
+    "hyperos_persistence_marker_verified": true,
+    "post_run_abl_slot_flags_verified": false,
     "device_result": "docs/results-2026-11-21-auto8-darwinboot.md"
   }
 }
