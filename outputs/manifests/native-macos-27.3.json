@@ -1646,6 +1646,13 @@
     "gate": "DarwinBoot and APRIORI match archived witness. Default menu retains piano-reset-after=90. Archived DarwinBoot stops before invoking XNU. Cold reset on watchdog setup failure and firmware write-path audit remain open.",
     "device_tested": false
   },
+  "watchdog_abl_retention_control": {
+    "image": "out/boot-piano-watchdog-retention-abl.img",
+    "sha256": "b0e0929f206062105be4cb5edc113625d9ea0a88eff160b21741faaedc840c8c",
+    "fd_sha256": "600c73f8310aca83365765bf0f21e8f95502b55c6b1c4dda5f912bab0dabc3ac",
+    "device_tested": true,
+    "result": "docs/results-2026-11-22-watchdog-abl-retention.md"
+  },
   "darwinboot_watchdog_enter_no_poll": {
     "image": "out/boot-piano-watchdog-enter-no-poll.img",
     "sha256": "1c4feecd143e8c990e42dc022a32100094917a05570efd825429faddba33d90a",

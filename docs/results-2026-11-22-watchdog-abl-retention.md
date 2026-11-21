@@ -1,0 +1,5 @@
+# Watchdog return to ABL and CVP retention
+
+On November 22, stock ABL identified `piano`, slot A successful and bootable, six retries, snapshot status `none`, and accepted the temporary `boot-piano-watchdog-retention-abl.img`. Host readback verified that only the 3 MiB FD and the boot ID changed relative to the watchdog-expiry container. USB showed `piano-uefi`, then stock ABL with product `piano`. The live DEBUG ring was not captured, so SDAM register values and the watchdog return code were not observed directly.
+
+Before Android started, the existing RAM reader uploaded all 7,340,032 bytes of CVP. Offset `0x6f5000` held `31 54 44 57`. Capture SHA-256 is `f32d763d5ebfa8362458f7e6eb417ce817ba90da5eb09f4e27b56dda95eda01a`. The reader rebooted to HyperOS `OS3.0.309.0.WPYCNXM`, slot `_a`, with `sys.boot_completed=1`. Logs are under `out/retention-abl-live/`. No partition-flash command was issued. This qualifies the observed pre-Android retention route for the control. DarwinBoot ExitBootServices and XNU checkpoints remain to be tested.
