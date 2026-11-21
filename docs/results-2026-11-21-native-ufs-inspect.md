@@ -11,3 +11,5 @@ The mailbox container was then repacked in the same scratch directory by replaci
 The extracted menu has timeout=-1 and defaults to reset. Neither XNU entry passes log=1, piano-reset-after or piano-reset-to. Probe 2 exits before creating the UFS root service, and Data mode 0 skips opening a UFS store. The stock ABL persistence paths remain an open gate in WRITE-PLAN.md.
 
 A fresh ABL visit reported product=piano, is-userspace=no, snapshot-update-status=none, current-slot=a, slot-successful:a=yes, slot-unbootable:a=no and slot-retry-count:a=6. A normal Fastboot reboot returned to HyperOS OS3.0.309.0.WPYCNXM with sys.boot_completed=1. Only the stock boot path ran during this baseline check.
+
+A second package readback extracted `Payloads/kernel.macho`, its ADT, trust cache, and scratch image directly from the FAT and matched their SHA-256 values to `build-inspect-mailbox.json`. The Android boot image also contains exactly one copy of the recorded isolation FD, and its ramdisk bytes match the verified FAT byte for byte. This strengthens package identity and pairing evidence but does not audit the distributed ABL handler.
