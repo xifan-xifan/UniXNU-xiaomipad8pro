@@ -1,0 +1,5 @@
+# Packaged GPT preflight on piano (2026-11-21)
+
+Build with `python tooling/bootimg/build-maintenance-manual-exit.py INPUT OUTPUT --include-tablet`, using the pinned EFI-pstore-disabled input in the deployment manifest. Two builds matched byte for byte. The default build reproduced the previously verified image. Comparing the decompressed archives found one added executable, `/bin/piano-tablet`, with the other archive members, kernel, command line and DTB unchanged. The image and script digests are in the deployment manifest.
+
+The tablet booted the image through ABL Fastboot. `/bin/piano-tablet` matched the manifest digest on the tablet and `piano-309-gpt-preflight` returned `lun0=sda` and `gpt_preflight=ready`. ABL after maintenance exit reported the same slot A success, bootability and retry count (6) and snapshot status (`none`). ADB confirmed HyperOS `OS3.0.309.0.WPYCNXM` on `_a` with `sys.boot_completed=1`. This run issued no persistent partition writes. GPT write and rollback and stock Recovery tests remain pending.

@@ -28,7 +28,14 @@ def edit_maintenance(data):
                      b'Automatic restart disabled in this readback image.'))
 
 
-def edit_archive(archive):
+def cpio_executable(name, data):
+    name += b'\0'
+    fields = (0, 0o100755, 0, 0, 1, 0, len(data), 0, 0, 0, 0, len(name), 0)
+    header = b'070701' + ''.join(f'{field:08x}' for field in fields).encode()
+    return header + name + bytes(-(len(header) + len(name)) % 4) + data + bytes(-len(data) % 4)
+
+
+def edit_archive(archive, tablet=None):
     edits = {b'init': edit_init, b'bin/piano-maint': edit_maintenance}
     result = bytearray()
     position = 0
@@ -40,6 +47,10 @@ def edit_archive(archive):
         name = archive[position + 110:name_end - 1]
         start = (name_end + 3) & ~3
         end = (start + size + 3) & ~3
+        if tablet is not None and name == b'bin/piano-tablet':
+            raise ValueError('piano-tablet already exists in the source archive')
+        if tablet is not None and name == b'TRAILER!!!':
+            result += cpio_executable(b'bin/piano-tablet', tablet)
         if name in edits:
             data = edits.pop(name)(archive[start:start + size])
             result += header[:54] + f'{len(data):08x}'.encode() + header[62:]
@@ -56,6 +67,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('source', type=Path, help='pinned EFI-pstore-disabled image')
     parser.add_argument('output', type=Path, help='new image file')
+    parser.add_argument('--include-tablet', action='store_true', help='embed tablet.sh for explicit invocation')
     args = parser.parse_args()
     image = args.source.read_bytes()
     if hashlib.sha256(image).hexdigest() != SOURCE_SHA256:
@@ -65,7 +77,10 @@ def main():
     page = header['page_size']
     if end != len(image) or header['second_size'] or header['recovery_dtbo_size']:
         parser.error('unexpected boot image layout')
-    packed = gzip.compress(edit_archive(gzip.decompress(ramdisk)), compresslevel=9, mtime=0)
+    tablet = None
+    if args.include_tablet:
+        tablet = (Path(__file__).resolve().parents[1] / 'persist/tablet.sh').read_bytes().replace(b'\r\n', b'\n')
+    packed = gzip.compress(edit_archive(gzip.decompress(ramdisk), tablet), compresslevel=9, mtime=0)
     prefix_end = page + len(kernel) + (-len(kernel) % page)
     dtb_start = end - len(dtb) - (-len(dtb) % page)
     prefix = bytearray(image[:prefix_end])

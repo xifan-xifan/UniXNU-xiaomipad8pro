@@ -49,6 +49,13 @@
     "device_status": "RAM-booted on HyperOS 3.0.309 tablet; USB NCM, A-slot whole-partition readback and return to HyperOS verified",
     "device_result": "docs/results-2026-11-21-maintenance-ram-boot.md"
   },
+  "maintenance_gpt_preflight_candidate": {
+    "path": "out/maintenance-gpt/preflight.img",
+    "bytes": 49168384,
+    "sha256": "44ab3ec21adcc8a08c8f36707ea58df3551bd4e9ad75aea3275b95730bee0f65",
+    "tablet_script_sha256": "b36bef0c45f816cc4a1e9fd22125a659e286d20c67b2705084ec58387fe7cdee",
+    "device_result": "docs/results-2026-11-21-packaged-gpt-preflight.md"
+  },
   "abl_source_review_2026_11_20": {
     "repository": "https://git.codelinaro.org/clo/la/abl/tianocore/edk2.git",
     "tag": "KERNEL.PLATFORM.3.0.r23-02400-kernel.0",

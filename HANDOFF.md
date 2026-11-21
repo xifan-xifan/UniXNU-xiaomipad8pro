@@ -1,5 +1,7 @@
 # Native macOS Deployment Handoff
 
+The maintenance image with the packaged checker passed on the tablet. The maintenance writer and stock Recovery remain separate storage gates. See [the packaged preflight result](docs/results-2026-11-21-packaged-gpt-preflight.md).
+
 The frozen maintenance RAM image read both stock GPT copies from unmounted LUN 0 and returned to HyperOS 3.0.309 with the same ABL baseline. See [the maintenance GPT result](docs/results-2026-11-21-maintenance-gpt-preflight.md). The packaged checker, maintenance writer backend and stock Recovery entry still need qualification.
 
 On 2026-11-21 ABL acknowledged the frozen diagnostic RAM image. Menu execution remains unobserved. A subsequent stock ABL check matched the preflight slot and snapshot values and the tablet returned to HyperOS 3.0.309 on slot A. [First diagnostic RAM boot attempt](docs/results-2026-11-21-diagnostic-boot.md)
