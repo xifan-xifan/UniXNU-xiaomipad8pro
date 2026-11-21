@@ -1883,7 +1883,7 @@ def maint_exit(s):
     """piano-maint fastboot: the maintenance image reboots into ABL fastboot."""
     s.log('  tablet# sync; piano-maint fastboot')
     if s.execute:
-        subprocess.run(['python3', str(MAINT_SHELL), 'sync; piano-maint fastboot', '20'], capture_output=True, text=True, timeout=60)
+        subprocess.run([sys.executable, str(MAINT_SHELL), 'sync; piano-maint fastboot', '20'], capture_output=True, text=True, timeout=60)
     if not s.wait(s.serial, True, 120):
         raise Stop('not back in ABL fastboot')
 
