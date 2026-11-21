@@ -1347,6 +1347,17 @@ def maint_attach(s):
         s.need(m and m.group(1) == s.host_ip(), f'the tablet fetches from {m and m.group(1)}: this host\'s USB-link address')
     # tablet.sh is not on the tablet yet: its own 'fetch' cannot bring it. Bootstrap it with busybox wget + sha256sum.
     digest = common.sha(TABLET_SH)
+    if os.name == 'nt':
+        s.shell('mkdir -p /run/pp && (busybox timeout 30 busybox nc -l -p 18000 </dev/null >/run/pp/tablet.sh & echo script_receiver=$!)')
+        if s.execute:
+            with socket.create_connection((s.env['PIANO_MAINT_HOST'], 18000), timeout=10) as conn:
+                conn.sendall(TABLET_SH.read_bytes())
+                conn.shutdown(socket.SHUT_WR)
+        out = s.shell('sha256sum /run/pp/tablet.sh')
+        if out is not None:
+            s.need(digest in out, 'uploaded RAM maintenance script SHA-256')
+        s.shell('piano-maint status')
+        return
     s.serve({'tablet.sh': TABLET_SH})
     out = s.shell(f'mkdir -p /run/pp && rm -f /run/pp/tablet.sh && wget -q -O /run/pp/tablet.sh http://{s.host_ip()}:{s.a.http_port}/tablet.sh '
                   f'&& sha256sum /run/pp/tablet.sh', 300)
