@@ -1,0 +1,5 @@
+# SourceRootBinding and verified NativeUfs object link (2026-11-21)
+
+Apple clang 17 recompiled the historical resolver using the frozen independent XNU recipe with `--target=arm64e-apple-ios27.0`. Apple ld combined it with the retained verified NativeUfs object (`c5e6e1c163001548321d743cd7a48adac2dcf7d144d99eade563fd0ea165efc9`) using `ld -r -arch arm64e`. The combined object reports iOS 27.0 and the arm64e kernel ABI. The resolver's `native_ufs_block_authenticates` import is resolved. SHA-256: `83556dac8d95d7de9662c67a177ef93b79ba262fa279f8699748b4eb0ea96b98`; Mac path: `/tmp/piano-resolver-link.kMROH1/resolver-ufs-ios27.o`.
+
+The retained `kernel-dispatch.macho` provides an alternative resolver that requires `native_ufs_install_authenticator`. The retained verified NativeUfs object exports the direct authentication function but does not install that callback. Do not combine those artifacts as if registration were already wired, or add the direct resolver alongside the existing resolver exports. The relocatable link does not establish complete KC compatibility, runtime APFS selection or Data mount behavior. No tablet commands were issued.
