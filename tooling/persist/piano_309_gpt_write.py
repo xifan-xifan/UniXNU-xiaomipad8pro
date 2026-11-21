@@ -22,6 +22,12 @@ def write_pair(read, write_and_flush, primary, backup):
                        for key, data in (('PRIMARY', primary), ('BACKUP', backup)))
     if identities[0] is None or identities[0] != identities[1]:
         raise ValueError('unverified GPT pair')
+    if identities[0] == 'candidate':
+        current = tuple(CHECKER[key].get(hashlib.sha256(read(offset, size)).hexdigest())
+                        for key, offset, size in (('PRIMARY', 0, len(primary)),
+                                                  ('BACKUP', backup_offset, len(backup))))
+        if current != ('stock', 'stock'):
+            raise OSError('candidate GPT requires both verified stock copies')
     for label, offset, fragment in (('backup', backup_offset, backup), ('primary', 0, primary)):
         write_and_flush(offset, fragment)
         if read(offset, len(fragment)) != fragment:
