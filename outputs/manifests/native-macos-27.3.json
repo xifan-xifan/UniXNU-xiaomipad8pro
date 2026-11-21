@@ -1635,7 +1635,7 @@
     "image": "out/boot-piano-darwin-lookup-auto8.img",
     "sha256": "de26c50d2a73dd57b1d70fb40b9085450d386a24ef156b36341a133aae1ec0b1",
     "result": "docs/results-2026-11-21-darwin-lookup-auto8.md",
-    "status": "ABL accepted temporary boot. XNU handoff and Android return pending."
+    "status": "ABL accepted temporary boot. BDS lookup confirmed the loader protocol. ADB confirmed completed HyperOS on A and the original marker after the auto8 run. The reset trigger and XNU handoff remain unverified."
   },
   "native_ufs_inspect_auto8_reset90_probe": {
     "image": "out/boot-piano-macos-ram-inspect-auto8-reset90.img",

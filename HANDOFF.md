@@ -1,6 +1,6 @@
 # Native macOS Deployment Handoff
 
-The [UEFI debug log audit](docs/results-2026-11-21-uefi-debuglog.md) identifies a separate DEBUG ring export while firmware Fastboot responds. Use it with direct BDS protocol instrumentation. SEC clears the ring on a new UEFI boot.
+The [UEFI debug log audit](docs/results-2026-11-21-uefi-debuglog.md) identifies a separate DEBUG ring export while firmware Fastboot responds. The retained BDS lookup already confirmed loader registration, and the later watchdog witness reached the final ExitBootServices preparation. SEC clears the ring on a new UEFI boot. The remaining gap is evidence after that call and after entry into XNU.
 
 The [packed DarwinBoot audit](docs/results-2026-11-21-mailbox-packed-driver.md) confirmed that the mailbox trial marker is in the packaged PE32 executable. The [packed DTB audit](docs/results-2026-11-21-cvp-ownership.md) identified the CVP consumer, and stock HyperOS exposes a live msm_cvp driver binding for that node. Qualify retention before HyperOS initializes the region or use an independently qualified reservation.
 
