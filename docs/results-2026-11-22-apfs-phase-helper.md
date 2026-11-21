@@ -1,3 +1,5 @@
 # Cached APFS phase helper audit
 
 The cached Mac source at /private/tmp/piano-apfs-shim.woh3mU/apfs_boot_util.c implements a phase logger with an unconditional success return. It assumes the kernel already mounted Data and that the verified root container has no other role volumes. It checks neither assumption and does not implement either launchd fsck task. It cannot count as evidence of mount completion or filesystem integrity. No tablet commands were issued.
+
+An independent statfs probe compiled with warnings as errors for arm64 on the Mac and cross-built for arm64e macOS 27. The host binary returned 0 for both supported phases and 1 for phase 3. The Mac's own sealed root and writable Data volume satisfied the predicate, demonstrating that filesystem type, mount flags, mount point and distinct filesystem IDs do not bind the check to the intended native volumes. Preserve the probe in ignored `out/mount-phase-host/` as host evidence only. Require target volume identity and role policy before accepting it as a shim.
