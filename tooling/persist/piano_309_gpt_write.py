@@ -28,3 +28,5 @@ def write_pair(read, write_and_flush, primary, backup):
             raise OSError(f'{label} GPT readback mismatch')
     if read(backup_offset, len(backup)) != backup:
         raise OSError('backup GPT changed after primary update')
+    if read(0, len(primary)) != primary:
+        raise OSError('primary GPT changed during final pair verification')
