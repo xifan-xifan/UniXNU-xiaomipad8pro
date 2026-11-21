@@ -408,3 +408,5 @@ The Gunyah watchdog status diagnostic now links and packages successfully. The r
 ADB re-enumerated as serial 7ccdd855 on completed HyperOS 3.0.309 A. Read-only ABL checks showed A successful/bootable, six retries, no snapshot; normal reboot preserved the Android marker. See [device return result](docs/results-2026-11-21-device-return.md). The watchdog status RAM candidate is ready for the next controlled trial.
 
 The watchdog status RAM trial verified UEFI EL1 and STATUS=0 in the DEBUG ring. Host-issued UEFI Fastboot reboot brought back completed HyperOS on A with the original marker. See [the watchdog status result](docs/results-2026-11-21-uefi-watchdog-status.md). Test expiry independently before relying on recovery across handoff.
+
+The Gunyah watchdog expiry RAM trial returned to completed HyperOS on A without a host reboot after capture. The Android marker matched. The reset source and intermediate USB interfaces were not captured. See [expiry result](docs/results-2026-11-21-uefi-watchdog-expiry.md). For the next trial, capture the USB transition continuously and test the gap between ExitBootServices and XNU watchdog ownership separately.
