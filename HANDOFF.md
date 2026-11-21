@@ -446,3 +446,5 @@ A WSL artifact recheck found retained 27.3 kernel/boot/payload outputs, but the 
 The retained boot image embeds the archived FAT payload byte for byte. Its embedded KC matches the payload manifest and has SHA-256 beginning d36b8047. Trace the loose KC beginning afe7646e separately. See [retained boot payload audit](docs/results-2026-11-21-retained-boot-payload.md).
 
 The retained boot payload's ADT, Apple trust cache and 4 GiB packed APFS scratch image match its manifest. SystemOS and root are external to the payload and still require a verified pairing. See [payload companions](docs/results-2026-11-21-retained-payload-companions.md).
+
+The old task archive identifies d36b8047 as the local 2026-11-14 candidate and records only a first-192-MiB ESP write/readback; its own README says it was not tablet-booted. See [historical d36b8047 source](docs/results-2026-11-21-historical-d36b8047-source.md).
