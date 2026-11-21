@@ -406,3 +406,5 @@ The first Gunyah firmware probe is firmware/diagnostic/ram-watchdog-status.patch
 The Gunyah watchdog status diagnostic now links and packages successfully. The retained WSL build log is UbuntuPiano:/tmp/piano-watchdog-status.zvGZxXmN/build.log. The Windows RAM image and FD hashes are in artifacts/ARTIFACTS.md. Windows PnP, ADB and Fastboot still showed no tablet after packaging. The firmware status query awaits a tablet run.
 
 ADB re-enumerated as serial 7ccdd855 on completed HyperOS 3.0.309 A. Read-only ABL checks showed A successful/bootable, six retries, no snapshot; normal reboot preserved the Android marker. See [device return result](docs/results-2026-11-21-device-return.md). The watchdog status RAM candidate is ready for the next controlled trial.
+
+The watchdog status RAM trial verified UEFI EL1 and STATUS=0 in the DEBUG ring. Host-issued UEFI Fastboot reboot brought back completed HyperOS on A with the original marker. See [the watchdog status result](docs/results-2026-11-21-uefi-watchdog-status.md). Test expiry independently before relying on recovery across handoff.

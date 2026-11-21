@@ -1,0 +1,5 @@
+# Gunyah watchdog status on piano
+
+Stock ABL accepted the manifest-pinned action-only watchdog RAM image. The first capture used `oem log`, which exports the console rather than the DEBUG ring. Its 171-byte log (`out/uefi-watchdog-status-20261121-172335/firmware.log`, SHA-256 `f4fffc042cc9d1f36091733dc0821eb4b00b541aadc1c18b6daf04ac76e810a1`) showed UEFI Fastboot, DarwinBoot protocol presence, and menu return. Host-issued UEFI Fastboot reboot restored HyperOS.
+
+A second run used `oem debuglog` and `get_staged`. The retained `out/uefi-watchdog-debug-172534/debug.log` (SHA-256 `64a16e3121c56f2c88e9dffb32c73760306700b1c8472f5d35ef51f845e8e10b`) reports `piano watchdog probe: EL1` and `piano watchdog probe: STATUS=0`. This verifies that UEFI can query the watchdog from EL1. The image did not arm it. A host-issued UEFI Fastboot reboot restored HyperOS `OS3.0.309.0.WPYCNXM` on `_a` with `sys.boot_completed=1` and the original Android marker hash. Watchdog expiry, recovery across handoff and post-trial ABL retry readback remain open.
