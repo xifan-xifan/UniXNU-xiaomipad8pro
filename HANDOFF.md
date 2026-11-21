@@ -454,3 +454,5 @@ Historical ESP run evidence shows the retained candidate reached the UniXNU menu
 The working-copy DarwinBoot parser rejects the original d36b8047 collection and accepts the archived subtype-2 and loose afe7646e collections. See [host parser replay](docs/results-2026-11-21-retained-parser-replay.md).
 
 A byte comparison found the archived subtype-2 correction at offset 0xb. It makes the outer and embedded kernel CPU subtype words equal, satisfying the current DarwinBoot parser. See [retained subtype mismatch](docs/results-2026-11-21-retained-subtype-mismatch.md).
+
+The archived subtype-2 boot package is internally consistent: corrected ARM64 header, packaging DTB, exact payload embedding and zero-padded ESP prefix. Its hardware timeline still lacks XNU handoff or desktop evidence. See [subtype-2 package consistency](docs/results-2026-11-21-subtype2-package-consistency.md).
