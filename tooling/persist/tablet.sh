@@ -85,6 +85,28 @@ map)
 		echo "$n=$1 $2 $3"
 	done
 	;;
+piano-309-gpt-preflight)
+	# Read-only. Refuse active mounts, swap and stacked block devices before a GPT trial.
+	l=$(lun0)
+	case "$l" in sd[a-z]) ;; *) die "LUN 0 missing or ambiguous: '$l'" ;; esac
+	[ "$(cat "/sys/block/$l/queue/logical_block_size")" = 4096 ] || die 'unexpected LUN 0 block size'
+	[ "$(blockdev --getsize64 "/dev/$l")" = 510165778432 ] || die 'unexpected LUN 0 capacity'
+	[ "$(blockdev --getro "/dev/$l")" = 0 ] || die 'LUN 0 is not writable'
+	mounts=$(awk '{print $3}' /proc/self/mountinfo) || die 'cannot inspect mounts'
+	[ -n "$mounts" ] || die 'mount inventory is empty'
+	awk 'END { exit NR != 1 }' /proc/swaps || die 'active swap or unreadable swap inventory'
+	for b in "/sys/block/$l" "/sys/block/$l"/"$l"[0-9]*; do
+		[ -d "$b" ] || continue
+		devno=$(cat "$b/dev") || die "cannot identify ${b##*/}"
+		if printf '%s\n' "$mounts" | grep -Fxq "$devno"; then die "${b##*/} is mounted"; fi
+		[ -d "$b/holders" ] || die "cannot inspect ${b##*/} holders"
+		for holder in "$b"/holders/*; do
+			[ ! -e "$holder" ] || die "${b##*/} has block holder ${holder##*/}"
+		done
+	done
+	echo "lun0=$l"
+	echo 'gpt_preflight=ready'
+	;;
 hash)   # from the medium: the page cache is dropped first
 	sync; { echo 3 > /proc/sys/vm/drop_caches; } 2>/dev/null
 	status=$(mktemp "$P/hash.XXXXXX") || die 'cannot create hash status file'
