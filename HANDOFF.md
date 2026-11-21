@@ -586,3 +586,5 @@ The stock Android transport is currently authorized (ADB enabled, `ro.adb.secure
 2026-11-22: The first native root write sequence is recorded in [WRITE-PLAN.md](WRITE-PLAN.md#first-native-root-write-on-the-verified-candidate-layout). The existing stock root transfer is still in progress. Writer rehearsal and full target preflight remain pending.
 `n
 2026-11-22: The [full root preflight](docs/results-2026-11-22-root-blank-preflight.md) verified all 20 GiB of linux_rootfs were zero and returned to completed HyperOS on slot A. Writer rehearsal and complete source digest remain pending.
+
+2026-11-22: The candidate root installer is available as maint-attach piano-309-root with --root-image. The Windows CLI dry run rejected the incomplete transfer. Host fault injection covered mismatched geometry, short writes and corrupted readback. A partial prefix stops for inspection. An already complete prefix is verified without rewriting. The full source digest and first hardware write are pending.
