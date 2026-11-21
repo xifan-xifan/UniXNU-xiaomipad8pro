@@ -20,7 +20,8 @@ OS=$1 CX=$2 APP=$3 OUT=$4 SIZE_MIB=${5:-6144}
 D=$(cd "$(dirname "$0")/../.." && pwd)
 . "$D/tooling/k27/k27-tree.sh"
 SHIMS=$PIANO_K27_TREE/overlay/systemos-shims
-for shim in mount fsck; do
+boot_shims=(mount fsck)
+for shim in "${boot_shims[@]}"; do
   path=$SHIMS/sbin/$shim
   [ -f "$path" ] && [ -r "$path" ] && [ -s "$path" ] || {
     echo "missing, unreadable, or empty native boot shim: $path" >&2
@@ -102,7 +103,7 @@ done
 sudo mkdir -p "$M/System/Volumes/Preboot/com.apple.security.cryptexd/Cryptexes"
 sudo mkdir -p "$M/sbin"
 sudo install -m 755 -o root -g wheel "$WORK/os/sbin/mount" "$M/sbin/mount.real"
-for f in "$SHIMS"/sbin/*; do sudo install -m 755 -o root -g wheel "$f" "$M/sbin/$(basename "$f")"; done
+for shim in "${boot_shims[@]}"; do sudo install -m 755 -o root -g wheel "$SHIMS/sbin/$shim" "$M/sbin/$shim"; done
 sudo mkdir -p "$M/private/var" "$M/private/etc" "$M/private/tmp"
 sudo ln -s private/var "$M/var"
 sudo ln -s private/etc "$M/etc"
