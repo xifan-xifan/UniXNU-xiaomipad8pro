@@ -584,3 +584,5 @@ The stock Android transport is currently authorized (ADB enabled, `ro.adb.secure
 2026-11-22: A fresh [ADB layout check](docs/results-2026-11-22-live-layout-recheck.md) found the candidate partition names and shortened Android capacity. Use this live observation for the next preflight and verify the raw GPT before writing native volumes.
 
 2026-11-22: The first native root write sequence is recorded in [WRITE-PLAN.md](WRITE-PLAN.md#first-native-root-write-on-the-verified-candidate-layout). The existing stock root transfer is still in progress. Writer rehearsal and full target preflight remain pending.
+`n
+2026-11-22: The [full root preflight](docs/results-2026-11-22-root-blank-preflight.md) verified all 20 GiB of linux_rootfs were zero and returned to completed HyperOS on slot A. Writer rehearsal and complete source digest remain pending.
