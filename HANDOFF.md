@@ -490,3 +490,5 @@ A host KC replay now consumes the real stock-root v2 policy object instead of fi
 The locked DarwinBoot parser accepted the stock-policy KC replay and passed its synthetic malformed-range and arm64/arm64e tests. This is a structural host check only; signing, root mount and device execution remain open.
 
 The [stock-policy provider audit](docs/results-2026-11-21-stock-policy-provider.md) traced the replay's resolved callback to the host-only object and confirmed the tablet was online in HyperOS on slot A. Historical iPadOS sources contain an empty callback. Establish the frozen macOS provider configuration before promoting the collection.
+
+The [verified NativeUfs host replay](docs/results-2026-11-21-verified-ufs-without-poll.md) removes the host callback object and passes the pinned DarwinBoot parser with the stock policy and VerifiedRoot logic retained. Resume payload pairing from the manifest entry `host_stock_policy_kc_without_poll`.
