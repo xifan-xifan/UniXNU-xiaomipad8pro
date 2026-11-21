@@ -17,6 +17,7 @@
 #   write FILE DEV SEEK BS                WRITE: dd FILE onto DEV at block SEEK of BS bytes, conv=notrunc,fsync
 #   restore NAME DEV SEEK BS PORT         WRITE: stream http://HOST:PORT/NAME (a verified backup) onto DEV at block SEEK;
 #                                         fails when wget fails (a short body fails wget through the server's Content-Length)
+#   restore-bounded NAME DEV BLOCKS PORT WRITE: restore at block zero with a 4096-byte block limit and exact output count
 #   restore-list FILE DEV PORT NAME       WRITE: FILE's runs from the host's NAME@K, at their DST blocks; the same failure rule
 #   job NAME SUBCOMMAND...                run a subcommand detached (setsid): /run/pp/NAME.{log,rc}; survives the telnet session
 #   job-status NAME                       rc=<exit status> when done, else running=1
@@ -29,7 +30,7 @@
 set -u
 export PATH=${PIANO_PATH:-/usr/sbin:/usr/bin:/sbin:/bin}
 P=${PIANO_PP_DIR:-/run/pp}   # (PIANO_PP_DIR, PIANO_DEV_DIR, PIANO_PATH and PIANO_HOST_IP only for a host-side test of this script)
-DEV=${PIANO_DEV_DIR:-/dev}   # discard and zero only
+DEV=${PIANO_DEV_DIR:-/dev}   # guarded partition operations
 mkdir -p "$P"
 host_ip() { [ -n "${PIANO_HOST_IP:-}" ] || . /etc/piano-network; echo "$PIANO_HOST_IP"; }
 die() { echo "error=$*"; exit 1; }
@@ -247,6 +248,21 @@ write)
 	dd if="$P/$1" of="/dev/$2" bs="$4" seek="$3" conv=notrunc,fsync 2>"$P/dd.err" || { cat "$P/dd.err"; die "dd write"; }
 	tail -1 "$P/dd.err"; echo "written=$1"
 	;;
+restore-bounded)
+	# NAME DEV BLOCKS PORT. The caller qualifies geometry and verifies readback.
+	[ "$#" = 4 ] || die 'restore-bounded requires NAME DEV BLOCKS PORT'
+	case "$2" in ''|*[!a-zA-Z0-9_-]*) die 'invalid target name' ;; esac
+	case "$3" in ''|0*|*[!0-9]*) die 'invalid block count' ;; esac
+	[ -b "$DEV/$2" ] || die 'target is not a block device'
+	work=$(mktemp -d "$P/restore.XXXXXX") || die 'cannot allocate restore status directory'
+	trap 'rm -f "$work/wget.rc" "$work/dd.err"; rmdir "$work"' EXIT
+	{ wget -q -O - "http://$(host_ip):$4/$1" || echo $? > "$work/wget.rc"; } |
+		LC_ALL=C dd of="$DEV/$2" bs=4096 iflag=fullblock count="$3" conv=notrunc,fsync 2>"$work/dd.err" ||
+		{ cat "$work/dd.err"; die 'bounded write failed'; }
+	[ ! -s "$work/wget.rc" ] || die 'bounded transfer failed'
+	[ "$(awk '/records out$/ {print $1}' "$work/dd.err")" = "$3+0" ] || die 'short bounded write'
+	echo "restored=$1"
+	;;
 restore)
 	rm -f "$P/wget.rc"
 	{ wget -q -O - "http://$(host_ip):$5/$1" || echo $? > "$P/wget.rc"; } | dd of="/dev/$2" bs="$4" seek="$3" conv=notrunc,fsync 2>"$P/dd.err" || { cat "$P/dd.err"; die "restore $1: dd"; }
@@ -297,6 +313,6 @@ zero)
 	tail -1 "$P/dd.err"; echo "zeroed=$1 bytes=$bytes"
 	;;
 *)
-	die "usage: tablet.sh map|hash|zero-sha|peek|send|fetch|file-sha|copy|copy-list|hash-list|send-list|restore-list|write|restore|job|job-status|drop-caches|rereadpt|discard-info|discard|zero"
+	die "usage: tablet.sh map|hash|zero-sha|peek|send|fetch|file-sha|copy|copy-list|hash-list|send-list|restore-list|write|restore|restore-bounded|job|job-status|drop-caches|rereadpt|discard-info|discard|zero"
 	;;
 esac
