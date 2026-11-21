@@ -1,6 +1,6 @@
 # Native macOS Deployment Handoff
 
-Candidate GPT was written and independently verified on the tablet. The last observed state was stock Recovery, which [enumerated the candidate layout](docs/results-2026-11-21-candidate-recovery-geometry.md). The on-device wipe and Android boot remain unverified. See [the trial result](docs/results-2026-11-21-candidate-gpt-tablet.md).
+Candidate GPT was written and independently verified on the tablet. The last observed state was stock Recovery, which [enumerated the candidate layout](docs/results-2026-11-21-candidate-recovery-geometry.md). HyperOS subsequently completed boot on slot A, and a synced Android test file survived a new boot. See [the HyperOS candidate result](docs/results-2026-11-21-candidate-hyperos.md). See [the trial result](docs/results-2026-11-21-candidate-gpt-tablet.md).
 
 The frozen writer image verified `primary=stock backup=stock` on the tablet using its read-only command. See `out/maintenance-gpt/writer-readback.log`. Explicit exit returned through ABL to completed HyperOS on slot A. Candidate write and rollback remain pending.
 
