@@ -544,3 +544,5 @@ The [packed dispatch audit](docs/results-2026-11-22-packed-gop-inventory.md) als
 The [witness replay identity check](docs/results-2026-11-22-witness-replay-identity.md) found identical APRIORI files and different DarwinBoot driver bytes. Use the archived FD as the witness reference.
 
 The witness replay inventory also found BdsDxe and PcdDxe changes. A host-only decoded section derived from the archive moves DarwinBoot to first in APRIORI while preserving all bytes outside the GUID list. The result and its hash are in the witness replay identity record.
+
+The archive-derived APRIORI order control is packaged and read back. See [packaging and readback](docs/results-2026-11-22-witness-order-packaging.md).
