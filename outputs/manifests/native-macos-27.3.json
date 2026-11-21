@@ -1584,5 +1584,16 @@
     "uefi_entry_verified": true,
     "android_return_verified": true,
     "xnu_handoff_verified": false
+  },
+  "native_ufs_inspect_auto8_probe": {
+    "image": "out/boot-piano-macos-ram-inspect-auto8.img",
+    "build_record": "out/boot-piano-macos-ram-inspect-auto8.json",
+    "bytes": 185733120,
+    "sha256": "7cd14bf2767743d427385c6acf6a0b44db21459d6bc46ef9aa610e5ea239bb5e",
+    "base_sha256": "56c84e6547c1b21a18854a8acc754f050c1a1cbb6595977899b3d6c94e61a536",
+    "menu_timeout_seconds": 8,
+    "menu_default": "macos-8cpu",
+    "host_verifier_failures": 0,
+    "device_tested": false
   }
 }
