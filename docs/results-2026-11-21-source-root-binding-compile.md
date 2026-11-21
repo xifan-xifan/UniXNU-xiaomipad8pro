@@ -1,0 +1,7 @@
+# SourceRootBinding independent-target compile (2026-11-21)
+
+The historical untracked `SourceRootBinding.cpp` was compiled on the Mac with Apple clang 17 and the frozen independent XNU `IOUserServer.cpo.json` argument set, remapped to the retained source and generated headers. The compile completed successfully as an `MH_OBJECT` for ARM64e kernel ABI. Input SHA-256: `f395a15d37b89a10bc9e965d9093dc29d0ff54d5eb61ded87ef623300cdf0f20`. Object SHA-256: `05eb8baef4bd135e005d60158517c083dbb8e067290124d420a4a3d34fd9445c`, retained at `/tmp/piano-binding.Bd4ziU/SourceRootBinding.o` on the Mac.
+
+The object defines `native_verified_block_root_authorized`, `native_verified_block_manifest_sha384`, and `native_verified_block_volume_device`. Its unresolved imports include IOKit registry APIs, `native_ufs_block_authenticates`, and normal kernel C++/libkern symbols. This establishes source/API compile compatibility only. It does not establish link compatibility, runtime ordering, registry availability before launchd, uniqueness under device conditions, or authenticated Data integration. The source remains untracked in the historical workspace and was not modified there. No object was added to a kernelcache or sent to the tablet.
+
+Next, compile this resolver as part of the correct NativeVirtioBlock kext target, link it with authenticated NativeUfs, and test its IOMedia selection against actual staged APFS volumes. The Data preparation path remains a separate unresolved integration requirement.
