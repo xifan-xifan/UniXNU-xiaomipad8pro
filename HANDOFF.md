@@ -1,5 +1,7 @@
 # Native macOS Deployment Handoff
 
+The [unattended witness review](docs/results-2026-11-22-unattended-witness-route.md) found historical piano watchdog-to-ABL evidence. Qualify CVP retention on that route before interpreting an absent DarwinBoot return record; the prior mailbox capture allowed HyperOS to start before the dump.
+
 The [live firmware ring](docs/results-2026-11-22-enter-ring-live.md) confirms unattended menu selection and the final marker before ExitBootServices. HyperOS returned on slot A. The next device trial needs an independent checkpoint after ExitBootServices; XNU entry remains unproved.
 
 The watchdog-gate reset build links ArmPsciResetSystemLib. Its complete piano platform source has no caller of PianoResetHookInstall, so the stock block flush hook is not installed by that path. ResetSystemRuntimeDxe still invokes registered callbacks before PSCI SYSTEM_RESET. The older watchdog-status image returned to HyperOS through firmware Fastboot reboot using the same UEFI cold-reset API, but that does not demonstrate the gate failure branch before Fastboot starts. Keep this candidate separate from hardware-qualified recovery.

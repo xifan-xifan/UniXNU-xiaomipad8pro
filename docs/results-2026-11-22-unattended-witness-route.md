@@ -1,0 +1,7 @@
+# Unattended ExitBootServices witness review
+
+The retained DarwinBoot mailbox image already writes eleven cache-flushed copies of the ExitBootServices return status. It stops before DarwinEnter. Its previous tablet capture was taken after HyperOS started and returned only zeroes; rerunning that capture order would leave the same ambiguity. The firmware-only post-EBS control observed on November 21 proves a separate loader path and cannot qualify this DarwinBoot call.
+
+The November 12 upstream tablet report records the no-ping boot guard test returning to ABL Fastboot on a watchdog bite. This is historical hardware evidence that watchdog-to-ABL routing is achievable on piano with the boot guard's restart reason. It does not prove CVP retention on that reset or establish that the current image programs the same reason. No retained `ping0` image was found in the searched current and historical Windows outputs, WSL `/root`, or Mac temporary directories. No old image was rebuilt or run.
+
+The current maintenance-to-ABL control proves pre-Android CVP readback after a deliberate restart. For the watchdog path, first stage a known CVP word in an isolated RAM control with verified restart routing. Observe stock ABL and dump the word before Android starts. Only a passing control can make a missing DarwinBoot checkpoint informative. Keep any diagnostic restart reason isolated from the deployment image and qualify Android return after the reader.
