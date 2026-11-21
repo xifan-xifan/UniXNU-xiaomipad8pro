@@ -440,3 +440,5 @@ Static symbol inspection of the 26C5035r fsck wrapper confirms fstab enumeration
 The CVP dump is not uniformly zero: 1,176,334 bytes are nonzero, but all eleven expected DarwinBoot mailbox pages at offset 0x6F5000 are zero and the magic is absent. See [mailbox offset audit](docs/results-2026-11-21-mailbox-offset-audit.md); this still does not prove whether the records were never written or later cleared.
 
 The DarwinBoot trial dump and the earlier menu-only dump have identical zeroed expected-record windows and the same nonzero tail marker; the reader path is therefore transferring the expected CVP range. See [mailbox baseline comparison](docs/results-2026-11-21-mailbox-baseline-comparison.md).
+
+A WSL artifact recheck found retained 27.3 kernel/boot/payload outputs, but the producing checkout is heavily modified and all related RAM candidates remain explicitly offline and untested. The locked k27 commits are still absent; see [WSL artifact recheck](docs/results-2026-11-21-wsl-native-artifact-recheck.md).
