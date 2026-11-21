@@ -14,27 +14,22 @@
 #
 #   make-systemos.sh OS.dmg SYSTEMOS_CRYPTEX.dmg APP_CRYPTEX.dmg OUT.img [SIZE_MIB]     (the raw APFS containers of the IPSW)
 #
+# For an independently qualified shim set, append SHIM_DIR MOUNT_SHA256 FSCK_SHA256 after SIZE_MIB.
+# SHIM_DIR contains sbin/mount and sbin/fsck. Use digests from the frozen build manifest.
+#
 # Output: OUT.img (a raw APFS container, the window as it is written) and OUT.img.json {volume_uuid, size, sha256}.
 set -euo pipefail
 OS=$1 CX=$2 APP=$3 OUT=$4 SIZE_MIB=${5:-6144}
 D=$(cd "$(dirname "$0")/../.." && pwd)
-. "$D/tooling/k27/k27-tree.sh"
-SHIMS=$PIANO_K27_TREE/overlay/systemos-shims
 boot_shims=(mount fsck)
-for shim in "${boot_shims[@]}"; do
-  path=$SHIMS/sbin/$shim
-  [ -f "$path" ] && [ -r "$path" ] && [ -s "$path" ] || {
-    echo "missing, unreadable, or empty native boot shim: $path" >&2
-    exit 1
-  }
-  rel=overlay/systemos-shims/sbin/$shim
-  expected=$(git -C "$PIANO_K27_TREE" rev-parse --verify "HEAD:$rel") || exit 1
-  actual=$(git -C "$PIANO_K27_TREE" hash-object --no-filters -- "$path") || exit 1
-  if [ "$actual" != "$expected" ]; then
-    echo "native boot shim differs from the locked k27 source: $path" >&2
-    exit 1
-  fi
-done
+case $# in
+  4|5)
+    . "$D/tooling/k27/k27-tree.sh"
+    SHIMS=$PIANO_K27_TREE/overlay/systemos-shims
+    ;;
+  8) SHIMS=$6 ;;
+  *) echo "expected OS CX APP OUT [SIZE_MIB [SHIM_DIR MOUNT_SHA256 FSCK_SHA256]]" >&2; exit 1 ;;
+esac
 [ -e "$OUT" ] && { echo "$OUT exists" >&2; exit 1; }
 WORK=$(mktemp -d /tmp/k273-systemos.XXXXXX)
 DISKS=()
@@ -46,6 +41,30 @@ cleanup() {
   rm -rf "$WORK"
 }
 trap cleanup EXIT
+# Install the same staged bytes we verify before attaching any images.
+mkdir -p "$WORK/shims"
+for shim in "${boot_shims[@]}"; do
+  path=$SHIMS/sbin/$shim
+  staged=$WORK/shims/$shim
+  if [ ! -f "$path" ] || [ ! -r "$path" ] || [ ! -s "$path" ]; then
+    echo "missing, unreadable, or empty native boot shim: $path" >&2
+    exit 1
+  fi
+  cp "$path" "$staged"
+  if [ "$#" -eq 8 ]; then
+    case $shim in mount) expected=$7 ;; fsck) expected=$8 ;; esac
+    actual=$(shasum -a 256 "$staged" | cut -d' ' -f1)
+  else
+    expected=$(git -C "$PIANO_K27_TREE" rev-parse --verify "HEAD:overlay/systemos-shims/sbin/$shim")
+    actual=$(git -C "$PIANO_K27_TREE" hash-object --no-filters -- "$staged")
+  fi
+  if [ "$actual" != "$expected" ]; then
+    echo "native boot shim differs from the declared input: $path" >&2
+    exit 1
+  fi
+  shim_sha=$(shasum -a 256 "$staged" | cut -d' ' -f1)
+  case $shim in mount) mount_sha=$shim_sha ;; fsck) fsck_sha=$shim_sha ;; esac
+done
 mkdir -p "$WORK"/mnt "$WORK"/os "$WORK"/cx "$WORK"/app
 
 DISKOF="python3 $D/tooling/k273/disk-of.py"
@@ -103,7 +122,7 @@ done
 sudo mkdir -p "$M/System/Volumes/Preboot/com.apple.security.cryptexd/Cryptexes"
 sudo mkdir -p "$M/sbin"
 sudo install -m 755 -o root -g wheel "$WORK/os/sbin/mount" "$M/sbin/mount.real"
-for shim in "${boot_shims[@]}"; do sudo install -m 755 -o root -g wheel "$SHIMS/sbin/$shim" "$M/sbin/$shim"; done
+for shim in "${boot_shims[@]}"; do sudo install -m 755 -o root -g wheel "$WORK/shims/$shim" "$M/sbin/$shim"; done
 sudo mkdir -p "$M/private/var" "$M/private/etc" "$M/private/tmp"
 sudo ln -s private/var "$M/var"
 sudo ln -s private/etc "$M/etc"
@@ -114,5 +133,5 @@ sync
 diskutil unmount "$M" > /dev/null
 hdiutil detach "$WHOLE" > /dev/null
 SHA=$(shasum -a 256 "$OUT" | cut -d' ' -f1)
-printf '{"volume_uuid": "%s", "size": %s, "sha256": "%s"}\n' "$UUID" "$(stat -f %z "$OUT")" "$SHA" > "$OUT.json"
+printf '{"volume_uuid": "%s", "size": %s, "sha256": "%s", "boot_shims": {"mount_sha256": "%s", "fsck_sha256": "%s"}}\n' "$UUID" "$(stat -f %z "$OUT")" "$SHA" "$mount_sha" "$fsck_sha" > "$OUT.json"
 cat "$OUT.json"
