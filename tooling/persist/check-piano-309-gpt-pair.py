@@ -2,6 +2,7 @@
 """Identify the piano 3.0.309 GPT state from saved 4 KiB boundary fragments."""
 import argparse
 import hashlib
+import re
 from pathlib import Path
 
 
@@ -23,15 +24,43 @@ def identify(path, length, known):
     return known.get(hashlib.sha256(data).hexdigest(), 'unknown')
 
 
+def identify_readback(text):
+    """Validate the complete output of the maintenance GPT readback command."""
+    values = {}
+    for line in text.splitlines():
+        key, sep, value = line.partition('=')
+        if not sep:
+            continue
+        if key == 'error':
+            raise ValueError(f'maintenance readback failed: {value}')
+        if key in ('primary_sha256', 'backup_sha256', 'lun0', 'gpt_preflight'):
+            if key in values:
+                raise ValueError(f'duplicate maintenance readback field: {key}')
+            values[key] = value
+    if values.get('gpt_preflight') != 'ready' or not re.fullmatch(r'sd[a-z]', values.get('lun0', '')):
+        raise ValueError('incomplete maintenance preflight')
+    return (PRIMARY.get(values.get('primary_sha256'), 'unknown'),
+            BACKUP.get(values.get('backup_sha256'), 'unknown'))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('primary', type=Path)
-    parser.add_argument('backup', type=Path)
+    parser.add_argument('primary', nargs='?', type=Path)
+    parser.add_argument('backup', nargs='?', type=Path)
+    parser.add_argument('--readback-log', type=Path, help='output from a successful maintenance readback')
     args = parser.parse_args()
+    if args.readback_log:
+        if args.primary or args.backup:
+            parser.error('--readback-log cannot be combined with fragment paths')
+    elif not (args.primary and args.backup):
+        parser.error('provide two fragment paths or --readback-log')
     try:
-        primary = identify(args.primary, 6 * 4096, PRIMARY)
-        backup = identify(args.backup, 5 * 4096, BACKUP)
-    except OSError as exc:
+        if args.readback_log:
+            primary, backup = identify_readback(args.readback_log.read_text(encoding='utf-8'))
+        else:
+            primary = identify(args.primary, 6 * 4096, PRIMARY)
+            backup = identify(args.backup, 5 * 4096, BACKUP)
+    except (OSError, ValueError) as exc:
         parser.exit(2, f'{exc}\n')
     print(f'primary={primary} backup={backup}')
     if primary == backup and primary in ('stock', 'candidate'):
