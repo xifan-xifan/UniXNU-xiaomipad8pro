@@ -396,3 +396,5 @@ A third prearmed auto8 run captured a 128-byte log showing DarwinBoot protocol r
 Latest lookup-auto8 follow-up: ADB confirmed completed HyperOS 3.0.309 on A and the unchanged marker. The reset trigger remains unknown. For unattended runs, verify recovery across the ABL-to-UEFI transition and preserve firmware DEBUG ring captures. USB disappearance alone cannot establish XNU entry. See docs/results-2026-11-21-darwin-lookup-auto8-retest.md.
 
 The DEBUG ring capture verified RAM configuration and menu rendering. The last capture precedes selection. The diagnostic returned to HyperOS on A without an operator reboot. See docs/results-2026-11-21-darwin-lookup-auto8-retest.md. Capture the dispatch boundary before counting XNU entry or proceeding to desktop tests.
+
+Prepared lookup-auto2 for a dispatch capture before the previously observed USB loss. Use the artifact digest in artifacts/ARTIFACTS.md. The host launch command stopped at its ADB list check before rebooting the tablet. Use the serial-specific ADB get-state check for the next preflight. Review the ABL and firmware persistence gate in WRITE-PLAN.md before loading the derivative.
