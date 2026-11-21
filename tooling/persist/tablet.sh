@@ -248,7 +248,7 @@ write)
 	dd if="$P/$1" of="/dev/$2" bs="$4" seek="$3" conv=notrunc,fsync 2>"$P/dd.err" || { cat "$P/dd.err"; die "dd write"; }
 	tail -1 "$P/dd.err"; echo "written=$1"
 	;;
-restore-bounded)
+restore-bounded|restore-bounded-push)
 	# NAME DEV BLOCKS PORT. The caller qualifies geometry and verifies readback.
 	[ "$#" = 4 ] || die 'restore-bounded requires NAME DEV BLOCKS PORT'
 	case "$2" in ''|*[!a-zA-Z0-9_-]*) die 'invalid target name' ;; esac
@@ -256,7 +256,13 @@ restore-bounded)
 	[ -b "$DEV/$2" ] || die 'target is not a block device'
 	work=$(mktemp -d "$P/restore.XXXXXX") || die 'cannot allocate restore status directory'
 	trap 'rm -f "$work/wget.rc" "$work/dd.err"; rmdir "$work"' EXIT
-	{ wget -q -O - "http://$(host_ip):$4/$1" || echo $? > "$work/wget.rc"; } |
+	{
+		if [ "$cmd" = restore-bounded-push ]; then
+			busybox nc -l -p "$4" </dev/null || echo $? > "$work/wget.rc"
+		else
+			wget -q -O - "http://$(host_ip):$4/$1" || echo $? > "$work/wget.rc"
+		fi
+	} |
 		LC_ALL=C dd of="$DEV/$2" bs=4096 iflag=fullblock count="$3" conv=notrunc,fsync 2>"$work/dd.err" ||
 		{ cat "$work/dd.err"; die 'bounded write failed'; }
 	[ ! -s "$work/wget.rc" ] || die 'bounded transfer failed'

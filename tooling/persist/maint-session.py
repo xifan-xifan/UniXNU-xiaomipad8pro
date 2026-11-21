@@ -398,6 +398,9 @@ class Session:
     def job(self, name, *argv, timeout=3600, every=None):
         """A long tablet.sh subcommand, detached on the tablet (survives the telnet line), polled until it ends."""
         self.t('job', name, *argv)
+        return self.wait_job(name, timeout, every)
+
+    def wait_job(self, name, timeout, every=None):
         if not self.execute:
             return None
         every = every or JOB_POLL
@@ -926,9 +929,21 @@ def piano_309_root(s):
         s.need(check_target() == dev, 'root target remains the same before writing')
         s.save(piano_309_root_attempt={'target': dev, 'first_lba': 102269696, 'blocks': count,
                                        'source_sha256': digest, 'blank_prefix': prefix, 'blank_tail': tail})
-        s.serve({'root.img': img})
         if s.write(f'{img.name} -> /dev/{dev} blocks 0 through {count - 1}'):
-            s.job('piano-309-root-write', 'restore-bounded', 'root.img', dev, count, s.a.http_port, timeout=4 * 3600)
+            name = 'piano-309-root-write'
+            if os.name == 'nt':
+                s.t('job', name, 'restore-bounded-push', 'root.img', dev, count, 18000)
+                with socket.create_connection((s.env['PIANO_MAINT_HOST'], 18000), timeout=30) as conn, img.open('rb') as source:
+                    sent = 0
+                    while chunk := source.read(MiB):
+                        conn.sendall(chunk)
+                        sent += len(chunk)
+                    conn.shutdown(socket.SHUT_WR)
+                s.need(sent == count * B, 'complete root stream sent')
+                s.wait_job(name, 4 * 3600)
+            else:
+                s.serve({'root.img': img})
+                s.job(name, 'restore-bounded', 'root.img', dev, count, s.a.http_port, timeout=4 * 3600)
         s.need(s.region_sha(dev, 0, count, name='root-prefix-after') == digest, 'full root readback matches source')
     s.need(s.region_sha(dev, count, tail_count, name='root-tail-after') == tail, 'root tail hash is unchanged')
     s.need(check_target() == dev, 'candidate GPT and root target verified after readback')
