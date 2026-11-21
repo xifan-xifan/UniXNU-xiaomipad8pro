@@ -582,3 +582,5 @@ The stock Android transport is currently authorized (ADB enabled, `ro.adb.secure
 2026-11-22: The [watchdog-enter inventory](docs/results-2026-11-22-watchdog-enter-inventory.md) found two changed modules in the same 174-entry FVMAIN order. DarwinBoot and BdsDxe differ. The baseline and rebuilt watchdog gate require a direct BdsDxe comparison before treating the trial as a loader-only change.
 
 2026-11-22: A fresh [ADB layout check](docs/results-2026-11-22-live-layout-recheck.md) found the candidate partition names and shortened Android capacity. Use this live observation for the next preflight and verify the raw GPT before writing native volumes.
+
+2026-11-22: The first native root write sequence is recorded in [WRITE-PLAN.md](WRITE-PLAN.md#first-native-root-write-on-the-verified-candidate-layout). The existing stock root transfer is still in progress. Writer rehearsal and full target preflight remain pending.
