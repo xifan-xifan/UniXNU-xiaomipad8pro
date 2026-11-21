@@ -377,7 +377,7 @@ class Session:
         self.log(f'  tablet# {command}')
         if not self.execute:
             return None
-        r = subprocess.run(['python3', str(MAINT_SHELL), command, str(timeout)], capture_output=True, text=True, timeout=timeout + 30)
+        r = subprocess.run([sys.executable, str(MAINT_SHELL), command, str(timeout)], capture_output=True, text=True, timeout=timeout + 30)
         out = r.stdout.replace('\r', '')
         for line in out.strip().splitlines()[-40:]:
             self.log('        | ' + line)
