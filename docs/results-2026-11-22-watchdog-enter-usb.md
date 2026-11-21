@@ -1,0 +1,5 @@
+# XNU USB diagnostic on the tablet
+
+Stock ABL accepted temporary image `a711c1885a407d7630b3892e9f871ff6fcb7e3039a08514bd67a1141ce7f6da6` with slot A successful, bootable, six retries and no update snapshot. The sole FAT file change from the prior control was `piano-usb=2` in the default entry. The independent Windows PnP observer ran before the trial and saw Android `18d1:4e11`, two intervals of `18d1:d00d`, and Android again at 06:23:33 local host time. It did not sample `1209:0001` during the transition. No host reboot command followed the temporary boot.
+
+HyperOS OS3.0.309.0.WPYCNXM returned on `_a` with boot completed and boot reason `bootloader`. The boot ID changed from `6be28244-f876-4b70-83ec-53d8c1e7fe67` to `61fe4d4d-d129-4c65-8713-c7fa97610b16`. The USB result does not distinguish loader failure, early XNU failure, device controller setup failure or an enumeration missed between samples. Do not rerun this profile without a new witness. Qualify a checkpoint before IOKit and its retrieval across reset. Raw evidence: `out/watchdog-enter-usb-live/`.
