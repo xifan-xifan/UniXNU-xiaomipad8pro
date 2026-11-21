@@ -455,4 +455,4 @@ The working-copy DarwinBoot parser rejects the original d36b8047 collection and 
 
 A byte comparison found the archived subtype-2 correction at offset 0xb. It makes the outer and embedded kernel CPU subtype words equal, satisfying the current DarwinBoot parser. See [retained subtype mismatch](docs/results-2026-11-21-retained-subtype-mismatch.md).
 
-The archived subtype-2 boot package is internally consistent: corrected ARM64 header, packaging DTB, exact payload embedding and zero-padded ESP prefix. Its hardware timeline still lacks XNU handoff or desktop evidence. See [subtype-2 package consistency](docs/results-2026-11-21-subtype2-package-consistency.md).
+The subtype-2 ESP payload and its padded readback match. Both retained corrected-header RAM images still contain the original payload. See [archived subtype-2 ESP payload and RAM images](docs/results-2026-11-21-subtype2-package-consistency.md).
