@@ -432,3 +432,5 @@ The [DarwinBoot build replay](docs/results-2026-11-21-darwinboot-build-replay.md
 The [DarwinBoot EBS mailbox diagnostic](docs/results-2026-11-21-darwinboot-mailbox.md) built and was packaged from the retained witness. It returned unattended to completed HyperOS A with the marker intact. All eleven checkpoint locations were zero after the separate reader boot. Qualify a known RAM write across this sequence before interpreting the absence.
 
 The archived upstream references passed all 12 length and SHA-256 checks. ADB again confirmed completed HyperOS on A. See [input integrity and device state](docs/results-2026-11-21-resume-input-integrity.md) for the host helper check and outstanding filesystem dispatch qualification.
+
+The [host fsck dispatch check](docs/results-2026-11-21-fsck-dispatch-host.md) found that the stock wrapper rejects a positional APFS volume and can select the host container with no device argument. The explicit APFS helper passed against the isolated SystemOS UUID. Keep target selection and repair policy explicit for the native candidate.
