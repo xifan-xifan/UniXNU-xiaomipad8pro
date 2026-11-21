@@ -1,0 +1,5 @@
+# Data startup binding audit (2026-11-22)
+
+The bindfs owner kernel link list reuses the cryptex build's `kern_exec.o`. Its recorded compiler arguments enable `XNU_OWNER_DATA_MOUNT` and `XNU_NATIVE_RAM_BLOCK` and set `XNU_OWNER_DATA_VOLUME_UUID` to `1B4CEC84-35B3-4AAD-88D0-200DD0956637`, matching the first-install Data candidate. The source calls the UUID resolver before launching init in DEVELOPMENT or DEBUG builds. It mounts APFS read/write at `/System/Volumes/Data`, checks the mounted device and flags, then installs firmlinks. A reported mount error panics before init.
+
+The retained no-poll KC matches the manifest SHA-256 and contains both the expected UUID and the Data mount panic string. These observations tie the candidate to the first-install Data identity and describe the source startup policy. Runtime provider registration, Data mount completion, and recovery after a startup panic still require a tablet run. Because the kernel requests read/write before init, the boot write review must account for APFS mount activity before any userland fsck shim runs.
