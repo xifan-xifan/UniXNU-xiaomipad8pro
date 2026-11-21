@@ -1,5 +1,7 @@
 # Native macOS Deployment Handoff
 
+On 2026-11-22 the Mac mounted the first-install Data candidate read-only after matching UUID 1B4CEC84-35B3-4AAD-88D0-200DD0956637 with the current image selector. Explicit fsck_apfs -q on its raw volume returned 0 and reported a clean filesystem. Cleanup detached the image and its raw SHA-256 still matched the manifest. This covers the Mac's read-only mount and quick check. Target mount phases, repair and persistence remain open.
+
 The [SystemOS explicit APFS checks](docs/results-2026-11-22-systemos-explicit-fsck.md) verified the pinned fixture UUID before running offline fsck_apfs -n and -q against its raw volume. Both exited 0 and the image hash matched before and after detachment. Boot-time device selection, repair and mounted-volume checks remain open.
 
 The [stock APFS phase audit](docs/results-2026-11-22-stock-apfs-phases.md) resolves `mount -P 1/2` dispatch: phase 1 invokes `apfs_boot_util 1` on an APFS root; phase 2 invokes `apfs_boot_util 2` only when `vfs.generic.apfs.rosp` is nonzero. That utility discovers Data by APFS role in the root device's container, without a separate Data UUID. The native independent Data seed therefore still needs its own explicit mount path and a qualified write policy; do not treat stock phase 2 as mounting it.
