@@ -1,6 +1,6 @@
 # WRITE-PLAN: HyperOS 3.0.309 and native macOS 27.3
 
-Status: the owner authorized persistent writes and declined a new tablet backup. Persistent execution still depends on the technical gates below.
+Status: the owner declined a new tablet backup. Present the concrete partition and recovery plan for explicit approval before any GPT or userdata change. Persistent execution still depends on the technical gates below.
 
 This document defines the gate before any GPT, boot, ESP, root, Data, or boot-triplet write. No persistent write in this plan has been executed.
 
@@ -24,7 +24,7 @@ The offline GPT study uses 4 KiB sectors and proposes these inclusive LUN 0 rang
 | macOS Data | 107,512,576 | 124,289,791 |
 | ESP | 124,289,792 | 124,551,935 |
 
-The last three regions overlap the current userdata partition. The current encrypted F2FS filesystem must never be mounted against a shortened block device until a qualified migration or recreation procedure has completed. Restoring the stock GPT restores partition geometry only. If any writes replace the existing F2FS tail, restoring geometry cannot recover those bytes. Under the no-backup instruction, a layout that overwrites those bytes requires a verified stock reinitialization procedure. The owner reports the tablet was factory-reset, declined a tablet backup, and explicitly authorized persistent writes within this deployment, including GPT and userdata changes.
+The last three regions overlap the current userdata partition. The current encrypted F2FS filesystem must never be mounted against a shortened block device until a qualified migration or recreation procedure has completed. Restoring the stock GPT restores partition geometry only. If any writes replace the existing F2FS tail, restoring geometry cannot recover those bytes. Under the no-backup instruction, a layout that overwrites those bytes requires a verified stock reinitialization procedure. The owner reports the tablet was factory-reset and declined a tablet backup. The partition change requires separate approval of the concrete plan.
 
 The live A-slot HyperOS 3.0.309 read-only check on 2026-11-20 found `/data` mounted as F2FS through `dm-56` with `inlinecrypt`. `/vendor/etc/fstab.qcom` marks userdata `formattable` and specifies wrapped-key file and metadata encryption, with the metadata key directory at `/metadata/vold/metadata_encryption`. The stock symlinks resolve userdata to `sda34` and metadata to `sda20`. An unprivileged ADB shell could not read their block geometry from sysfs, so the candidate LBAs still use the verified GPT captures. Free filesystem blocks do not establish a free GPT range. A recreation trial must verify that stock recovery initializes the encrypted mapping and mounts `/data` on the proposed shortened geometry before that recovery route can be relied on. The fstab flag alone does not establish that outcome.
 
@@ -83,4 +83,4 @@ The 27.3 ESP builder can encode the provisional ESP start at LBA 124289792. The 
 
 ### 4 KiB userdata geometry rehearsal (2026-11-21)
 
-UbuntuPiano successfully formatted and checked a sparse file at the provisional shortened userdata byte length through a loop device configured with 4096-byte logical sectors. See [the host result](docs/results-2026-11-21-f2fs-4k-host.md). This qualifies only the F2FS capacity/sector geometry. The exact 3.0.309 recovery and sparse userdata/metadata images are not available in this workspace, and Xiaomi recovery, metadata key setup, and Android boot on this geometry remain unqualified. Do not treat this rehearsal as permission to rewrite GPT/userdata or as proof of rollback.
+UbuntuPiano successfully formatted and checked a sparse file at the provisional shortened userdata byte length through a loop device configured with 4096-byte logical sectors. See [the host result](docs/results-2026-11-21-f2fs-4k-host.md). This qualifies only the F2FS capacity/sector geometry. The retained 3.0.309 archive contains stock userdata and metadata inputs. Xiaomi recovery, metadata key setup, and Android boot on this geometry remain unqualified. Do not treat this rehearsal as permission to rewrite GPT/userdata or as proof of rollback.
