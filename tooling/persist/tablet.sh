@@ -85,7 +85,7 @@ map)
 		echo "$n=$1 $2 $3"
 	done
 	;;
-piano-309-gpt-preflight)
+piano-309-gpt-preflight|piano-309-gpt-readback)
 	# Read-only. Refuse active mounts, swap and stacked block devices before a GPT trial.
 	l=$(lun0)
 	case "$l" in sd[a-z]) ;; *) die "LUN 0 missing or ambiguous: '$l'" ;; esac
@@ -104,6 +104,18 @@ piano-309-gpt-preflight)
 			[ ! -e "$holder" ] || die "${b##*/} has block holder ${holder##*/}"
 		done
 	done
+	if [ "$cmd" = piano-309-gpt-readback ]; then
+		umask 077
+		work=$(mktemp -d /run/piano-gpt.XXXXXX) || die 'cannot allocate RAM readback directory'
+		trap 'rm -f "$work/primary" "$work/backup"; rmdir "$work"' EXIT
+		dd if="/dev/$l" of="$work/primary" bs=4096 count=6 || die 'cannot read primary GPT'
+		dd if="/dev/$l" of="$work/backup" bs=4096 skip=124552187 count=5 || die 'cannot read backup GPT'
+		[ "$(wc -c < "$work/primary")" -eq 24576 ] || die 'short primary GPT read'
+		[ "$(wc -c < "$work/backup")" -eq 20480 ] || die 'short backup GPT read'
+		primary=$(sha256sum "$work/primary") || die 'cannot hash primary GPT'
+		backup=$(sha256sum "$work/backup") || die 'cannot hash backup GPT'
+		printf 'primary_sha256=%s\nbackup_sha256=%s\n' "${primary%% *}" "${backup%% *}"
+	fi
 	echo "lun0=$l"
 	echo 'gpt_preflight=ready'
 	;;
