@@ -1690,7 +1690,7 @@
   "host_direct_resolver_kc": {
     "path": "out/resolver-kc-replay/resolver.kc",
     "sha256": "bf6abf74be7ae1c42d676028fe05be19d4432120d630b9acfbcadf16642f2aff",
-    "host_parser": "pending",
+    "host_parser": "pass",
     "deployment_eligible": false,
     "device_tested": false
   },
