@@ -488,3 +488,5 @@ The stock-window policy replay succeeded: the real OS/SystemOS 544-byte headers 
 A host KC replay now consumes the real stock-root v2 policy object instead of fixture headers. The retained 26-driver owner recipe linked successfully to a 135,806,976-byte KC, SHA-256 a927b53d3ebca0e257d945d89a6ba0594835834a30f2a2bef374c83c1a178fbe. It is unsigned and host-only; packaging and device qualification remain open.
 
 The locked DarwinBoot parser accepted the stock-policy KC replay and passed its synthetic malformed-range and arm64/arm64e tests. This is a structural host check only; signing, root mount and device execution remain open.
+
+The [stock-policy provider audit](docs/results-2026-11-21-stock-policy-provider.md) traced the replay's resolved callback to the host-only object and confirmed the tablet was online in HyperOS on slot A. Historical iPadOS sources contain an empty callback. Establish the frozen macOS provider configuration before promoting the collection.
