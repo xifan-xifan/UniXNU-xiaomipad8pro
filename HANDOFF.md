@@ -540,3 +540,5 @@ The 2026-11-22 GitHub API recheck resolved CrossDarwin's default test_27 to `4a6
 The [packed GOP inventory](docs/results-2026-11-22-packed-gop-inventory.md) confirmed SimpleFbDxe in the retained auto8, witness, and mailbox containers. The menu refusal remains ambiguous. The APRIORI witness provides a confirmed loader-dispatch baseline for the next diagnostic.
 
 The [packed dispatch audit](docs/results-2026-11-22-packed-gop-inventory.md) also confirms that the historical auto8, witness and mailbox images share the exact FAT payload. The witness uses a different FD and reached the final EBS preparation with those inputs. Prioritize the FD and loader runtime differences when diagnosing the auto8 refusal.
+
+The [witness replay identity check](docs/results-2026-11-22-witness-replay-identity.md) found identical APRIORI files and different DarwinBoot driver bytes. Use the archived FD as the witness reference.
