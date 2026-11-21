@@ -412,3 +412,5 @@ The watchdog status RAM trial verified UEFI EL1 and STATUS=0 in the DEBUG ring. 
 The Gunyah watchdog expiry RAM trial returned to completed HyperOS on A without a host reboot after capture. The Android marker matched. The reset source and intermediate USB interfaces were not captured. See [expiry result](docs/results-2026-11-21-uefi-watchdog-expiry.md). For the next trial, capture the USB transition continuously and test the gap between ExitBootServices and XNU watchdog ownership separately.
 
 The Windows USB observer captured Android, stock ABL, and completed HyperOS in a host-directed control. See [the observer result](docs/results-2026-11-21-usb-observer.md). Start it before a RAM trial and wait for its first baseline line.
+
+The expiry replay captured UEFI Fastboot loss and later verified completed HyperOS on A with the original marker. See [the replay](docs/results-2026-11-21-watchdog-usb-replay.md). Use a longer observation window for the post-ExitBootServices stall trial.
