@@ -149,4 +149,4 @@ See [the image inventory](../docs/results-2026-11-21-fips4b-inventory.md) for th
 
 - 2026-11-21 4 KiB F2FS mkfs log, `/tmp/piano-f2fs-loop.c99i5s/mkfs.log` SHA-256 `2ff21545b367c68cfe4ee2453031aaa5f22abe19f25493295889b6273ff1ed83`; dry-run fsck log `/tmp/piano-f2fs-loop.c99i5s/fsck.log` SHA-256 `8128dbcc3085fa8289f8dd95a27112f9afbcf991ff696ea24fb52d8275e9aed3`.
 
-- 2026-11-21 firmware dispatch timing candidate, `out/boot-piano-darwin-lookup-auto2.img`, SHA-256 `36d8406c0afc5c7b7d6bcf0872a2dec559d3d7df9962953eb13802c8a936d11b`. Host verified that the kernel and DTB sections match lookup-auto8, the boot header ID was recomputed, and the only live FAT file difference is the menu timeout (8 to 2 seconds). Hardware run pending.
+- 2026-11-21 firmware dispatch timing candidate, `out/boot-piano-darwin-lookup-auto2.img`, SHA-256 `36d8406c0afc5c7b7d6bcf0872a2dec559d3d7df9962953eb13802c8a936d11b`. Host verified that the kernel and DTB sections match lookup-auto8, the boot header ID was recomputed, and the only live FAT file difference is the menu timeout (8 to 2 seconds). [Hardware observation](../docs/results-2026-11-21-darwin-lookup-auto2.md).

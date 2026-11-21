@@ -398,3 +398,5 @@ Latest lookup-auto8 follow-up: ADB confirmed completed HyperOS 3.0.309 on A and 
 The DEBUG ring capture verified RAM configuration and menu rendering. The last capture precedes selection. The diagnostic returned to HyperOS on A without an operator reboot. See docs/results-2026-11-21-darwin-lookup-auto8-retest.md. Capture the dispatch boundary before counting XNU entry or proceeding to desktop tests.
 
 Prepared lookup-auto2 for a dispatch capture before the previously observed USB loss. Use the artifact digest in artifacts/ARTIFACTS.md. The host launch command stopped at its ADB list check before rebooting the tablet. Use the serial-specific ADB get-state check for the next preflight. Review the ABL and firmware persistence gate in WRITE-PLAN.md before loading the derivative.
+
+The lookup-auto2 RAM boot was accepted by ABL and presented a roughly one-second UEFI USB window. The host captured no ring. Android return and XNU entry remain unverified. See [the result and reset coverage review](docs/results-2026-11-21-darwin-lookup-auto2.md).
