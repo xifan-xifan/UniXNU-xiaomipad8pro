@@ -1,5 +1,7 @@
 # Native macOS Deployment Handoff
 
+The [CrossDarwin profile comparison](docs/results-2026-11-22-crossdarwin-profile.md) verified the same Apple XNU base and 26C5035r target. The public patch series is a reconstruction reference. The prepared k27 tree and piano runtime compatibility remain unverified.
+
 The [ABL slot and snapshot readback](docs/results-2026-11-22-abl-snapshot-readback.md) confirmed A active/successful, retry 6, and snapshot status none in userspace Fastboot and ABL; the tablet returned to HyperOS. Slot B reports unbootable and was not changed. No native Darwin recovery evidence yet.
 
 The [Native Data and UFS write audit](docs/results-2026-11-22-native-data-write-gates.md) distinguishes the mode-0 RAM Data path from the separate UFS log/export gate. Data store tooling and ABL state preflight tests pass in UbuntuPiano. Verify the effective boot arguments and live slot state before device qualification.
