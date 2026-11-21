@@ -1,5 +1,7 @@
 # Native macOS Deployment Handoff
 
+The [UEFI debug log audit](docs/results-2026-11-21-uefi-debuglog.md) identifies a separate DEBUG ring export while firmware Fastboot responds. Use it with direct BDS protocol instrumentation. SEC clears the ring on a new UEFI boot.
+
 The [packed DarwinBoot audit](docs/results-2026-11-21-mailbox-packed-driver.md) confirmed that the mailbox trial marker is in the packaged PE32 executable. The [packed DTB audit](docs/results-2026-11-21-cvp-ownership.md) identified the CVP consumer, and stock HyperOS exposes a live msm_cvp driver binding for that node. Qualify retention before HyperOS initializes the region or use an independently qualified reservation.
 
 The [DarwinBoot APRIORI control](docs/results-2026-11-21-darwin-apriori.md) built successfully and enumerated as UEFI Fastboot in an action-only RAM boot. HyperOS returned on A with the original marker. A follow-up captured the staged log before reboot. The capture stops at menu launch and does not establish loader registration. Check the protocol directly at the BDS boundary. The retained candidate is `out/boot-piano-darwin-apriori-menu.img`.
