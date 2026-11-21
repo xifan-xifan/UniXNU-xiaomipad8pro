@@ -430,3 +430,5 @@ The [DarwinBoot witness trial](docs/results-2026-11-21-darwinboot-witness.md) ca
 The [DarwinBoot build replay](docs/results-2026-11-21-darwinboot-build-replay.md) linked from the retained cache after restoring the FD macros. The unpacked FVMAIN comparison found only PcdDxe debug metadata and the BdsDxe build time differences among the 174 FFS files. DarwinBoot matches byte for byte. Use the retained tablet-tested FD for the next controlled comparison.
 
 The [DarwinBoot EBS mailbox diagnostic](docs/results-2026-11-21-darwinboot-mailbox.md) built and was packaged from the retained witness. It returned unattended to completed HyperOS A with the marker intact. All eleven checkpoint locations were zero after the separate reader boot. Qualify a known RAM write across this sequence before interpreting the absence.
+
+The archived upstream references passed all 12 length and SHA-256 checks. ADB again confirmed completed HyperOS on A. See [input integrity and device state](docs/results-2026-11-21-resume-input-integrity.md) for the host helper check and outstanding filesystem dispatch qualification.
