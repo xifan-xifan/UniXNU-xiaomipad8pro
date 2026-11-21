@@ -1,8 +1,8 @@
 # Native macOS Deployment Handoff
 
-Stock Recovery entry succeeded, but remote reboot attempts returned to Recovery. The tablet awaits the on-device Reboot to System action. See [the Recovery entry result](docs/results-2026-11-21-stock-recovery-entry.md).
+Stock Recovery entry succeeded, but remote reboot attempts returned to Recovery. ADB subsequently observed completed HyperOS on slot A; the specific Recovery exit action was not observed. See [the Recovery entry result](docs/results-2026-11-21-stock-recovery-entry.md).
 
-`out/maintenance-gpt/readback-direct.img` embeds `piano-309-gpt-readback`. The deployment manifest records its repeatable build and host fixture results. Run it on the tablet after verifying that stock Recovery can return to HyperOS. The readback bypasses the Linux page cache with O_DIRECT. Post-write flush and UFS readback still need device qualification.
+`out/maintenance-gpt/readback-direct.img` embeds `piano-309-gpt-readback`. The deployment manifest records its repeatable build and host fixture results. The packaged command passed on the tablet: both GPT digests matched stock, and ABL reboot returned to completed HyperOS on slot A. See [the direct GPT result](docs/results-2026-11-21-direct-gpt-readback.md). The readback bypasses the Linux page cache with O_DIRECT. Post-write flush and UFS readback still need device qualification.
 
 After `/bin/piano-tablet piano-309-gpt-readback` exits successfully, save its output and run `python tooling/persist/check-piano-309-gpt-pair.py --readback-log LOG`. Require `primary=stock backup=stock` before a candidate layout trial.
 
