@@ -1,5 +1,7 @@
 # Native macOS Deployment Handoff
 
+The [SystemOS explicit APFS checks](docs/results-2026-11-22-systemos-explicit-fsck.md) verified the pinned fixture UUID before running offline fsck_apfs -n and -q against its raw volume. Both exited 0 and the image hash matched before and after detachment. Boot-time device selection, repair and mounted-volume checks remain open.
+
 The [stock APFS phase audit](docs/results-2026-11-22-stock-apfs-phases.md) resolves `mount -P 1/2` dispatch: phase 1 invokes `apfs_boot_util 1` on an APFS root; phase 2 invokes `apfs_boot_util 2` only when `vfs.generic.apfs.rosp` is nonzero. That utility discovers Data by APFS role in the root device's container, without a separate Data UUID. The native independent Data seed therefore still needs its own explicit mount path and a qualified write policy; do not treat stock phase 2 as mounting it.
 
 The 2026-11-22 read-only device check found serial `7ccdd855` online in completed HyperOS `OS3.0.309.0.WPYCNXM`, slot `_a`. The by-name links resolve `esp` to `sda37`, `linux_rootfs` to `sda35`, and `linux_data` to `sda36`; ordinary ADB shell cannot read their sysfs geometry, and `bootctl` is unavailable. This confirms the current OS and names only, not live GPT boundaries, ABL success/retry state, or write authorization. See [current device baseline](docs/results-2026-11-22-device-baseline.md). No reboot or write command was issued.
