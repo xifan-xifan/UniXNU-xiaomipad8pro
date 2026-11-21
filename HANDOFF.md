@@ -342,3 +342,5 @@ The new probe 2 mailbox package audit is in [the NativeUfs probe result](docs/re
 A host F2FS rehearsal now uses a 4096-byte loop logical sector and the exact proposed shortened userdata size; mkfs.f2fs and dry-run fsck.f2fs passed. It corrects the earlier 512-byte regular-file trial but does not qualify device recovery or encryption. See [the 4 KiB result](docs/results-2026-11-21-f2fs-4k-host.md).
 
 The frozen mailbox image was rehashed directly in UbuntuPiano WSL at the recorded scratch path and matched the artifact manifest. The upstream default HEAD still matched the planned baseline 2438556c77c90c22c7b76e57eb8b40c44b35f1af. The tablet reported piano, OS3.0.309.0.WPYCNXM, slot _a, and sys.boot_completed=1 over ADB. This check did not load any image. The stock ABL audit remains open, and the owner needs to approve the concrete plan before any GPT or userdata change.
+
+The A-slot recovery partition matches the verified 3.0.309 package image. Both slot hashes and capacities are recorded in [the live recovery result](docs/results-2026-11-21-live-recovery-slots.md).
