@@ -1662,5 +1662,14 @@
     "hyperos_persistence_marker_verified": true,
     "post_run_abl_slot_flags_verified": false,
     "device_result": "docs/results-2026-11-21-auto8-darwinboot.md"
+  },
+  "archived_subtype2_normalized_ram": {
+    "path": "out/subtype2-verification/normalized.img",
+    "bytes": 171220992,
+    "sha256": "c957f87278d22e2f586da33d065176fbe5fce60d38b8ebda6940ef03bdc2973d",
+    "host_verifier": "pass",
+    "signed": false,
+    "device_tested": false,
+    "result": "docs/results-2026-11-21-subtype2-container-verifier.md"
   }
 }
