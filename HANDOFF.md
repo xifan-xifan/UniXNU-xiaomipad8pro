@@ -1,5 +1,7 @@
 # Native macOS Deployment Handoff
 
+The [live firmware ring](docs/results-2026-11-22-enter-ring-live.md) confirms unattended menu selection and the final marker before ExitBootServices. HyperOS returned on slot A. The next device trial needs an independent checkpoint after ExitBootServices; XNU entry remains unproved.
+
 The watchdog-gate reset build links ArmPsciResetSystemLib. Its complete piano platform source has no caller of PianoResetHookInstall, so the stock block flush hook is not installed by that path. ResetSystemRuntimeDxe still invokes registered callbacks before PSCI SYSTEM_RESET. The older watchdog-status image returned to HyperOS through firmware Fastboot reboot using the same UEFI cold-reset API, but that does not demonstrate the gate failure branch before Fastboot starts. Keep this candidate separate from hardware-qualified recovery.
 
 The [retained k27 baseline replay](docs/results-2026-11-22-k27-baseline-replay.md) reproduced the clean c2936ef tree from the 47 local patches. Native 0053 still requires three different file revisions. Preserve the replay as a separate reconstruction input.

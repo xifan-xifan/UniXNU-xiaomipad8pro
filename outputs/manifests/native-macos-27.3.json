@@ -1778,5 +1778,13 @@
     "bytes": 5183875,
     "sha256": "ec28dca0231ef58c7d347153cf572c60440bf25e198095af02a19bf0167b8438",
     "qualification": "Exact upstream commit object reconstructed from the verified archive: tree 6e9060023b750feae81727e756a0577f5829baa1. Mac checkout reports exact HEAD e45fbe30a7879e0b16e26dddb78538f1b00e0bff, clean status, and prepare-storage-headers.py passed with 19 public headers."
+  },
+  "unattended_menu_ring": {
+    "result": "docs/results-2026-11-22-enter-ring-live.md",
+    "capture_directory": "out/enter-ring-live",
+    "snapshots": 11,
+    "last_confirmed_stage": "DarwinBoot ready for ExitBootServices",
+    "hyperos_return": "OS3.0.309.0.WPYCNXM, slot A, boot completed",
+    "xnu_execution_confirmed": false
   }
 }
