@@ -420,3 +420,5 @@ The [post-ExitBootServices firmware trial](docs/results-2026-11-21-watchdog-post
 The [DarwinBoot post-ExitBootServices stop](docs/results-2026-11-21-darwinboot-watchdog-build.md) builds as a DEBUG module. Rebuild the combined FD with the early firmware stop removed and the watchdog setup retained before packaging the automatic RAM probe.
 
 The combined DarwinBoot watchdog RAM image returned unattended to HyperOS A with the Android marker intact. The loader stop itself lacks a framebuffer or log witness. See [the tablet result](docs/results-2026-11-21-darwinboot-watchdog-return.md).
+
+The [DarwinBoot witness trial](docs/results-2026-11-21-darwinboot-witness.md) captured the loader immediately before the final ExitBootServices sequence with the watchdog armed. HyperOS A returned unattended and the marker matched. Post-exit evidence and XNU watchdog takeover remain pending.

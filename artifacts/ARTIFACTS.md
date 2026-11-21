@@ -160,3 +160,5 @@ See [the image inventory](../docs/results-2026-11-21-fips4b-inventory.md) for th
 - DarwinBoot watchdog stop FFS (host build only), `UbuntuPiano:/tmp/darwinboot-post-ebs.ffs`, SHA-256 `6563739a80454379e850bc9fa5d08bc01fff23c408902e75e338cb9badfbf034`.
 
 - Combined DarwinBoot watchdog RAM image, out/boot-piano-darwinboot-watchdog-stop.img, SHA-256 1adc49c0a613beb7775f4276978cfa55528e911cff02211d72e5b085e36a9e4c. FD SHA-256 31f490b6e1f4589f5d6657f18128822ab1ea01340b0b370ec37a14577cdd0ce3.
+
+- DarwinBoot witness RAM image, out/boot-piano-darwinboot-witness.img, SHA-256 a74a9e605283aa68c6f5cecf6e1e1fd624e0a1c767774ee302fde868a3f945aa. See [tablet result](../docs/results-2026-11-21-darwinboot-witness.md).
