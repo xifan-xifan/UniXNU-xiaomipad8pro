@@ -1687,6 +1687,15 @@
     "device_tested": false,
     "result": "docs/results-2026-11-21-subtype2-container-verifier.md"
   },
+  "callback_binding_check": {
+    "kernel_collection": "out/verified-no-poll-23aca0b8/verified.kc",
+    "ufs_install_target": "0xfffffff00c268174",
+    "ufs_authenticator": "0xfffffff008b51550",
+    "data_install_target": "0xfffffff00c268f5c",
+    "data_seed_provider": "0xfffffff008b620a4",
+    "verified": true,
+    "runtime_registered": false
+  },
   "host_direct_resolver_kc": {
     "path": "out/resolver-kc-replay/resolver.kc",
     "sha256": "bf6abf74be7ae1c42d676028fe05be19d4432120d630b9acfbcadf16642f2aff",
