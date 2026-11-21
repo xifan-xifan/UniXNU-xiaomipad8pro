@@ -365,6 +365,15 @@ def test_tablet_sh(tmp, hash_only=False):
         'sys.stdout.buffer.write(data) if out == "-" else open(out, "wb").write(data)\n'
         'PY\n')
     shim.joinpath('wget').chmod(0o755)
+    # Send until stdin EOF and then close the connection, like the tablet client.
+    # Host netcat implementations differ in how they handle stdin EOF.
+    shim.joinpath('nc').write_text(
+        '#!/usr/bin/env python3\n'
+        'import socket, sys\n'
+        'with socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=10) as conn:\n'
+        '    while chunk := sys.stdin.buffer.read(65536):\n'
+        '        conn.sendall(chunk)\n')
+    shim.joinpath('nc').chmod(0o755)
     env['PIANO_PATH'] = f'{shim}{os.pathsep}/usr/sbin:/usr/bin:/sbin:/bin'   # tablet.sh exports its own PATH otherwise
 
     def sink():
@@ -669,6 +678,7 @@ def main():
     p.add_argument('--fake-shell', nargs=2)
     p.add_argument('--keep', type=Path)
     p.add_argument('--hash-only', action='store_true', help='run the scratch-file hash checks without maintenance assets')
+    p.add_argument('--shell-only', action='store_true', help='run all shell fixture checks without maintenance assets')
     a = p.parse_args()
     if a.fake_shell:
         sys.stdout.write(fake_shell(a.fake_shell[0]))
@@ -677,7 +687,7 @@ def main():
     tmp.mkdir(parents=True, exist_ok=True)
     try:
         test_tablet_sh(tmp, hash_only=a.hash_only)
-        if not a.hash_only:
+        if not (a.hash_only or a.shell_only):
             test_session(tmp)
             (tmp / 'pair').mkdir()
             test_pair_rule(tmp / 'pair')
