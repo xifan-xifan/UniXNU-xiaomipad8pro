@@ -434,3 +434,5 @@ The [DarwinBoot EBS mailbox diagnostic](docs/results-2026-11-21-darwinboot-mailb
 The archived upstream references passed all 12 length and SHA-256 checks. ADB again confirmed completed HyperOS on A. See [input integrity and device state](docs/results-2026-11-21-resume-input-integrity.md) for the host helper check and outstanding filesystem dispatch qualification.
 
 The [host fsck dispatch check](docs/results-2026-11-21-fsck-dispatch-host.md) found that the stock wrapper rejects a positional APFS volume and can select the host container with no device argument. The explicit APFS helper passed against the isolated SystemOS UUID. Keep target selection and repair policy explicit for the native candidate.
+
+Static symbol inspection of the 26C5035r fsck wrapper confirms fstab enumeration (getfsent) and -R/-L options, but not native target selection. See [fsck symbol audit](docs/results-2026-11-21-fsck-symbol-audit.md).
