@@ -1596,6 +1596,12 @@
     "host_verifier_failures": 0,
     "device_tested": false
   },
+  "darwin_lookup_auto8_probe": {
+    "image": "out/boot-piano-darwin-lookup-auto8.img",
+    "sha256": "de26c50d2a73dd57b1d70fb40b9085450d386a24ef156b36341a133aae1ec0b1",
+    "result": "docs/results-2026-11-21-darwin-lookup-auto8.md",
+    "status": "ABL accepted temporary boot. XNU handoff and Android return pending."
+  },
   "native_ufs_inspect_auto8_reset90_probe": {
     "image": "out/boot-piano-macos-ram-inspect-auto8-reset90.img",
     "build_record": "out/boot-piano-macos-ram-inspect-auto8-reset90.json",
