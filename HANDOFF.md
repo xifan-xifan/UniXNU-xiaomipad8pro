@@ -1,5 +1,7 @@
 # Native macOS Deployment Handoff
 
+The [Native Data and UFS write audit](docs/results-2026-11-22-native-data-write-gates.md) distinguishes the mode-0 RAM Data path from the separate UFS log/export gate. Data store tooling and ABL state preflight tests pass in UbuntuPiano. Verify the effective boot arguments and live slot state before device qualification.
+
 The [Data startup binding audit](docs/results-2026-11-22-data-startup-binding.md) links the retained kernel build recipe to the first-install Data UUID. Its DEVELOPMENT/DEBUG startup path requests a writable APFS mount before init, so review mount writes independently of the later fsck shim. Runtime order and recovery remain open.
 
 On 2026-11-22 the Mac mounted the first-install Data candidate read-only after matching UUID 1B4CEC84-35B3-4AAD-88D0-200DD0956637 with the current image selector. Explicit fsck_apfs -q on its raw volume returned 0 and reported a clean filesystem. Cleanup detached the image and its raw SHA-256 still matched the manifest. This covers the Mac's read-only mount and quick check. Target mount phases, repair and persistence remain open.
