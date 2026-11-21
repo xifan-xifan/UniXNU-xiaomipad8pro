@@ -6,6 +6,8 @@ Stock Recovery entry succeeded, but remote reboot attempts returned to Recovery.
 
 After `/bin/piano-tablet piano-309-gpt-readback` exits successfully, save its output and run `python tooling/persist/check-piano-309-gpt-pair.py --readback-log LOG`. Require `primary=stock backup=stock` before a candidate layout trial.
 
+The separate `out/maintenance-gpt/writer.img` embeds `piano-309-gpt-write stock|candidate`. It stages the pinned fragments from `/run/pp/gpt-head.bin` and `/run/pp/gpt-tail.bin`, checks the source layout for candidate writes, and verifies both copies with direct reads. Host shell rehearsal applied, rejected reapplication, and reverted the candidate. Qualify it on the tablet only after the stock Recovery return and direct readback checks.
+
 The maintenance image with the packaged checker passed on the tablet. The maintenance writer and stock Recovery remain separate storage gates. See [the packaged preflight result](docs/results-2026-11-21-packaged-gpt-preflight.md).
 
 The frozen maintenance RAM image read both stock GPT copies from unmounted LUN 0 and returned to HyperOS 3.0.309 with the same ABL baseline. See [the maintenance GPT result](docs/results-2026-11-21-maintenance-gpt-preflight.md). The packaged checker, maintenance writer backend and stock Recovery entry still need qualification.

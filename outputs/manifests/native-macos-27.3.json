@@ -64,6 +64,13 @@
     "host_verification": "Two byte-identical builds. Verified stock hashes, mount rejection, short reads and cleanup on a sparse disk fixture. The extracted ARM64 BusyBox read both stock fragments using O_DIRECT under QEMU.",
     "device_status": "Pending hardware execution and independent media readback after a write."
   },
+  "maintenance_gpt_writer_candidate": {
+    "path": "out/maintenance-gpt/writer.img",
+    "bytes": 49172480,
+    "sha256": "ef9e4d27e921d96b371ac6487814fb758a1af226334ba6fd8d3edddcb8d02722",
+    "tablet_script_sha256": "9433310a10e1971a959475fe721a354e1c73c67e90eeabb21eafe5f4ca8a319c",
+    "device_status": "Pending hardware qualification"
+  },
   "abl_source_review_2026_11_20": {
     "repository": "https://git.codelinaro.org/clo/la/abl/tianocore/edk2.git",
     "tag": "KERNEL.PLATFORM.3.0.r23-02400-kernel.0",

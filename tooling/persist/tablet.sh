@@ -85,8 +85,13 @@ map)
 		echo "$n=$1 $2 $3"
 	done
 	;;
-piano-309-gpt-preflight|piano-309-gpt-readback)
-	# Read-only. Refuse active mounts, swap and stacked block devices before a GPT trial.
+piano-309-gpt-preflight|piano-309-gpt-readback|piano-309-gpt-write)
+	if [ "$cmd" = piano-309-gpt-write ]; then
+		lock=/run/piano-309-gpt-write.lock
+		mkdir "$lock" || die 'GPT write lock already held or unavailable'
+		trap 'rmdir "$lock"' EXIT
+	fi
+	# Refuse active mounts, swap and stacked block devices before a GPT trial.
 	l=$(lun0)
 	case "$l" in sd[a-z]) ;; *) die "LUN 0 missing or ambiguous: '$l'" ;; esac
 	[ "$(cat "/sys/block/$l/queue/logical_block_size")" = 4096 ] || die 'unexpected LUN 0 block size'
@@ -104,6 +109,43 @@ piano-309-gpt-preflight|piano-309-gpt-readback)
 			[ ! -e "$holder" ] || die "${b##*/} has block holder ${holder##*/}"
 		done
 	done
+	if [ "$cmd" = piano-309-gpt-write ]; then
+		[ "$#" = 1 ] || die 'specify stock or candidate'
+		stock_head=9c096761ee7b9c12c1a5c3ef3f100bc27abccbbafb798a141aa4320eb81af25d
+		stock_tail=f8b53b4538913ccf2ac385d8bd87eb8ad689aa3f439222480a95d05c625ca4fe
+		case "$1" in
+		stock) head=$stock_head; tail=$stock_tail ;;
+		candidate)
+			head=12710135635beee2a5de1dd910924a3d2d26e09a6f368c191b879fd6b41a499b
+			tail=9acf222558a6766c4f1fcd09509a41cfd5be10d53f34a2a0f84a8cfe0a18c2f5 ;;
+		*) die 'specify stock or candidate' ;;
+		esac
+		umask 077
+		work=$(mktemp -d /run/piano-gpt.XXXXXX) || die 'cannot allocate RAM write directory'
+		trap 'rm -f "$work/head" "$work/tail" "$work/check"; rmdir "$work"; rmdir "$lock"' EXIT
+		cp "$P/gpt-head.bin" "$work/head" && cp "$P/gpt-tail.bin" "$work/tail" || die 'cannot stage GPT fragments'
+		check_hash() {
+			digest=$(sha256sum "$1") || die 'cannot hash GPT fragment'
+			[ "${digest%% *}" = "$2" ] || die "GPT hash mismatch: $3"
+		}
+		verify_region() {
+			dd if="/dev/$l" of="$work/check" bs=4096 iflag=direct skip="$1" count="$2" || die "GPT read failed at LBA $1"
+			check_hash "$work/check" "$3" "LBA $1"
+		}
+		check_hash "$work/head" "$head" 'staged primary'
+		check_hash "$work/tail" "$tail" 'staged backup'
+		if [ "$1" = candidate ]; then
+			verify_region 0 6 "$stock_head"
+			verify_region 124552187 5 "$stock_tail"
+		fi
+		dd if="$work/tail" of="/dev/$l" bs=4096 seek=124552187 conv=notrunc,fsync || die 'backup GPT write failed'
+		verify_region 124552187 5 "$tail"
+		dd if="$work/head" of="/dev/$l" bs=4096 conv=notrunc,fsync || die 'primary GPT write failed'
+		verify_region 0 6 "$head"
+		verify_region 124552187 5 "$tail"
+		verify_region 0 6 "$head"
+		printf 'gpt_written=%s\n' "$1"
+	fi
 	if [ "$cmd" = piano-309-gpt-readback ]; then
 		umask 077
 		work=$(mktemp -d /run/piano-gpt.XXXXXX) || die 'cannot allocate RAM readback directory'
