@@ -560,3 +560,5 @@ The [watchdog callback audit](docs/results-2026-11-22-watchdog-reset-callbacks.m
 The retained [misc captures](docs/results-2026-11-22-stock-misc-baseline.md) contain a bootonce-bootloader command. Use them for historical comparison. Unattended Recovery exit still needs a live readback through the maintenance path.
 
 The [unattended Recovery exit](docs/results-2026-11-22-unattended-recovery-exit.md) passed on stock GPT. The maintenance RAM boot verified and cleared the live Recovery request in the first misc sector, then returned through ABL to completed HyperOS on A. Shortened userdata initialization still needs an unattended procedure.
+
+The [stock Recovery wipe review](docs/results-2026-11-22-stock-recovery-wipe-inputs.md) identified four option names and Xiaomi pre/post wipe hooks in the retained ELF. The bootloader-message option that formats both userdata and metadata remains unverified.
