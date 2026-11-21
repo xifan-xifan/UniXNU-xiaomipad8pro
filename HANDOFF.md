@@ -1,5 +1,7 @@
 # Native macOS Deployment Handoff
 
+The [DarwinEnter mailbox trial](docs/results-2026-11-22-enter-mailbox-abl.md) recovered nine matching EBS success records, with no XNU log. HyperOS A returned. Instrument the assembly handoff and kernel entry separately.
+
 The [XNU entry trial](docs/results-2026-11-22-xnu-entry-abl.md) returned to ABL and recovered a complete pre-Android CVP capture without an XNU log. Preserve the EBS mailbox checkpoints in the next DarwinEnter candidate.
 
 The [DarwinBoot mailbox trial](docs/results-2026-11-22-darwinboot-ebs-abl.md) captured eight matching EFI_SUCCESS records before Android started. HyperOS A returned. The probe stopped before DarwinEnter. Next isolate the kernel branch and use the same return route.

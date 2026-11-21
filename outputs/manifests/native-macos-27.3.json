@@ -1663,6 +1663,16 @@
     "device_tested": true,
     "result": "docs/results-2026-11-22-watchdog-abl-retention.md"
   },
+  "darwinboot_enter_mailbox_abl": {
+    "image": "out/boot-piano-enter-mailbox-abl.img",
+    "sha256": "900d5a0ee819b5bae000f2c99dbf921e924baf93d53b21f824ec70a3b6138aef",
+    "fd_sha256": "6ff14fee948b0003b3620f22a2348a81765dc8d3b44e35f01c30923f95d71d94",
+    "cvp_sha256": "a932a0a2a889162d081e705b2b81f936778886fc5d937594812cb8cf3153bb0f",
+    "valid_ebs_records": 9,
+    "xnu_entry_verified": false,
+    "android_return_verified": true,
+    "result": "docs/results-2026-11-22-enter-mailbox-abl.md"
+  },
   "darwinboot_enter_abl": {
     "image": "out/boot-piano-watchdog-enter-abl.img",
     "sha256": "e33eba67220b18461036c6cb11c1358235cb0fbe9cb84f2b0908e67f6c78cee3",
