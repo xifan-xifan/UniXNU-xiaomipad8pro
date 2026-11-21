@@ -580,3 +580,5 @@ The stock Android transport is currently authorized (ADB enabled, `ro.adb.secure
 2026-11-22: Built the watchdog-enter firmware with the successful ExitBootServices marker followed by DarwinEnter. The no-poll image is recorded in the manifest. Readback verified the boot ID, original FAT payload and DTB. The firmware inventory comparison and independent XNU entry witness remain open.
 
 2026-11-22: The [watchdog-enter inventory](docs/results-2026-11-22-watchdog-enter-inventory.md) found two changed modules in the same 174-entry FVMAIN order. DarwinBoot and BdsDxe differ. The baseline and rebuilt watchdog gate require a direct BdsDxe comparison before treating the trial as a loader-only change.
+
+2026-11-22: A fresh [ADB layout check](docs/results-2026-11-22-live-layout-recheck.md) found the candidate partition names and shortened Android capacity. Use this live observation for the next preflight and verify the raw GPT before writing native volumes.
