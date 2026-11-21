@@ -1602,6 +1602,9 @@
     "sha256": "384fe14b6bc799fe5eb84f329d7b63d4b8614b289fb2ba792c12bba7cf17e010",
     "xnu_reset_seconds": 90,
     "host_verifier_failures": 0,
-    "device_tested": false
+    "device_tested": true,
+    "automatic_selection_verified": true,
+    "xnu_handoff_verified": false,
+    "device_result": "docs/results-2026-11-21-auto8-handoff.md"
   }
 }

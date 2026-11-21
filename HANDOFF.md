@@ -4,6 +4,8 @@ The revised Probe 2 container reached RAM UEFI, uploaded the pre-XNU mailbox, an
 
 The manifest also records a verified derivative that adds `piano-reset-after=90` only to `macos-8cpu`. The frozen KC contains the timer diagnostics. Patch 0056 requires EARLY_BOOT and the SMC conduit before it can schedule PSCI reset. The image omits `piano-reset-to=bootloader`, so patch 0057 does not request a PMIC SDAM restart reason write. Recovery before timer initialization still needs the physical path, and the ABL persistence review still applies.
 
+The [automatic SMP probe ran on the tablet](docs/results-2026-11-21-auto8-handoff.md). The eight second countdown selected the expected entry, then the diagnostic firmware reported that the XNU loader protocol was missing. UEFI Fastboot reboot returned to HyperOS. The retained firmware build inventory contains the DarwinBoot driver GUID and is the next candidate for dispatch verification.
+
 Candidate GPT was written and independently verified on the tablet. Stock Recovery [enumerated the candidate layout](docs/results-2026-11-21-candidate-recovery-geometry.md). HyperOS subsequently completed boot on slot A, and a synced Android test file survived a new boot. See the [GPT trial](docs/results-2026-11-21-candidate-gpt-tablet.md) and [HyperOS persistence result](docs/results-2026-11-21-candidate-hyperos.md).
 
 The frozen writer image verified `primary=stock backup=stock` on the tablet using its read-only command. See `out/maintenance-gpt/writer-readback.log`. Explicit exit returned through ABL to completed HyperOS on slot A. The subsequent candidate write passed. Stock GPT rollback remains pending.
