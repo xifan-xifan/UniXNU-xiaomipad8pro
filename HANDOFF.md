@@ -558,3 +558,5 @@ The watchdog-gate image's packed variable driver uses emulated NV variables with
 The [watchdog callback audit](docs/results-2026-11-22-watchdog-reset-callbacks.md) excludes the identified open-source logger, TPM and NVMe callback drivers from the menu-gate FVMAIN. The failure reset runs before diagnostic Fastboot is available. Early reset and proprietary callbacks remain unverified.
 
 The retained [misc captures](docs/results-2026-11-22-stock-misc-baseline.md) contain a bootonce-bootloader command. Use them for historical comparison. Unattended Recovery exit still needs a live readback through the maintenance path.
+
+The [unattended Recovery exit](docs/results-2026-11-22-unattended-recovery-exit.md) passed on stock GPT. The maintenance RAM boot verified and cleared the live Recovery request in the first misc sector, then returned through ABL to completed HyperOS on A. Shortened userdata initialization still needs an unattended procedure.
