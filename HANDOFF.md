@@ -468,3 +468,5 @@ The [subtype-2 root pairing audit](docs/results-2026-11-21-subtype2-root-pairing
 The [NativeUfs host tests](docs/results-2026-11-21-native-ufs-host-tests.md) passed all eight plain and ASan/UBSan combinations. They cover the development storage path only; authenticated root and tablet execution remain open.
 
 The [retained SystemOS input check](docs/results-2026-11-21-systemos-stock-policy-input.md) confirms the stock 26C5035r image matches the archived policy digest and size. Full policy and native userland qualification remain open.
+
+The [stock SystemOS table result](docs/results-2026-11-21-systemos-stock-table.md) generated a 22,790,144-byte table for the retained 2.9 GiB window; its SHA-256 matches the checked-in SystemOS policy header. The 50,331,648-byte table in the 6 GiB SHNGROOT assembly is not interchangeable.
