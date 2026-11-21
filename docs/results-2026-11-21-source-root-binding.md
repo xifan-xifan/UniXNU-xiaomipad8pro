@@ -1,0 +1,9 @@
+# Historical SourceRootBinding implementation review (2026-11-21)
+
+The historical workspace `E:/codex/2026-11-01/ni` contains `work/sources/UniXNU-sheng-main/package/SourceRootBinding.cpp`, SHA-256 `F395A15D37B89A10BC9E965D9093DC29D0FF54D5EB61DED87EF623300CDF0F20`. It is untracked in that workspace at parent HEAD `feaa135df4763e3c19a155402e6b17b124a12e13`; treat it as a lead, not an authoritative build input. No files in that workspace were changed.
+
+The source implements the three verified-volume interfaces expected by the owner patches. It resolves by APFS UUID through IOMedia, requires exactly one match, verifies BSD major/minor and device name, then walks up to 64 provider links and asks NativeUfs to authenticate the media UUID. This is materially stronger than selecting a disk number or trusting UUID text alone. The routines allocate IOKit matching objects and traverse the registry, so their availability and safety before launchd must be checked against the independent kernel's early-boot execution context.
+
+The owner SystemOS patch consumes this resolver, verifies the mounted SystemOS is the selected read-only APFS device, and requires a union mount when configured. Its Data path separately resolves the Data UUID and verifies that `/private/var` is mounted read-write from the selected APFS device. The patch's non-RAM Data fallback instead assumes `/dev/md0` and hashes a kernel virtual address; that path is not suitable for the persistent UFS-backed Data requirement without replacing it with the typed provider interface.
+
+Neither the historical resolver nor the owner patches were applied or compiled against the independent XNU tree in this review. The independent tree was left untouched. Next qualification must reconcile its IOMedia/IOBSD APIs, replace the memory-disk Data fallback, build NativeUfs in authenticated-root mode, then test UUID selection and post-mount device/flags on host before any device boot.
