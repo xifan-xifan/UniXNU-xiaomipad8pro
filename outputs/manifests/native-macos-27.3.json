@@ -1663,6 +1663,14 @@
     "device_tested": true,
     "result": "docs/results-2026-11-22-watchdog-abl-retention.md"
   },
+  "darwinboot_enter_abl": {
+    "image": "out/boot-piano-watchdog-enter-abl.img",
+    "sha256": "e33eba67220b18461036c6cb11c1358235cb0fbe9cb84f2b0908e67f6c78cee3",
+    "cvp_sha256": "4c1701214561cb0a9e44b2245810132b9f9ecdb079e4e053109e72948c1d601f",
+    "android_return_verified": true,
+    "xnu_entry_verified": false,
+    "result": "docs/results-2026-11-22-xnu-entry-abl.md"
+  },
   "darwinboot_watchdog_enter_no_poll": {
     "image": "out/boot-piano-watchdog-enter-no-poll.img",
     "sha256": "1c4feecd143e8c990e42dc022a32100094917a05570efd825429faddba33d90a",
