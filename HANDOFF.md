@@ -576,3 +576,5 @@ The stock Android transport is currently authorized (ADB enabled, `ro.adb.secure
 2026-11-22: Read the kernel directly from the watchdog-gate boot image FAT at byte offset 4263936. Its SHA-256 matches `readonly-inspect.kc` and differs from the independent no-poll collection. The manifest now records the embedded identity. The watchdog-gate image has no tablet result.
 
 2026-11-22: The [no-poll watchdog control](docs/results-2026-11-22-watchdog-no-poll-control.md) passed boot ID and FAT readback on the host. Its inherited loader stops before DarwinEnter. Tablet testing remains pending.
+
+2026-11-22: Built the watchdog-enter firmware with the successful ExitBootServices marker followed by DarwinEnter. The no-poll image is recorded in the manifest. Readback verified the boot ID, original FAT payload and DTB. The firmware inventory comparison and independent XNU entry witness remain open.

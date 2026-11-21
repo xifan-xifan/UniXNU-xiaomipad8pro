@@ -167,3 +167,5 @@ See [the image inventory](../docs/results-2026-11-21-fips4b-inventory.md) for th
 - DarwinBoot EBS mailbox diagnostic FD SHA-256 `777b2cedd454fc7f65a1ad77c11d7dc473044d18f5ec4cc0405b16958307d102`. `out/boot-piano-darwinboot-mailbox.img` SHA-256 `978d5a787b1bbcc44ff33d0471fef54947a8f96b8c0a20c8f8df3cba895db42f`. [Host result](../docs/results-2026-11-21-darwinboot-mailbox.md).
 
 - No-poll watchdog control, `out/boot-piano-witness-watchdog-gate-no-poll.img` (185,733,120 bytes), SHA-256 `4a03fb5d42d97340272b2653cb5fece3d8b9c65742db30b02b478b6efc2d8a74`. [Host result](../docs/results-2026-11-22-watchdog-no-poll-control.md).
+
+- Watchdog-enter no-poll image, `out/boot-piano-watchdog-enter-no-poll.img`, SHA-256 `1c4feecd143e8c990e42dc022a32100094917a05570efd825429faddba33d90a`. The DEBUG CLANGPDB build log is `UbuntuPiano:/tmp/piano-watchdog-enter.hf3u5UqC/build.log`.
