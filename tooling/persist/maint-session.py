@@ -884,6 +884,54 @@ def entries_using_rootfs(s, record):
     return {e['id']: why for e in entries if (why := common.entry_uses_rootfs(e))}
 
 
+@step('piano-309-root', 'maintenance, WRITE the frozen 27.3 root on the candidate layout',
+      writes='LUN 0 linux_rootfs, first 17547919360 bytes')
+def piano_309_root(s):
+    digest = 'db3629e5da012ce76e64c0f42739ada9541ed8cca5adaab32256fc9b64b34ef7'
+    count, total = 4284160, 5242880
+    if not s.a.root_image:
+        raise Stop('piano-309-root needs --root-image IMG')
+    img = Path(s.a.root_image).expanduser()
+    s.need(img.is_file() and img.stat().st_size == count * B, 'frozen root image size')
+    if not s.execute:
+        s.log('  check source SHA-256, live GPT, blank target, bounded write and independent readback')
+        return
+    s.need(s.sha_nocache(img) == digest, 'frozen root image SHA-256')
+
+    def check_target():
+        gpt = s.t('piano-309-gpt-readback')
+        s.need(gpt.get('gpt_preflight') == 'ready' and
+               gpt.get('primary_sha256') == '12710135635beee2a5de1dd910924a3d2d26e09a6f368c191b879fd6b41a499b' and
+               gpt.get('backup_sha256') == '9acf222558a6766c4f1fcd09509a41cfd5be10d53f34a2a0f84a8cfe0a18c2f5',
+               'both frozen candidate GPT copies and unmounted LUN 0')
+        mapping = map_nodes(s)
+        dev, first, blocks = part_geometry(s, 'linux_rootfs')
+        lun = gpt.get('lun0', '')
+        s.need(bool(re.fullmatch(r'sd[a-z]', lun)) and mapping.get('lun0') == lun and
+               (dev, first, blocks) == (lun + '35', 102269696, total), 'candidate linux_rootfs extent')
+        return dev
+
+    dev = check_target()
+    tail_count = total - count
+    blank_tail = s.job('root-zero-tail', 'zero-sha', tail_count, B)['sha256']
+    tail = s.region_sha(dev, count, tail_count, name='root-tail-before')
+    s.need(tail == blank_tail, 'candidate root tail is blank')
+    prefix = s.region_sha(dev, 0, count, name='root-prefix-before')
+    if prefix != digest:
+        blank_prefix = s.job('root-zero-prefix', 'zero-sha', count, B)['sha256']
+        s.need(prefix == blank_prefix, 'candidate root prefix is blank')
+        s.need(check_target() == dev, 'root target remains the same before writing')
+        s.save(piano_309_root_attempt={'target': dev, 'first_lba': 102269696, 'blocks': count,
+                                       'source_sha256': digest, 'blank_prefix': prefix, 'blank_tail': tail})
+        s.serve({'root.img': img})
+        if s.write(f'{img.name} -> /dev/{dev} blocks 0 through {count - 1}'):
+            s.job('piano-309-root-write', 'restore-bounded', 'root.img', dev, count, s.a.http_port, timeout=4 * 3600)
+        s.need(s.region_sha(dev, 0, count, name='root-prefix-after') == digest, 'full root readback matches source')
+    s.need(s.region_sha(dev, count, tail_count, name='root-tail-after') == tail, 'root tail hash is unchanged')
+    s.need(check_target() == dev, 'candidate GPT and root target verified after readback')
+    s.save(piano_309_root_verified={'target': dev, 'sha256': digest, 'tail_sha256': tail})
+
+
 @step('linux-data-root', 'maintenance, WRITE linux_data from its first block (a second root image)',
       writes='LUN 0 partition linux_data, from its first block, the root image\'s size')
 def linux_data_root(s):
