@@ -255,10 +255,15 @@ restore-bounded|restore-bounded-push)
 	case "$3" in ''|0*|*[!0-9]*) die 'invalid block count' ;; esac
 	[ -b "$DEV/$2" ] || die 'target is not a block device'
 	work=$(mktemp -d "$P/restore.XXXXXX") || die 'cannot allocate restore status directory'
-	trap 'rm -f "$work/wget.rc" "$work/dd.err"; rmdir "$work"' EXIT
+	lock="$P/restore-bounded.$2.lock"
+	if ! mkdir "$lock"; then
+		rmdir "$work"
+		die 'bounded write already active or target lock unavailable'
+	fi
+	trap 'rm -f "$work/wget.rc" "$work/dd.err"; rmdir "$work" "$lock"' EXIT
 	{
 		if [ "$cmd" = restore-bounded-push ]; then
-			busybox nc -l -p "$4" </dev/null || echo $? > "$work/wget.rc"
+			busybox timeout 14400 busybox nc -l -p "$4" </dev/null || echo $? > "$work/wget.rc"
 		else
 			wget -q -O - "http://$(host_ip):$4/$1" || echo $? > "$work/wget.rc"
 		fi
