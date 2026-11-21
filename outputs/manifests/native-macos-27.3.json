@@ -1687,6 +1687,13 @@
     "device_tested": false,
     "result": "docs/results-2026-11-21-subtype2-container-verifier.md"
   },
+  "host_direct_resolver_kc": {
+    "path": "out/resolver-kc-replay/resolver.kc",
+    "sha256": "bf6abf74be7ae1c42d676028fe05be19d4432120d630b9acfbcadf16642f2aff",
+    "host_parser": "pending",
+    "deployment_eligible": false,
+    "device_tested": false
+  },
   "host_stock_policy_kc_without_poll": {
     "path": "out/verified-no-poll-23aca0b8/verified.kc",
     "sha256": "72e5240f8a3286d9233136a540c7129dab4c66fc3d2789c8c5287f6e18332601",
