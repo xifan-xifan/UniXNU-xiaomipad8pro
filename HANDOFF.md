@@ -474,3 +474,5 @@ The [stock SystemOS table result](docs/results-2026-11-21-systemos-stock-table.m
 The stock-window SHNGROOT v2 candidate passed host readback of both windows and both vroot tables. See [assembly evidence](docs/results-2026-11-21-stock-root-v2-assembly.md). The candidate still requires boot policy registration and native userland verification.
 
 The [RootPolicies ADT comparison](docs/results-2026-11-21-root-policies-determinism.md) confirms fresh random bytes account for the differences between repeated control runs. The policy run adds only the expected 16-byte slot after excluding that randomness.
+
+The Apple OSS IOStorageFamily source archive at e45fbe30a7879e0b16e26dddb78538f1b00e0bff was downloaded and extracted. The manifest records its SHA-256. The clean UniXNU d830d23 checkout on mac contains the header and driver build helpers. Header preparation requires the real upstream Git HEAD. A local archive import failed the revision check, and the Mac shallow fetch ended with early EOF after a transfer timeout. The alternate piano build script requests 7edb88fbae296fb7c8ce2f64e115e116e566d51c; keep that input distinct from the legacy pin.

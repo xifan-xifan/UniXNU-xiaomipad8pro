@@ -1682,5 +1682,12 @@
     "verified_root_host_block_authentication": {"OS": 3538432, "SystemOS": 712192, "altered_blocks_rejected": true},
     "device_tested": false,
     "result": "docs/results-2026-11-21-stock-root-v2-assembly.md"
+  },
+  "io_storage_family_archive": {
+    "commit": "e45fbe30a7879e0b16e26dddb78538f1b00e0bff",
+    "path": "out/IOStorageFamily-e45fbe30a7879e0b16e26dddb78538f1b00e0bff.tar.gz",
+    "bytes": 5183875,
+    "sha256": "ec28dca0231ef58c7d347153cf572c60440bf25e198095af02a19bf0167b8438",
+    "qualification": "Archive extracted successfully. The pinned build helper requires a clean Git checkout at the exact commit. Header preparation and ABI qualification are pending."
   }
 }
