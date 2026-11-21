@@ -1,5 +1,7 @@
 # Native macOS Deployment Handoff
 
+The host image selector now accepts an expected APFS volume UUID and rejects ambiguous matches. On the Mac, the SHA-256-verified first-install raw candidate was attached read-only without mounting. UUID `1B4CEC84-35B3-4AAD-88D0-200DD0956637` selected the Data volume, a mismatched UUID was rejected, and explicit `fsck_apfs -n` on the selected raw volume reported it healthy. The image was detached. This qualifies offline target selection and integrity checking only; native mount phases, repair dispatch and Data persistence still require validation.
+
 The [UEFI debug log audit](docs/results-2026-11-21-uefi-debuglog.md) identifies a separate DEBUG ring export while firmware Fastboot responds. The retained BDS lookup already confirmed loader registration, and the later watchdog witness reached the final ExitBootServices preparation. SEC clears the ring on a new UEFI boot. The remaining gap is evidence after that call and after entry into XNU.
 
 The [packed DarwinBoot audit](docs/results-2026-11-21-mailbox-packed-driver.md) confirmed that the mailbox trial marker is in the packaged PE32 executable. The [packed DTB audit](docs/results-2026-11-21-cvp-ownership.md) identified the CVP consumer, and stock HyperOS exposes a live msm_cvp driver binding for that node. Qualify retention before HyperOS initializes the region or use an independently qualified reservation.
