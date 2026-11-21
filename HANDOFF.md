@@ -456,3 +456,5 @@ The working-copy DarwinBoot parser rejects the original d36b8047 collection and 
 A byte comparison found the archived subtype-2 correction at offset 0xb. It makes the outer and embedded kernel CPU subtype words equal, satisfying the current DarwinBoot parser. See [retained subtype mismatch](docs/results-2026-11-21-retained-subtype-mismatch.md).
 
 The subtype-2 ESP payload and its padded readback match. Both retained corrected-header RAM images still contain the original payload. See [archived subtype-2 ESP payload and RAM images](docs/results-2026-11-21-subtype2-package-consistency.md).
+
+A host-only v2 RAM image was assembled with the parser-passing subtype-2 payload (d12691e0…), existing kernel field/DTB, and recomputed section ID. Image SHA-256 begins 47125fbd; it has not been signed or sent to the tablet. See [offline subtype-2 RAM image](docs/results-2026-11-21-offline-subtype2-ram-image.md).
