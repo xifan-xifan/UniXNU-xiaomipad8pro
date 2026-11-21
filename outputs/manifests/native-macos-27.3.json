@@ -62,7 +62,7 @@
     "sha256": "e568d44958b9f47934d084b373d198d9e7ad7637a45f87c54381b4a7ac743225",
     "tablet_script_sha256": "ee9b2b780fcb481e61a49c5e53cadc4697e63178415f8bdefe36920d1f1879d9",
     "host_verification": "Two byte-identical builds. Verified stock hashes, mount rejection, short reads and cleanup on a sparse disk fixture. The extracted ARM64 BusyBox read both stock fragments using O_DIRECT under QEMU.",
-    "device_status": "Pending hardware execution and independent media readback after a write."
+    "device_status": "Stock primary and backup matched on the tablet using direct I/O. Explicit exit returned through ABL to completed HyperOS on A. Independent media readback after a write remains pending. See docs/results-2026-11-21-direct-gpt-readback.md."
   },
   "maintenance_gpt_writer_candidate": {
     "path": "out/maintenance-gpt/writer.img",
