@@ -1687,6 +1687,15 @@
     "device_tested": false,
     "result": "docs/results-2026-11-21-subtype2-container-verifier.md"
   },
+  "host_stock_policy_kc": {
+    "sha256": "a927b53d3ebca0e257d945d89a6ba0594835834a30f2a2bef374c83c1a178fbe",
+    "bytes": 135806976,
+    "host_parser": "pass",
+    "deployment_eligible": false,
+    "device_tested": false,
+    "host_fixture_object": "host-poll.o",
+    "result": "docs/results-2026-11-21-stock-policy-kc-replay.md"
+  },
   "host_stock_root_v2": {
     "host": "mac",
     "path": "/private/tmp/piano-stock-root.1ubLtk/root.img",
