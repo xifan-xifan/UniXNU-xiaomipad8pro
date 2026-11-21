@@ -1,0 +1,37 @@
+--- a/Platforms/Xiaomi/pianoPkg/Library/DeviceBootManagerLib/DeviceBootManager.c
++++ b/Platforms/Xiaomi/pianoPkg/Library/DeviceBootManagerLib/DeviceBootManager.c
+@@ -4,6 +4,8 @@
+   SPDX-License-Identifier: BSD-2-Clause
+ **/
+ #include <Library/CacheMaintenanceLib.h>
++#include <Library/BaseLib.h>
++#include <Library/UefiRuntimeServicesTableLib.h>
+ #include <Protocol/GraphicsOutput.h>
+ #include <Library/DebugLib.h>
+ #include <Library/BaseMemoryLib.h>
+@@ -44,6 +46,7 @@
+ DeviceBootManagerAfterConsole ()
+ {
+   UINT64 CurrentEl;
++  BOOLEAN WatchdogArmed = FALSE;
+ 
+   __asm__ volatile ("mrs %0, CurrentEL" : "=r" (CurrentEl));
+   DEBUG ((DEBUG_ERROR, "piano watchdog trial: EL%u\n", (UINT32)(CurrentEl >> 2)));
+@@ -61,11 +64,17 @@
+       if (X0 == 0) {
+         X0 = 0x86000005; X1 = 3; X2 = 0; X3 = 0;
+         __asm__ volatile ("smc #0" : "+r" (X0), "+r" (X1), "+r" (X2), "+r" (X3) : : "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
++        WatchdogArmed = (X0 == 0);
+         DEBUG ((DEBUG_ERROR, "piano watchdog trial: ENABLE=%Lx; no pet armed\n", X0));
+       }
+     }
+   }
+ 
++  if (!WatchdogArmed) {
++    DEBUG ((DEBUG_ERROR, "PIANO: watchdog setup failed; resetting before menu\n"));
++    gRT->ResetSystem (EfiResetCold, EFI_ABORTED, 0, NULL);
++    CpuDeadLoop ();
++  }
+   PianoFastbootStart (); 
+   return NULL;
+ }
