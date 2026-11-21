@@ -556,3 +556,5 @@ The diagnostic [watchdog menu gate](firmware/diagnostic/ram-watchdog-menu-gate.p
 The watchdog-gate image's packed variable driver uses emulated NV variables with zero flash storage base and size. The reset driver matches the linked output. See [storage audit](docs/results-2026-11-22-watchdog-gate-storage.md).
 
 The [watchdog callback audit](docs/results-2026-11-22-watchdog-reset-callbacks.md) excludes the identified open-source logger, TPM and NVMe callback drivers from the menu-gate FVMAIN. The failure reset runs before diagnostic Fastboot is available. Early reset and proprietary callbacks remain unverified.
+
+The retained [misc captures](docs/results-2026-11-22-stock-misc-baseline.md) contain a bootonce-bootloader command. Use them for historical comparison. Unattended Recovery exit still needs a live readback through the maintenance path.
