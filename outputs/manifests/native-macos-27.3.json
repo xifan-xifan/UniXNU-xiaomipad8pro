@@ -1,4 +1,13 @@
 {
+  "host_no_demura_entry_control": {
+    "kc": "out/no-demura-control/control.kc",
+    "kc_sha256": "c4fd7130784413150f0d8735806267cbc6b029cd4e388ad8439fea6f207851be",
+    "image": "out/no-demura-control/boot-piano-no-demura-abl.img",
+    "sha256": "e4f6936dd35d5ac561125d24a1601603e02751a3a9e5a24effc39ab11a5df636",
+    "host_parser": "pass",
+    "device_tested": false,
+    "result": "docs/results-2026-11-22-no-demura-control.md"
+  },
   "schema": 1,
   "checked_on": "2026-11-20",
   "device_repository": "https://github.com/lenzhang/UniXNU-xiaomipad8pro",
