@@ -1,0 +1,22 @@
+--- a/Platforms/Xiaomi/pianoPkg/Library/DeviceBootManagerLib/DeviceBootManager.c
++++ b/Platforms/Xiaomi/pianoPkg/Library/DeviceBootManagerLib/DeviceBootManager.c
+@@ -4,6 +4,7 @@
+   SPDX-License-Identifier: BSD-2-Clause
+ **/
+ #include <Library/DebugLib.h>
++#include <Library/CacheMaintenanceLib.h>
+ #include <Library/BaseMemoryLib.h>
+ #include <Library/UefiBootServicesTableLib.h>
+ #include <Library/DeviceBootManagerLib.h>
+@@ -57,6 +58,11 @@ DeviceBootManagerAfterConsole ()
+       __asm__ volatile ("smc #0" : "+r" (X0), "+r" (X1), "+r" (X2), "+r" (X3) : : "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+       DEBUG ((DEBUG_ERROR, "piano watchdog trial: SET_TIME=%Lx\n", X0));
+       if (X0 == 0) {
++        volatile UINT32 *Marker = (volatile UINT32 *)(UINTN)0x9D1F5000;
++        *Marker = 0x57445431;
++        WriteBackDataCacheRange ((VOID *)(UINTN)Marker, sizeof (*Marker));
++        __asm__ volatile ("dsb sy" ::: "memory");
++        DEBUG ((DEBUG_ERROR, "piano watchdog checkpoint: %08x\n", *Marker));
+         X0 = 0x86000005; X1 = 3; X2 = 0; X3 = 0;
+         __asm__ volatile ("smc #0" : "+r" (X0), "+r" (X1), "+r" (X2), "+r" (X3) : : "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+         DEBUG ((DEBUG_ERROR, "piano watchdog trial: ENABLE=%Lx; no pet armed\n", X0));
