@@ -1,5 +1,7 @@
 # Native macOS Deployment Handoff
 
+The revised Probe 2 container reached RAM UEFI, uploaded the pre-XNU mailbox, and returned to completed HyperOS on slot A. See [the Probe 2 UEFI result](docs/results-2026-11-21-probe2-uefi-entry.md). XNU selection remains pending.
+
 Candidate GPT was written and independently verified on the tablet. Stock Recovery [enumerated the candidate layout](docs/results-2026-11-21-candidate-recovery-geometry.md). HyperOS subsequently completed boot on slot A, and a synced Android test file survived a new boot. See the [GPT trial](docs/results-2026-11-21-candidate-gpt-tablet.md) and [HyperOS persistence result](docs/results-2026-11-21-candidate-hyperos.md).
 
 The frozen writer image verified `primary=stock backup=stock` on the tablet using its read-only command. See `out/maintenance-gpt/writer-readback.log`. Explicit exit returned through ABL to completed HyperOS on slot A. The subsequent candidate write passed. Stock GPT rollback remains pending.
