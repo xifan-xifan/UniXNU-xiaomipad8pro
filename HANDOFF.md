@@ -1,5 +1,7 @@
 # Native macOS Deployment Handoff
 
+The [ABL slot and snapshot readback](docs/results-2026-11-22-abl-snapshot-readback.md) confirmed A active/successful, retry 6, and snapshot status none in userspace Fastboot and ABL; the tablet returned to HyperOS. Slot B reports unbootable and was not changed. No native Darwin recovery evidence yet.
+
 The [Native Data and UFS write audit](docs/results-2026-11-22-native-data-write-gates.md) distinguishes the mode-0 RAM Data path from the separate UFS log/export gate. Data store tooling and ABL state preflight tests pass in UbuntuPiano. Verify the effective boot arguments and live slot state before device qualification.
 
 The [Data startup binding audit](docs/results-2026-11-22-data-startup-binding.md) links the retained kernel build recipe to the first-install Data UUID. Its DEVELOPMENT/DEBUG startup path requests a writable APFS mount before init, so review mount writes independently of the later fsck shim. Runtime order and recovery remain open.
