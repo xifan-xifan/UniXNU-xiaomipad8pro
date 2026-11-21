@@ -578,3 +578,5 @@ The stock Android transport is currently authorized (ADB enabled, `ro.adb.secure
 2026-11-22: The [no-poll watchdog control](docs/results-2026-11-22-watchdog-no-poll-control.md) passed boot ID and FAT readback on the host. Its inherited loader stops before DarwinEnter. Tablet testing remains pending.
 
 2026-11-22: Built the watchdog-enter firmware with the successful ExitBootServices marker followed by DarwinEnter. The no-poll image is recorded in the manifest. Readback verified the boot ID, original FAT payload and DTB. The firmware inventory comparison and independent XNU entry witness remain open.
+
+2026-11-22: The [watchdog-enter inventory](docs/results-2026-11-22-watchdog-enter-inventory.md) found two changed modules in the same 174-entry FVMAIN order. DarwinBoot and BdsDxe differ. The baseline and rebuilt watchdog gate require a direct BdsDxe comparison before treating the trial as a loader-only change.
