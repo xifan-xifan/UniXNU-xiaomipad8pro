@@ -574,3 +574,5 @@ A stock-layout readback confirmed `sda20` is metadata and has F2FS magic at offs
 The stock Android transport is currently authorized (ADB enabled, `ro.adb.secure=1`, `ro.debuggable=0`, build type `user`). An Android shell cannot read the raw volume mapping or inspect the persisted ADB trust file, and the prior Recovery return only tested an already provisioned Data volume. Qualify a host-observable boot and a subsequent host-controlled return to ABL across fresh Android setup before using a wipe as an intermediate step of the unattended GPT trial. Keep the verified ABL maintenance entry and existing recovery evidence as separate gates.
 
 2026-11-22: Read the kernel directly from the watchdog-gate boot image FAT at byte offset 4263936. Its SHA-256 matches `readonly-inspect.kc` and differs from the independent no-poll collection. The manifest now records the embedded identity. The watchdog-gate image has no tablet result.
+
+2026-11-22: The [no-poll watchdog control](docs/results-2026-11-22-watchdog-no-poll-control.md) passed boot ID and FAT readback on the host. Its inherited loader stops before DarwinEnter. Tablet testing remains pending.
