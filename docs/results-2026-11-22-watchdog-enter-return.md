@@ -1,0 +1,5 @@
+# Watchdog-enter no-poll tablet return
+
+Stock ABL accepted the frozen temporary image `1c4feecd143e8c990e42dc022a32100094917a05570efd825429faddba33d90a`. Preflight confirmed piano, slot A successful and bootable with six retries, and snapshot state none. The host sampled `piano-uefi` from 06:12:55 to 06:13:03 local host time on November 22, 2026. The next sample showed it absent. ADB reappeared at 06:13:53 with no intervening host reboot command. The tablet completed HyperOS OS3.0.309.0.WPYCNXM on slot A with boot reason `bootloader`. Android boot ID changed from `563aaec9-73de-47c5-8a4a-bece7396afda` to `6be28244-f876-4b70-83ec-53d8c1e7fe67`.
+
+This proves unattended Android return from the candidate, but USB disappearance and boot reason cannot distinguish a loader failure or firmware reset from XNU execution. No XNU-side log was captured. Keep this run as the control and require a positive XNU witness before counting an XNU recovery or switch cycle. Raw observations are in `out/watchdog-enter-live/`.

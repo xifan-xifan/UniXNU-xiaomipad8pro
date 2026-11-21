@@ -1651,7 +1651,10 @@
     "sha256": "1c4feecd143e8c990e42dc022a32100094917a05570efd825429faddba33d90a",
     "fd_sha256": "56b0d02d4a0d80cbfd976f70a22be8f1b75bf640aa86ec5852ca6b9d3ad32975",
     "status": "built, v2 boot ID and unchanged FAT and DTB verified; FVMAIN confirms DarwinBoot payload change and BdsDxe timestamp only. Independent XNU entry witness pending",
-    "device_tested": false
+    "device_tested": true,
+    "android_return_verified": true,
+    "xnu_entry_verified": false,
+    "result": "docs/results-2026-11-22-watchdog-enter-return.md"
   },
   "darwinboot_watchdog_stop": {
     "image": "out/boot-piano-darwinboot-watchdog-stop.img",
