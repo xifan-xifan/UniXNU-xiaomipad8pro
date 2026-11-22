@@ -641,3 +641,5 @@ The [MMU checkpoint mapping audit](docs/results-2026-11-22-xnu-mmu-mapping.md) p
 2026-11-22: entropy-split ran on the tablet and recovered stage 166, immediately before the first HMAC. Seed retrieval and length validation passed. The next investigation is linked cchmac/SHA-512 dispatch. HyperOS A recovered unattended. See docs/results-2026-11-22-xnu-mmu-live.md.
 
 The [first HMAC linked pointer audit](docs/results-2026-11-22-hmac-fixup-audit.md) matched on-disk SHA-512 authenticated pointer fields to their call sites. Runtime probes should distinguish HMAC entry, digest setup and compression using phase numbers only.
+
+The [first HMAC compression checkpoint](docs/results-2026-11-22-hmac-compression-live.md) recovered phase 186 on the tablet and returned unattended to HyperOS A. Instrument SHA-512 compression entry and exit to distinguish the indirect branch from execution in the routine.
