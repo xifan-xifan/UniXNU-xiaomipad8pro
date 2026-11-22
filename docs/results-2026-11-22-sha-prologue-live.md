@@ -1,0 +1,5 @@
+# SHA-512 pre-stack checkpoint
+
+The candidate adds phase 192 immediately after `pacibsp` in SHA-512 compression, before stack allocation and the stack guard load. The KC passed the DarwinBoot host parser and its FAT readback matched byte for byte. Mach-O SHA-256 `9cd09d52a65ae25c8209256d6338ec6c925cb25f733c9206dcbb7ff939ec519d`, KC `5dd68c7f8a70634afedf7c455f50eb4bcc3436adcf0ffe0c106832668960a360`, temporary image `a1315e1fe6a1f440d0931b92c3412b76e3a6b2b92c7add8351a488c3c0d1a376`.
+
+After one temporary boot and watchdog return, the reader recovered phase 186 at the established marker address. The capture does not establish execution through the first instructions of compression. Inspect the packed descriptor and loader fixups before making changes. ABL preflight confirmed successful and bootable slot A, retry count six and snapshot status none. HyperOS OS3.0.309.0.WPYCNXM returned unattended on slot A with boot completed. Evidence is retained under `out/no-demura-control/sha-prologue-*`.
