@@ -1879,5 +1879,16 @@
     "last_confirmed_stage": "DarwinBoot ready for ExitBootServices",
     "hyperos_return": "OS3.0.309.0.WPYCNXM, slot A, boot completed",
     "xnu_execution_confirmed": false
+  },
+  "host_xnu_sctlr_pair": {
+    "high_capture_sha256": "3bacabad50b92cb507b69aa3fe126c9575d9f473fece15d59baf6fea635d88e9",
+    "image": "out/no-demura-control/boot-piano-sctlr-pair.img",
+    "android_return": "OS3.0.309.0.WPYCNXM slot A boot completed",
+    "image_sha256": "b99003c81d68ed314bcb0dba66b5f3c33a977d4fda6cb49bba556d7ccf8b283c",
+    "result": "docs/results-2026-11-22-xnu-mmu-live.md",
+    "kc": "out/no-demura-control/sctlr-pair.kc",
+    "kc_sha256": "4bca26d9983f1441200fd731e18a8b41be20f57d2f9443f5f278bd8b28c6bcc2",
+    "post_mmu_stage": "0x0f",
+    "low_capture_sha256": "7da8b64e8b4fde48bbdbbf4936c2ad64a843f3775bb3b5c4fe00ec2ae969a5a2"
   }
 }
