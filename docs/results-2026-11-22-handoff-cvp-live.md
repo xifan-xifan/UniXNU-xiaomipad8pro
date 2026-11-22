@@ -1,0 +1,7 @@
+# DarwinBoot handoff on the tablet
+
+Stock ABL accepted the temporary handoff image with boot ID `25a8b58b144e38a6316535d818ef325b9b5604c6` and SHA-256 `eb0a498455886c42321bde9f1185247ffd7faa8ee0bafeeae9a856653a78d86e`. Its only container edits replace the 3 MiB FD and recompute the boot ID. Before boot, slot A was successful and bootable with six retries and snapshot status `none`.
+
+After the watchdog reset, the RAM reader captured 7,340,032 bytes before Android started. Nine EBS records show EFI_SUCCESS on attempt zero. CVP offsets `0x6f5100`, `0x6f5200`, `0x6f5300` and `0x6f5400` respectively held `0x150334844`, `0x250334844`, `0x350334844` and `0x450334844`. The prior control held zero at these offsets. The last word proves that DarwinEnter reached the instructions after disabling the MMU and invalidating the TLB, immediately before `br x1`. The XNU console header remains absent. An entry checkpoint independent of that console can distinguish a fault at the branch target from a later failure before console initialization.
+
+Capture SHA-256 `9385cf5ef67224ab4017eb0ba8f22a6c125b631b26b85df93b4d65a93a64a5b0`. Local evidence is in `out/no-demura-control/handoff-cvp-live.{bin,log}`. The first script invocation stopped in ABL because the log path was relative to a directory changed by the script. The corrected invocation resumed from that ABL session. The reader returned unattended to completed HyperOS OS3.0.309.0.WPYCNXM on A.

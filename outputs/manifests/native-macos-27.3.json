@@ -2,7 +2,13 @@
   "host_darwinboot_handoff_cvp": {
     "fd": "UbuntuPiano:/tmp/piano-handoff.hddbWw4L/handoff-cvp.fd",
     "sha256": "44531624219cf0a2c9b114ca624c36452c5c5fb9841420f9d0ab90181e4f0afb",
-    "device_tested": false,
+    "device_tested": true,
+    "image": "out/no-demura-control/boot-piano-handoff-cvp.img",
+    "image_sha256": "eb0a498455886c42321bde9f1185247ffd7faa8ee0bafeeae9a856653a78d86e",
+    "cvp_sha256": "9385cf5ef67224ab4017eb0ba8f22a6c125b631b26b85df93b4d65a93a64a5b0",
+    "handoff_stages_observed": [1, 2, 3, 4],
+    "xnu_entry_verified": false,
+    "android_return": "OS3.0.309.0.WPYCNXM slot A boot completed",
     "fvmain_changed_entries": ["DarwinBoot", "BdsDxe", "PcdDxe", "SmBiosTableDxe"]
   },
   "host_no_demura_entry_control": {
