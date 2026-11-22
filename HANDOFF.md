@@ -1,6 +1,6 @@
 # Native macOS Deployment Handoff
 
-The [MMU transition tablet trial](docs/results-2026-11-22-xnu-mmu-live.md) read back source-defined XNU markers through the arm_init return point after enabling the MMU. Next trace the first arm_init instructions and root mounting.
+The [MMU transition tablet trial](docs/results-2026-11-22-xnu-mmu-live.md) read back source-defined XNU markers through the arm_init return point after enabling the MMU. The first arm_init path reached the pre-`_arm_vm_init` marker; post-call slot 0x12 was absent. Diagnose VM initialization using its early markers before proceeding to root storage.
 
 The pre-SCTLR diagnostic KC passed the host DarwinBoot parser. It records the intended SCTLR value at CVP 0x9d1f56a0 before enabling translation. The Mac recipe requires the frozen osfmk/DEVELOPMENT working directory and the candidate kernel.files with its replacement start.o. Candidate inputs and KC are retained in out/no-demura-control. Device validation is pending.
 

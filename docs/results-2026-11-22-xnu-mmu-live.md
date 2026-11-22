@@ -6,4 +6,4 @@ After unattended watchdog return, the low CVP capture still held `0x1000fc14793d
 
 The high-address reader returned 256 bytes, proving the path could read this address on the reset route. The reader returned unattended to HyperOS `OS3.0.309.0.WPYCNXM`, slot `_a`, with boot complete. Captures and logs are in `out/no-demura-control/sctlr-pair-*`.
 
-Offsets 0xa0 and 0xc0 also contain uniform 0x10 and 0x11 blocks. Their instruction sites must be matched against the linked kernel before assigning them to a milestone.
+The 256-byte readback contains slot 0x10 at offset 0xa0 and slot 0x11 at offset 0xc0. The exact linked kernel calls `_piano_dbg_slot(0x11)` in `_arm_init` immediately before `_arm_vm_init`; its slot 0x12 call follows the return. Slot 0x12 is zero in this capture, so execution reached the pre-call marker but the readback does not establish a return from VM initialization. Root mounting and desktop remain unverified.
