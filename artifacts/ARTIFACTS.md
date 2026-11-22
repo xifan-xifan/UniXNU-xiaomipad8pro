@@ -169,3 +169,5 @@ See [the image inventory](../docs/results-2026-11-21-fips4b-inventory.md) for th
 - No-poll watchdog control, `out/boot-piano-witness-watchdog-gate-no-poll.img` (185,733,120 bytes), SHA-256 `4a03fb5d42d97340272b2653cb5fece3d8b9c65742db30b02b478b6efc2d8a74`. [Host result](../docs/results-2026-11-22-watchdog-no-poll-control.md).
 
 - Watchdog-enter no-poll image, `out/boot-piano-watchdog-enter-no-poll.img`, SHA-256 `1c4feecd143e8c990e42dc022a32100094917a05570efd825429faddba33d90a`. The DEBUG CLANGPDB build log is `UbuntuPiano:/tmp/piano-watchdog-enter.hf3u5UqC/build.log`.
+
+- SHA-256 HMAC-final RAM candidate, `out/no-demura-control/boot-piano-sha2final.img` (185,733,120 bytes), SHA-256 `F77C8F83538A4FEEF6D1F8893B9274415F6855BF4C1783A11F4A3A07F7D504F4`; packed KC SHA-256 `0ABF77FBFA77B493EFA26DDF75509F32DD391418F572C94262D20E7E5C6E9489`. Tablet run reached phase 62 after `bootseed_init()` and returned unattended to HyperOS A. [Tablet result](../docs/results-2026-11-22-sha2final-live.md).
