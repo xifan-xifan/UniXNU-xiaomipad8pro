@@ -38,3 +38,18 @@ The payload is byte-identical to the hung image: `kernel.macho` (`4efc1dea…`, 
 2. `run-paclr53-ufsroot3.ps1`. Any hang now ends in ABL fastboot by itself and the console dump names the stage.
 
 Open: whether the hang is before `STARTUP(EARLY_BOOT)` (no backstop can help; would show as another silent hang even with `piano-reset-after`) or inside the root bring-up.
+
+## Host check
+
+`tooling/native/check-boot-image.py` reads the live `args` out of a k27 RAM image and fails any image that asks for a native UFS run without a reset backstop or without `pstore-console`. It walks the ramdisk's FAT directory and cluster chain, because a raw search of the image also finds the orphaned copies of the previous `unixnu.toml` that an in-place `mcopy` leaves in free clusters: the first version of this check reported four `args` lines for an image with two, and two of them were stale text.
+
+Run against the four paclr53 images it separates them correctly:
+
+```
+ufsroot.img   native-ufs-root=1   backstop=none                     -> FAIL (the hung image)
+ufsroot2.img  native-ufs-root=1   piano-reset-after=420             -> pass
+probe11.img   native-ufs-probe=11 piano-reset-after=240             -> pass
+ufsroot3.img  native-ufs-root=1   piano-reset-after=180, boot-guard=150 -> pass
+```
+
+Images that carry no k27 `args` are reported as skipped (the UEFI FD containers and the maintenance image), so the check can run over a directory without false alarms.
