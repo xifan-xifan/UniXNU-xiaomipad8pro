@@ -4,7 +4,13 @@
     "kc_sha256": "9b40207d72bbad60cb242f321b05640d6a27ddac6f15bd2e5b5415e071ac9292",
     "macho_sha256": "273978cd94c5b081fd77aafa1660bba4843829830db364de9c72d79ca6d749c8",
     "host_parser": "pass",
-    "device_tested": false
+    "device_tested": true,
+    "result": "docs/results-2026-11-22-xnu-pre-sctlr.md",
+    "image": "out/no-demura-control/boot-piano-pre-sctlr.img",
+    "image_sha256": "cfba2fdd37692474f46719d250e527686d4b9631dbf5155354dac1364b5d93e2",
+    "capture": "out/no-demura-control/pre-sctlr-live.bin",
+    "capture_sha256": "f9fa5bbc8766e8355e775caa5b345da06bd4226e48e871e105e75bd3f60f4dbe",
+    "android_return": "OS3.0.309.0.WPYCNXM slot A boot completed"
   },
   "device_xnu_bootstrap_tables": {
     "result": "docs/results-2026-11-22-xnu-bootstrap-live.md",

@@ -1,5 +1,7 @@
 # Native macOS Deployment Handoff
 
+The [pre-SCTLR tablet trial](docs/results-2026-11-22-xnu-pre-sctlr.md) verified execution immediately before the SCTLR write and unattended return to HyperOS A. The next trial needs a separately readable post-ISB witness.
+
 The pre-SCTLR diagnostic KC passed the host DarwinBoot parser. It records the intended SCTLR value at CVP 0x9d1f56a0 before enabling translation. The Mac recipe requires the frozen osfmk/DEVELOPMENT working directory and the candidate kernel.files with its replacement start.o. Candidate inputs and KC are retained in out/no-demura-control. Device validation is pending.
 
 The [XNU early marker audit](docs/results-2026-11-22-xnu-early-marker-audit.md) traced the actual packed entry to the retained Mac start.s. Prepare the next control without the pre-MMU Display_Demura writes.
