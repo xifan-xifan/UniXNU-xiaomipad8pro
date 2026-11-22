@@ -1,14 +1,16 @@
 {
-  "device_xnu_first_cpu": {
-    "result": "docs/results-2026-11-22-xnu-first-cpu-live.md",
-    "image": "out/no-demura-control/boot-piano-entry-owner.img",
-    "image_sha256": "22d97cac191a243fb93e7ffd9bbec7fa844a3c2eb1ffd6343440c50b8551656b",
-    "kc_sha256": "dcce4e2d62c8becbc451b311b12c6675fbcea2bebccdda8132a2a9fea0de6caf",
-    "capture": "out/no-demura-control/entry-owner-live.bin",
-    "capture_sha256": "cff2ee881fef0d41981b334f4abd2ff39b025d6e6610bcadd56c25b9027237b7",
-    "xnu_entry_marker": "0x550334844",
-    "android_return": "OS3.0.309.0.WPYCNXM slot A boot completed"
-  },
+  
+    "device_xnu_first_cpu": {
+      "result": "docs/results-2026-11-22-xnu-first-cpu-live.md",
+      "image": "out/no-demura-control/boot-piano-entry-owner.img",
+      "image_sha256": "22d97cac191a243fb93e7ffd9bbec7fa844a3c2eb1ffd6343440c50b8551656b",
+      "kc_sha256": "dcce4e2d62c8becbc451b311b12c6675fbcea2bebccdda8132a2a9fea0de6caf",
+      "capture": "out/no-demura-control/entry-owner-live.bin",
+      "capture_sha256": "cff2ee881fef0d41981b334f4abd2ff39b025d6e6610bcadd56c25b9027237b7",
+      "xnu_entry_marker": "0x550334844",
+      "android_return": "OS3.0.309.0.WPYCNXM slot A boot completed"
+    }
+  ,
   "host_darwinboot_handoff_cvp": {
     "fd": "UbuntuPiano:/tmp/piano-handoff.hddbWw4L/handoff-cvp.fd",
     "sha256": "44531624219cf0a2c9b114ca624c36452c5c5fb9841420f9d0ab90181e4f0afb",
