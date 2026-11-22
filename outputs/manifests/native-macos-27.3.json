@@ -5,7 +5,10 @@
     "image": "out/no-demura-control/boot-piano-no-demura-abl.img",
     "sha256": "e4f6936dd35d5ac561125d24a1601603e02751a3a9e5a24effc39ab11a5df636",
     "host_parser": "pass",
-    "device_tested": false,
+    "device_tested": true,
+    "android_return_verified": true,
+    "xnu_entry_verified": false,
+    "cvp_sha256": "f658f18c391ce434d8db5f470063cef6c491f8ad09ad945a685ac910e34eb473",
     "result": "docs/results-2026-11-22-no-demura-control.md"
   },
   "schema": 1,
