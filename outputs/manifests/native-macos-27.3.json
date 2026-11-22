@@ -1,4 +1,11 @@
 {
+  "host_xnu_pre_sctlr": {
+    "kc": "out/no-demura-control/pre-sctlr.kc",
+    "kc_sha256": "9b40207d72bbad60cb242f321b05640d6a27ddac6f15bd2e5b5415e071ac9292",
+    "macho_sha256": "273978cd94c5b081fd77aafa1660bba4843829830db364de9c72d79ca6d749c8",
+    "host_parser": "pass",
+    "device_tested": false
+  },
   "device_xnu_bootstrap_tables": {
     "result": "docs/results-2026-11-22-xnu-bootstrap-live.md",
     "image": "out/no-demura-control/boot-piano-bootstrap.img",
