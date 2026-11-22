@@ -630,3 +630,5 @@ The [XNU first CPU trial](docs/results-2026-11-22-xnu-first-cpu-live.md) confirm
 2026-11-22: The [DarwinBoot checkpoint FD](docs/results-2026-11-22-handoff-cvp-build.md) built with the full replay macro set. FVMAIN has four changed entries. Compare the three other payloads with the frozen no-demura firmware and verify retention of the four CVP offsets before packaging the trial. No device run was issued.
 
 2026-11-22: The [tablet handoff trial](docs/results-2026-11-22-handoff-cvp-live.md) recovered all four CVP checkpoints and returned unattended to completed HyperOS A. DarwinEnter reached the instruction sequence immediately before the branch to XNU. Add an independent XNU entry checkpoint to distinguish branch or entry faults from later console initialization failures.
+
+The [MMU checkpoint mapping audit](docs/results-2026-11-22-xnu-mmu-mapping.md) places the existing post-MMU slot outside the qualified CVP capture window. Add a pre-SCTLR observation and qualify a reader or mapping for the post-SCTLR observation.

@@ -1,0 +1,7 @@
+# XNU MMU checkpoint mapping audit
+
+The captured bootstrap tuple gives VA `0xfffffff007004000`, PA `0x8c0004000`, and a span of `0x200000000`. Applying that offset to the linked `_piano_stage_slots` VA `0xfffffff00c941080` gives PA `0x8c5941080`, outside the qualified CVP reader window `[0x9cb00000, 0x9d200000)`. This is address arithmetic from the captured tuple, not a runtime page walk. The retained marker at `0x9d1f5680` precedes the branch to `common_start`.
+
+The frozen `start.s` sets TCR, TTBR0, TTBR1, MAIR and VBAR before writing SCTLR_EL1. The first existing `piano_stage_slots` store follows the SCTLR write and `isb sy`. Neither the XNU identity map described by the captured tuple nor its high kernel map establishes a CPU mapping for the low CVP capture address. Keep any direct CVP instrumentation on the pre-MMU side unless a separate translation is verified. A pre-MMU marker immediately before the SCTLR write can distinguish failure in register setup from failure at or after the transition. A second observation needs an independently qualified reader or a verified retained mapping. No candidate was run for this audit.
+
+CrossDarwin HEAD and `test_27` still resolve to `4a671773c2ee289735ab526eda7c9628131250df`. The earlier source comparison remains applicable. This audit used the retained Mac build tree via `ssh mac` because `mac-lan` did not resolve from the current Windows host.
