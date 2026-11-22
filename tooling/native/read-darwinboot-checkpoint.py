@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Decode the DarwinBoot ExitBootServices records from a full piano CVP dump."""
+"""Decode DarwinBoot ExitBootServices and handoff records from a full piano CVP dump."""
 
 import argparse
 import struct
@@ -11,6 +11,15 @@ MAGIC = 0x315342454F4E4150
 MASK = (1 << 64) - 1
 STAGES = {1: "before GetMemoryMap", 2: "before ExitBootServices",
           3: "ExitBootServices returned", 4: "GetMemoryMap failed"}
+
+
+HANDOFF_MAGIC = 0x50334844
+HANDOFF_STAGES = (
+    "entered DarwinEnter",
+    "passed the framebuffer path",
+    "completed cache maintenance",
+    "disabled the MMU and invalidated the TLB before branching to XNU",
+)
 
 
 def main():
@@ -32,6 +41,14 @@ def main():
             continue
         records.add((stage, attempt, status))
         print(f"copy {copy}: {STAGES[stage]}, attempt {attempt}, EFI_STATUS=0x{status:016x}")
+
+    for stage, description in enumerate(HANDOFF_STAGES, 1):
+        offset = FIRST_RECORD + stage * 0x100
+        word, = struct.unpack_from("<Q", data, offset)
+        if word == (stage << 32) | HANDOFF_MAGIC:
+            print(f"handoff {stage}: {description}")
+        else:
+            print(f"handoff {stage}: no valid record")
 
     if not records:
         print("No checkpoint recovered. This does not identify the last executed stage.")
