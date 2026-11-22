@@ -1,4 +1,10 @@
 {
+  "host_darwinboot_handoff_cvp": {
+    "fd": "UbuntuPiano:/tmp/piano-handoff.hddbWw4L/handoff-cvp.fd",
+    "sha256": "44531624219cf0a2c9b114ca624c36452c5c5fb9841420f9d0ab90181e4f0afb",
+    "device_tested": false,
+    "fvmain_changed_entries": ["DarwinBoot", "BdsDxe", "PcdDxe", "SmBiosTableDxe"]
+  },
   "host_no_demura_entry_control": {
     "kc": "out/no-demura-control/control.kc",
     "kc_sha256": "c4fd7130784413150f0d8735806267cbc6b029cd4e388ad8439fea6f207851be",

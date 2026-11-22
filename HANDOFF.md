@@ -622,3 +622,5 @@ The stock Android transport is currently authorized (ADB enabled, `ro.adb.secure
 2026-11-22: The [XNU restart routing trial](docs/results-2026-11-22-xnu-reset-routing.md) returned to HyperOS without observable stock ABL, so the qualified CVP reader did not run. The remaining question is whether DarwinBoot completes the handoff. Move the next observation upstream of the XNU restart hook.
 
 2026-11-22: The [no-demura entry control](docs/results-2026-11-22-no-demura-control.md) passed host parser, fixup, trust and image checks. The bounded tablet run recovered ten successful EBS records through the watchdog and CVP reader, then returned to completed HyperOS A. XNU entry is still unverified. Add separate checkpoints around the MMU transition and at the XNU entry before the next trial.
+
+2026-11-22: The [DarwinBoot checkpoint FD](docs/results-2026-11-22-handoff-cvp-build.md) built with the full replay macro set. FVMAIN has four changed entries. Compare the three other payloads with the frozen no-demura firmware and verify retention of the four CVP offsets before packaging the trial. No device run was issued.
