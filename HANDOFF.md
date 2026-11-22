@@ -643,3 +643,5 @@ The [MMU checkpoint mapping audit](docs/results-2026-11-22-xnu-mmu-mapping.md) p
 The [first HMAC linked pointer audit](docs/results-2026-11-22-hmac-fixup-audit.md) matched on-disk SHA-512 authenticated pointer fields to their call sites. Runtime probes should distinguish HMAC entry, digest setup and compression using phase numbers only.
 
 The [first HMAC compression checkpoint](docs/results-2026-11-22-hmac-compression-live.md) recovered phase 186 on the tablet and returned unattended to HyperOS A. Instrument SHA-512 compression entry and exit to distinguish the indirect branch from execution in the routine.
+
+The SHA-512 entry trial read phase 186 and returned unattended to HyperOS A. Disassembly places the new phase 190 after the stack guard access. Dispatch and the callee prologue remain in the failure interval. See docs/results-2026-11-22-sha-entry-live.md.
