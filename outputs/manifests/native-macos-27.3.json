@@ -1,4 +1,13 @@
 {
+  "device_xnu_bootstrap_tables": {
+    "result": "docs/results-2026-11-22-xnu-bootstrap-live.md",
+    "image": "out/no-demura-control/boot-piano-bootstrap.img",
+    "image_sha256": "d012f96e30c156db9f6732038726b3cc871f41eaa8eea0d123e57fa09184f8c2",
+    "kc_sha256": "84541f610f5e4bc40cb0ae8d7f53c339baa718d02c0891acecaed17704787e30",
+    "capture": "out/no-demura-control/bootstrap-live.bin",
+    "capture_sha256": "718a0c33212acb98d788fc637d5f014f447f1e151f61e5d7195b07a526be8e02",
+    "android_return": "OS3.0.309.0.WPYCNXM slot A boot completed"
+  },
   "device_xnu_first_cpu": {
     "result": "docs/results-2026-11-22-xnu-first-cpu-live.md",
     "image": "out/no-demura-control/boot-piano-entry-owner.img",
