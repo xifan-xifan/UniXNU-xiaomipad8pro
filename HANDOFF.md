@@ -647,3 +647,5 @@ The [first HMAC compression checkpoint](docs/results-2026-11-22-hmac-compression
 The SHA-512 entry trial read phase 186 and returned unattended to HyperOS A. Disassembly places the new phase 190 after the stack guard access. Dispatch and the callee prologue remain in the failure interval. See docs/results-2026-11-22-sha-entry-live.md.
 
 The SHA-512 pre-stack trial captured phase 186 and returned unattended to HyperOS A. The new phase 192 precedes stack access. See docs/results-2026-11-22-sha-prologue-live.md.
+
+The pre-stack candidate packed KC was walked from its format-8 page starts. Both SHA-512 fields at `0xfffffff007dd0fa0` and `0xfffffff007dd0fa8` are reachable in `__DATA_CONST`. Their encoded targets match the candidate symbols at `0xfffffff00bbd8c60` and `0xfffffff00bbd90e8`. Both use address-diverse IA with discriminators `0xc7a0` and `0x1bda`. Runtime application remains unverified. CrossDarwin `test_27` still resolves to the reviewed `4a671773` pin.
