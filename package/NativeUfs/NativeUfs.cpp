@@ -1403,11 +1403,16 @@ static bool hostBringUp (const char **why)
     const uint32_t bytes = sizes[attempt];
     if (counts[attempt] > slots && counts[attempt] > 1) continue;
     IOLog ("NativeUfs: DMA attempt %u: %u bytes (slots %u, wide %d)\n", attempt, bytes, slots, wide);
+    IOLog ("NativeUfs: DMA attempt %u entering inTaskWithOptions\n", attempt);
     IOBufferMemoryDescriptor *dma = IOBufferMemoryDescriptor::inTaskWithOptions (
       kernel_task, static_cast<IOOptionBits> (kIODirectionInOut) | static_cast<IOOptionBits> (kIOMemoryPhysicallyContiguous) |
       static_cast<IOOptionBits> (kIOMemoryMapperNone),
       bytes, 4096);
-    if (!dma) continue;
+    if (!dma) {
+      IOLog ("NativeUfs: DMA attempt %u returned no buffer\n", attempt);
+      continue;
+    }
+    IOLog ("NativeUfs: DMA attempt %u returned a buffer\n", attempt);
     uint8_t *virt = static_cast<uint8_t *> (dma->getBytesNoCopy ());
     IOByteCount contiguous = 0;
     uint64_t phys = dma->getPhysicalSegment (0, &contiguous, kIOMemoryMapperNone);
@@ -1415,6 +1420,7 @@ static bool hostBringUp (const char **why)
     gRootDiagnostic.dma = phys;
     gRootDiagnostic.contiguous = contiguous;
     if (!virt || !phys || (phys & 4095) || contiguous < bytes || (!wide && phys + bytes > 0x100000000ULL)) {
+      IOLog ("NativeUfs: DMA attempt %u rejected virt=%p phys=%llx contiguous=%llx\n", attempt, virt, (unsigned long long) phys, (unsigned long long) contiguous);
       dma->release ();
       continue;
     }
