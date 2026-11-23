@@ -1,0 +1,20 @@
+--- kc-build.py	2026-11-24 07:09:36
++++ kc-build-replace.py	2026-11-24 07:26:57
+@@ -309,6 +309,8 @@
+     # (branches, pointers) is rebound by name to the stand-in's symbols, which also replaces them as a library (see stand_in()).
+     stand_ins = {name: spec for spec in natives for name in spec.get('stands_in_for', [])}
+     keep = dependency_closure(plist['_PrelinkInfoDictionary'], roots, stand_ins) & set(kc.entries)
++    # REPLACE_NATIVE: bundles supplied through --native replace any copy already in the base collection.
++    keep -= {spec['bundle'] for spec in natives}
+     print(f'keeping {len(keep)} kexts: {sorted(keep)}')
+ 
+     # 1. Clear every segment of the old kernel and of the dropped kexts (everything but their shared LINKEDIT).
+@@ -836,6 +838,8 @@
+         return
+     ranges, names = [], {}
+     for name, spec in stand_ins.items():
++        if name not in kc.entries:
++            continue   # the base already carries a build with this stand-in applied
+         for segment in kc.macho(name)['segments']:
+             if segment['size'] and segment['name'] != '__LINKEDIT':
+                 ranges.append((segment['va'] + shift, segment['va'] + segment['size'] + shift, spec))
