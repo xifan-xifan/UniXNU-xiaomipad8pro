@@ -1,0 +1,406 @@
+--- a/package/UniXNUPkg/Library/UniXNULib/Boot.c	2026-11-24 06:44:55
++++ b/package/UniXNUPkg/Library/UniXNULib/Boot.c	2026-11-24 06:44:55
+@@ -10,6 +10,11 @@
+ #include <Guid/Fdt.h>
+ #include <Protocol/UniXNULoader.h>
+ 
++// UniXNU-piano: bootflag.h requests (PianoBootFlag.h), without its static functions in this file.
++#define PIANO_REQ_ONCE_ANDROID_VALUE   1
++#define PIANO_REQ_DEFAULT_ANDROID_VALUE  4
++#define PIANO_REQ_DEFAULT_MACOS_VALUE  5
++
+ STATIC
+ EFI_STATUS
+ RunAction (
+@@ -28,6 +33,15 @@
+     case UniXNUActionExit:
+       UniXNULog ("action: exit");
+       return EFI_SUCCESS;
++    case UniXNUActionAndroid:
++      UniXNULog ("action: android");
++      return PianoBootFlagAction (PIANO_REQ_ONCE_ANDROID_VALUE);
++    case UniXNUActionAndroidDefault:
++      UniXNULog ("action: android-default");
++      return PianoBootFlagAction (PIANO_REQ_DEFAULT_ANDROID_VALUE);
++    case UniXNUActionMacosDefault:
++      UniXNULog ("action: macos-default");
++      return PianoBootFlagAction (PIANO_REQ_DEFAULT_MACOS_VALUE);
+     default:
+       break;
+   }
+--- a/package/UniXNUPkg/Library/UniXNULib/Config.c	2026-11-24 06:44:55
++++ b/package/UniXNUPkg/Library/UniXNULib/Config.c	2026-11-24 06:44:55
+@@ -1148,6 +1148,12 @@
+       Entry->Action = UniXNUActionShutdown;
+     } else if (AsciiStrCmp (Action, "exit") == 0) {
+       Entry->Action = UniXNUActionExit;
++    } else if (AsciiStrCmp (Action, "android") == 0) {
++      Entry->Action = UniXNUActionAndroid;
++    } else if (AsciiStrCmp (Action, "android-default") == 0) {
++      Entry->Action = UniXNUActionAndroidDefault;
++    } else if (AsciiStrCmp (Action, "macos-default") == 0) {
++      Entry->Action = UniXNUActionMacosDefault;
+     } else if (AsciiStrCmp (Action, "tools") == 0) {
+       Entry->Action = UniXNUActionTools;
+     } else {
+--- a/package/UniXNUPkg/Library/UniXNULib/Internal.h	2026-11-24 06:44:55
++++ b/package/UniXNUPkg/Library/UniXNULib/Internal.h	2026-11-24 06:44:55
+@@ -47,6 +47,12 @@
+   VOID
+   );
+ 
++// UniXNU-piano: PianoBootFlag.c
++EFI_STATUS
++PianoBootFlagAction (
++  IN INT32  Request
++  );
++
+ VOID
+ EFIAPI
+ UniXNULog (
+@@ -203,7 +209,10 @@
+   UniXNUActionReset,
+   UniXNUActionShutdown,
+   UniXNUActionExit,
+-  UniXNUActionTools
++  UniXNUActionTools,
++  UniXNUActionAndroid,          ///< UniXNU-piano: boot flag once Android, restart
++  UniXNUActionAndroidDefault,   ///< UniXNU-piano: boot flag default Android, restart
++  UniXNUActionMacosDefault      ///< UniXNU-piano: boot flag default macOS, restart
+ } UNIXNU_ACTION;
+ 
+ typedef struct {
+--- a/package/UniXNUPkg/Library/UniXNULib/UniXNULib.inf	2026-11-24 06:44:55
++++ b/package/UniXNUPkg/Library/UniXNULib/UniXNULib.inf	2026-11-24 06:44:55
+@@ -27,6 +27,8 @@
+   Toml.c
+   Ui.c
+   Volume.c
++  PianoBootFlag.h
++  PianoBootFlag.c
+ 
+ [Packages]
+   MdePkg/MdePkg.dec
+--- a/package/UniXNUPkg/Library/UniXNULib/PianoBootFlag.c	1970-01-01 07:30:00
++++ b/package/UniXNUPkg/Library/UniXNULib/PianoBootFlag.c	2026-11-24 06:44:55
+@@ -0,0 +1,146 @@
++/** @file
++  UniXNU-piano (T-16 UEFI OS switch): the menu actions "android", "android-default" and "macos-default". They set piano's
++  Android/macOS boot flag (SID 0 SDAM 0x7100 byte 0x49, PianoBootFlag.h = UniXNU-piano firmware/selector/bootflag.h, byte for byte)
++  through the SPMI arbiter v7 as EE 0, read it back and restart; the pre-UEFI selector in the combined boot_a then boots the system
++  the flag names. A byte that is not ours is never written; the SDAM's APID must be EE 0's. The arbiter facts are UniXNU-piano's
++  package/PianoPower/SpmiObserver.h and package/include/PianoSpmi.h; the FD maps the arbiter as device memory (AOSS region).
++
++  SPDX-License-Identifier: BSD-2-Clause-Patent
++**/
++
++#include "Internal.h"
++#include "PianoBootFlag.h"
++
++#define SPMI_CORE  0x0C400000UL
++#define SPMI_CNFG  0x0C42D000UL
++#define SPMI_OBSV  0x0C440000UL
++#define SPMI_CHNL  0x0C500000UL
++
++STATIC UINT32 Rd (UINTN A) { return *(volatile UINT32 *)A; }
++STATIC VOID Wr (UINTN A, UINT32 V) { *(volatile UINT32 *)A = V; __asm__ volatile ("dsb sy" ::: "memory"); }
++
++STATIC
++INTN
++Poll (
++  IN UINTN  Ch
++  )
++{
++  UINTN   I;
++  UINT32  St;
++
++  for (I = 0; I < 1000; I++) {
++    St = Rd (Ch + 0x08);
++    if (St & 1) {
++      return (St & 0xE) ? -1 : 0;
++    }
++    gBS->Stall (1);
++  }
++  for (I = 0; I < 5000 && !(Rd (Ch + 0x08) & 1); I++) {
++    gBS->Stall (1);
++  }
++  return -2;
++}
++
++STATIC
++INTN
++FindSdam (
++  OUT BOOLEAN  *Ee0
++  )
++{
++  UINT32  N, I, Map;
++  INTN    Apid = -1;
++
++  *Ee0 = FALSE;
++  if ((Rd (SPMI_CORE) >> 28) != 7) {
++    return -1;
++  }
++  N = Rd (SPMI_CORE + 4) & 0x7FF;
++  if ((N == 0) || (N > 1024)) {
++    return -1;
++  }
++  for (I = 0; I < N; I++) {
++    Map = Rd (SPMI_CORE + 0x2000 + 4 * I);
++    if ((Map == 0) || (((Map >> 8) & 0xFFF) != PIANO_BOOTFLAG_PPID)) {
++      continue;
++    }
++    if ((Apid < 0) || (((Rd (SPMI_CNFG + 4 * I) & 7) == 0) && !*Ee0)) {
++      Apid = (INTN)I;
++      *Ee0 = (Rd (SPMI_CNFG + 4 * I) & 7) == 0;
++    }
++  }
++  return Apid;
++}
++
++STATIC
++INTN
++Read8 (
++  IN  INTN   Apid,
++  OUT UINT8  *Val
++  )
++{
++  UINTN  Ch = SPMI_OBSV + 0x20 * (UINTN)Apid;
++  UINTN  T;
++
++  for (T = 0; T < 5; T++) {
++    Wr (Ch, 1U << 27 | (UINT32)PIANO_BOOTFLAG_OFFSET << 4);
++    if (Poll (Ch) == 0) {
++      *Val = (UINT8)Rd (Ch + 0x18);
++      return 0;
++    }
++    gBS->Stall (500);
++  }
++  return -1;
++}
++
++STATIC
++INTN
++Write8 (
++  IN INTN   Apid,
++  IN UINT8  Val
++  )
++{
++  UINTN  Ch = SPMI_CHNL + 0x1000 * (UINTN)Apid;
++
++  Wr (Ch + 0x10, Val);
++  Wr (Ch, 0U << 27 | (UINT32)PIANO_BOOTFLAG_OFFSET << 4);
++  return Poll (Ch);
++}
++
++/**
++  Apply a bootflag.h request and restart. Returns only when the flag could not be set (the caller stays in the menu).
++**/
++EFI_STATUS
++PianoBootFlagAction (
++  IN INT32  Request
++  )
++{
++  BOOLEAN   Ee0;
++  INTN      Apid;
++  UINT8     Old = 0, Back = 0;
++  unsigned  New = 0;
++
++  Apid = FindSdam (&Ee0);
++  if ((Apid < 0) || (Read8 (Apid, &Old) != 0)) {
++    UniXNULog ("android: cell 0x7149 unreadable (APID %d)", (INT32)Apid);
++    return EFI_DEVICE_ERROR;
++  }
++  if (piano_bootflag_apply (Old, Request, &New) != 0) {
++    UniXNULog ("android: cell 0x7149 0x%02x is not ours: untouched", Old);
++    return EFI_ACCESS_DENIED;
++  }
++  if (New != Old) {
++    if (!Ee0) {
++      UniXNULog ("android: SDAM APID %d is not EE 0's: no write", (INT32)Apid);
++      return EFI_ACCESS_DENIED;
++    }
++    if ((Write8 (Apid, (UINT8)New) != 0) || (Read8 (Apid, &Back) != 0) || (Back != (UINT8)New)) {
++      UniXNULog ("android: cell 0x7149 0x%02x -> 0x%02x failed, read back 0x%02x", Old, New, Back);
++      return EFI_DEVICE_ERROR;
++    }
++  } else {
++    Back = Old;
++  }
++  UniXNULog ("android: cell 0x7149 0x%02x -> 0x%02x, read back 0x%02x; restarting", Old, New, Back);
++  gRT->ResetSystem (EfiResetCold, EFI_SUCCESS, 0, NULL);
++  return EFI_SUCCESS;
++}
+--- a/package/UniXNUPkg/Library/UniXNULib/PianoBootFlag.h	1970-01-01 07:30:00
++++ b/package/UniXNUPkg/Library/UniXNULib/PianoBootFlag.h	2026-11-24 06:44:55
+@@ -0,0 +1,171 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent */
++/*
++ * The Android/macOS boot flag of piano's combined boot_a (T-16 UEFI OS switch). Plain C99, no library calls: the selector (before
++ * UEFI, MMU off), the FD (UniXNULib), a kext (C++) and the host tests include it.
++ *
++ * Storage: one byte, SID 0 SDAM 0x7100 (PPID 0x071) offset 0x49, next to ABL's restart reason at 0x48. The byte is a CANDIDATE
++ * until the read-only survey shows it reads 0x00 across boots (private/host-checks/20261123-switcher/UEFI-SWITCH-DESIGN.md §2).
++ *
++ *   0x00              never written (the survey baseline): default macOS, no one-shot
++ *   0xA0 | bits       ours: bit 0 ONCE_ANDROID, bit 1 ONCE_MACOS, bit 2 DEFAULT_ANDROID, bit 3 must be 0, and at most one ONCE bit
++ *   anything else     not ours: never written by any of our writers; the selector boots macOS
++ *
++ * A writer only writes over 0x00 or one of our values. The selector consumes a ONCE bit (clears it, reads it back) before it jumps;
++ * a value that is ours with no bit left is stored as 0x00, so the byte is back at its baseline whenever nothing is pending.
++ */
++#ifndef PIANO_BOOTFLAG_H
++#define PIANO_BOOTFLAG_H
++
++#define PIANO_BOOTFLAG_PPID		0x071u	/* SID 0, SDAM 0x7100 */
++#define PIANO_BOOTFLAG_OFFSET		0x49u
++#define PIANO_BOOTFLAG_MAGIC		0xA0u
++#define PIANO_BOOTFLAG_MAGIC_MASK	0xF8u	/* magic nibble + reserved bit 3 */
++#define PIANO_BOOTFLAG_ONCE_ANDROID	0x01u
++#define PIANO_BOOTFLAG_ONCE_MACOS	0x02u
++#define PIANO_BOOTFLAG_DEFAULT_ANDROID	0x04u
++#define PIANO_BOOTFLAG_ONCE_MASK	0x03u
++
++/* What starts. */
++enum piano_target {
++	PIANO_TARGET_STOCK = 0,		/* the stock kernel, ABL's own path (recovery, off-mode charging, no UEFI payload, guards) */
++	PIANO_TARGET_ANDROID = 1,	/* the stock kernel because the flag or the key asked for Android */
++	PIANO_TARGET_MACOS = 2,		/* the UEFI payload (our FD), which boots macOS from the ESP */
++	PIANO_TARGET_FASTBOOT = 3	/* restart reason bootloader + PSCI reset: ABL fastboot */
++};
++
++/* 1 when the byte is ours (or the 0x00 baseline), 0 when another writer owns it. */
++static inline int piano_bootflag_ours(unsigned v)
++{
++	if (v == 0)
++		return 1;
++	if ((v & PIANO_BOOTFLAG_MAGIC_MASK) != PIANO_BOOTFLAG_MAGIC)
++		return 0;
++	return (v & PIANO_BOOTFLAG_ONCE_MASK) != PIANO_BOOTFLAG_ONCE_MASK;
++}
++
++/* The stored form of a set of bits: 0x00 when nothing is set. */
++static inline unsigned piano_bootflag_encode(unsigned bits)
++{
++	bits &= PIANO_BOOTFLAG_ONCE_MASK | PIANO_BOOTFLAG_DEFAULT_ANDROID;
++	return bits ? (PIANO_BOOTFLAG_MAGIC | bits) : 0u;
++}
++
++static inline int piano_bootflag_default_android(unsigned v)
++{
++	return piano_bootflag_ours(v) && (v & PIANO_BOOTFLAG_DEFAULT_ANDROID);
++}
++
++/* Requests of the writers (FD menu, macOS sysctl, Android module). */
++enum piano_bootflag_req {
++	PIANO_REQ_ONCE_ANDROID = 1,	/* next boot Android (a pending ONCE_MACOS is replaced) */
++	PIANO_REQ_ONCE_MACOS = 2,	/* next boot macOS */
++	PIANO_REQ_ONCE_CLEAR = 3,	/* drop a pending one-shot */
++	PIANO_REQ_DEFAULT_ANDROID = 4,	/* persistent default Android */
++	PIANO_REQ_DEFAULT_MACOS = 5,	/* persistent default macOS (the factory state) */
++	PIANO_REQ_RESET = 6		/* everything back to 0x00 */
++};
++
++/*
++ * The new byte for a request on the byte read now. Returns 0 and sets *out, or -1 when the byte is not ours (the writer must not
++ * write) or the request is unknown. A writer then writes *out (only when it differs) and reads it back.
++ */
++static inline int piano_bootflag_apply(unsigned old, int req, unsigned *out)
++{
++	unsigned bits;
++
++	if (!piano_bootflag_ours(old))
++		return -1;
++	bits = old ? (old & (PIANO_BOOTFLAG_ONCE_MASK | PIANO_BOOTFLAG_DEFAULT_ANDROID)) : 0u;
++	switch (req) {
++	case PIANO_REQ_ONCE_ANDROID:
++		bits = (bits & ~PIANO_BOOTFLAG_ONCE_MASK) | PIANO_BOOTFLAG_ONCE_ANDROID;
++		break;
++	case PIANO_REQ_ONCE_MACOS:
++		bits = (bits & ~PIANO_BOOTFLAG_ONCE_MASK) | PIANO_BOOTFLAG_ONCE_MACOS;
++		break;
++	case PIANO_REQ_ONCE_CLEAR:
++		bits &= ~PIANO_BOOTFLAG_ONCE_MASK;
++		break;
++	case PIANO_REQ_DEFAULT_ANDROID:
++		bits |= PIANO_BOOTFLAG_DEFAULT_ANDROID;
++		break;
++	case PIANO_REQ_DEFAULT_MACOS:
++		bits &= ~PIANO_BOOTFLAG_DEFAULT_ANDROID;
++		break;
++	case PIANO_REQ_RESET:
++		bits = 0;
++		break;
++	default:
++		return -1;
++	}
++	*out = piano_bootflag_encode(bits);
++	return 0;
++}
++
++/* The selector's inputs, all read before any decision. */
++struct piano_sel_in {
++	int can_run;		/* EL1 with the MMU off */
++	int bootmode_stock;	/* ABL's bootargs carry bootmonitor.bootmode=recovery or =poweroff_cg */
++	int have_uefi;		/* the image carries the UEFI payload */
++	int key_down;		/* vol-down held (debounced) */
++	int key_up;		/* vol-up held (debounced) */
++	int flag_ok;		/* the flag byte was read */
++	unsigned flag;		/* its value */
++};
++
++/* The decision. *write_flag = 1 with *new_flag when the selector must consume a one-shot before it jumps. */
++struct piano_sel_out {
++	enum piano_target target;
++	int write_flag;
++	unsigned new_flag;
++	enum piano_target if_write_fails;	/* the target when the write or its read-back fails */
++};
++
++/*
++ * Order (UEFI-SWITCH-DESIGN.md §3):
++ *   1. guards (not EL1 / MMU on) -> stock; ABL's recovery or off-mode-charging boot -> stock; no UEFI payload -> stock.
++ *   2. vol-down -> ABL fastboot (a second road; ABL's own vol-down at power-on is before us and unchanged).
++ *   3. the flag unreadable or not ours -> macOS, nothing written.
++ *   4. a ONCE bit picks the system, else the DEFAULT bit; vol-up -> the other system than that.
++ *   5. a ONCE bit is consumed (written back without it); if that write fails -> macOS.
++ */
++static inline struct piano_sel_out piano_select(const struct piano_sel_in *in)
++{
++	struct piano_sel_out o;
++	unsigned v = in->flag;
++	int android;
++
++	o.target = PIANO_TARGET_MACOS;
++	o.write_flag = 0;
++	o.new_flag = 0;
++	o.if_write_fails = PIANO_TARGET_MACOS;
++	if (!in->can_run || in->bootmode_stock || !in->have_uefi) {
++		o.target = PIANO_TARGET_STOCK;
++		return o;
++	}
++	if (in->key_down) {
++		o.target = PIANO_TARGET_FASTBOOT;
++		return o;
++	}
++	if (!in->flag_ok || !piano_bootflag_ours(v)) {
++		/* fail-safe; vol-up still reaches Android */
++		o.target = in->key_up ? PIANO_TARGET_ANDROID : PIANO_TARGET_MACOS;
++		return o;
++	}
++	if (v & PIANO_BOOTFLAG_ONCE_ANDROID)
++		android = 1;
++	else if (v & PIANO_BOOTFLAG_ONCE_MACOS)
++		android = 0;
++	else
++		android = (v & PIANO_BOOTFLAG_DEFAULT_ANDROID) != 0;
++	if (in->key_up)
++		android = !android;
++	o.target = android ? PIANO_TARGET_ANDROID : PIANO_TARGET_MACOS;
++	if (v && (v & PIANO_BOOTFLAG_ONCE_MASK)) {
++		o.write_flag = 1;
++		o.new_flag = piano_bootflag_encode(v & PIANO_BOOTFLAG_DEFAULT_ANDROID);
++	}
++	return o;
++}
++
++#endif
