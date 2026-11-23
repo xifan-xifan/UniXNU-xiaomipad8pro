@@ -13,6 +13,7 @@ image or userdata write was issued.
 | ufs139 | `machine_idle` also services the timer | `idle-service` never prints; the boot stops on the same line as ufs138 |
 | ufs140 | delay/idle stop calling `rtclock_intr`; a ticker thread masked-DAIF drives PPI 27 by hand | the boot passes NativeRamBlock, runs `bsd_init` and `bsd_autoconf`, walks the media registry and reaches `waitForMatchingService` for root UUID `84581E99-85BE-4957-AC53-2947E887B3E4`; the ticker then stops inside its first `rtclock_intr` |
 | ufs141 | ufs126 per-statement prints silenced by starting `s126_n` at 2 | identical stop point, so the halt is not the console lock |
+| ufs142 | ufs141 plus the ufs138 delay/idle `rtclock_intr` service restored | identical stop point; the UFS publisher still never starts, so the ticker's first `rtclock_intr` is what freezes the boot |
 
 ## Mechanism
 
@@ -50,3 +51,5 @@ Artifacts in `out/no-demura-control/` (not committed):
 | --- | --- | --- |
 | ufs140 | `a59de386` | `b8e70224718c8ac7107367e6e85d9aaca48a8477b36509b79d8eac6ff2fe2531` |
 | ufs141 | `819be797` | `f37e656c55f81b05e31dd70c7fc85c2416a149faf92e98d3a2fb5f74e8062dec` |
+| ufs142 | `0d3e5a36` | `4a8f95d0a9a96809e8a46b9c65bd4f8da6e12095c0f48948d1d3c3be295a531e` |
+
