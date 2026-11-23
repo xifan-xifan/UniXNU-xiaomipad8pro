@@ -10,6 +10,7 @@
 #include <IOKit/IOKitKeys.h>
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/storage/IOBlockStorageDevice.h>
+#include <IOKit/storage/IOMedia.h>
 #include <libkern/crypto/sha2.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_map.h>
@@ -65,7 +66,7 @@ static void hostSpinMs (uint32_t ms)
     __asm__ volatile ("mrs %0, cntvct_el0" : "=r" (now));
     if (now - start >= ticks) break;
   }
-  IOLog ("NativeUfs: spin %u ms ticks=%llu\n", ms, now - start);
+  (void) now; (void) start;   // quiet: 100 ms polling flooded the console ring in ufs36/ufs38
 }
 // UniXNU-piano: every bring-up stage also goes to the console (the native-run log mailbox), so a stall shows where it is.
 static inline void rootStage (const char *stage)
@@ -2203,6 +2204,9 @@ public:
   bool signedVolumeUuid (char out[37]) const;
 #endif
   const char *windowLabel () const { return label; }
+  bool publishMatch ();
+  IOService *publishMedia (const char *uuid);
+  bool readContainerUuid (char out[37]);
   bool configure (const char *name, uint64_t absoluteOffset, uint64_t size);
   bool start (IOService *provider) override;
   void free () override;
@@ -2213,14 +2217,21 @@ public:
   char *getProductString () override { return product[0] ? product : label; }
   char *getRevisionString () override { return const_cast<char *> ("1.0"); }
   char *getAdditionalDeviceInfoString () override { return const_cast<char *> ("UFS LUN 0 userdata window, read-only"); }
-  IOReturn reportBlockSize (UInt64 *value) override { *value = 512; return kIOReturnSuccess; }
+  IOReturn reportBlockSize (UInt64 *value) override { IOLog ("NativeUfs: %s reportBlockSize\n", label); *value = 512; return kIOReturnSuccess; }
   IOReturn reportEjectability (bool *value) override { *value = false; return kIOReturnSuccess; }
-  IOReturn reportMaxValidBlock (UInt64 *value) override { *value = bytes / 512 - 1; return kIOReturnSuccess; }
+  IOReturn reportMaxValidBlock (UInt64 *value) override { IOLog ("NativeUfs: %s reportMaxValidBlock\n", label); *value = bytes / 512 - 1; return kIOReturnSuccess; }
   IOReturn reportMediaState (bool *present, bool *changed) override {
+    IOLog ("NativeUfs: %s reportMediaState\n", label);
     *present = online; if (changed) *changed = false; return kIOReturnSuccess;
   }
-  IOReturn reportRemovability (bool *value) override { *value = false; return kIOReturnSuccess; }
-  IOReturn reportWriteProtection (bool *value) override { *value = !writable; return kIOReturnSuccess; }
+  IOReturn reportRemovability (bool *value) override { IOLog ("NativeUfs: %s reportRemovability\n", label); *value = false; return kIOReturnSuccess; }
+  IOReturn reportWriteProtection (bool *value) override { IOLog ("NativeUfs: %s reportWriteProtection\n", label); *value = !writable; return kIOReturnSuccess; }
+  bool open (IOService *forClient, IOOptionBits options, void *arg) override {
+    IOLog ("NativeUfs: %s open enter\n", label);
+    bool ok = IOBlockStorageDevice::open (forClient, options, arg);
+    IOLog ("NativeUfs: %s open returned %d\n", label, ok);
+    return ok;
+  }
   IOReturn doSynchronizeCache () override {
     if (!online) return kIOReturnNotReady;
     return writable ? hostSyncCache () : kIOReturnSuccess;
@@ -2624,7 +2635,105 @@ bool NativeUfsBlock::start (IOService *provider)
     setProperty (kIOMaximumByteCountReadKey, gMaxIoBytes, 64);
     setProperty (kIOMaximumBlockCountReadKey, gMaxIoBytes / 512, 64);
   }
-  registerService ();
+  // UniXNU-piano (2026-11-24): no device-type=Generic, so the collection's IOBlockStorageDriver
+  // personality does not match this window. That match never completes under this boot (ufs159:
+  // busy 1 for 30 s, no child). publishMedia() attaches the IOMedia that APFS and the BSD client
+  // match instead; the window only needs to be a registered registry node for that.
+  setProperty ("Content", "Apple_APFS");
+  setProperty ("Content Hint", "EF57347C-0000-11AA-AA11-00306543ECAC");
+  // ufs166: the collection's IOBlockStorageDriver personality requires device-type=Generic.
+  // Published asynchronously so the match job runs on a config thread instead of inline here.
+  setProperty ("device-type", "Generic");
+  IOLog ("NativeUfs: %s media content Apple_APFS hint EF57347C\n", label);
+  // ufs167: register only after start() has returned (publishMatch() spawns a thread that waits a
+  // moment). Registering inside start() let the match run while this service was still starting and
+  // left the arbitration lock held when the second window tried to register.
+  return true;
+}
+
+static void matchThread (void *self, wait_result_t)
+{
+  NativeUfsBlock *device = static_cast<NativeUfsBlock *> (self);
+  IOLog ("NativeUfs: %s match thread alive\n", device->windowLabel ());
+  IOSleep (20);
+  IOLog ("NativeUfs: %s synchronous match entering\n", device->windowLabel ());
+  device->registerService (kIOServiceSynchronous);
+  IOLog ("NativeUfs: %s synchronous match returned\n", device->windowLabel ());
+  device->release ();
+}
+
+bool NativeUfsBlock::publishMatch ()
+{
+  thread_t thread = nullptr;
+  retain ();
+  IOLog ("NativeUfs: %s match thread start entering\n", windowLabel ());
+  kern_return_t kr = kernel_thread_start (matchThread, this, &thread);
+  IOLog ("NativeUfs: %s match thread start returned %d\n", windowLabel (), kr);
+  if (kr != KERN_SUCCESS) {
+    release ();
+    return false;
+  }
+  thread_deallocate (thread);
+  return true;
+}
+
+// UniXNU-piano (2026-11-24): publish the window's IOMedia directly. The collection's
+// IOBlockStorageDriver personality never finishes matching under this boot (ufs158/159: busy 1,
+// no child, no media), so create the media node here; APFS matches IOMedia by Content Hint and
+// reads through IOStorage to this device. The media carries the signed volume's UUID.
+IOService *NativeUfsBlock::publishMedia (const char *uuid)
+{
+  IOMedia *media = new IOMedia;
+  IOLog ("NativeUfs: %s media alloc %p\n", label, media);
+  if (!media) return nullptr;
+  if (!media->init (0, bytes, 512, true, false, "Apple_APFS", nullptr)) {
+    IOLog ("NativeUfs: %s media init failed\n", label);
+    media->release ();
+    return nullptr;
+  }
+  IOLog ("NativeUfs: %s media init ok bytes %llu\n", label, bytes);
+  if (uuid && uuid[0]) media->setProperty ("UUID", uuid);
+  media->setProperty ("Content Hint", "EF57347C-0000-11AA-AA11-00306543ECAC");
+  if (!media->attach (this)) {
+    IOLog ("NativeUfs: %s media attach failed\n", label);
+    media->release ();
+    return nullptr;
+  }
+  IOLog ("NativeUfs: %s media attach ok\n", label);
+  {
+    IORegistryEntry *walk = media;
+    for (unsigned depth = 0; walk && depth < 8; ++depth) {
+      IORegistryEntry *next = walk->getParentEntry (gIOServicePlane);
+      IOLog ("NativeUfs: media chain %u %s -> %s\n", depth, walk->getName (),
+             next ? next->getName () : "(none)");
+      walk = next;
+    }
+  }
+  IOLog ("NativeUfs: %s media register entering\n", label);
+  media->registerService ();
+  IOLog ("NativeUfs: %s media register returned\n", label);
+  IOLog ("NativeUfs: %s media node published for %s\n", label, uuid && uuid[0] ? uuid : "(no uuid)");
+  return media;
+}
+
+// The APFS container superblock (nx_superblock) is the first block of the window: nx_magic at 0x20,
+// nx_uuid at 0x48. Read it once for the IOMedia identity; a window without it publishes without a UUID.
+bool NativeUfsBlock::readContainerUuid (char out[37])
+{
+  uint8_t block[4096];
+  if (absolute % 4096 || hostRead4k (0, absolute / 4096, 1, block) != kIOReturnSuccess) {
+    IOLog ("NativeUfs: %s container UUID read failed\n", label);
+    return false;
+  }
+  if (memcmp (block + 0x20, "NXSB", 4)) {
+    IOLog ("NativeUfs: %s container UUID no NXSB (magic %.4s)\n", label, block + 0x20);
+    return false;
+  }
+  const uint8_t *u = block + 0x48;
+  snprintf (out, 37, "%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
+            u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7],
+            u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]);
+  IOLog ("NativeUfs: %s container UUID %.36s\n", label, out);
   return true;
 }
 
@@ -2650,6 +2759,13 @@ IOReturn NativeUfsBlock::doAsyncReadWrite (IOMemoryDescriptor *buffer, UInt64 bl
   }
   if (buffer->getDirection () != kIODirectionIn) {
     return kIOReturnNotWritable;
+  }
+  {
+    static unsigned debugReads = 0;
+    if (debugReads < 24) {
+      IOLog ("NativeUfs: %s read block %llu count %llu\n", label, block, count);
+      debugReads++;
+    }
   }
   // native-ufs-perf: the request's size and alignment on the 4 KiB device blocks, and its time from here to its completion.
   const uint64_t requestStart = hostPerfNow ();
@@ -2883,33 +2999,51 @@ static char gPendingUuid[4][37];
 static UfsRootPlan gPublicationPlan;
 static NativeUfs *gPendingProvider;
 
-static bool mediaWithUuidExists (const char *uuid, NativeUfsBlock *window)
+// A window's IOMedia is created by IOStorageFamily while the window's own matching runs. Asking
+// the matching machinery for IOMedia from the publisher thread parks behind that same pass
+// (ufs36: no return from IOService::getMatchingServices while the root stayed unpublished), so
+// walk the service-plane children through the registry instead. "seen" says how much of the
+// subtree was reachable: 0 means IOStorageFamily has not attached its driver to the window yet.
+static bool childWithUuid (IORegistryEntry *entry, const char *uuid, unsigned depth, unsigned *seen)
 {
-  OSDictionary *matching = IOService::serviceMatching ("IOMedia");
-  OSDictionary *properties = OSDictionary::withCapacity (1);
-  OSString *wanted = OSString::withCString (uuid);
+  if (!entry || depth > 4) return false;
+  OSIterator *children = entry->getChildIterator (gIOServicePlane);
+  if (!children) return false;
   bool found = false;
-  if (matching && properties && wanted && properties->setObject ("UUID", wanted) &&
-      matching->setObject ("IOPropertyMatch", properties)) {
-    OSIterator *iterator = IOService::getMatchingServices (matching);
-    if (iterator) {
-      for (unsigned matches = 0; matches < 64 && !found; ++matches) {
-        IORegistryEntry *media = OSDynamicCast (IORegistryEntry, iterator->getNextObject ());
-        if (!media) break;
-        IORegistryIterator *parents = IORegistryIterator::iterateOver (
-          media, gIOServicePlane, kIORegistryIterateRecursively | kIORegistryIterateParents);
-        if (parents) {
-          found = ufsMediaHasAncestor (*parents, window);
-          parents->release ();
-        }
-      }
-      iterator->release ();
+  for (unsigned steps = 0; steps < 16 && !found; ++steps) {
+    IORegistryEntry *child = OSDynamicCast (IORegistryEntry, children->getNextObject ());
+    if (!child) break;
+    ++*seen;
+    OSString *id = OSDynamicCast (OSString, child->getProperty ("UUID"));
+    if (id && id->getCStringNoCopy () && !strcmp (id->getCStringNoCopy (), uuid)) {
+      found = true;
+      break;
     }
+    found = childWithUuid (child, uuid, depth + 1, seen);
   }
-  OSSafeReleaseNULL (wanted);
-  OSSafeReleaseNULL (properties);
-  OSSafeReleaseNULL (matching);
+  children->release ();
   return found;
+}
+
+static bool mediaWithUuidExists (const char *uuid, NativeUfsBlock *window, unsigned *seen)
+{
+  *seen = 0;
+  return window && childWithUuid (window, uuid, 0, seen);
+}
+
+// Diagnostic only: how many services of a class have finished matching right now.
+static unsigned countMatchedServices (const char *className)
+{
+  OSDictionary *matching = IOService::serviceMatching (className);
+  if (!matching) return 0;
+  unsigned count = 0;
+  OSIterator *services = IOService::getMatchingServices (matching);
+  if (services) {
+    while (services->getNextObject ()) ++count;
+    services->release ();
+  }
+  matching->release ();
+  return count;
 }
 
 // What sits below the window in the service plane, matched or not (getMatchingServices lists only services whose matching has
@@ -2917,7 +3051,8 @@ static bool mediaWithUuidExists (const char *uuid, NativeUfsBlock *window)
 static void captureMissingMedia (const char *uuid, IOService *window)
 {
   int used = snprintf (gRootMediaText, sizeof (gRootMediaText), "Waiting for signed UUID %s\n", uuid);
-  IORegistryIterator *children = window ? IORegistryIterator::iterateOver (window, gIOServicePlane, kIORegistryIterateRecursively) : nullptr;
+  if (!window) return;
+  OSIterator *children = window->getChildIterator (gIOServicePlane);
   unsigned count = 0;
   while (children && used < int (sizeof (gRootMediaText)) - 160 && count++ < 8) {
     IOService *entry = OSDynamicCast (IOService, children->getNextObject ());
@@ -2954,9 +3089,21 @@ static void publishThread (void *, wait_result_t)
   if (OSDictionary *matching = IOService::serviceMatching ("IOResources")) {
     if (const OSSymbol *bsd = OSSymbol::withCString (kIOBSDKey)) { matching->setObject ("IOResourceMatched", bsd); bsd->release (); }
     rootStage ("waiting for IOBSD");
-    if (IOService *resources = IOService::waitForMatchingService (matching, 60ULL * kSecondScale)) resources->release ();
-    else IOLog ("NativeUfs: IOBSD not matched after 60 s; publishing anyway\n");
-    matching->release ();
+    // UniXNU-piano (2026-11-23): IOKitBSDInit has already published the IOBSD resource in
+  // bsd_autoconf, long before kext load runs this code. Matching IOResources instead waits for
+  // every client of IOResources to finish starting, which never happens before mountroot (ufs36:
+  // "IOResources busy 5" until the timeout every run). Test the published resource property.
+  IOService *resources = IOService::getResourceService ();
+  bool bsd = false;
+  for (unsigned tick = 0; tick < 600 && !bsd; tick++) {
+    bsd = resources && resources->getProperty (kIOBSDKey);
+    if (!bsd) {
+      if (tick && tick % 50 == 0) IOLog ("NativeUfs: IOBSD still absent after %u s\n", tick / 10);
+      hostSpinMs (100);
+    }
+  }
+  IOLog ("NativeUfs: IOBSD resource %s; publishing\n", bsd ? "present" : "still absent after 60 s");
+  if (matching) matching->release ();
   }
   struct Operations {
     bool start (unsigned index) {
@@ -2965,6 +3112,15 @@ static void publishThread (void *, wait_result_t)
       gRootDiagnostic.publicationPhase = static_cast<unsigned> (UfsRootPhase::Start);
       gRootDiagnostic.publicationWindow = index;
       if (!device->start (gPendingProvider)) return false;
+      IOLog ("NativeUfs: %s start returned\n", device->windowLabel ());
+      // ufs169: only the OS window is registered for now; SystemOS's match is what kept the
+      // arbitration lock and blocked this window in ufs166. Match the OS window on IOKit's own
+      // config queue after start() has returned.
+      if (!strcmp (device->windowLabel (), "OS")) {
+        IOLog ("NativeUfs: OS startMatching entering\n");
+        device->startMatching (kIOServiceSynchronous);
+        IOLog ("NativeUfs: OS startMatching returned\n");
+      }
       native_ufs_blocks_published = native_ufs_blocks_published + 1;
       IOLog ("NativeUfs: published %s\n", device->windowLabel ());
       return true;
@@ -2977,24 +3133,46 @@ static void publishThread (void *, wait_result_t)
       gRootDiagnostic.publicationWindow = index;
       bool ready = false;
 #if defined(NATIVE_UFS_UNVERIFIED_ROOT) && NATIVE_UFS_UNVERIFIED_ROOT && !(defined(NATIVE_VERIFIED_BLOCK) && NATIVE_VERIFIED_BLOCK)
-      if (!uuid[0]) {
-        unsigned tick = 0;
-        for (; tick < 300 && (tick < 5 || device->getBusyState ()); ++tick) IOSleep (100);
-        IOLog ("NativeUfs: %s matched after %u ms (busy %u, unverified)\n", device->windowLabel (), tick * 100, device->getBusyState ());
+      (void) uuid;
+      {
+        // ufs40: the window stayed at busy 1, which is IOBlockStorageDriver holding its device open
+        // after start, so busy is not a readiness signal. The registry probe never returned either.
+        // IOFindBSDRoot already blocks on the IOMedia UUID match, so publishing is enough: give the
+        // driver a short settle window, then let the blocking root match decide.
+        const unsigned settleTicks = strcmp (device->windowLabel (), "OS") ? 4 : 300;
+        for (unsigned tick = 0; tick < settleTicks; ++tick) {
+          if (tick == 5 || tick == 15 || tick == 35 || tick == 79 || tick == 149 || tick == 299) {
+            captureMissingMedia ("(unverified)", device);
+            IOLog ("NativeUfs: %s child probe at %u ms (busy %u, unverified)\n%s",
+                   device->windowLabel (), tick * 100, device->getBusyState (), gRootMediaText);
+            IOLog ("NativeUfs: %s diagnostic state %x content %s matched drivers %u media %u\n",
+                   device->windowLabel (), device->getState (),
+                   device->getProperty ("Content") ? "set" : "absent",
+                   countMatchedServices ("IOBlockStorageDriver"), countMatchedServices ("IOMedia"));
+          }
+          IOSleep (100);
+        }
+        IOLog ("NativeUfs: %s published; not waiting for media (busy %u, unverified)\n", device->windowLabel (), device->getBusyState ());
         return true;
       }
 #endif
       // Diagnostic mode affects reporting only, never the dependency gate.
       for (unsigned tick = 0; tick <= 300; ++tick) {
-        ready = mediaWithUuidExists (uuid, device);
+        unsigned seen = 0;
+        ready = mediaWithUuidExists (uuid, device, &seen);
         if (ready || tick == 300) break;
+        if (tick && (tick <= 10 || tick % 50 == 0)) {
+          captureMissingMedia (uuid, device);
+          IOLog ("NativeUfs: %s probe tick %u seen %u window busy %u\n%s", device->windowLabel (), tick, seen,
+                 device->getBusyState (), gRootMediaText);
+        }
         if (tick && tick % 50 == 0) {
           // Every 5 s: what the IOKit side has published so far, and whether the window's own matching is still busy.
           captureMissingMedia (uuid, device);
           IOLog ("NativeUfs: %s volume %s still missing after %u s, window busy %u\n%s", device->windowLabel (), uuid,
                  tick / 10, device->getBusyState (), gRootMediaText);
         }
-        IOSleep (100);
+        hostSpinMs (100);
       }
       IOLog ("NativeUfs: %s volume %s %s\n", device->windowLabel (), uuid, ready ? "ready" : "not ready");
       if (!ready) {
@@ -3006,6 +3184,15 @@ static void publishThread (void *, wait_result_t)
     void discard (unsigned index) { discardPendingWindow (index); }
   } operations;
   UfsRootPublicationResult result = ufsPublishRootWindows (operations, gPublicationPlan);
+  // UniXNU-piano (2026-11-24) diagnostic: the match threads run after both windows publish; watch
+  // whether IOMedia appears and whether a window keeps a busy count (a blocked synchronous match).
+  for (unsigned tick = 0; tick < 8; ++tick) {
+    IOSleep (1000);
+    IOLog ("NativeUfs: monitor %u media %u drivers %u busy %u/%u\n", tick,
+           countMatchedServices ("IOMedia"), countMatchedServices ("IOBlockStorageDriver"),
+           gPendingDevice[0] ? gPendingDevice[0]->getBusyState () : 0,
+           gPendingDevice[1] ? gPendingDevice[1]->getBusyState () : 0);
+  }
   if (result.phase != UfsRootPhase::Complete) {
     gRootDiagnostic.result = result.phase == UfsRootPhase::Start ? kIOReturnIOError : kIOReturnTimeout;
     const char *reason = result.phase == UfsRootPhase::Start ? "root window service start failed" :
@@ -3624,7 +3811,16 @@ bool NativeUfs::startRoot (IOService *provider)
       return true;
 #elif defined(NATIVE_UFS_UNVERIFIED_ROOT) && NATIVE_UFS_UNVERIFIED_ROOT
       // UniXNU-piano development build: the windows are published unverified, as k27's NativeVirtioBlock disks are in the VM.
-      // No identity: wait() takes the window's own matching as its readiness. Owner-signed policies replace this before release.
+      // No identity check; the APFS container UUID is read from the window's own superblock so the published
+      // IOMedia carries the UUID that IOFindBSDRoot and APFS look for. Owner-signed policies replace this before release.
+      for (unsigned i = 0; i < gPending; ++i) {
+        if (!gPendingDevice[i]->readContainerUuid (gPendingUuid[i])) {
+          IOLog ("NativeUfs: %s has no APFS container superblock at its first block\n", gPendingDevice[i]->windowLabel ());
+          gPendingUuid[i][0] = 0;
+        }
+        for (unsigned j = 0; j < i; ++j)
+          if (gPendingUuid[i][0] && !strcmp (gPendingUuid[i], gPendingUuid[j])) return false;
+      }
       IOLog ("NativeUfs: UNVERIFIED development root: %u windows published without owner policies\n", gPending);
       return true;
 #else
