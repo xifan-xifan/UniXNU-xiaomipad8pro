@@ -53,6 +53,20 @@ extern const uint8_t verified_root_key[];
 #include "SmmuTakeover.h"
 
 static UfsRootDiagnostics gRootDiagnostic;
+// Pre-interrupt busy wait: the k27 kernel's timer callouts do not fire before interrupts are
+// enabled (docs/results-2026-11-23-paclr53-watchdog-return.md), so IOSleep never returns there.
+// IODelay spins on the architected counter, which does advance.
+static void hostSpinMs (uint32_t ms)
+{
+  uint64_t start = 0, now = 0;
+  __asm__ volatile ("mrs %0, cntvct_el0" : "=r" (start));
+  const uint64_t ticks = uint64_t (ms) * 24000U;
+  for (uint32_t guard = 0; guard < 50000000U; guard++) {
+    __asm__ volatile ("mrs %0, cntvct_el0" : "=r" (now));
+    if (now - start >= ticks) break;
+  }
+  IOLog ("NativeUfs: spin %u ms ticks=%llu\n", ms, now - start);
+}
 // UniXNU-piano: every bring-up stage also goes to the console (the native-run log mailbox), so a stall shows where it is.
 static inline void rootStage (const char *stage)
 {
@@ -1313,9 +1327,14 @@ static IOBufferMemoryDescriptor *hostContiguous (uint32_t bytes, IOOptionBits ca
   cacheCivac (*virt, bytes);
   return dma;
 }
+// When the allocator cannot return a region above 128 KiB, the slots' descriptors live in one small region and every slot's data area
+// is a separate 128 KiB buffer named by its own PRDT. The request list stays in the descriptor region (entry 2s).
+static bool gSplitDma = false;
+static unsigned gSplitSlots = 0;
+static IOBufferMemoryDescriptor *gSplitData[kRegionSlots] = {};
 static void hostSlotsUpgrade (unsigned regionSlots, unsigned entries, bool wide)
 {
-  if (gListDma || regionSlots < 2 || entries < regionSlots) return;
+  if (gListDma || gSplitDma || regionSlots < 2 || entries < regionSlots) return;
   uint8_t *cached = nullptr; uint64_t listPhys = 0;
   IOBufferMemoryDescriptor *list = hostContiguous (4096, kIOMapWriteCombineCache, wide, &cached, &listPhys);
   if (!list) return;
@@ -1396,43 +1415,71 @@ static bool hostBringUp (const char **why)
   const unsigned entries = (read32 (gHost.hc, 0) & 0x1f) + 1;
   unsigned slots = (entries + 1) / 2 < kRegionSlots ? (entries + 1) / 2 : kRegionSlots;
   gHost.lock = IOLockAlloc ();
-  // Smaller regions keep the same layout for their first slots: 16, then 8, then 1.
-  const uint32_t sizes[3] = { uint32_t (kDmaBytes), uint32_t (kDmaBytesEightSlots), uint32_t (kDmaBytesOneSlot) };
-  const unsigned counts[3] = { kRegionSlots, 8, 1 };
-  for (unsigned attempt = 0; attempt < 3 && !gHost.virt; ++attempt) {
-    const uint32_t bytes = sizes[attempt];
-    if (counts[attempt] > slots && counts[attempt] > 1) continue;
-    IOLog ("NativeUfs: DMA attempt %u: %u bytes (slots %u, wide %d)\n", attempt, bytes, slots, wide);
-    IOLog ("NativeUfs: DMA attempt %u entering inTaskWithOptions\n", attempt);
-    IOBufferMemoryDescriptor *dma = IOBufferMemoryDescriptor::inTaskWithOptions (
+  if (!gHost.virt && gHost.lock) {
+    // Split fallback: the kernel's physically contiguous allocator stalls above 128 KiB and runs dry after a few 64 KiB
+    // requests, so one slot owns a single 64 KiB data area and the descriptors live in one 6 KiB region. Commands through
+    // the pool then serialise; larger reads still go through zero-copy PRDTs where the buffer qualifies.
+    const unsigned splitSlots = 1;
+    const uint32_t descBytes = 4096 + splitSlots * kUcdStride;
+    const uint32_t slotDataBytes = 65536;
+    IOLog ("NativeUfs: split descriptors entering %u bytes\n", descBytes);
+    IOBufferMemoryDescriptor *desc = IOBufferMemoryDescriptor::inTaskWithOptions (
       kernel_task, static_cast<IOOptionBits> (kIODirectionInOut) | static_cast<IOOptionBits> (kIOMemoryPhysicallyContiguous) |
-      static_cast<IOOptionBits> (kIOMemoryMapperNone),
-      bytes, 4096);
-    if (!dma) {
-      IOLog ("NativeUfs: DMA attempt %u returned no buffer\n", attempt);
-      continue;
+      static_cast<IOOptionBits> (kIOMemoryMapperNone), descBytes, 4096);
+    IOByteCount descContiguous = 0;
+    uint8_t *descVirt = desc ? static_cast<uint8_t *> (desc->getBytesNoCopy ()) : nullptr;
+    uint64_t descPhys = desc ? desc->getPhysicalSegment (0, &descContiguous, kIOMemoryMapperNone) : 0;
+    IOLog ("NativeUfs: split descriptors %u bytes: virt=%p phys=%llx contiguous=%llx\n", descBytes, descVirt,
+           (unsigned long long) descPhys, (unsigned long long) descContiguous);
+    const bool descGood = descVirt && descPhys && !(descPhys & 4095) && descContiguous >= descBytes &&
+                          (wide || descPhys + descBytes <= 0x100000000ULL);
+    if (descGood) {
+      unsigned ready = 0;
+      for (unsigned s = 0; s < splitSlots; ++s) {
+        IOLog ("NativeUfs: split data slot %u entering %u bytes\n", s, slotDataBytes);
+        IOBufferMemoryDescriptor *d = IOBufferMemoryDescriptor::inTaskWithOptions (
+          kernel_task, static_cast<IOOptionBits> (kIODirectionInOut) | static_cast<IOOptionBits> (kIOMemoryPhysicallyContiguous) |
+          static_cast<IOOptionBits> (kIOMemoryMapperNone), slotDataBytes, 4096);
+        IOByteCount c = 0;
+        uint8_t *v = d ? static_cast<uint8_t *> (d->getBytesNoCopy ()) : nullptr;
+        uint64_t pa = d ? d->getPhysicalSegment (0, &c, kIOMemoryMapperNone) : 0;
+        IOLog ("NativeUfs: split data slot %u <- virt=%p phys=%llx contiguous=%llx\n", s, v, (unsigned long long) pa,
+               (unsigned long long) c);
+        // Reachability is verified once the SMMU bank exists (hostReachable needs it); only the 32-bit bound is checked here.
+        if (!v || !pa || (pa & 4095) || c < slotDataBytes || (!wide && pa + slotDataBytes > 0x100000000ULL)) {
+          IOLog ("NativeUfs: split data slot %u failed: virt=%p phys=%llx contiguous=%llx\n", s, v, (unsigned long long) pa,
+                 (unsigned long long) c);
+          if (d) d->release ();
+          break;
+        }
+        bzero (v, slotDataBytes);
+        cacheCivac (v, slotDataBytes);
+        gSplitData[s] = d;
+        hostSlotGeometry (s, descVirt + 64 * s, 2 * s, descVirt + 4096 + s * kUcdStride, descPhys + 4096 + s * kUcdStride, v, pa);
+        ++ready;
+      }
+      IOLog ("NativeUfs: split data buffers ready=%u of %u (%u bytes each)\n", ready, splitSlots, slotDataBytes);
+      if (ready == splitSlots) {
+        gSplitDma = true;
+        gSplitSlots = splitSlots;
+        gSlotDataBytes = slotDataBytes;
+        gHost.dma = desc; gHost.virt = descVirt; gHost.phys = descPhys; gHost.dmaBytes = descBytes;
+      } else {
+        for (unsigned s = 0; s < ready; ++s) { gSplitData[s]->release (); gSplitData[s] = nullptr; }
+        desc->release ();
+      }
+    } else if (desc) {
+      desc->release ();
     }
-    IOLog ("NativeUfs: DMA attempt %u returned a buffer\n", attempt);
-    uint8_t *virt = static_cast<uint8_t *> (dma->getBytesNoCopy ());
-    IOByteCount contiguous = 0;
-    uint64_t phys = dma->getPhysicalSegment (0, &contiguous, kIOMemoryMapperNone);
-    IOLog ("NativeUfs: DMA virt=%p phys=%llx contiguous=%llx\n", virt, (unsigned long long) phys, (unsigned long long) contiguous);
-    gRootDiagnostic.dma = phys;
-    gRootDiagnostic.contiguous = contiguous;
-    if (!virt || !phys || (phys & 4095) || contiguous < bytes || (!wide && phys + bytes > 0x100000000ULL)) {
-      IOLog ("NativeUfs: DMA attempt %u rejected virt=%p phys=%llx contiguous=%llx\n", attempt, virt, (unsigned long long) phys, (unsigned long long) contiguous);
-      dma->release ();
-      continue;
-    }
-    gHost.dma = dma; gHost.virt = virt; gHost.phys = phys; gHost.dmaBytes = bytes;
   }
   if (!gHost.virt || !gHost.lock) {
     *why = !gHost.lock ? "dma buffer" : "DMA address/contiguity";
     return false;
   }
-  const unsigned regionSlots = gHost.dmaBytes == kDmaBytes ? slots : gHost.dmaBytes == kDmaBytesEightSlots ? (slots < 8 ? slots : 8) : 1;
+  const unsigned regionSlots = gSplitDma ? gSplitSlots :
+    gHost.dmaBytes == kDmaBytes ? slots : gHost.dmaBytes == kDmaBytesEightSlots ? (slots < 8 ? slots : 8) : 1;
   IOLog ("NativeUfs: DMA region %u bytes, %u slots\n", gHost.dmaBytes, regionSlots);
-  hostSlotGeometryRegionA (regionSlots);
+  if (!gSplitDma) hostSlotGeometryRegionA (regionSlots);
   hostSlotsInit (regionSlots, gHost.lock);
   native_ufs_slots = gSlotCount;
   IOLog ("NativeUfs: slots initialised (%u)\n", gSlotCount);
@@ -1445,6 +1492,16 @@ static bool hostBringUp (const char **why)
   if (!hostStopQueue (why)) return false;
   smmuBypassStream (0x60, gHost.smmuMap, report, gHost.phys, gHost.dmaBytes);
   gHost.smmu = gHost.smmuMap->getVirtualAddress ();
+  if (gSplitDma) {
+    unsigned reachable = 0;
+    for (unsigned s = 0; s < gSplitSlots; ++s)
+      if (hostReachable (gSlotGeom[s].dataPhys, gSlotDataBytes, wide)) ++reachable;
+    IOLog ("NativeUfs: split data reachable %u of %u\n", reachable, gSplitSlots);
+    if (reachable != gSplitSlots) {
+      *why = "split DMA unreachable";
+      return false;
+    }
+  }
   // The board's WiFi endpoint (wifi=2 or more) needs a pass-through stream of its own, set up here with the same code and at the same moment as the
   // storage stream: the registers of the stream matching group are not safe to touch from another thread later (a read of the first one never returned).
   uint32_t wifi = 0;
@@ -1616,12 +1673,15 @@ static bool hostBringUp (const char **why)
       *why = "wake (START STOP UNIT)";
       return false;
     }
-    IOSleep (50);
+    IOLog ("NativeUfs: wake sleep\n");
+    hostSpinMs (50);
+    IOLog ("NativeUfs: wake slept\n");
   }
   rootStage ("LUN ready");
   for (unsigned attempt = 0; attempt < 20; attempt++) {
     uint8_t tur[6] = { 0, 0, 0, 0, 0, 0 };
     uint32_t scsi = 0;
+    IOLog ("NativeUfs: tur try %u\n", attempt);
     if (hostScsi (0, tur, 6, false, 0, 200000, &scsi) == kIOReturnSuccess) {
       gHost.ready = true;
       hostEnableInterrupt ();
@@ -1633,7 +1693,7 @@ static bool hostBringUp (const char **why)
       return true;
     }
     if (gHost.poisoned) break;
-    IOSleep (10);
+    hostSpinMs (10);
   }
   gHost.ready = false;
   *why = "LUN 0 not ready";

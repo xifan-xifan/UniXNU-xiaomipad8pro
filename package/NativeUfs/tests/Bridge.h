@@ -12,6 +12,8 @@
 #include <cassert>
 #include <string>
 #include <vector>
+// RootCommands.h and TransferPoll.h print bring-up diagnostics with IOLog; the host tests keep them behind UFS_TEST_VERBOSE.
+static void IOLog (const char *format, ...) __attribute__ ((format (printf, 1, 2)));
 #include "../RootDiagnostics.h"
 #include "../TransferPoll.h"
 using IOReturn = uint32_t;
@@ -86,6 +88,16 @@ static void hostPowerLog (const char *format, ...)
   va_end (ap);
   gPowerLines.push_back (line);
   if (getenv ("UFS_TEST_VERBOSE")) printf ("  NativeUfs: %s\n", line);
+}
+[[maybe_unused]] static void IOLog (const char *format, ...)
+{
+  if (!getenv ("UFS_TEST_VERBOSE")) return;
+  char line[512];
+  va_list ap;
+  va_start (ap, format);
+  vsnprintf (line, sizeof (line), format, ap);
+  va_end (ap);
+  printf ("  %s", line);
 }
 static void hostPowerPanic (const char *text)
 {

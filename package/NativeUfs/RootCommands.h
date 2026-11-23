@@ -101,6 +101,8 @@ static bool gZeroCopy = true;
 
 // UniXNU-piano: dataSynced (native-ufs-direct's reads, hostReadPrd only): the PRDT names physical pages the caller cleans before and
 // invalidates after the command itself (they have no single kernel address), so the data's cache maintenance here is skipped.
+static unsigned gRingLogs = 0;
+static unsigned gXferLogs = 0;
 static IOReturn hostIssue (const UfsSlot &slot, uint32_t direction, uint32_t dataBytes, uint32_t timeoutUs, uint64_t *deadline,
                            uint32_t *ocs, const UfsPrd *prd = nullptr, unsigned prds = 0, const void *buffer = nullptr,
                            bool dataSynced = false)
@@ -108,7 +110,7 @@ static IOReturn hostIssue (const UfsSlot &slot, uint32_t direction, uint32_t dat
   *ocs = 15;
   if (prds > kMaxPrds || (prds && !buffer && !dataSynced) || (dataSynced && (!prds || buffer || direction != 2)))
     return kIOReturnBadArgument;
-  if (!timeoutUs || dataBytes > (prds ? kXferMax : kDataMax) || (dataBytes & 3) ||
+  if (!timeoutUs || dataBytes > (prds ? kXferMax : gSlotDataBytes) || (dataBytes & 3) ||
       (dataBytes ? (direction != 1 && direction != 2) : direction != 0)) return kIOReturnBadArgument;
   if (gHost.poisoned) return kIOReturnNotReady;
   if (read32 (gHost.hc, 0x58) & slot.bit) {
@@ -167,9 +169,14 @@ static IOReturn hostIssue (const UfsSlot &slot, uint32_t direction, uint32_t dat
     hostPerfSpan (kUfsPerfClean, cleanStart, dataBytes);
   }
   if (!hostInterruptMode ()) hostWrite (0x20, 1);  // Acknowledge completion only; preserve error evidence. With interrupts the handler does.
+  const bool logRing = gRingLogs < 3;
+  if (logRing) ++gRingLogs;
+  const uint64_t ringNow = mach_absolute_time ();
   clock_interval_to_deadline (timeoutUs, kMicrosecondScale, deadline);
+  if (logRing) IOLog ("NativeUfs: ring pre now=%llx deadline=%llx irq=%u\n", ringNow, *deadline, hostInterruptMode () ? 1U : 0U);
   __atomic_or_fetch (&gOutstanding, slot.bit, __ATOMIC_RELEASE);
   hostWrite (0x58, slot.bit);
+  if (logRing) IOLog ("NativeUfs: ring written bit=%x\n", slot.bit);
   hostPerfDepth (1);
   return kIOReturnSuccess;
 }
@@ -183,6 +190,11 @@ static IOReturn hostAwait (const UfsSlot &slot, uint32_t dataBytes, uint64_t dea
   UfsTransferPoll state;
   const uint64_t deviceStart = hostPerfNow ();
   UfsTransferEnd end = pollUfsTransfer (port, state);
+  if (gXferLogs < 40) {
+    ++gXferLogs;
+    IOLog ("NativeUfs: xfer end=%d polls=%u ocs=%u db=%x is=%08x\n", static_cast<int> (end), state.polls, state.ocs,
+           state.doorbellSeen, state.interruptSeen);
+  }
   hostPerfDepth (-1);
   hostPerfSpan (kUfsPerfDevice, deviceStart, dataBytes);
   if (end == UfsTransferEnd::Completed) __atomic_and_fetch (&gOutstanding, ~slot.bit, __ATOMIC_RELEASE);
@@ -264,10 +276,15 @@ static IOReturn hostResponseHeader (const UfsSlot &slot, uint8_t type, uint8_t l
 static IOReturn hostNop (void)
 {
   const UfsSlot slot = ufsSlot (0);
+  IOLog ("NativeUfs: nop clear\n");
   if (!hostClearUcd (slot)) return kIOReturnNotReady;
   slot.ucd[3] = 1;
   uint32_t ocs = 15;
+  IOLog ("NativeUfs: nop ring\n");
   IOReturn result = hostSubmit (slot, 0, 0, 200000, &ocs);
+  IOLog ("NativeUfs: nop done rc=%d ocs=%u polls=%u is=%08x dbr=%08x hcs=%08x tx=%x\n", result, ocs,
+         gRootDiagnostic.polls, read32 (gHost.hc, 0x20), read32 (gHost.hc, 0x58), read32 (gHost.hc, 0x30),
+         read32 (gHost.hc, 0x9c));
   if (result != kIOReturnSuccess) return result;
   result = hostResponseHeader (slot, 0x20, 0, 1);
   if (result != kIOReturnSuccess) return result;
@@ -286,7 +303,7 @@ static IOReturn hostScsiIssue (const UfsSlot &slot, uint8_t lun, const uint8_t *
                                const UfsPrd *prd = nullptr, unsigned prds = 0, const void *buffer = nullptr, bool dataSynced = false)
 {
   *scsiStatus = 0xffff;
-  if (!cdb || !cdbLength || cdbLength > 16 || dataBytes > (prds ? kXferMax : kDataMax) || direction > 2 ||
+  if (!cdb || !cdbLength || cdbLength > 16 || dataBytes > (prds ? kXferMax : gSlotDataBytes) || direction > 2 ||
       (dataBytes & 3) || (dataBytes ? !direction : direction)) return kIOReturnBadArgument;
   if (!hostClearUcd (slot)) return kIOReturnNotReady;
   uint8_t *ucd = slot.ucd;
@@ -350,7 +367,9 @@ static IOReturn hostScsi (uint8_t lun, const uint8_t *cdb, unsigned cdbLength, b
                           uint32_t timeoutUs, uint32_t *scsiStatus)
 {
   if (dataBytes && !toHost) { *scsiStatus = 0xffff; return kIOReturnBadArgument; }
-  return hostScsiDir (ufsSlot (0), lun, cdb, cdbLength, dataBytes ? 2U : 0U, dataBytes, timeoutUs, scsiStatus);
+  IOReturn scsiResult = hostScsiDir (ufsSlot (0), lun, cdb, cdbLength, dataBytes ? 2U : 0U, dataBytes, timeoutUs, scsiStatus);
+  IOLog ("NativeUfs: scsi lun=%x op=%x rc=%d status=%x\n", lun, cdb ? cdb[0] : 0, scsiResult, *scsiStatus);
+  return scsiResult;
 }
 
 // Query read request (opcode 0x03 READ ATTRIBUTE / 0x05 READ FLAG). Returns the value field.
@@ -367,6 +386,7 @@ static IOReturn hostQueryRead (uint8_t opcode, uint8_t idn, uint32_t *value)
   ucd[13] = idn;
   uint32_t ocs = 0xf;
   IOReturn status = hostSubmit (slot, 0, 0, 200000, &ocs);
+  IOLog ("NativeUfs: query op=%x idn=%x rc=%d ocs=%u\n", opcode, idn, status, ocs);
   if (status != kIOReturnSuccess) {
     return status;
   }
@@ -510,9 +530,9 @@ static IOReturn hostRead4k (uint8_t lun, uint64_t lba, uint32_t blocks, void *ds
   }
   UfsPrd prd[kMaxPrds];
   const unsigned prds = blocks <= kXferMax / 4096 ? hostBuildPrds (dst, uint64_t (blocks) * 4096, prd) : 0;
-  if (!prds && blocks > kDataMax / 4096) {
-    // Beyond one command: pieces of kXferMax (each tried for zero copy again), or of kDataMax through the data area.
-    const uint32_t step = blocks > kXferMax / 4096 ? kXferMax / 4096 : kDataMax / 4096;
+  if (!prds && blocks > gSlotDataBytes / 4096) {
+    // Beyond one command: pieces of kXferMax (each tried for zero copy again), or of the slot data area through it.
+    const uint32_t step = blocks > kXferMax / 4096 ? kXferMax / 4096 : gSlotDataBytes / 4096;
     for (uint32_t done = 0; done < blocks; done += step) {
       const uint32_t chunk = blocks - done > step ? step : blocks - done;
       IOReturn status = hostRead4k (lun, lba + done, chunk, static_cast<uint8_t *> (dst) + uint64_t (done) * 4096);
@@ -670,9 +690,9 @@ static IOReturn hostWrite4k (uint8_t lun, uint64_t lba, uint32_t blocks, const v
   }
   UfsPrd prd[kMaxPrds];
   const unsigned prds = hostBuildPrds (src, uint64_t (blocks) * 4096, prd);
-  if (!prds && blocks > kDataMax / 4096) {
-    for (uint32_t done = 0; done < blocks; done += kDataMax / 4096) {
-      const uint32_t chunk = blocks - done > kDataMax / 4096 ? kDataMax / 4096 : blocks - done;
+  if (!prds && blocks > gSlotDataBytes / 4096) {
+    for (uint32_t done = 0; done < blocks; done += gSlotDataBytes / 4096) {
+      const uint32_t chunk = blocks - done > gSlotDataBytes / 4096 ? gSlotDataBytes / 4096 : blocks - done;
       IOReturn status = hostWrite4k (lun, lba + done, chunk, static_cast<const uint8_t *> (src) + uint64_t (done) * 4096, fua);
       if (status != kIOReturnSuccess) return status;
     }

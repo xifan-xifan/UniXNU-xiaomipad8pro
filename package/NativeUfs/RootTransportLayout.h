@@ -24,6 +24,10 @@ enum : uint32_t {
   kRegionBDataOffset = kRegionSlots * kUcdStride,
   kRegionBBytes = kRegionBDataOffset + kRegionSlots * kDataMax,
 };
+// Per-slot data area actually allocated. The split fallback gives every slot its own 64 KiB buffer because the kernel's
+// physically contiguous allocator stalls above 128 KiB; the command path then caps a single transfer at this size and
+// hostRead4k/hostWrite4k split larger requests.
+static uint32_t gSlotDataBytes = kDataMax;
 // Region A offsets of slot s < kRegionSlots.
 static constexpr uint32_t ufsSlotUcdOffset (unsigned slot) { return slot ? kExtraUcdOffset + (slot - 1) * kUcdStride : kUcdOffset; }
 static constexpr uint32_t ufsSlotDataOffset (unsigned slot) { return slot ? kExtraDataOffset + (slot - 1) * kDataMax : kDataOffset; }

@@ -184,3 +184,17 @@ See [the image inventory](../docs/results-2026-11-21-fips4b-inventory.md) for th
 
 - short-argument root image, `out/no-demura-control/boot-piano-paclr53-rootshort.img` (185,733,120 bytes), SHA-256 `a324ebe1e17b8aa7b219757f844934bd229b10890aa7cc96eaf9abb12089c46f`. The timercheck line with `native-ufs-root=1 native-ufs-root-part=linux_rootfs native-ufs-diagnostics=1` and `piano-reset-after=20`. Built, to be run. See [probe result](../docs/results-2026-11-23-paclr53-probe11-probe2-noreturn.md).
 - Both short-argument images above were run on device `7ccdd855` on 2026-11-23. Each returned the fastboot serial at 80.1 s with no manual power cycle and HyperOS reached `boot_completed=1`; the console shows `piano-reset-after: reset at 20 s, Gunyah watchdog armed (32 s bite)` and no `20 s reached` line, so the 32 s Gunyah bite returned them. The root image stopped after `NativeUfs: DMA attempt 1` without any `DMA virt=` line. See [watchdog return](../docs/results-2026-11-23-paclr53-watchdog-return.md).
+
+## Native UFS RAM-boot probes (2026-11-23)
+
+Built on the Mac from the pinned k27 tree (/private/tmp/piano-k27-independent.zbovHflG) with the NativeUfs object
+rebuilt from package/NativeUfs; each was astboot boot only and returned to HyperOS unattended. See
+`docs/results-2026-11-23-native-ufs-root-window.md`.
+
+| File | Bytes | SHA-256 | What |
+|---|---|---|---|
+| `out/no-demura-control/boot-piano-ufs17mark.img` | 185733120 | 0c197b68af2a0d22f84a4c537ab268c797cfbdd726d7d23498a555b2b5beadf2 | ring instrumentation; NOP did not report |
+| `out/no-demura-control/boot-piano-ufs18mark.img` | 185733120 | fcc19758c3802986dcf3af1938f5ee9adcde2ebddce20cee97f41f88d26ba78c | NOP and query complete |
+| `out/no-demura-control/boot-piano-ufs19mark.img` | 185733120 | e0aa46c73cdefe1ea6adff28566999e98c111da1eb0c09d9f5d06b5af740f1fd | SCSI wake completes, IOSleep stops |
+| `out/no-demura-control/boot-piano-ufs20mark.img` | 185733120 | c9615fe1b13a2c6c392670b73e5c25ca484ba71802d221f3d4b4fe288594ad2f | IODelay spin still stops |
+| `out/no-demura-control/boot-piano-ufs21mark.img` | 185733120 | 503c3151616c0bf58f4684d4886c5060c0019c08a50dcb306777e6ec7d830611 | cntvct spin; root windows published |
