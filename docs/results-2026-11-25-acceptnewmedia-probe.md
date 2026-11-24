@@ -120,4 +120,7 @@ the helper sits at +896, so nothing else in the hole is touched.
 `_piano_dbg_kv` was also disassembled to confirm the probe can write at all: it rejects codes outside
 `0x0b..0xca` (`sub w8, w0, #0xcb` / `cmn w8, #0xc0` / `b.lo ret`), stores `x1` into all four words of
 `0xfffffff00c912880 + (code-0x0b)*32` and cleans the cache line, so 0xA0-0xA6 land in the table and
-survive to the readback.
+survive to the readback.`decode-slots.py --scan` also dumps every non-empty slot of the table it lands on, and when no probe
+code is present it reports the longest run of agreeing 32-byte entries with the table base that run
+implies. That separates "the window is unmapped or the read landed elsewhere" from "the probe code is
+missing", which the bare hit/no-hit answer could not.
