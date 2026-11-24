@@ -1,3 +1,13 @@
+## 2026-11-24 23:5x — 设备已回到无人值守可控状态；ufs264 实机跑完但未前移
+
+ADB 已授权（`adb devices` = `7ccdd855 device`），`adb reboot bootloader` 可直接进 fastboot，维护镜像也能远程进入和退出，不再需要按键。**fastboot 必须用 `out/pt33` 的 33.0.3**：37.0.3 会把 `boot-ram-maintenance.img` 判成 `Failed to load/authenticate boot image: Load Error`，33.0.3 正常 `OKAY`。
+
+`boot-piano-ufs264cfg.img`（`d74fad3a…`）两次 `fastboot boot` 均在 37.3 s / 51.9 s 自行回 fastboot，与 ufs256 38.6 s、ufs263 44.9 s 同量级，说明删掉 PPI27 分支里的 `CNTV_CTL_EL0=2` 还没改变死亡点；无任何分区/GPT/userdata 写入。
+
+读回通道恢复，但规则是：**每启动一次 reader 只能做一次 `oem dump`**，第二次会 `Too many links` 并把设备踢出 fastboot。槽位表和 console 要分两次 reader 启动读。`0x8c5912880` 的 8 KiB 已取回（`out/no-demura-control/ufs264-slots.bin`），但内容不是探针值，而是每条目 32 字节、单调递增 `0x200000004` 的页表样数据——该地址是按 ufs256 KC 推的，ufs264 的 `_piano_stage_slots` VA 需要重算，不能据此判断探针是否执行。
+
+设备当前在 HyperOS OS3.0.309.0.WPYCNXM，`_a`，`sys.boot_completed=1`。ESP（`68c28df1…`）与 root（`db3629e5…`）的写入记录未变。boot_a 仍无签名 v5 产物，签名私钥不在本机/Mac，仍是持久启动链的硬阻塞。详细证据见 `docs/results-2026-11-24-ufs264.md`。
+
 ## 2026-11-25 — 维护会话接受设备 ESP 布局；几何测试全绿
 
 `tooling/persist/maint-session.py` 的 ESP 记录校验从硬编码历史 LBA 改为 `check_esp_placement()`：LUN 0、分区 37、262144 块、1 MiB 对齐、窗口在 LUN 0 内；没有 `partition` 字段的旧记录仍按历史 `common.ESP_FIRST` 解释。`map` 现在把 GPT 状态分为 `old`/`candidate`/`new`/`unknown`，并加入候选表哈希。新增 `esp-candidate` 步骤：要求 live map 的 esp 分区与构建记录的 LBA/大小一致、GPT 为 `candidate` 或 `new`，写前对整块 1 GiB 做 SHA-256（`esp_before`，按无备份授权不保留原字节），写入后经分区和 LUN 0 两路读回比对，并写 `installed.json`（`layout: candidate`）。
