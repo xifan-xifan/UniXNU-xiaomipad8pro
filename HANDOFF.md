@@ -1,3 +1,10 @@
+## 2026-11-25 — 备用探针：`IOService::startMatching` 八点插桩
+
+平板仍不在 USB 上，所以把"acceptNewMedia 探针若显示 0xA0 缺席"时需要的下一发镜像先做出来了：`out/k27-smprobe/piano-ufs266.kc`（147,095,552 B，`9f276dff…`）在 ufs264 的 `__ZN9IOService13startMatchingEj`（`0xfffffff00c1450ec`）上插 0xB0-0xB7 八个点——入口、`doServiceMatch` 前后、循环退出条件 `cmp w21,w9 / b.hs`、`thread_block` 前后、退出路径、最终返回路径。8×192 B 桩 + 两个条件跳板共 1,544 B，仍在同一 1,657 B 零洞里；首指令 `pacibsp` 保留，替换的是其后的 `stp`。
+
+反汇编确认了判据：busy 计数是 `[x20,#0x4c]` 的低 10 位，`w21` 是进入时的值；`0x14529c` 的 `b.hs` 表示"进入计数已不低于当前计数"就退出循环，否则置 `0x18000000`、`assert_wait`、解锁、`thread_block` 后回到 `0x145250` 再匹配。因此表里能直接分开审计文档留下的两案：有 0xB1 无 0xB2 = 卡在 `doServiceMatch` 内；有 0xB4 无 0xB5 = 卡在 `thread_block`。
+
+镜像 `out/k27-smprobe/boot-piano-ufs266-smprobe.img`，185,733,120 B、`a56f132d…`、boot id `a79d3a17…`；与 ufs264 镜像差 1,552 B / 51 段（boot id、8 个位点、桩块），回读 ramdisk 内 `kernel.macho` 哈希等于新 KC，洞内其余 113 B 仍为零。runner `tooling/native/run-ufs266-smprobe.ps1` 固定了镜像哈希、用 `--codes b0 b7` 扫表，无设备时退出 2。`decode-slots.py` 顺带加了 `--codes LO HI`。详见 `docs/results-2026-11-25-startmatching-probe.md`。未启动、未写入平板。
 ## 2026-11-25 — ESP 记录审计：哈希、输入、几何、store 绑定全部自洽
 
 只读复核 `out/persistent/esp-device.json` 与本地 `out/esp-device.img`：本地/Mac/sda37/LUN0 四路都是 `68c28df1…`、1,073,741,824 B；KC/ADT/trustcache/seed 四个输入哈希与 pin 一致；`store.extent=[107512576,124289791]`（16,777,216 块=64 GiB）、`first_lba=117735999`、窗口 6,291,649 块落到 124,027,647、尾部 262,144 块=1 GiB 保留，与 `WRITE-PLAN.md` 第 77 行推导完全一致，`test-esp-geometry.py` 15 项全过。

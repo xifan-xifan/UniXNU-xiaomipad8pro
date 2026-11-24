@@ -4,7 +4,8 @@
 Read it back with:  fastboot -s piano-uefi oem dump 8c5000000 1000000 && get_staged region.bin
 then run with --scan to find the table inside a larger window: the probe writes the
 bare code (0xa0..0xa6) into all four words of its entry, so a run of four equal
-words in that range identifies the table even when the slide moves it.
+words in that range identifies the table even when the slide moves it. Use
+`--codes LO HI` for a probe whose codes are outside 0xa0..0xa6.
 
 Without --scan the file is treated as the table itself, starting at code
 0x0b.
@@ -13,6 +14,8 @@ import struct, sys
 
 FIRST = 0x0b
 LAST = 0xca
+PROBE_LO = 0xa0
+PROBE_HI = 0xa6
 
 def vote(words):
     v = 0
@@ -62,12 +65,12 @@ def best_run(raw):
         off += 8
     return best
 
-def scan(raw):
+def scan(raw, lo=PROBE_LO, hi=PROBE_HI):
     """Find 32-byte entries whose four words are the same probe code."""
     found = []
     for off in range(0, len(raw) - 31, 8):
         w = struct.unpack_from('<4Q', raw, off)
-        if w[0] == w[1] == w[2] == w[3] and 0xa0 <= w[0] <= 0xa6:
+        if w[0] == w[1] == w[2] == w[3] and lo <= w[0] <= hi:
             found.append((off, w[0]))
     found.sort()
     if not found:
@@ -93,12 +96,18 @@ def scan(raw):
     return found
 
 def main():
-    args = [a for a in sys.argv[1:] if a != '--scan']
+    argv = sys.argv[1:]
+    lo, hi = PROBE_LO, PROBE_HI
+    if '--codes' in argv:
+        i = argv.index('--codes')
+        lo, hi = int(argv[i+1], 16), int(argv[i+2], 16)
+        del argv[i:i+3]
+    args = [a for a in argv if a != '--scan']
     if not args:
         sys.exit('usage: decode-slots.py FILE [--scan] [FIRST [LAST]]')
     raw = open(args[0], 'rb').read()
-    if '--scan' in sys.argv[1:]:
-        hits = scan(raw)
+    if '--scan' in argv:
+        hits = scan(raw, lo, hi)
         sys.exit(0 if hits else 1)
     first = int(args[1], 16) if len(args) > 1 else FIRST
     last = int(args[2], 16) if len(args) > 2 else LAST

@@ -222,3 +222,12 @@ See [Mac FD build](../docs/results-2026-11-25-mac-fd-build.md).
 | `out/k27-acceptprobe/boot-piano-ufs265-probe.img` | 185733120 | 86b534f29c528058a85e4ae8660be07f860cfe1ce12d9ab62efac6f683cea5f7 | v2 RAM image carrying that KC, boot id `6d766e67`; `fastboot boot` only, not run yet |
 
 See [the probe result](../docs/results-2026-11-25-acceptnewmedia-probe.md).
+## startMatching probe RAM image (2026-11-25)
+
+| File | Bytes | SHA-256 | What |
+|---|---|---|---|
+| `out/k27-smprobe/piano-ufs266.kc` | 147095552 | 9f276dff4a35ef6ed89ffd2c8a535d3742ed4f843623b744f310c8fa68aca64b | ufs264 KC with 0xB0-0xB7 probes across `IOService::startMatching`: entry, before/after `doServiceMatch`, loop condition, before/after `thread_block`, loop exit and final return |
+| `out/k27-smprobe/boot-piano-ufs266-smprobe.img` | 185733120 | a56f132dc2f3f5e89bbd09f90252c6e630d6f977427a2f9e16267830119e43fe | v2 RAM image carrying that KC, boot id `a79d3a17`; `fastboot boot` only, not run yet |
+
+See [the probe result](../docs/results-2026-11-25-startmatching-probe.md). The
+runner is `tooling/native/run-ufs266-smprobe.ps1`.
