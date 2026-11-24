@@ -1,3 +1,11 @@
+## 2026-11-25 — 设备布局 ESP 已离线构建并复现
+
+`tooling/persist/build-esp.py` 新增 `--esp-first-lba`、`--rootfs-last` 和 `--data-extent`。给定平板候选布局（root 102,269,696-107,512,575；Data 107,512,576-124,289,791；ESP 124,289,792-124,551,935）后，脚本自动把 macos 条目绑定为 `native-ufs-root-part=linux_rootfs data-store-part=linux_data data-store-lba=117735999`，并拒绝 ESP 与 Data 重叠或 24 GiB store 放不下保留区的情况。`tooling/persist/test-esp-geometry.py` 覆盖 LBA、`dd seek=485507`、双向重叠和窗口算术。
+
+Mac 上以固定 `--utc 1795478400` 构建两次，`esp-device.img` 与 `esp-device-repro.img` 哈希一致：1,073,741,824 B，SHA-256 `68c28df15bcf55a589441df37e9c5fd94614e2771c437e955f190e3eb0aab898`，FAT hidden sectors 124,289,792。记录 `~/Codex/k273-esp/out/esp-device.json` 仍标 `OFFLINE_BUILD_NOT_DEVICE_TESTED`，完整命令和校验见 `WRITE-PLAN.md` 的 “ESP build record”。没有向平板写入任何字节。
+
+设备侧仍只有 ADB `unauthorized`：恢复出厂后需要在平板上点一次“允许 USB 调试（始终允许）”。`fastboot devices` 为空。授权后先 `adb reboot bootloader` 记录槽状态，再 RAM 启动维护镜像跑只读 `maint-session.py map`，与候选 GPT 表逐项比对后才讨论写入。所谓 “native k27” 锁定提交 `11ac316b…` 至今没有权威来源；本轮 ESP 使用的是已核对的 `piano-ufs264.kc`（含 k27 0066、boot guard、data-store-lba、PianoA830 标记），不能把它称为那个缺失的提交。
+
 ## 2026-11-24 23:xx — 上游 v13.1y12d 锁定完成；设备侧仍卡 ADB 授权
 
 上游 `lenzhang/main` 经 SSH `git ls-remote` 复核仍为 `480c661a1ffeaf5b0a8e3ca25ff7a62d02aea9b4`，比计划基线 `2438556c` 多 506 个文件，但只是文档/验证批，依赖 pin 未变。完整树已抓成 `upstream-tip-480c661a.zip`（SHA-256 `cdac94d502b226d97d85c781680f2e153205bf0d8dddb06f45cf2fc2ec260009`），`scp` 到 Mac 后解压于 `/Users/zhangqi/Codex/upstream-480c661a`；本地副本移入被忽略的 `out/upstream-audit/`。结论已写入 `REPRODUCIBILITY.md` 的 “Upstream recheck 2026-11-24” 与 `MIGRATION-DIFF.md` 的 “Switching gap against v13.1y12d”。提交 `dfd3360c` 已推送，分支 `main`。

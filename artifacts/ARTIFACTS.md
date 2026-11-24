@@ -198,3 +198,7 @@ rebuilt from package/NativeUfs; each was astboot boot only and returned to Hype
 | `out/no-demura-control/boot-piano-ufs19mark.img` | 185733120 | e0aa46c73cdefe1ea6adff28566999e98c111da1eb0c09d9f5d06b5af740f1fd | SCSI wake completes, IOSleep stops |
 | `out/no-demura-control/boot-piano-ufs20mark.img` | 185733120 | c9615fe1b13a2c6c392670b73e5c25ca484ba71802d221f3d4b4fe288594ad2f | IODelay spin still stops |
 | `out/no-demura-control/boot-piano-ufs21mark.img` | 185733120 | 503c3151616c0bf58f4684d4886c5060c0019c08a50dcb306777e6ec7d830611 | cntvct spin; root windows published |
+
+## Device-layout ESP (2026-11-24, offline)
+
+- `esp-device.img` on the Mac at `~/Codex/k273-esp/out/esp-device.img`, 1,073,741,824 bytes, SHA-256 `68c28df15bcf55a589441df37e9c5fd94614e2771c437e955f190e3eb0aab898`, built twice byte-identically with a fixed `--utc`. FAT hidden sectors 124,289,792; record `~/Codex/k273-esp/out/esp-device.json` says `OFFLINE_BUILD_NOT_DEVICE_TESTED`. Inputs: `piano-ufs264.kc` (`529265c7…`), `paclr53.adt` (`4e904d90…`), `kernel.macho.trustcache.3mod` (`9d225ea3…`), the 24 GiB empty seed (`7e9bd39b…`), and the two pinned firmware files. Host geometry test: `tooling/persist/test-esp-geometry.py`.

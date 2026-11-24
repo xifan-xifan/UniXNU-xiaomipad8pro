@@ -132,9 +132,32 @@ Verified inputs now available: `out/inputs/k273/kc/kc273-mac17j.bin` (124,518,40
 
 Still missing before the first device write, and therefore the current gate:
 
-1. A FAT32 ESP image built for the ESP window above (no `esp-k273*.img` or build record exists on either host). `tooling/persist/build-esp.py` needs `--kc --adt --trust --seed`, an ESP-first-LBA override of 124,289,792, and the firmware files its profile pins (`out/firmware` currently holds only `fs19xx.fsm` and `vpu35_4v.mbn`).
+1. A FAT32 ESP image for the ESP window above: **offline build done** on 2026-11-24 (`esp-device.img`, SHA-256 `68c28df15bcf55a589441df37e9c5fd94614e2771c437e955f190e3eb0aab898`, built twice byte-identically). Its boot arguments bind root to `linux_rootfs` and the Data store to `linux_data` LBA 117,735,999. This is a host artifact only; it has not been written to or booted from the tablet.
 2. A version-2 trust bundle for that ESP. `tooling/k273/make-trust.py` expects a 27.0.1 base bundle (`out/inputs/kernel.macho.trustcache`) that is not present; the three 27.3 IPSW modules are here as IM4P files (`141-22106-021.dmg.trustcache`, `141-22145-021.dmg.aea.trustcache`, `141-22233-021.dmg.aea.trustcache`).
 3. The root image staged and byte-checked against the tablet's copy, and the Data seed written to its window, both with SHA-256 readback.
+
+### ESP build record (2026-11-24, offline)
+
+`tooling/persist/build-esp.py` now takes `--esp-first-lba`, `--rootfs-last` and `--data-extent FIRST LAST`. The extent derives the store binding instead of the historical `linux_rootfs` window: the macos entries get `native-ufs-root-part=linux_rootfs data-store-part=linux_data data-store-lba=117735999`, and an overlap between the ESP and the extent, or a store that does not fit with its 1 GiB reserve, is refused. `tooling/persist/test-esp-geometry.py` covers the device LBA, the `dd seek=485507`, both overlap directions and the binding arithmetic.
+
+Built on the Mac with GNU mtools 4.0.50 and Python 3.9:
+
+```sh
+cd ~/Codex/k273-esp/repo
+env PYTHONPATH=$HOME/Codex/k273-esp/stub PATH=$HOME/Codex/mtools/install/bin:$PATH   PIANO_DATA_STORE_RELAYOUT=1 python3 tooling/persist/build-esp.py --profile daily --from .   --kc ../inputs/piano-ufs264.kc --adt ../inputs/paclr53.adt   --trust ../inputs/kernel.macho.trustcache.3mod --seed ../inputs/scratch-data.img   --firmware-dir ../inputs/firmware --esp-first-lba 124289792 --rootfs-last 107512575   --data-extent 107512576 124289791 --utc 1795478400 --name esp-device --out ../out --default macos
+```
+
+| Item | Value |
+|---|---|
+| image | `~/Codex/k273-esp/out/esp-device.img` |
+| bytes | 1,073,741,824 |
+| SHA-256 | `68c28df15bcf55a589441df37e9c5fd94614e2771c437e955f190e3eb0aab898` |
+| FAT | 4096-byte sectors, 1 per cluster, 262,144 total, hidden sectors 124,289,792 |
+| write window | LUN 0, partition 37 `esp`, LBA 124,289,792-124,551,935; `bs=1M seek=485507 count=1024` |
+| Data binding | `data-store-part=linux_data data-store-lba=117735999` (6,291,649 blocks, 1 GiB reserve at the tail) |
+| record | `~/Codex/k273-esp/out/esp-device.json`, `status: OFFLINE_BUILD_NOT_DEVICE_TESTED` |
+
+The ESP is still only one of the three write inputs. The trust bundle, the staged root image and the boot triplet remain separate gates; no write is authorized by this build.
 
 Execution order once ADB is authorized, all with the tablet cabled and no manual key presses:
 
