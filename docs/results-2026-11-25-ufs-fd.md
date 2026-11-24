@@ -39,3 +39,24 @@ Trial 2 is prepared with `394c5c78…` (`out/persistent-r9test/boot.img`, rebuil
    desktop and acceptance matrix.
 4. A fresh FD build is being prepared on the Mac from the pinned UniXNU, uefi-sheng, DarwinBoot, Mu-Silicium and piano-uefi
    checkouts for reproducibility.
+
+## Content check of the candidate FD (2026-11-25, offline)
+
+The 3 MiB block at byte 4288 of `out/persistent/boot-piano-macos-persistent-v5-ufs.img` decompresses to 8,097,800 bytes
+across the FV's compressed sections (LZMA, GUID `98584eee-…`). Searching the decompressed image proves the three properties
+that matter, from the artifact itself rather than from the build log:
+
+- `UFSDxe` is present, with the Qualcomm package path `QcomPkg/Drivers/UFSDxe/…/UFSDxe.dll` and the DT bindings
+  `/soc/ufs%d`, `/soc/ufs%d/ufs_clk%d`, `/soc/ufs%d/volt_regs/qref_on`.
+- `config: volume %s` is present, so the embedded `UniXNU.efi` carries `firmware/patches/unixnu/0001`.
+- `taken (largest run)` is present in UTF-16, the `DarwinBoot.efi` marker for the 13 GiB RAM window.
+
+The v4 image the earlier `fastboot boot` logs came from has FD `44531624…`; the log stored under
+`out/uefilog-20261125-025522/` is therefore the no-UFS case: `UniXNU: config: RAM Simple File System Unsupported`,
+`config: none found, using built-in configuration`, `menu: shown 4 entries, default 0 'exit'`. That matches the diagnosis and
+is not evidence about the new FD. The later 30 s enumeration trial left no log (its directory is empty), so the new FD has
+never produced a captured log yet.
+
+Artifact: `out/persistent/boot-piano-macos-persistent-v5-ufs.img`, 100,663,296 bytes, SHA-256
+`5de858b8157e9572f9f44ad9648c87d669d6a53e5aecb50630df34d0b080f19c`; `avbtool verify_image` passes with
+`out/keys/piano-boot-v4-local.pem` (footer plus 100,593,664-byte payload).

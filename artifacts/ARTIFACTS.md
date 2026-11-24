@@ -202,3 +202,4 @@ rebuilt from package/NativeUfs; each was astboot boot only and returned to Hype
 ## Device-layout ESP (2026-11-24, offline)
 
 - `esp-device.img` on the Mac at `~/Codex/k273-esp/out/esp-device.img`, 1,073,741,824 bytes, SHA-256 `68c28df15bcf55a589441df37e9c5fd94614e2771c437e955f190e3eb0aab898`, built twice byte-identically with a fixed `--utc`. FAT hidden sectors 124,289,792; record `~/Codex/k273-esp/out/esp-device.json` says `OFFLINE_BUILD_NOT_DEVICE_TESTED`. Inputs: `piano-ufs264.kc` (`529265c7…`), `paclr53.adt` (`4e904d90…`), `kernel.macho.trustcache.3mod` (`9d225ea3…`), the 24 GiB empty seed (`7e9bd39b…`), and the two pinned firmware files. Host geometry test: `tooling/persist/test-esp-geometry.py`.
+| `out/persistent/boot-piano-macos-persistent-v5-ufs.img` | 100663296 | 5de858b8157e9572f9f44ad9648c87d669d6a53e5aecb50630df34d0b080f19c | slot A boot: v4 BootShim+DTB with FD `394c5c78` (UFSDxe, `config: volume`, 13 GiB window), AVB signed; RAM trial pending |
