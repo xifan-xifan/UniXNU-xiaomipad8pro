@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Decode the in-image piano_stage_slots table (piano_dbg_kv / piano_dbg_slot).
 
-Read it back with:  fastboot -s piano-uefi oem dump 8c5941080 2000 && get_staged slots.bin
+Read it back with:  fastboot -s piano-uefi oem dump 8c5912880 2000 && get_staged slots.bin
 The table has one 32-byte entry per code 0x0b..0xca; piano_dbg_kv() stores the same
 64-bit value in all four words of the entry, so a bitwise majority over the four is
 the value and the distance between copies is the damage seen across the reset.

@@ -33,7 +33,7 @@ Read-back of that fault was attempted with the menu image after the ufs256 reset
 at the transport: `oem dump 9cb00000 700000` answered `FAILED (Status read failed (Too many
 links))` while the reader was still enumerated as `piano-uefi`. The next read-back is the
 8 KiB one: `sleh_synchronous` already records ESR/FAR/PC/x16/x17 in `piano_dbg_kv` slots
-0x7b-0x7f, which live in the image's own `piano_stage_slots` table at PA 0x8c5941080, and
+0x7b-0x7f, which live in the image's own `piano_stage_slots` table at PA 0x8c5912880, and
 `tooling/native/run-ufs256-dump2.ps1` reboots to the bootloader first so the reader is
 booted from a fresh USB session. ufs264 and that script are ready; the run is waiting for
 the tablet to leave the `adb` `unauthorized` state HyperOS came back in.

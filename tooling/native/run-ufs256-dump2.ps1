@@ -3,7 +3,7 @@
 # Stage 2: fastboot reboot bootloader + settle (the successful captures never booted the
 #          reader from the fastboot session that had just seen the test image return).
 # Stage 3: reader.img, then ONE small dump: the in-image piano_stage_slots table
-#          (PA 0x8c5941080, 0x2000) which is where piano_dbg_kv() keeps probe91's
+#          (PA 0x8c5912880 = _piano_stage_slots 0xfffffff00c912880 - 0xfffffff007004000 + 0x8c0004000, 0x2000) which is where piano_dbg_kv() keeps probe91's
 #          ESR/FAR/PC/x16/x17. Falls back to a 0x1000 dump and then the 7 MiB console.
 $ErrorActionPreference='Continue'
 $d='7ccdd855'; $pt='E:\project\UniXNU-xiaomipad8pro\out\pt33\platform-tools'; $a="$pt\adb.exe"; $f="$pt\fastboot.exe"
@@ -44,8 +44,8 @@ try {
   if(!(Fast 'piano-uefi' 30)){ 'piano-uefi did not appear'; exit 5 }
   "reader up after {0:N1}s" -f ((Get-Date)-$t0).TotalSeconds
   Start-Sleep -Milliseconds 1500
-  $ok = Dump 'ufs256-slots' '8c5941080' '2000'
-  if(!$ok){ $ok = Dump 'ufs256-slots1k' '8c5941080' '1000' }
+  $ok = Dump 'ufs256-slots' '8c5912880' '2000'
+  if(!$ok){ $ok = Dump 'ufs256-slots1k' '8c5912880' '1000' }
   if(!$ok){ $ok = Dump 'ufs256-panic' '8c5945000' '20000' }
   if(!$ok){ $ok = Dump 'ufs256-console' '9cb00000' '700000' }
   "readback_ok=$ok"
@@ -53,3 +53,4 @@ try {
 } finally {
   Stop-Transcript | Out-Null
 }
+
