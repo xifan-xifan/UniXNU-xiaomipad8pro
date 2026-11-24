@@ -48,28 +48,40 @@ try {
   if($LASTEXITCODE -ne 0){ 'fastboot boot refused the probe image'; exit 3 }
   if(!(WaitFast $s $WaitBoot)){ 'probe image never returned to fastboot'; exit 4 }
   "probe returned after {0:N1}s" -f ((Get-Date)-$t0).TotalSeconds
-  & $f -s $s reboot bootloader 2>&1 | Out-Null
-  Start-Sleep -Seconds 7
-  if(!(WaitFast $s 90)){ 'no fastboot after reboot'; exit 5 }
-  & $f -s $s boot $reader 2>&1 | Out-Null
-  if(!(WaitReader $WaitReader)){ 'reader did not appear'; exit 6 }
-  Start-Sleep -Seconds 2
-  $staged = Join-Path $root 'out\k27-acceptprobe\ufs265-region.bin'
-  $ok = $false
-  for($i=1; $i -le 3; $i++){
-    $o = (& $f -s piano-uefi oem dump 8c5000000 1000000 2>&1 | Out-String)
-    "dump#$i rc=$LASTEXITCODE : $($o.Trim())"
-    if($LASTEXITCODE -eq 0){
-      & $f -s piano-uefi get_staged $staged 2>&1 | Out-Null
-      $fi = Get-Item -LiteralPath $staged -ErrorAction SilentlyContinue
-      if($fi -and $fi.Length -gt 0){ "staged $($fi.Length) bytes"; $ok = $true; break }
-    }
-    if(!(WaitReader 5)){ 'reader gone'; break }
-    Start-Sleep -Milliseconds 800
-  }
-  if(!$ok){ 'no slots read back'; exit 7 }
   $decoder = Join-Path $root 'tooling\native\decode-slots.py'
-  python $decoder $staged --scan
-  if($LASTEXITCODE -ne 0){ 'no probe entry in the 1 MiB window'; exit 8 }
-  "readback_ok=$ok"
+  # One dump per reader boot is all this channel allows, so every window costs a
+  # fresh reader. 1 MiB at 0x8c5000000 tolerates a slide; 0x2000 at
+  # 0x8c5912880 is the static _piano_stage_slots page that already read back once
+  # and is the smaller, safer retry.
+  $windows = @(
+    @{ Name='region'; Addr='8c5000000'; Size='1000000' },
+    @{ Name='slots';  Addr='8c5912880'; Size='2000' }
+  )
+  $done = $false
+  foreach($w in $windows){
+    & $f -s $s reboot bootloader 2>&1 | Out-Null
+    Start-Sleep -Seconds 7
+    if(!(WaitFast $s 90)){ 'no fastboot after reboot'; exit 5 }
+    & $f -s $s boot $reader 2>&1 | Out-Null
+    if(!(WaitReader $WaitReader)){ 'reader did not appear'; exit 6 }
+    Start-Sleep -Seconds 2
+    $staged = Join-Path $root ("out\k27-acceptprobe\ufs265-{0}.bin" -f $w.Name)
+    $ok = $false
+    for($i=1; $i -le 3; $i++){
+      $o = (& $f -s piano-uefi oem dump $w.Addr $w.Size 2>&1 | Out-String)
+      "{0} dump#{1} rc={2} : {3}" -f $w.Name,$i,$LASTEXITCODE,$o.Trim()
+      if($LASTEXITCODE -eq 0){
+        & $f -s piano-uefi get_staged $staged 2>&1 | Out-Null
+        $fi = Get-Item -LiteralPath $staged -ErrorAction SilentlyContinue
+        if($fi -and $fi.Length -gt 0){ "{0} staged {1} bytes" -f $w.Name,$fi.Length; $ok = $true; break }
+      }
+      if(!(WaitReader 5)){ 'reader gone'; break }
+      Start-Sleep -Milliseconds 800
+    }
+    if(!$ok){ "no bytes read back from {0}" -f $w.Name; continue }
+    python $decoder $staged --scan
+    if($LASTEXITCODE -eq 0){ "readback_ok=$($w.Name)"; $done = $true; break }
+    "{0} window holds no probe entry" -f $w.Name
+  }
+  if(!$done){ 'probe code not found in either window'; exit 8 }
 } finally { Stop-Transcript | Out-Null }

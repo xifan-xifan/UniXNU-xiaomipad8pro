@@ -844,15 +844,18 @@ tablet, which stayed off USB.
 `out/k27-acceptprobe/piano-ufs265.kc` (`d68bb240…`) carries codes 0xA0-0xA6 at `acceptNewMedia` entry, around
 `instantiateMediaObject`, `attach`, `attachToParent` and `registerService`; the stubs sit in the 1,657-byte zero hole at
 `0xfffffff00bc07988` and preserve x0-x18, NZCV and x30. It is installed in
-`out/k27-acceptprobe/boot-piano-ufs265-probe.img` (185,733,120 B, `ba9285ec…`, boot id `f660cd6e…`) by replacing
+`out/k27-acceptprobe/boot-piano-ufs265-probe.img` (185,733,120 B, `e6c1f8b1…`, boot id `014e3b0b…`) by replacing
 `EFI/UniXNU/Payloads/kernel.macho` inside the v2 ramdisk's FAT32 volume (file chain starts at cluster 5, 71,824 clusters,
 same length) and recomputing the Android id; `out/fatswap.py` does what the archived scripts did with `mcopy`, since WSL
 is unusable here. A byte diff against `boot-piano-ufs264cfg.img` shows 898 changed bytes in 54 runs: the id, the seven
 4-byte branches and the 896-byte stub block. The embedded collection in the ufs264 image is byte-identical to
 `out/inputs/piano-ufs264.kc`, so the swap path is sound.
 
-`tooling/native/run-ufs265-probe.ps1` boots that image, waits for the return to fastboot, boots `reader.img`, dumps
-`8c5912880`/`0x2000` once and reports which of 0xA0-0xA6 are non-zero; the last code is the stop point. It checks both
+`tooling/native/run-ufs265-probe.ps1` boots that image, waits for the return to fastboot, boots `reader.img`, dumps one window and reports which of 0xA0-0xA6 were written; the last code is the stop point.
+The first window is 1 MiB at `0x8c5000000`, scanned for four equal words in 0xA0-0xA6, because the earlier
+8 KiB read at `0x8c5912880` was not the slot table and a slide must not hide the answer. If that window
+returns nothing, the runner spends a second reader boot on `0x8c5912880`/`0x2000`, the page that already
+read back once, and scans it the same way; one reader boot allows exactly one `oem dump`. It checks both
 image hashes first and discovers the serial instead of hard-coding `7ccdd855`. Run: `powershell -NoProfile -File
 tooling\native\run-ufs265-probe.ps1`. Without a device it exits 2 with `no adb and no fastboot device`, which is the
 current state: the tablet has been off USB since 03:18. Nothing has been flashed; this is a `fastboot boot` probe.
