@@ -1413,8 +1413,9 @@ def map_step(s):
         s.need(r['lun0_block_size'] == '4096' and r['lun0_bytes'] == str(LUN0_BYTES), f'LUN 0 {r["lun0"]}: 4096-byte blocks, {LUN0_BYTES} bytes')
         s.need(r['mounted'] == '0', 'nothing from UFS is mounted')
         start, size = (int(x) for x in r['linux_rootfs'].split()[1:]) if r['linux_rootfs'] != 'none' else (None, None)
-        geometry = start == common.ROOTFS_FIRST * 8 and size in ((common.ROOTFS_LAST - common.ROOTFS_FIRST + 1) * 8,
-                                                                 (common.ROOTFS_NEW_LAST - common.ROOTFS_FIRST + 1) * 8)
+        windows = {common.ROOTFS_FIRST: (common.ROOTFS_LAST - common.ROOTFS_FIRST + 1, common.ROOTFS_NEW_LAST - common.ROOTFS_FIRST + 1),
+                   common.CANDIDATE_ROOTFS_FIRST: (common.CANDIDATE_ROOTFS_LAST - common.CANDIDATE_ROOTFS_FIRST + 1,)}
+        geometry = start is not None and start % 8 == 0 and size % 8 == 0 and size // 8 in windows.get(start // 8, ())
         if elsewhere:
             s.log(f'  info  linux_rootfs {r["linux_rootfs"]} (512-byte units): no entry of {target["image"]} uses it')
         else:
@@ -1437,7 +1438,9 @@ def map_step(s):
                         ('init_boot_a', common.INIT_BOOT_A_SHA256), ('boot_b', None)):
         got = s.region_sha(s.nodes[key], 0, s.sizes[key] // MiB, MiB, name=f'sha-{key}')
         if key in ('vendor_boot_a', 'init_boot_a'):
-            s.need(got == digest if s.execute else None, f'{key} = slot A\'s current image {digest[:16]}')
+            stock = getattr(common, 'STOCK_' + key.upper() + '_SHA256', None)
+            s.need(got in (digest, stock, s.state.get(f'{key}_sha256')) if s.execute else None,
+                   f'{key} = slot A\'s stock or retained image ({got[:16] if got else "-"})')
         elif not s.execute:
             s.log(f'  info  {key} sha256 is recorded ({"Ubuntu 13-boot_a " + digest[:16] + " or the macOS image" if digest else "never written"})')
         elif key == 'boot_a':
@@ -2145,7 +2148,9 @@ def boot_a_step(s):
     s.require_backup('boot_b')
     for key, digest in (('vendor_boot_a', common.VENDOR_BOOT_A_SHA256), ('init_boot_a', common.INIT_BOOT_A_SHA256)):
         got = s.region_sha(s.nodes[key], 0, s.sizes[key] // MiB, MiB, name=f'sha-{key}')
-        s.need(got == digest if s.execute else None, f'{key} is slot A\'s current image {digest[:16]} (ABL pairs it with boot_a)')
+        stock = getattr(common, 'STOCK_' + key.upper() + '_SHA256', None)
+        s.need(got in (digest, stock, s.state.get(f'{key}_sha256')) if s.execute else None,
+               f'{key} is slot A\'s stock or retained image ({got[:16] if got else "-"}) (ABL pairs it with boot_a)')
     s.fetch('boot.img', image, signed or '<signed sha256>')
     if s.write(f'{image.name} -> /dev/{boot_a} ({common.BOOT_PARTITION_BYTES} bytes)'):
         s.t('write', 'boot.img', boot_a, 0, MiB, timeout=600)

@@ -45,6 +45,11 @@ RESERVE_BLOCKS = 1024 * 256
 STORE_SCRATCH_FIRST = 64711424
 # The boot triplet on LUN 4 (CRITICAL-BACKUP/boot-partitions.json; backups in partition_backup()'s sde/).
 BOOT_A_SHA256 = '389d4271743bb4c69664bdb31c34440589978c8add3af0ce9190c46045259a87'      # 13-boot_a (Ubuntu, key f5151930)
+# The stock 3.0.309 triplet the tablet has after restore (maintenance RAM read, 2026-11-21 and 2026-11-24). It replaced the Ubuntu
+# set when the tablet was restored to factory HyperOS; both are recognized so a session never mistakes a stock image for a change.
+STOCK_BOOT_A_SHA256 = '7c444a2d6aa930cd79e2d48c569f6c891fbaff054c63fc85c3a57fb61c660ac2'
+STOCK_VENDOR_BOOT_A_SHA256 = '7f766f1d728c39d779a3fb7cf0ac1310dac4306cd3b37a98a0143dd4fca5bd23'
+STOCK_INIT_BOOT_A_SHA256 = '56197797f2ec99870a4e42b7a24bbf88407e4409615aba61f401182f13ea5cdc'
 VENDOR_BOOT_A_SHA256 = '50f70e361b927945afa4adb5ddc9947e39a136cd2cd2e28a311a4c3d2163829a'  # 23-vendor_boot_a (Ubuntu)
 INIT_BOOT_A_SHA256 = 'bbebc3d156fa4bffbdf2fdf83940a71a1ec6d64dcddc60977ece057eb1147061'    # 28-init_boot_a (Ubuntu)
 BOOT_PARTITION_BYTES = 100663296
