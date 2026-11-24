@@ -52,3 +52,13 @@ embedded `__DATA` are byte-identical.
 Every run returned unattended to HyperOS OS3.0.309.0.WPYCNXM on `_a` with
 `sys.boot_completed=1`; no partition, GPT, boot image or userdata write was
 issued.
+
+## The slot table address was transcribed wrong
+
+The kernel `__TEXT` base is IPA `0x8c0004000`. `_piano_stage_slots` sits at
+`0xfffffff00c912880`, which is `+0x912880` from the text base, so its IPA is
+`0x8c0004000 + 0x912880 = 0x8c0916880`. The earlier dump used
+`0x8c5912880`, two transposed groups, which explains both why it succeeded
+(that page is mapped) and why its contents looked like page tables instead of
+probe slots. The next ufs264 warm-session dump should request
+`0x8c0916880 1800`.
