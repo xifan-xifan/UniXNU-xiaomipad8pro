@@ -827,3 +827,15 @@ it then `assert_wait` + `thread_block` (IOService.cpp:1175-1195), which the earl
 image has to log entry/return of `IOBlockStorageDriver::start` and the busy count to tell "blocked inside the driver" from
 "blocked in the wait loop".
 
+
+2026-11-25: [acceptNewMedia audit](docs/results-2026-11-25-acceptnewmedia-audit.md). Apple's `IOBlockStorageDriver::start`
+runs `handleStart` -> `checkForMedia` -> `mediaStateHasChanged` -> `recordMediaParameters` -> `acceptNewMedia`; ufs171's
+console ends right after `recordMediaParameters`, so the stop is inside `acceptNewMedia` (IOMedia create, `attach`,
+`attachToParent` in the driver tree, then asynchronous `registerService`), not proven to be the `startMatching` wait. The
+collection `out/inputs/piano-ufs264.kc` keeps `LC_SYMTAB` for IOStorageFamily (1,477 symbols) and the kernel, so probes can
+go on named entries: `acceptNewMedia` `0xfffffff00aeb8260`, `instantiateMediaObject` `0xfffffff00aeba1d4`,
+`recordMediaParameters` `0xfffffff00aeba5d0`, `IOService::startMatching` `0xfffffff00c1450ec`, `_piano_dbg_kv`
+`0xfffffff00bbc7590`, `_piano_stage_slots` `0xfffffff00c912880`. The KC builder is present locally
+(`out/k27-independent-20261120/host-run/kc-preflight`), so a kernel-only rebuild or an in-place code patch needs no tree;
+compiling a `package/` kext still needs the absent `PIANO_K27_TREE` recipes and generated headers. Nothing touched the
+tablet, which stayed off USB.
