@@ -1,3 +1,21 @@
+## 2026-11-25 — `oem dump` 由可用退化为持续失败；`oem log` 仍正常
+
+实机顺序（每条都是 reader 启动后的第一条设备命令）：
+
+| 会话 | 请求 | 结果 |
+| --- | --- | --- |
+| 冷启动 | `8c0004000 100` | OKAY，256 B 全 0 |
+| 冷启动 | `9cb00000 100` | `Too many links` |
+| 冷启动 | `8c0004000 100` 复测 | `Too many links` |
+| ufs264 热会话 | `8c0916880 1800` / `8c0004000 100` | `Too many links` |
+| ufs264 热会话 | `9cb00000 700000` / `2000` | `Too many links` |
+| ufs264 热会话 | `8c5912880 2000` 三次重试 | `Too many links`，reader 掉线 |
+
+对照：同一 reader 版本里 `oem log` + `get_staged reader-fw.log` 正常（100 B），所以暂存/批量通路没问题，只有 `oem dump` 失败；同一地址同一长度早些时候成功、晚些时候失败，所以不是地址属性。`pnputil /restart-device "USB\VID_18D1&PID_4E11\7ccdd855"` 即使提权也是 `Access is denied`，沙箱内无法重置该接口。
+
+结论：RAM 读回卡在主机 USB 层。需要重新建立平板的 USB 连接（换端口或重新插拔）后才能读 ufs264 的同步异常寄存器。设备现处 HyperOS OS3.0.309.0.WPYCNXM `_a`，`sys.boot_completed=1`，无任何写入。
+
+另外纠正一处记录：`_piano_stage_slots` 的 PA 就是 `0x8c5912880`（换算 `VA - 0xfffffff007004000 + 0x8c0004000`），之前写的 `0x8c0916880` 是我算错的，该地址未映射。
 ## 2026-11-25 — `oem dump` 通道规则查清：每次 reader 启动只能发一条命令，未映射地址表现为 `Too many links`
 
 实机验证（详见 `docs/results-2026-11-25-dump-channel.md`）：
@@ -751,6 +769,7 @@ The [SHA-256 HMAC final trial](docs/results-2026-11-22-sha2final-live.md) advanc
 
 2026-11-23: [NativeUfs DMA stall and the KC base](docs/results-2026-11-23-native-ufs-dma-and-kc-base.md). The working base image's console ends its UFS path at `NativeUfs: DMA attempt 0: 2138112 bytes (slots 16, wide 1)` with no attempt 1, while other CPUs keep printing (`CoreAnalyticsHub`, `mbinit`, `NativeGopDisplay`), so the thread is stuck inside the first `IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, kIOMemoryPhysicallyContiguous|kIOMemoryMapperNone, 2138112, 4096)`. Instrumentation for that call is in `package/NativeUfs/NativeUfs.cpp` and compiles as a kext object on the Mac. The Mac KC builder cannot currently carry it: with the only local base, the already-built `paclr53-unpatched.kc`, four rebuilds (47 entries with NativeUfs, all 81 kept with NativeUfs, identity with nothing re-linked, identity plus `compact-kc-linkedit.py`) all stop right after IONVRAM, before AMFI, security-policy init, `piano-reset-to` arming and `StartIOKitMatching`; the identity build proves re-emitting a built collection is the broken step, not the kext change and not linkedit size. The documented 27.3 recipe needs Apple's `kernelcache.release.mac17j` as `KC_BASE` plus `patches/k27-kc/0001` best-fit placement (the recovered host-run builder lacks it, which is why 26 natives do not fit). Blocked on `out/inputs/k273/kc/kc273-mac17j.bin` and a k27 tree prepared by `tooling/k273/prepare-k27-tree.sh`. Every run in this round returned unattended in 67.6-67.7 s through the Gunyah watchdog and came back to completed HyperOS OS3.0.309.0.WPYCNXM; no partition, GPT, boot-image or userdata write was issued.
 2026-11-23: [ufs101-103](docs/results-2026-11-23-ufs101-amfi-initbsd-defer.md) removed the inline AMFI `mpo_policy_initbsd` wait (thread per deferred policy after `mac_policy_release_exclusive()`) and replaced the dead `thread_call` reset tick with a kernel ticker. ufs101 reached `NativeRamBlock` and `bsd_autoconf: IOKitBSDInit rc=0`; ufs102 showed the Gunyah watchdog still bites at 32 s without pets; ufs103 spun on `mach_absolute_time()`, reset itself at 240 s (277.8 s wall), and the decoded console reached `bsd_init: calling setconf`, the registry walk (`visited=6 emitted=3`) and `piano: media wait bounded match 30s`. Root UUID `84581E99-85BE-4957-AC53-2947E887B3E4` was absent and the buzzy ticker starved the deferred AMFI worker, so `waitForMatchingService` never returned. ufs104 proved `thread_block(THREAD_CONTINUE_NULL)` blocks forever here (84.7 s bite, no spin beats). ufs105 uses `thread_block_reason(THREAD_CONTINUE_NULL, NULL, AST_YIELD)` once a second in the ticker; built, to be run. Every run is `fastboot boot` only and returns unattended to completed HyperOS OS3.0.309.0.WPYCNXM A; no partition, GPT, boot image or userdata write.2026-11-24: [ufs164-171](docs/results-2026-11-24-ufs164-171.md) moved the storage boundary: manual IOMedia publication never matched, and asynchronous registerService is not consumed this early, but calling `startMatching(kIOServiceSynchronous)` inside the publish thread let IOBlockStorageDriver match, run every `IOBlockStorageDevice` callback and issue real block reads (OCS=0). The OS window APFS container UUID reads `A7672058-6BF2-44D4-AE1F-CBF9CF814C0D`; SystemOS is `79F45B3D-B2A6-4497-8467-1CFF475F2415`. The booter still waits on volume UUID `84581E99-85BE-4957-AC53-2947E887B3E4`, no IOMedia node appears and `startMatching` never returns, so the driver start path is the current blocker. All runs were `fastboot boot` only and returned unattended to completed HyperOS OS3.0.309.0.WPYCNXM; no desktop, userland, switch or Data persistence yet.
+
 
 
 

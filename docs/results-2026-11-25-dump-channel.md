@@ -53,12 +53,42 @@ Every run returned unattended to HyperOS OS3.0.309.0.WPYCNXM on `_a` with
 `sys.boot_completed=1`; no partition, GPT, boot image or userdata write was
 issued.
 
-## The slot table address was transcribed wrong
+## The slot table address is right after all
 
-The kernel `__TEXT` base is IPA `0x8c0004000`. `_piano_stage_slots` sits at
-`0xfffffff00c912880`, which is `+0x912880` from the text base, so its IPA is
-`0x8c0004000 + 0x912880 = 0x8c0916880`. The earlier dump used
-`0x8c5912880`, two transposed groups, which explains both why it succeeded
-(that page is mapped) and why its contents looked like page tables instead of
-probe slots. The next ufs264 warm-session dump should request
-`0x8c0916880 1800`.
+The kernel links at VA `0xfffffff007004000` and DarwinBoot places it at PA
+`0x8c0004000`, so a symbol's PA is `VA - 0xfffffff007004000 + 0x8c0004000`.
+`_piano_stage_slots` at `0xfffffff00c912880` therefore lands at
+`0x8c5912880`, which is the address `run-ufs256-dump2.ps1` used. An earlier
+note in this file claimed the value was a transposition of `0x8c0916880`; that
+was wrong, `0x8c0916880` is not mapped.
+
+## Then the dump path stopped working altogether
+
+After the first successful 256-byte read, every later `oem dump` failed with the
+same status error, whatever the address, size or timing:
+
+| Session | Request (always the first device command) | Result |
+| --- | --- | --- |
+| cold, from Android | `8c0004000 100` | OKAY, 256 bytes, all zero |
+| cold, from Android | `9cb00000 100` | `Too many links` |
+| cold, from Android | `8c0004000 100` again | `Too many links` |
+| warm, after ufs264 | `8c0916880 1800` | `Too many links` |
+| warm, after ufs264 | `8c0004000 100` | `Too many links` |
+| warm, after ufs264 | `9cb00000 700000` and `9cb00000 2000` | `Too many links` |
+| warm, after ufs264 | `8c5912880 2000`, three retries | `Too many links`, reader dropped |
+
+Two controls separate the variable:
+
+- `oem log` plus `get_staged reader-fw.log` still succeeds in the same reader
+  build, so the staging and bulk paths are healthy. Only `oem dump` fails.
+- The identical 256-byte request at `0x8c0004000` succeeded earlier in the day
+  and failed later, so the failure is not a property of the address.
+
+A host-side re-enumeration was attempted: `pnputil /restart-device
+"USB\VID_18D1&PID_4E11\7ccdd855"` is denied with `Access is denied` even when
+run escalated. Nothing in the sandbox can reset that interface.
+
+Conclusion: the RAM readback route is blocked at the host USB layer for now.
+The stage-slot and console dumps need a working `oem dump`, which needs the
+tablet's USB connection re-established (different port or a re-plug) before the
+ufs264 crash registers can be read.
