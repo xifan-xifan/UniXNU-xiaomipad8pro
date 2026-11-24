@@ -123,3 +123,26 @@ The [live layout recheck](docs/results-2026-11-22-live-layout-recheck.md) verifi
 3. Write partition blocks 0 through 4284159 inclusive and flush. Hash the full image range directly from the medium, compare the remaining partition tail against its preflight hash, and recheck both GPT hashes. Record the checks alongside the write result.
 4. Record the blank preflight, source hash and extent before starting. After an interrupted transfer, reenter maintenance, confirm the previous writer has stopped, revalidate identity and geometry, and read back the target. A matching image hash qualifies the written range. A known partial write with a matching run record can be retried with the same image from block zero. Stop on unexpected contents or geometry. The historical `rootfs-clear` prerequisite belongs to a different layout.
 5. Rehearse target mismatch, short transfer and readback mismatch on the host before running the writer on hardware. Return via ABL and verify the active slot and HyperOS boot completion. Data, ESP and boot image installation are later phases.
+
+## v2 install sequence on the installed candidate layout (2026-11-24)
+
+The candidate GPT is already on the tablet and read back (2026-11-21): userdata ends at LBA 102,269,695; macOS root 102,269,696-107,512,575 (20 GiB); Data 107,512,576-124,289,791 (64 GiB); ESP 124,289,792-124,551,935 (1 GiB), all 4096-byte sectors. The live names must be read back with `maint-session.py map` before any write; the table above is the offline record, not a substitute.
+
+Verified inputs now available: `out/inputs/k273/kc/kc273-mac17j.bin` (124,518,400 B, SHA-256 `d1003b5143ffd88439b4d45b6017f587171cfe6855660bed05370a2ea5db9fe9`, the macOS 27.3 `26C5035r` KC base pin); `out/piano-stock-root-26C5035r.img` (17,543,725,056 B, fits the 20 GiB root window); `out/inputs/k273/first-install/scratch-data.img` (22,200,480 B, empty Data seed); `out/paclr53.adt` (15,736 B) with its collection `out/no-demura-control/paclr53.kc`; the Apple root/SystemOS AEA and decrypted DMGs on `D:\Download\piano-macos-273-inputs` (each SHA-256 verified against its IPSW-member JSON).
+
+Still missing before the first device write, and therefore the current gate:
+
+1. A FAT32 ESP image built for the ESP window above (no `esp-k273*.img` or build record exists on either host). `tooling/persist/build-esp.py` needs `--kc --adt --trust --seed`, an ESP-first-LBA override of 124,289,792, and the firmware files its profile pins (`out/firmware` currently holds only `fs19xx.fsm` and `vpu35_4v.mbn`).
+2. A version-2 trust bundle for that ESP. `tooling/k273/make-trust.py` expects a 27.0.1 base bundle (`out/inputs/kernel.macho.trustcache`) that is not present; the three 27.3 IPSW modules are here as IM4P files (`141-22106-021.dmg.trustcache`, `141-22145-021.dmg.aea.trustcache`, `141-22233-021.dmg.aea.trustcache`).
+3. The root image staged and byte-checked against the tablet's copy, and the Data seed written to its window, both with SHA-256 readback.
+
+Execution order once ADB is authorized, all with the tablet cabled and no manual key presses:
+
+1. `adb reboot bootloader`; record `getvar current-slot`, `slot-successful:a`, `slot-retry-count:a`, `snapshot-update-status`, and the partition size of `boot_a`.
+2. `fastboot boot <maintenance RAM image>`; `maint-session.py map` (read-only) and compare every name, first/last LBA and size with the table.
+3. Write the ESP image into its window, drop caches, read the region back and match its SHA-256.
+4. Write the root image window and the Data seed window the same way, each preceded by a region readback of what was there and followed by a SHA-256 readback.
+5. RAM-boot the matching image with `data-persist=0` first (no store writes), confirm desktop, then the persistent profile.
+6. Three cold starts, two Android->macOS->Android cycles with the slot success bit and retry counters recorded before and after each exchange, a Data write followed by a restart readback, a normal restart, and a hard-reset recovery.
+
+Rollback: restore the captured stock GPT from `out/rollback-3.0.309-gpt`; slot A's HyperOS triplet is never written by these steps; userdata is already empty, so the shortened geometry needs only a first-boot format by Android.
