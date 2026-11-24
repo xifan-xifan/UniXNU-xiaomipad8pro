@@ -821,3 +821,9 @@ five entries, an 8 GiB `ram_window` paired with the 13 GiB FD, and `data-store-p
 `taken (largest run)`, `UFSDxe` and `/soc/ufs%d`, so the FD built by `build-fd.sh` carries the UFS stack and both patch
 markers through packing.
 
+2026-11-25: [startMatching wait audit](docs/results-2026-11-25-startmatching-wait-audit.md). In the k27 XNU tree at
+`E:/Temp/k27-native-candidate-20261119-a`, `IOService::startMatching` waits only when the match leaves the busy count raised;
+it then `assert_wait` + `thread_block` (IOService.cpp:1175-1195), which the earlier runs showed never resumes here. The next
+image has to log entry/return of `IOBlockStorageDriver::start` and the busy count to tell "blocked inside the driver" from
+"blocked in the wait loop".
+
