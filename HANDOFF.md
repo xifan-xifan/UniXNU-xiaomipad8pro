@@ -1,3 +1,14 @@
+## 2026-11-24 23:xx — 上游 v13.1y12d 锁定完成；设备侧仍卡 ADB 授权
+
+上游 `lenzhang/main` 经 SSH `git ls-remote` 复核仍为 `480c661a1ffeaf5b0a8e3ca25ff7a62d02aea9b4`，比计划基线 `2438556c` 多 506 个文件，但只是文档/验证批，依赖 pin 未变。完整树已抓成 `upstream-tip-480c661a.zip`（SHA-256 `cdac94d502b226d97d85c781680f2e153205bf0d8dddb06f45cf2fc2ec260009`），`scp` 到 Mac 后解压于 `/Users/zhangqi/Codex/upstream-480c661a`；本地副本移入被忽略的 `out/upstream-audit/`。结论已写入 `REPRODUCIBILITY.md` 的 “Upstream recheck 2026-11-24” 与 `MIGRATION-DIFF.md` 的 “Switching gap against v13.1y12d”。提交 `dfd3360c` 已推送，分支 `main`。
+
+关键事实：v13.1y12d **没有 tag 或 release**，锁定依据是 README 的描述加构建记录；README 自认 OS switcher 只有 RAM 只读验证，“A full switch to Android has not been tested”，所以两轮双向切换在本机必须自己实现与验收。上游日常布局是 root 在 `linux_rootfs`、Data 是 `linux_data` 上 200 GiB（LBA 71859642），且依赖作者私有的 v1.1.0 维护镜像、签名密钥和 200 GiB seed，无法照搬。
+
+本机已有可复用资产：候选 GPT 早已写入并读回（`WRITE-PLAN.md` 顶部：userdata 截止 LBA 102269695、root 102269696-107512575、Data 107512576-124289791、ESP 124289792-124551935），`out/piano-stock-root-26C5035r.img`（16.34 GiB，能放进 20 GiB root 区），`out/inputs/k273/first-install/scratch-data.img`（22,200,480 B），以及 `out/no-demura-control/*.kc`（129.5 MB 级内核集合）与对应 `.macho`。Mac 侧 `/private/tmp` 里有稀疏 root 表镜像（`piano-root-26C5035r.593r2m`、`piano-root-tables.LLOseQ`、`piano-vroot-layout-yiktynqv`、`piano-stock-root.1ubLtk`）和 `native-driver-checkpoint/piano-boot.dtb`。
+
+仍然缺的是成套的 ESP/启动集：本机与 Mac 全盘都没有任何 `esp-k273*.img` 或 build record，`build-k273-esp.py` 需要 `--base` 的 ESP 记录；`out/firmware` 只有 `fs19xx.fsm` 和 `vpu35_4v.mbn`；trust cache 与 ADT 尚未按 27.3 集合重新生成。Apple 27.3 素材（`kc273-mac17j.bin`、`root.json`）也仍未找到。Mac 只剩 9.8 GiB 空闲。
+
+设备侧：`adb devices` 仍是 `7ccdd855 unauthorized`（ADB server 重启后一样），`fastboot devices` 空。恢复出厂清掉了 ADB 授权，必须在平板上点一次“允许 USB 调试（始终允许）”；这是当前唯一无法由主机完成的动作。ufs264 已构建未运行，ADB 恢复后可直接跑 `tooling/native/run-ufs264.ps1`。fastboot 通路也需要同一次重启进入 bootloader 才能验证。
 ## 2026-11-24 21:00 — IRQ 链路已通，死亡点是同步异常；ufs264 已构建，读回通道待 ADB 授权
 
 实机已验证（RAM 启动，`piano-reset-after` 自动回 fastboot）：
