@@ -8,7 +8,7 @@ relink, no `paclr264.macho` and no keep list are needed.
 Input: `out/inputs/piano-ufs264.kc`, 147,095,552 B, SHA-256
 `529265c7839c51fe4d643af3228f4061297dd5d2ed5cce3e585fbc6bcca14a72`.
 Output: `out/k27-acceptprobe/piano-ufs265.kc`, same size, SHA-256
-`30f0d67397562a86dc8f9b882ed92b6fe53734c938093a94eac2d1c0e89bcf99`.
+`d68bb2404d5ba9e50acbdd875a2e3161dcc17c88ff1907aa5cabc6e87cec715d`.
 
 | code | address | replaced instruction | position |
 |---|---|---|---|
@@ -47,8 +47,8 @@ layout and its signature have to be checked before swapping the blob.
 ## RAM image assembly
 
 `out/k27-acceptprobe/boot-piano-ufs265-probe.img`, 185,733,120 B, SHA-256
-`ba9285ec8cc73403a34f6383e2b85c2861d8071435c7c1aea4ce906fdcdc7f84`, boot id
-`f660cd6ef6ba97000f9ba922fd45cab4e8826076`.
+`e6c1f8b1649dc60b491a102823786b8895bc8ce52ff1fb5d376369e034743b2a`, boot id
+`014e3b0ba8ffacf427333c3362bc06298582e59c`.
 
 It is `boot-piano-ufs264cfg.img` with one file replaced inside the v2 ramdisk:
 the ramdisk starts at `0x411000` (FAT32, 512 B sectors, 4 sectors per cluster,
@@ -63,7 +63,7 @@ block - so the header, DTB, trustcache and `scratch-data.img` are untouched.
 
 The embedded copy of `kernel.macho` in `boot-piano-ufs264cfg.img` is byte-identical
 to `out/inputs/piano-ufs264.kc` (SHA-256 `529265c7...`), and the readback of the
-new image hashes to the probe collection (`30f0d673...`). The earlier note about a
+new image hashes to the probe collection (`d68bb240...`). The earlier note about a
 divergence at offset 0x800 came from searching for the collection's first bytes at
 a raw offset before mapping the FAT; it was not a real mismatch. The image carries
 no AVB footer (`avbtool verify_image` rejects both the old and new files the same
@@ -75,3 +75,19 @@ re-reads the file to hash it. This replaces the `mcopy` call that the archived
 scripts made in WSL, which is not usable on this host now.
 
 Built and checked, to be run on the tablet.
+
+## Probe value and readback window
+
+Disassembling `_piano_dbg_kv` (`0xfffffff00bbc7590`) shows the ABI: `w0` is the code, and
+the function stores `x1` into all four words of the slot at `_piano_stage_slots + (w0-0x0b)*32`,
+then cleans the cache line. The first stub passed `x1 = 0`, so every probe entry would have
+read back as zero and the run would have proven nothing. The generator now emits
+`mov w1, #code`, and a disassembly of the seven stubs shows `w0, #0xa0` with `w1, #0xa0`
+through `w0, #0xa6` with `w1, #0xa6`.
+
+The runner also stopped trusting the fixed address. It now takes one 1 MiB dump at
+`0x8c5000000` and runs `tooling/native/decode-slots.py --scan`, which looks for 32-byte
+entries whose four words are all a code in 0xa0-0xa6 and prints the implied table base and a
+consensus over all hits, so a moved slide no longer hides the answer. The earlier 8 KiB read
+at `0x8c5912880` held monotonic `0x001d86...003b0d..` values with spread 4 - not four equal
+copies - so it was not the `piano_dbg_kv` table and could not have shown a probe.

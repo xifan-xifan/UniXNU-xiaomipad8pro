@@ -12,7 +12,7 @@ $log = Join-Path $root 'out\k27-acceptprobe\probe-live.log'
 Set-Location (Join-Path $root 'out\k27-acceptprobe')
 
 function ShaH($p){ if(!(Test-Path $p)){ return '' }; (Get-FileHash -LiteralPath $p).Hash.ToLower() }
-if((ShaH $img) -ne 'ba9285ec8cc73403a34f6383e2b85c2861d8071435c7c1aea4ce906fdcdc7f84'){ throw 'probe image identity' }
+if((ShaH $img) -ne 'e6c1f8b1649dc60b491a102823786b8895bc8ce52ff1fb5d376369e034743b2a'){ throw 'probe image identity' }
 if((ShaH $reader) -ne '708d0e79ffa8adae5227eae5dbdff27121da4fa7e9530db31f71dd5153570468'){ throw 'reader identity' }
 
 Start-Transcript -Path $log -Force | Out-Null
@@ -54,10 +54,10 @@ try {
   & $f -s $s boot $reader 2>&1 | Out-Null
   if(!(WaitReader $WaitReader)){ 'reader did not appear'; exit 6 }
   Start-Sleep -Seconds 2
-  $staged = Join-Path $root 'out\k27-acceptprobe\ufs265-slots.bin'
+  $staged = Join-Path $root 'out\k27-acceptprobe\ufs265-region.bin'
   $ok = $false
   for($i=1; $i -le 3; $i++){
-    $o = (& $f -s piano-uefi oem dump 8c5912880 2000 2>&1 | Out-String)
+    $o = (& $f -s piano-uefi oem dump 8c5000000 1000000 2>&1 | Out-String)
     "dump#$i rc=$LASTEXITCODE : $($o.Trim())"
     if($LASTEXITCODE -eq 0){
       & $f -s piano-uefi get_staged $staged 2>&1 | Out-Null
@@ -68,15 +68,8 @@ try {
     Start-Sleep -Milliseconds 800
   }
   if(!$ok){ 'no slots read back'; exit 7 }
-  $raw = [IO.File]::ReadAllBytes($staged)
-  $hits = @()
-  foreach($code in 0xa0..0xa6){
-    $off = ($code - 0x0b) * 32
-    if($off + 32 -le $raw.Length){
-      $w = @([BitConverter]::ToUInt64($raw,$off),[BitConverter]::ToUInt64($raw,$off+8),[BitConverter]::ToUInt64($raw,$off+16),[BitConverter]::ToUInt64($raw,$off+24))
-      if(($w | Where-Object { $_ -ne 0 }).Count -gt 0){ $hits += ('{0:x2}' -f $code) }
-    }
-  }
-  "codes seen: " + ($hits -join ' ')
+  $decoder = Join-Path $root 'tooling\native\decode-slots.py'
+  python $decoder $staged --scan
+  if($LASTEXITCODE -ne 0){ 'no probe entry in the 1 MiB window'; exit 8 }
   "readback_ok=$ok"
 } finally { Stop-Transcript | Out-Null }
