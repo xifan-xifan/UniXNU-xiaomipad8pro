@@ -44,7 +44,15 @@ the signing host, where the private key stays.
 | k27 kernel `kernel-k27-0054-native.macho` | 20a5b4fdcf54b6ac6e8f1878856b6049fc800591d6936c204545e15c53ebbfae | the k27 tree at 11ac316 (pin `k27` of unixnu.lock), `K27_VARIANT=native` |
 | k27 kernel `kernel-k27-0054-vm.macho` | a8de3ece88b0477aa01e4bdfbdd8132b3ab04a5e4754ee212a63b3fbb6b74cf6 | same tree, `K27_VARIANT=vm` (not deployed) |
 | tablet `uefi_a` (OS3.0.303, BOOT.MXF.2.5.1-00265) | cee5757c034be1d5d656ace60d5f43fd242c19c511bbf52907655d2edf333a00 | 2026-11-10 backup `sde/1-uefi_a.img.zst`; source of FD B's DXEs (kept outside every repo) |
+| `inputs/v110/release/boot/boot.img` (fetched 2026-11-25) | d8d812798b1ec042eff860f122013617b41f194323aa9607ae0f2e7735b12b3a | Ubuntu v1.1.0 release `SHA256SUMS`, slot A candidate |
+| `inputs/v110/release/boot/init_boot.img` | 96057eb263fbe09284ba8bbe888128dbc0b36525dec4b01da918dcb7c6fe10ef | same |
+| `inputs/v110/release/boot/vendor_boot.img` (100663296 B) | 7cbb06b9eddb8051c201d7a1f672620a5440283f0d5edbf0ace9270c05a60174 | same; the partial download of 2026-11-25 02:33 was completed and verified |
+| `inputs/v110/release/boot/boot-ram-check.img` | 9071c5afd4be8637254795fea92df8f3a5ab67541a438d5d0b329dd246f230df | same |
 | piano hardware DTB `adt/piano-k27.hw.dtb` | 3e8ec34e612242bb93182713c77b8209890407b6497fc71042fac16e5ad5760d | dtc of dts/piano.dts + sm8750.dtsi |
+
+The whole `piano-ubuntu-v1.1.0-boot.zip` (153,123,957 B, 16 entries) passes `zipfile.testzip()` and every file under
+`release/boot/` matches the release `SHA256SUMS`, so the slot A write set (`boot.img`, `init_boot.img`, `vendor_boot.img`,
+`piano-boot.dtb`) is fully materialized offline. Built and signed on the v1.1.0 build host; not booted from this worktree.
 
 ## Persistent boot (2026-11-11, docs/persistent-boot.md)
 

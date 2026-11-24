@@ -1,3 +1,10 @@
+## 2026-11-25 — Ubuntu v1.1.0 槽 A 写集已完整落地并校验
+
+上一轮记的"`vendor_boot.img` 后半段仍在续传"已经作废：`out/inputs/v110/release/boot/vendor_boot.img` 现为完整的 100,663,296 B，`7cbb06b9…` 与发布包 `SHA256SUMS` 一致。整个 `piano-ubuntu-v1.1.0-boot.zip`（153,123,957 B、16 个成员）通过 `zipfile.testzip()`，`release/boot/` 下 `boot.img` `d8d81279…`、`init_boot.img` `96057eb2…`、`boot-ram-check.img` `9071c5af…`、`piano-boot.dtb` `50636eff…`、`boot-ram-maintenance.img` `54001a50…` 全部对上发布包哈希。槽 A 的持久写集因此离线齐备，ARTIFACTS 已补录这四条。
+
+顺手澄清一条通道事实，避免以后重复试：`oem log` 导出的是固件 `ConOut` 环形缓冲（`PianoFastboot.c` 里 `LogOutputString` 包了一层 `OutputString`），历史抓包在 "starting menu" 就断了，XNU 的 `IOLog` 不经过它，所以内核探针值不能靠 `oem log` 取；`oem debuglog` 读的是 `PIANO_LOG_BASE` 的 DEBUG 构建环形缓冲，需要 `PIANO_LOG_MAGIC`。两条都不能替代 `oem dump`。
+
+设备仍不在 USB 上（`adb devices` 与 `fastboot devices` 均为空），ufs265/ufs266 两发探针仍未启动，平板无任何写入。工作区里 2026-11-24 06:35 的 `package/NativeUfs/NativeUfs.cpp`、`tooling/k27/build-native-kext.py` 改动是 ufs182–185 的旧实验，已被 ufs264/265/266 取代，保持未提交、未修改。
 ## 2026-11-25 — 备用探针：`IOService::startMatching` 八点插桩
 
 平板仍不在 USB 上，所以把"acceptNewMedia 探针若显示 0xA0 缺席"时需要的下一发镜像先做出来了：`out/k27-smprobe/piano-ufs266.kc`（147,095,552 B，`9f276dff…`）在 ufs264 的 `__ZN9IOService13startMatchingEj`（`0xfffffff00c1450ec`）上插 0xB0-0xB7 八个点——入口、`doServiceMatch` 前后、循环退出条件 `cmp w21,w9 / b.hs`、`thread_block` 前后、退出路径、最终返回路径。8×192 B 桩 + 两个条件跳板共 1,544 B，仍在同一 1,657 B 零洞里；首指令 `pacibsp` 保留，替换的是其后的 `stp`。
