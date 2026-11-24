@@ -835,10 +835,11 @@ def part_geometry(s, name):
     return s.nodes.get(key), s.starts.get(key), (s.sizes.get(key) or 0) // B
 
 
-def bound_store(s, record):
+def bound_store(s, record, fresh_ok=False):
     """The store an ESP of a bound-store record (esp_store) resumes, read from the tablet: the window inside its partition as mapped
     and at NativeUfs's place there for its size (the end of the partition below the reserve: native_ufs_store_open), the header
     valid, of the record's seed, bound to that LBA (PersistOverlay.h kBound). Returns (True/False, the line; None in a dry run).
+    With fresh_ok, a blank header is the expected pre-install state: the first data-persist=2 boot creates the store there.
     The line of a store that passes reads "... the store at LBA N on PART ... IS the one this ESP resumes ..."."""
     store, seed = esp_store(record), record['seed']
     first, blocks, part = store['first_lba'], store.get('blocks') or seed['store_blocks'], store['partition']
@@ -858,6 +859,11 @@ def bound_store(s, record):
                             f'{common.store_first(last, blocks)}, not {first}: the binding would refuse it')
     if not problems:
         header = common.store_header(bytes.fromhex(s.t('peek', node, first - start, 0, 128)['hex']))
+        if header['state'] == 'blank' and fresh_ok:
+            s.save(esp_store={'partition': part, 'first_lba': first, 'node': node, 'header': header, 'problems': [],
+                              'fresh': True})
+            return True, (f'the store window at LBA {first} on {part} is blank: the first data-persist=2 boot creates the '
+                          f'{seed["store_blocks"]}-block store for seed {seed["identity_sha256"][:16]} there')
         if header['state'] != 'valid':
             problems.append(f'its header is {header["state"]} (no store of this seed there)')
         else:
@@ -1500,7 +1506,7 @@ def map_step(s):
     old = s.state.get('store_old') or {}
     if elsewhere:
         s.save(store_matches_esp=False)
-        ok, text = bound_store(s, target)
+        ok, text = bound_store(s, target, fresh_ok=True)
         s.log(('  check ' if ok is None else '  ok    ' if ok else '  WARN  ') + text +
               ('' if ok is not False else '; write_esp refuses this ESP'))
         current = s.state.get('store_new') or {}

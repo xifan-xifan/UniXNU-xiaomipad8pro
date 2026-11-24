@@ -76,5 +76,26 @@ reject(lambda: maint.check_esp_placement({'partition': {'lun': 0, 'index': 37, '
        'an unaligned maintenance placement', exc=(SystemExit, maint.Stop))
 check((common.CANDIDATE_ESP_FIRST, common.CANDIDATE_ESP_LAST) == (124289792, 124551935), 'candidate ESP constants')
 check(common.CANDIDATE_ESP_LAST - common.CANDIDATE_ESP_FIRST + 1 == common.ESP_BLOCKS, 'candidate ESP is 1 GiB')
+class BlankStoreSession:
+    execute = True
+    nodes = {'linux_data': 'sda36'}
+    sizes = {'linux_data': 68719476736}
+    starts = {'linux_data': 107512576}
+    state = {}
+
+    def t(self, action, node, first, offset, count):
+        return {'hex': '00' * 128}
+
+    def save(self, **kw):
+        self.state.update(kw)
+
+seed = {'identity_sha256': '7e' * 32, 'store_blocks': 6291649}
+record = {'store': {'partition': 'linux_data', 'first_lba': 117735999}, 'seed': seed}
+blank = BlankStoreSession()
+check(maint.bound_store(blank, record, fresh_ok=True)[0] is True,
+      'a blank pre-install store window is accepted for its first data-persist=2 boot')
+check(blank.state['esp_store'].get('fresh') is True, 'the fresh store state is recorded')
+check(maint.bound_store(BlankStoreSession(), record)[0] is False,
+      'a blank store is still refused after installation')
 print('esp geometry: ' + ('all checks passed' if not failures else f'{len(failures)} FAILED'))
 sys.exit(1 if failures else 0)
