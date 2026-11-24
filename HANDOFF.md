@@ -1,3 +1,8 @@
+## 2026-11-25 — 与上游 ShengUfs 逐行对照：偏差只在 publishMedia/startMatching
+
+把 pin 的上游生产驱动（`UniXNU/ShengUfs` `fd420df0`，即 `CrossDarwin/UniXNU_macOS` 的 `docs/porting/ufs.md`、`docs/drivers/sheng-ufs.md` 指向的版本）读完了：它发布根卷只做 `IOBlockStorageDevice::start` + `registerService`，然后 `wait()` 里以 300×100 ms 轮询 `mediaWithUuidExists(uuid, window)`，`IOMedia` 由 `IOStorageFamily` 自己创建，**全程不调用 `IOService::startMatching`**。本地 `package/NativeUfs/RootPublication.h` 与上游该头文件逐字节相同（3,224 B），所以差异只在 `NativeUfsBlock::start` 和 `publishMedia()`：我们故意不设 `device-type=Generic`、自己 `new IOMedia` 并手动 `startMatching`。
+
+也排除了"kext 不在 KC 里"这种解释：pin 的 RAM 内核集合（ufs266，147,095,552 B）里 `com.apple.iokit.IOStorageFamily` 出现 29 次、`IOBlockStorageDriver` 329 次、`IOMedia` 464 次、`AppleAPFSContainer` 120 次（`com.apple.iokit.IOAPFSFamily` 标识符 0 次，APFS 类别在别的 kext id 下）。所以 2026-11-24 06:35 那份未提交的 `NativeUfs.cpp` 改动（窗口 `registerService`、去掉 monitor 循环、跳过 `SystemOS`）正是回到上游序列的第一步，留着作为设备回来后第一个候选，探针继续当仪表。详见 `docs/results-2026-11-25-upstream-publication-diff.md`。设备仍未在 USB 上，本段未启动、未写入。
 ## 2026-11-25 — Ubuntu v1.1.0 槽 A 写集已完整落地并校验
 
 上一轮记的"`vendor_boot.img` 后半段仍在续传"已经作废：`out/inputs/v110/release/boot/vendor_boot.img` 现为完整的 100,663,296 B，`7cbb06b9…` 与发布包 `SHA256SUMS` 一致。整个 `piano-ubuntu-v1.1.0-boot.zip`（153,123,957 B、16 个成员）通过 `zipfile.testzip()`，`release/boot/` 下 `boot.img` `d8d81279…`、`init_boot.img` `96057eb2…`、`boot-ram-check.img` `9071c5af…`、`piano-boot.dtb` `50636eff…`、`boot-ram-maintenance.img` `54001a50…` 全部对上发布包哈希。槽 A 的持久写集因此离线齐备，ARTIFACTS 已补录这四条。
