@@ -808,3 +808,12 @@ were needed: the Sec sources copied from Windows were CRLF so both directions of
 (`out/persistent-v6-macfd/boot.img`, `946adfe0…`) was assembled from it and verifies with `avbtool`. Nothing touched the
 tablet, which has been off USB since 03:18; the armed watcher still holds the `394c5c78…` trial.
 
+2026-11-25: [switch tool audit](docs/results-2026-11-25-switch-tool-audit.md). The computer-side swap tool is
+`tools/piano-switch.py` from the Ubuntu release tree (local copy `out/tmp-upstream-mainline/tools/piano-switch.py`,
+`a3d3cb88…`): it checks both triplets' digests and sizes, requires piano/unlocked/slot A/userspace-no, flashes
+init_boot_a then vendor_boot_a then boot_a, and restores the rollback triplet on failure. It never sets the active slot.
+`maint-session.py slot-success` is the only writer of `boot_a`'s bit 54, with a GPT backup and a read-back limited to that
+attribute and the CRCs; `abl-final` requires slot A current and successful with an unchanged retry count 0-7. The live
+`getvar` values still have to be read on the tablet. The ESP manifest was also re-checked: `EFI/UniXNU/unixnu.toml` has the
+five entries, an 8 GiB `ram_window` paired with the 13 GiB FD, and `data-store-part=linux_data`.
+
