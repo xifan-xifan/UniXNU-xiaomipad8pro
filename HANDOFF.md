@@ -1,3 +1,10 @@
+## 2026-11-25 — 布局复核：候选 GPT、ESP、root 均已落地，Data 仍空白
+
+只读复核确认当前设备运行的是候选 GPT：`linux_rootfs` 20 GiB（sda35）、`linux_data` 64 GiB（sda36）、`esp` 1 GiB（sda37），`/data` 376 GiB，与候选表一致，不是原厂 461 GiB。此前的“当前没有 linux 分区”是 11-19 的旧状态。
+
+ESP 已于 2026-11-24 23:23 写入 1 GiB 镜像并做双路读回：`sda37` 与 LUN 0 偏移 485507 块均得到 sha256 `68c28df1…`。root 已于 11-22 写入 `linux_rootfs` 17,547,919,360 B，直接读回 `db3629e5…`，尾部与两份 GPT 未变。`state.json` 的 Data store 仍是 blank、`store_matches_esp: false`，Data seed 尚未写入。
+
+Mac `~/Codex/k273-esp` 下没有 root 镜像，也没有签名 v5 持久启动镜像。剩余阻塞仍是签名 v5、ufs264 同步异常、dump 通道需 USB 重新枚举、native k27 锁定提交无来源。详见 `docs/results-2026-11-25-layout-recheck.md`。
 ## 2026-11-25 — 切换工具审计：v1.6.3 电脑端脚本未变，设备内成功位方案可复用
 
 上游 `yzddmr6/xiaomipad-8pro-mainline` 最新 release 已到 v1.6.3（2026-11-23），tools 包 sha256 `680377bf2eee…`；`tools/piano-switch.py` 的 blob 仍是 `c504b603…`、3,111 B，与 v1.6.1 逐字节相同。该脚本只做 `getvar` 预检、哈希校验、顺序 `fastboot flash` 槽 A 三件套和失败回灌，没有成功位与重试门控、没有写后整分区读回；`INSTALL.en.md` 仍只支持 3.0.303 且会擦除 Android 数据。结论不变：电脑端安装器不采用。

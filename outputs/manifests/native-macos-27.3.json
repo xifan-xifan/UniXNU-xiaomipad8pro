@@ -1851,7 +1851,38 @@
     "hyperos_return": "OS3.0.309.0.WPYCNXM, slot A, boot completed",
     "result": "docs/results-2026-11-22-native-root-install.md"
   },
-  "host_stock_root_v2": {
+  "device_esp_candidate": {
+    "partition": "LUN 0 esp (sda37)",
+    "first_lba": 124289792,
+    "bytes": 1073741824,
+    "image_sha256": "68c28df15bcf55a589441df37e9c5fd94614e2771c437e955f190e3eb0aab898",
+    "layout": "candidate",
+    "readback_via_partition": "68c28df15bcf55a589441df37e9c5fd94614e2771c437e955f190e3eb0aab898",
+    "readback_via_lun0": "68c28df15bcf55a589441df37e9c5fd94614e2771c437e955f190e3eb0aab898",
+    "input_kc_sha256": "529265c7839c51fe4d643af3228f4061297dd5d2ed5cce3e585fbc6bcca14a72",
+    "input_adt_sha256": "4e904d90e92e880c3c36f052ccf7b5b8ca6e59099060323d34a6977f1063f3e3",
+    "installed": "2026-11-24 23:23:25",
+    "evidence": "out/persistent/installed.json, out/persistent/session/session.log",
+    "result": "docs/results-2026-11-25-layout-recheck.md"
+  },
+  "current_device_recheck_2026_11_25": {
+    "serial": "7ccdd855",
+    "hyperos": "OS3.0.309.0.WPYCNXM",
+    "slot": "a",
+    "boot_completed": 1,
+    "gpt_state": "candidate",
+    "data_gib": 376,
+    "by_name": {
+      "linux_rootfs": "sda35",
+      "linux_data": "sda36",
+      "esp": "sda37"
+    },
+    "root_installed_and_read_back": true,
+    "esp_installed_and_read_back": true,
+    "data_store_state": "blank",
+    "signed_v5_persistent_boot_present": false,
+    "result": "docs/results-2026-11-25-layout-recheck.md"
+  },  "host_stock_root_v2": {
     "host": "mac",
     "path": "/private/tmp/piano-stock-root.1ubLtk/root.img",
     "bytes": 17547919360,
