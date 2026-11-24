@@ -516,7 +516,30 @@ class Session:
         self.serve({})
 
     def fetch(self, name, path, digest):
-        """The tablet downloads a host file to /run/pp/NAME and checks its SHA-256."""
+        """The tablet gets a host file in /run/pp/NAME and checks its SHA-256. On Windows the host's inbound HTTP is routinely
+        blocked (the tablet's wget times out), so the tablet listens on the reverse channel and the host streams to it."""
+        if os.name == 'nt' and self.execute:
+            port = 18000
+            job = 'fetch-' + name.replace('.', '-')
+            self.log(f'  host  pushes {name} ({Path(path).name}) to tablet port {port}')
+            self.t('job', job, 'fetch-push', name, digest, port)
+            deadline = time.time() + 30
+            while True:             # the tablet's nc starts a moment after the detached job returns
+                try:
+                    conn = socket.create_connection((self.env['PIANO_MAINT_HOST'], port), timeout=30)
+                    break
+                except ConnectionRefusedError:
+                    if time.time() > deadline:
+                        raise Stop(f'{name}: the tablet did not listen on {port}')
+                    time.sleep(0.5)
+            with conn, open(path, 'rb') as source:
+                sent = 0
+                while chunk := source.read(MiB):
+                    conn.sendall(chunk)
+                    sent += len(chunk)
+                conn.shutdown(socket.SHUT_WR)
+            self.need(sent == Path(path).stat().st_size, f'complete {name} stream sent')
+            return self.wait_job(job, 1800)
         self.serve({name: path})
         return self.t('fetch', name, digest, self.a.http_port, timeout=900)
 

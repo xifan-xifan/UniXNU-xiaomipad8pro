@@ -200,6 +200,13 @@ fetch)
 	[ "$got" = "$2" ] || die "$1 sha256 $got, expected $2"
 	echo "fetched=$1 sha256=$got bytes=$(wc -c < "$P/$1")"
 	;;
+fetch-push)   # NAME SHA PORT: the host streams to a listening nc (the reverse of fetch; for hosts whose inbound HTTP is blocked)
+	rm -f "$P/$1"
+	busybox timeout 1800 busybox nc -l -p "$3" > "$P/$1" || die "nc $1"
+	got=$(sha256sum "$P/$1" | cut -d' ' -f1)
+	[ "$got" = "$2" ] || die "$1 sha256 $got, expected $2"
+	echo "fetched=$1 sha256=$got bytes=$(wc -c < "$P/$1")"
+	;;
 file-sha)
 	echo "sha256=$(sha256sum "$P/$1" | cut -d' ' -f1)"
 	;;
