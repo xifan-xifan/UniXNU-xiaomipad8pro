@@ -799,3 +799,12 @@ The [SHA-256 HMAC final trial](docs/results-2026-11-22-sha2final-live.md) advanc
 
 
 2026-11-25: [UFS-capable FD](docs/results-2026-11-25-ufs-fd.md). The FD in the signed `boot_a` candidate has no UFS stack, which is why UEFI never reaches the ESP. Unpacking the LZMA FVMAIN of every local `*.fd` found `394c5c78…` (piano-macos-latest) with the Qualcomm UFS DXEs, the UniXNU `config: volume` patch and the 13 GiB DarwinBoot window. A trial image built by swapping that 3 MiB FD into the existing boot image was signed and `fastboot boot`ed with the older r9 FD: UEFI enumerated, then stopped enumerating without returning to ABL within six minutes, so its log was lost. No partition was written. The tablet needs one power cycle; the `394c5c78…` trial is prepared.
+
+2026-11-25: [Mac FD build](docs/results-2026-11-25-mac-fd-build.md). The full `tooling/firmware/build-fd.sh` pipeline now
+succeeds on the Mac host: FD `3fcc8429…` (3,145,728 B) carries UFSDxe, the patched `UniXNU.efi` (`config: volume %s`) and
+the patched `DarwinBoot.efi` (`taken (largest run)`, 13 GiB), and `FV/Ffs` holds all four related modules. Two host fixes
+were needed: the Sec sources copied from Windows were CRLF so both directions of `git apply` failed (converted to LF), and
+`Mu_Basecore` was removed from the submodule update list on this host. A v6 boot image
+(`out/persistent-v6-macfd/boot.img`, `946adfe0…`) was assembled from it and verifies with `avbtool`. Nothing touched the
+tablet, which has been off USB since 03:18; the armed watcher still holds the `394c5c78…` trial.
+
