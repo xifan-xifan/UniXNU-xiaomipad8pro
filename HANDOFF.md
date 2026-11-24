@@ -6,7 +6,7 @@
 
 本机已有可复用资产：候选 GPT 早已写入并读回（`WRITE-PLAN.md` 顶部：userdata 截止 LBA 102269695、root 102269696-107512575、Data 107512576-124289791、ESP 124289792-124551935），`out/piano-stock-root-26C5035r.img`（16.34 GiB，能放进 20 GiB root 区），`out/inputs/k273/first-install/scratch-data.img`（22,200,480 B），以及 `out/no-demura-control/*.kc`（129.5 MB 级内核集合）与对应 `.macho`。Mac 侧 `/private/tmp` 里有稀疏 root 表镜像（`piano-root-26C5035r.593r2m`、`piano-root-tables.LLOseQ`、`piano-vroot-layout-yiktynqv`、`piano-stock-root.1ubLtk`）和 `native-driver-checkpoint/piano-boot.dtb`。
 
-仍然缺的是成套的 ESP/启动集：本机与 Mac 全盘都没有任何 `esp-k273*.img` 或 build record，`build-k273-esp.py` 需要 `--base` 的 ESP 记录；`out/firmware` 只有 `fs19xx.fsm` 和 `vpu35_4v.mbn`；trust cache 与 ADT 尚未按 27.3 集合重新生成。Apple 27.3 素材（`kc273-mac17j.bin`、`root.json`）也仍未找到。Mac 只剩 9.8 GiB 空闲。
+Apple 27.3 素材其实在本机：`D:\Download\piano-macos-273-inputs` 里的 `kernelcache.release.mac17j`（32,709,948 B，SHA-256 `66bbe2fa…4720`）、`DeviceTree.k114cap.im4p`（`7810505c…`）、`141-22145-021.dmg.aea`（`00f80636…`）、`141-22233-021.dmg.aea`（`b7dbb5c6…`）及两份解密 DMG 全部与相邻 IPSW member JSON 一致（本轮逐一重算）。缺的是派生成套 `out/inputs/k273`（kc/root/trust）和可构建的 k27 树。成套 ESP/启动集仍没有：本机与 Mac 全盘都没有 `esp-k273*.img` 或 build record，`build-k273-esp.py` 需要 `--base`；`out/firmware` 只有 `fs19xx.fsm` 与 `vpu35_4v.mbn`；ADT 与 trust bundle 尚未按 27.3 集合生成。Mac 只剩 9.8 GiB 空闲，放不下 13.8 GB 解密 root。
 
 设备侧：`adb devices` 仍是 `7ccdd855 unauthorized`（ADB server 重启后一样），`fastboot devices` 空。恢复出厂清掉了 ADB 授权，必须在平板上点一次“允许 USB 调试（始终允许）”；这是当前唯一无法由主机完成的动作。ufs264 已构建未运行，ADB 恢复后可直接跑 `tooling/native/run-ufs264.ps1`。fastboot 通路也需要同一次重启进入 bootloader 才能验证。
 ## 2026-11-24 21:00 — IRQ 链路已通，死亡点是同步异常；ufs264 已构建，读回通道待 ADB 授权
