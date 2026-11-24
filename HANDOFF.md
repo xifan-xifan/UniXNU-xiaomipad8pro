@@ -841,7 +841,7 @@ compiling a `package/` kext still needs the absent `PIANO_K27_TREE` recipes and 
 tablet, which stayed off USB.
 
 2026-11-25: [acceptNewMedia probe](docs/results-2026-11-25-acceptnewmedia-probe.md). The probe collection
-`out/k27-acceptprobe/piano-ufs265.kc` (`30f0d673…`) carries codes 0xA0-0xA6 at `acceptNewMedia` entry, around
+`out/k27-acceptprobe/piano-ufs265.kc` (`d68bb240…`) carries codes 0xA0-0xA6 at `acceptNewMedia` entry, around
 `instantiateMediaObject`, `attach`, `attachToParent` and `registerService`; the stubs sit in the 1,657-byte zero hole at
 `0xfffffff00bc07988` and preserve x0-x18, NZCV and x30. It is installed in
 `out/k27-acceptprobe/boot-piano-ufs265-probe.img` (185,733,120 B, `ba9285ec…`, boot id `f660cd6e…`) by replacing
