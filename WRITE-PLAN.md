@@ -170,3 +170,46 @@ Execution order once ADB is authorized, all with the tablet cabled and no manual
 6. Three cold starts, two Android->macOS->Android cycles with the slot success bit and retry counters recorded before and after each exchange, a Data write followed by a restart readback, a normal restart, and a hard-reset recovery.
 
 Rollback: restore the captured stock GPT from `out/rollback-3.0.309-gpt`; slot A's HyperOS triplet is never written by these steps; userdata is already empty, so the shortened geometry needs only a first-boot format by Android.
+## Slot A boot triplet write (2026-11-25, replacing the "wait for signed v5" gate)
+
+The signed v5 image and the signing host key are not available, and the 2026-11-13 v4 evidence shows this unlocked ABL boots
+a boot_a whose AVB chain does not match. The write therefore uses a locally rebuilt, unsigned v4 container and the Ubuntu
+v1.1.0 companion partitions. Scope: **slot A only**, `boot_a` + `vendor_boot_a` + `init_boot_a`; no GPT, no userdata, no
+slot B, no vbmeta/dtbo, no `set_active`.
+
+Verified inputs on this host:
+
+| Partition | New bytes | SHA-256 | Size |
+| --- | --- | --- | --- |
+| `boot_a` | `out/persistent/boot-piano-macos-persistent-v4.img` | `b267c758d0659c9975d71bd06549d4800ee98ad2390c8b8092c4648b075077bd` | 3,301,376 (zero-padded to 96 MiB) |
+| `vendor_boot_a` | Ubuntu v1.1.0 `boot/vendor_boot.img` | `7cbb06b9eddb8051c201d7a1f672620a5440283f0d5edbf0ace9270c05a60174` | 100,663,296 |
+| `init_boot_a` | Ubuntu v1.1.0 `boot/init_boot.img` | `96057eb263fbe09284ba8bbe888128dbc0b36525dec4b01da918dcb7c6fe10ef` | 8,388,608 |
+
+Current-region backups, taken 2026-11-25 and hashed on this host (`out/backup-20261125/`):
+
+| Partition | Backup SHA-256 | Size |
+| --- | --- | --- |
+| `boot_a` | `7c444a2d6aa930cd79e2d48c569f6c891fbaff054c63fc85c3a57fb61c660ac2` | 100,663,296 |
+| `vendor_boot_a` | `7f766f1d728c39d779a3fb7cf0ac1310dac4306cd3b37a98a0143dd4fca5bd23` | 100,663,296 |
+| `init_boot_a` | `56197797f2ec99870a4e42b7a24bbf88407e4409615aba61f401182f13ea5cdc` | 8,388,608 |
+| `boot_b` (reference, untouched) | `ec345e825416210bacab262c2275fbfb74cd482a85756003477c0b1865861fa3` | 100,663,296 |
+
+Steps, all in the maintenance RAM image over the NCM link (192.168.88.2:2323), with no key presses:
+
+1. `maint-shell.py` `cat /proc/partitions` + the GPT map; confirm the live names of `boot_a`, `vendor_boot_a`, `init_boot_a`
+   and that their sizes equal the table above. Abort on any difference.
+2. Re-read each partition's first and last 1 MiB and compare with the backup hashes; abort if the region changed since the
+   backup.
+3. Push each new file into `/tmp` with the reverse `nc` channel, then hash it **on the tablet** and compare with the table.
+4. `dd if=/tmp/<file> of=/dev/<part> bs=1M conv=fsync` (boot_a buffer zero-filled to 96 MiB), drop caches.
+5. Read every partition back on the tablet and on the host, compare SHA-256 with the table; abort and restore the backup if
+   any byte differs.
+6. Read slot metadata before and after: `slot-successful:a`, `slot-retry-count:a`, `snapshot-update-status`. The write does
+   not change them; record the values unchanged.
+7. `restart2 bootloader`, then boot slot A normally. First cold start is the acceptance run; the ESP's `macos-diag` entry
+   keeps `piano-reset-after=240` so a stalled kernel returns to the bootloader unattended.
+
+Rollback: push the three backups back with the same dd/readback procedure. All three are on this host and hash-verified, so
+the tablet never depends on a single copy of the stock partitions. `userdata` is empty (factory reset by the owner) and is
+not written by this plan.
+
