@@ -903,3 +903,7 @@ Stubs are 192 B (7 x 192 = 1344 B of the 1657-byte hole) with the helper at +134
 `_piano_dbg_kv` calls. Collection `05d8ccb5…`, image `86b534f2…`, boot id `6d766e67…`, 1356 changed bytes in 48
 runs against the ufs264 image, re-verified by disassembling the `kernel.macho` in the image. Still not run: no
 device on USB.
+2026-11-25: slot decoder host test committed (`18588056`). `tooling/native/test-decode-slots.py` covers table scan
+(b0-b7 eight entries, slid base 0x1200), the default a0-a6 window, the no-hit fallback to the longest agreeing run,
+`vote()` bit-error tolerance and `entries()` counting, all nine checks pass on this host. No tablet access; device still
+absent from `adb devices` and `fastboot devices`, so ufs265/ufs266 probes remain unarmed.
