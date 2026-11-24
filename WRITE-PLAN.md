@@ -129,7 +129,7 @@ The [live layout recheck](docs/results-2026-11-22-live-layout-recheck.md) verifi
 
 The candidate GPT is already on the tablet and read back (2026-11-21): userdata ends at LBA 102,269,695; macOS root 102,269,696-107,512,575 (20 GiB); Data 107,512,576-124,289,791 (64 GiB); ESP 124,289,792-124,551,935 (1 GiB), all 4096-byte sectors. The live names must be read back with `maint-session.py map` before any write; the table above is the offline record, not a substitute.
 
-Verified inputs now available: `out/inputs/k273/kc/kc273-mac17j.bin` (124,518,400 B, SHA-256 `d1003b5143ffd88439b4d45b6017f587171cfe6855660bed05370a2ea5db9fe9`, the macOS 27.3 `26C5035r` KC base pin); `out/piano-stock-root-26C5035r.img` (17,543,725,056 B, fits the 20 GiB root window); `out/inputs/k273/first-install/scratch-data.img` (22,200,480 B, empty Data seed); `out/paclr53.adt` (15,736 B) with its collection `out/no-demura-control/paclr53.kc`; the Apple root/SystemOS AEA and decrypted DMGs on `D:\Download\piano-macos-273-inputs` (each SHA-256 verified against its IPSW-member JSON).
+Verified inputs now available: `out/inputs/k273/kc/kc273-mac17j.bin` (124,518,400 B, SHA-256 `d1003b5143ffd88439b4d45b6017f587171cfe6855660bed05370a2ea5db9fe9`, the macOS 27.3 `26C5035r` KC base pin); `out/piano-stock-root-26C5035r.img` (17,547,919,360 B, fits the 20 GiB root window); `out/inputs/k273/first-install/scratch-data.img` (22,200,480 B, empty Data seed); `out/paclr53.adt` (15,736 B) with its collection `out/no-demura-control/paclr53.kc`; the Apple root/SystemOS AEA and decrypted DMGs on `D:\Download\piano-macos-273-inputs` (each SHA-256 verified against its IPSW-member JSON).
 
 Still missing before the first device write, and therefore the current gate:
 

@@ -2,7 +2,7 @@
 
 `tooling/persist/maint-session.py` 的 ESP 记录校验从硬编码历史 LBA 改为 `check_esp_placement()`：LUN 0、分区 37、262144 块、1 MiB 对齐、窗口在 LUN 0 内；没有 `partition` 字段的旧记录仍按历史 `common.ESP_FIRST` 解释。`map` 现在把 GPT 状态分为 `old`/`candidate`/`new`/`unknown`，并加入候选表哈希。新增 `esp-candidate` 步骤：要求 live map 的 esp 分区与构建记录的 LBA/大小一致、GPT 为 `candidate` 或 `new`，写前对整块 1 GiB 做 SHA-256（`esp_before`，按无备份授权不保留原字节），写入后经分区和 LUN 0 两路读回比对，并写 `installed.json`（`layout: candidate`）。
 
-`tooling/persist/test-esp-geometry.py` 修正了 `reject()` 对 `maint.Stop` 的处理，现在 25 项全过（`esp geometry: all checks passed`）。`test-persist.py` 的 `tablet.sh` 主机模拟在 Windows 上因 `dd` 不接受 `E:/...` 路径而失败，属既有平台限制；`test-data-store.py` 缺 `unixnu` 模块、`test-k273-only.py` 缺外部工具，均未在本机运行。设备侧仍是 ADB `unauthorized`，没有任何写入。
+`check` 现在接受 `map` 记录的候选 GPT 表，并按 `esp_first_lba` 校验 ESP 区域；`rollback esp-candidate` 明确拒绝伪恢复（没有字节副本，只能按记录重建或先回滚 boot-a）。`tooling/persist/test-esp-geometry.py` 修正了 `reject()` 对 `maint.Stop` 的处理，现在 25 项全过（`esp geometry: all checks passed`）。`test-persist.py` 的 `tablet.sh` 主机模拟在 Windows 上因 `dd` 不接受 `E:/...` 路径而失败，属既有平台限制；`test-data-store.py` 缺 `unixnu` 模块、`test-k273-only.py` 缺外部工具，均未在本机运行。设备侧仍是 ADB `unauthorized`，没有任何写入。
 ## 2026-11-25 — 设备布局 ESP 已离线构建并复现
 
 `tooling/persist/build-esp.py` 新增 `--esp-first-lba`、`--rootfs-last` 和 `--data-extent`。给定平板候选布局（root 102,269,696-107,512,575；Data 107,512,576-124,289,791；ESP 124,289,792-124,551,935）后，脚本自动把 macos 条目绑定为 `native-ufs-root-part=linux_rootfs data-store-part=linux_data data-store-lba=117735999`，并拒绝 ESP 与 Data 重叠或 24 GiB store 放不下保留区的情况。`tooling/persist/test-esp-geometry.py` 覆盖 LBA、`dd seek=485507`、双向重叠和窗口算术。

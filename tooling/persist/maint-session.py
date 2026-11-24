@@ -304,7 +304,8 @@ class Session:
     def tablet_esp(self):
         """The ESP region's sha256 on the tablet (as tablet_boot_a)."""
         if self.execute:
-            return self.region_sha(self.nodes['lun0'], common.ESP_FIRST * B // MiB, 1024, MiB, name='esp-region-now')
+            first = self.state.get('esp_first_lba') or self.sim.get('esp_first_lba') or common.ESP_FIRST
+            return self.region_sha(self.nodes['lun0'], first * B // MiB, 1024, MiB, name='esp-region-now')
         return self.sim.get('esp') or self.state.get('esp_sha256')
 
     def pair(self, boot_sha, esp_record, what):
@@ -1714,6 +1715,7 @@ def write_esp(s, image_name):
     s.need(got == record['sha256'] and got2 == record['sha256'] if s.execute else None,
            f'ESP read back through /dev/{esp} and /dev/{lun0}: {got} / {got2} = {record["sha256"][:16]}')
     s.sim['esp'] = record['sha256']
+    s.sim['esp_first_lba'] = first
     if s.execute:
         s.save(esp_written=record['image'], esp_sha256=record['sha256'])
         # The installed ESP's seed, which build-ram-images.py and build-esp.py compare theirs with (common.installed_seed).
@@ -1800,6 +1802,7 @@ def esp_delta(s):
     s.need(got == record['sha256'] and got2 == record['sha256'] if s.execute else None,
            f'ESP read back through /dev/{esp} and /dev/{s.nodes["lun0"]}: {got} / {got2} = {record["sha256"][:16]}')
     s.sim['esp'] = record['sha256']
+    s.sim['esp_first_lba'] = first
     if s.execute:
         s.save(esp_written=record['image'], esp_sha256=record['sha256'])
         common.write_json(OUT / 'installed.json', {'image': record['image'], 'sha256': record['sha256'], 'seed': record['seed'],
@@ -1845,12 +1848,20 @@ def esp_candidate(s):
     s.need(got == record['sha256'] and got2 == record['sha256'] if s.execute else None,
            f'ESP read back through /dev/{dev} and /dev/{s.nodes["lun0"]}: {got} / {got2} = {record["sha256"][:16]}')
     s.sim['esp'] = record['sha256']
+    s.sim['esp_first_lba'] = first
     if s.execute:
         s.save(esp_written=record['image'], esp_sha256=record['sha256'], esp_before=before, esp_first_lba=first)
         common.write_json(OUT / 'installed.json', {'image': record['image'], 'sha256': record['sha256'], 'seed': record['seed'],
                                                    'inputs': record.get('inputs'), 'layout': 'candidate',
                                                    'first_lba': first, 'written': time.strftime('%Y-%m-%d %H:%M:%S')})
 
+
+@rollback('esp-candidate')
+def esp_candidate_back(s):
+    """No byte copy exists (the owner's no-backup instruction): this stops with the recovery path instead of pretending to restore
+    the old 1 GiB. Rebuild the ESP from the recorded inputs and write it again, or roll back boot-a so the table never runs."""
+    raise Stop('esp-candidate: the pre-write sha256 is in the session state, but no byte copy was kept; rebuild the ESP from its '
+               'recorded inputs and rewrite it (WRITE-PLAN.md, Rollback), and roll back boot-a first so no table boots it')
 
 @step('esp', 'maintenance, WRITE partition 37 (test-phase ESP)', writes='LUN 0 LBA 71527424-71789567')
 def esp_step(s):
@@ -1897,7 +1908,8 @@ ROLLBACKS['esp-final'] = ROLLBACKS['esp']
 @step('check', 'maintenance, read only')
 def check_step(s):
     """Before leaving: root manifest block unchanged, vendor_boot_a/init_boot_a/boot_b unchanged, boot_a the old or the new
-    image, the GPT the new tables and sgdisk clean, the ESP the image written, the store header in place."""
+    image, the GPT the tables map found (new or candidate) and sgdisk clean, the ESP the image written at its recorded LBA, the
+    store header in place."""
     lun0, rootfs = s.nodes['lun0'], s.nodes['rootfs']
     m = s.region_sha(rootfs, 0, 1)
     s.need(m == s.state.get('manifest_sha256') if s.execute else None, 'root manifest block unchanged')
@@ -1908,12 +1920,16 @@ def check_step(s):
     s.need(got in (s.state.get('boot_a_sha256'), s.state.get('boot_a_written')) if s.execute else None, f'boot_a as expected ({got})')
     boot_now = got if s.execute else s.tablet_boot_a()
     head, tail = s.region_sha(lun0, 0, 6), s.region_sha(lun0, TAIL_LBA, 5)
-    s.need((head, tail) == (s.gpt['gpt-head.bin']['sha256'], s.gpt['gpt-tail.bin']['sha256']) if s.execute else None, 'GPT = the new tables')
+    new_pair = ((s.gpt or {}).get('gpt-head.bin', {}).get('sha256'), (s.gpt or {}).get('gpt-tail.bin', {}).get('sha256'))
+    known = {new_pair: 'new', (common.CANDIDATE_GPT_PRIMARY_SHA256, common.CANDIDATE_GPT_BACKUP_SHA256): 'candidate'}
+    s.need(known.get((head, tail)) == s.state.get('gpt_state') if s.execute else None,
+           f'GPT = the {s.state.get("gpt_state", "known")} tables')
     v = s.shell(f'sgdisk -v /dev/{lun0}')
     s.need('No problems found' in v if v is not None else None, 'sgdisk -v clean')
     esp_now = s.tablet_esp() if not s.execute else None
     if s.state.get('esp_sha256') or not s.execute:
-        got = s.region_sha(lun0, common.ESP_FIRST * B // MiB, 1024, MiB, name='esp-check-lun0')
+        first = s.state.get('esp_first_lba') or s.sim.get('esp_first_lba') or common.ESP_FIRST
+        got = s.region_sha(lun0, first * B // MiB, 1024, MiB, name='esp-check-lun0')
         s.need(got == s.state.get('esp_sha256') if s.execute else None, f'ESP = {s.state.get("esp_written", "the image written")}')
         esp_now = got if s.execute else esp_now
     record_now = s.esp_by_sha(esp_now) if esp_now else None
