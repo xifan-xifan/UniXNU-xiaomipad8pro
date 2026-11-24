@@ -213,3 +213,12 @@ rebuilt from package/NativeUfs; each was astboot boot only and returned to Hype
 | `out/persistent-v6-macfd/boot.img` | 100663296 | 946adfe02aa166e8c76e59bbf60a76c8e41396c980bb04a5aeb7b5c8d9c06ac3 | v5 container with the Mac FD, AVB signed; not yet run |
 
 See [Mac FD build](../docs/results-2026-11-25-mac-fd-build.md).
+
+## acceptNewMedia probe RAM image (2026-11-25)
+
+| File | Bytes | SHA-256 | What |
+|---|---|---|---|
+| `out/k27-acceptprobe/piano-ufs265.kc` | 147095552 | d4dfefb40e9508e6c6b1592c70ac4814075d5afc00f54e26db3b1788e084ab9e | ufs264 KC with 0xA0-0xA6 probes in `acceptNewMedia`; 0xA4 replays through a trampoline |
+| `out/k27-acceptprobe/boot-piano-ufs265-probe.img` | 185733120 | e820a349d3cfc1a98797faa18e2c4fecd87035262de4a9b1b57505534b15dde3 | v2 RAM image carrying that KC, boot id `195aa1b3`; `fastboot boot` only, not run yet |
+
+See [the probe result](../docs/results-2026-11-25-acceptnewmedia-probe.md).

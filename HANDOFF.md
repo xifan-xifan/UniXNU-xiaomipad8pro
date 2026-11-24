@@ -841,14 +841,14 @@ compiling a `package/` kext still needs the absent `PIANO_K27_TREE` recipes and 
 tablet, which stayed off USB.
 
 2026-11-25: [acceptNewMedia probe](docs/results-2026-11-25-acceptnewmedia-probe.md). The probe collection
-`out/k27-acceptprobe/piano-ufs265.kc` (`d68bb240…`) carries codes 0xA0-0xA6 at `acceptNewMedia` entry, around
+`out/k27-acceptprobe/piano-ufs265.kc` (`d4dfefb4…`) carries codes 0xA0-0xA6 at `acceptNewMedia` entry, around
 `instantiateMediaObject`, `attach`, `attachToParent` and `registerService`; the stubs sit in the 1,657-byte zero hole at
 `0xfffffff00bc07988` and preserve x0-x18, NZCV and x30. It is installed in
-`out/k27-acceptprobe/boot-piano-ufs265-probe.img` (185,733,120 B, `e6c1f8b1…`, boot id `014e3b0b…`) by replacing
+`out/k27-acceptprobe/boot-piano-ufs265-probe.img` (185,733,120 B, `e820a349…`, boot id `195aa1b3…`) by replacing
 `EFI/UniXNU/Payloads/kernel.macho` inside the v2 ramdisk's FAT32 volume (file chain starts at cluster 5, 71,824 clusters,
 same length) and recomputing the Android id; `out/fatswap.py` does what the archived scripts did with `mcopy`, since WSL
 is unusable here. A byte diff against `boot-piano-ufs264cfg.img` shows 898 changed bytes in 54 runs: the id, the seven
-4-byte branches and the 896-byte stub block. The embedded collection in the ufs264 image is byte-identical to
+4-byte branches, the 896-byte stub block and the 4-byte 0xA4 trampoline. The embedded collection in the ufs264 image is byte-identical to
 `out/inputs/piano-ufs264.kc`, so the swap path is sound.
 
 `tooling/native/run-ufs265-probe.ps1` boots that image, waits for the return to fastboot, boots `reader.img`, dumps one window and reports which of 0xA0-0xA6 were written; the last code is the stop point.
@@ -859,3 +859,10 @@ read back once, and scans it the same way; one reader boot allows exactly one `o
 image hashes first and discovers the serial instead of hard-coding `7ccdd855`. Run: `powershell -NoProfile -File
 tooling\native\run-ufs265-probe.ps1`. Without a device it exits 2 with `no adb and no fastboot device`, which is the
 current state: the tablet has been off USB since 03:18. Nothing has been flashed; this is a `fastboot boot` probe.
+
+2026-11-25: conditional-branch replay fix in the probe collection. The 0xA4 site replays `cbz w0, 0xfffffff00aeb87d0`,
+a copied word whose ±1 MiB offset pointed into the hole from its new location, so the run would have died on the
+success path before 0xA5/0xA6. The stub now retargets that word at a helper at `0xfffffff00bc07d08` that branches to
+the original destination. New collection `d4dfefb4…`, image `e820a349…` (boot id `195aa1b3…`), 909 changed bytes in
+47 runs against the ufs264 image; re-verified by disassembling the `kernel.macho` extracted from the image.
+`_piano_dbg_kv` accepts codes `0x0b..0xca`, so 0xA0-0xA6 are stored and cleaned. Still not run: no device on USB.

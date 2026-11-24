@@ -8,7 +8,7 @@ relink, no `paclr264.macho` and no keep list are needed.
 Input: `out/inputs/piano-ufs264.kc`, 147,095,552 B, SHA-256
 `529265c7839c51fe4d643af3228f4061297dd5d2ed5cce3e585fbc6bcca14a72`.
 Output: `out/k27-acceptprobe/piano-ufs265.kc`, same size, SHA-256
-`d68bb2404d5ba9e50acbdd875a2e3161dcc17c88ff1907aa5cabc6e87cec715d`.
+`d4dfefb40e9508e6c6b1592c70ac4814075d5afc00f54e26db3b1788e084ab9e`.
 
 | code | address | replaced instruction | position |
 |---|---|---|---|
@@ -47,8 +47,8 @@ layout and its signature have to be checked before swapping the blob.
 ## RAM image assembly
 
 `out/k27-acceptprobe/boot-piano-ufs265-probe.img`, 185,733,120 B, SHA-256
-`e6c1f8b1649dc60b491a102823786b8895bc8ce52ff1fb5d376369e034743b2a`, boot id
-`014e3b0ba8ffacf427333c3362bc06298582e59c`.
+`e820a349d3cfc1a98797faa18e2c4fecd87035262de4a9b1b57505534b15dde3`, boot id
+`195aa1b324bcaa5338130901c213d5a846a39991`.
 
 It is `boot-piano-ufs264cfg.img` with one file replaced inside the v2 ramdisk:
 the ramdisk starts at `0x411000` (FAT32, 512 B sectors, 4 sectors per cluster,
@@ -57,13 +57,13 @@ is a 147,095,552 B file in a 71,824-cluster chain starting at cluster 5, and the
 new collection has the same length, so only the cluster contents change. The
 Android boot id at 0x240 is recomputed over kernel, ramdisk, second, recovery
 dtbo and dtb exactly as the archived `vm-mem-repack.py` does. Nothing else in the
-image moves: a byte diff against the ufs264 image has 898 differing bytes in 54
-runs - the 20-byte id, the 7 four-byte probe branches, and the 896-byte stub
-block - so the header, DTB, trustcache and `scratch-data.img` are untouched.
+image moves: a byte diff against the ufs264 image has 909 differing bytes in 47
+runs - the 20-byte id, the 7 four-byte probe branches, the 896-byte stub block and the 4-byte
+trampoline - so the header, DTB, trustcache and `scratch-data.img` are untouched.
 
 The embedded copy of `kernel.macho` in `boot-piano-ufs264cfg.img` is byte-identical
 to `out/inputs/piano-ufs264.kc` (SHA-256 `529265c7...`), and the readback of the
-new image hashes to the probe collection (`d68bb240...`). The earlier note about a
+new image hashes to the probe collection (`d4dfefb4...`). The earlier note about a
 divergence at offset 0x800 came from searching for the collection's first bytes at
 a raw offset before mapping the FAT; it was not a real mismatch. The image carries
 no AVB footer (`avbtool verify_image` rejects both the old and new files the same
@@ -93,5 +93,31 @@ at `0x8c5912880` held monotonic `0x001d86...003b0d..` values with spread 4 - not
 copies - so it was not the `piano_dbg_kv` table and could not have shown a probe.
 - The shipped image was re-checked from the file itself: extracting
 `EFI/UniXNU/Payloads/kernel.macho` out of `boot-piano-ufs265-probe.img` hashes to
-`d68bb240...`, all seven sites hold `b` to their stub in the hole, every stub sets
+`d4dfefb4...`, all seven sites hold `b` to their stub in the hole, every stub sets
 `w0` and `w1` to its code, calls `_piano_dbg_kv` and branches back to `site+4`.
+
+## Conditional-branch replay fix (0xA4)
+
+Reading back the disassembly of the shipped image exposed a flaw that would have made the run
+uninformative at the one place it matters. The 0xA4 site is `cbz w0, 0xfffffff00aeb87d0` - the branch
+taken when `attach` *succeeded*. The generator copied that instruction verbatim into the stub, so its
+encoded ±1 MiB offset was now measured from the stub hole: capstone decoded the copied word as
+`cbz w0, 0xfffffff00bc07d6c`, i.e. a jump into zero padding inside the hole. Any run where `attach`
+returned 0 would have died there and never reached 0xA5 or 0xA6, hiding exactly the success path.
+
+The generator now detects conditional branches (`cbz`, `cbnz`, `tbz`, `tbnz`, `b.cond`) and re-targets
+the copied word at a 4-byte helper at `0xfffffff00bc07d08` (right after the seven stubs) that holds the
+far unconditional `b 0xfffffff00aeb87d0`. The stub tail is now `add sp, sp, #0xb0` / `cbz w0, helper` /
+`b site+4`, so the stack is restored before either branch and the success path continues at
+`0xfffffff00aeb8668`.
+
+Verified from `boot-piano-ufs265-probe.img` itself: the embedded `kernel.macho` hashes to `d4dfefb4…`,
+all seven sites hold `b` into the hole, each stub writes its own code into `w0` and `w1`, calls
+`_piano_dbg_kv`, replays the original instruction and branches to `site+4`, 0xA4's replay points at the
+helper, and the helper branches to the original destination. The stub block is 7 x 128 B = 896 B and
+the helper sits at +896, so nothing else in the hole is touched.
+
+`_piano_dbg_kv` was also disassembled to confirm the probe can write at all: it rejects codes outside
+`0x0b..0xca` (`sub w8, w0, #0xcb` / `cmn w8, #0xc0` / `b.lo ret`), stores `x1` into all four words of
+`0xfffffff00c912880 + (code-0x0b)*32` and cleans the cache line, so 0xA0-0xA6 land in the table and
+survive to the readback.
