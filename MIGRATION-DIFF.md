@@ -48,3 +48,14 @@ With the local 26C5035r OS window of 14,493,417,472 bytes and the pinned builder
 The subsequent baseline verified the current GPT maps and existing A-slot boot triplet copies. The independent kernel host build on 2026-11-20 leaves the stock storage layout intact. No usable internal extent or external root/Data path has been qualified, so there is still no concrete write plan. See the [kernel result](docs/results-2026-11-20-independent-k27.md).
 
 A host-only study verified a candidate 20 GiB root, 64 GiB Data-partition and 1 GiB ESP layout against both stock GPT captures, including a byte-for-byte simulated GPT rollback. Stock recovery names the Android partitions and supplies F2FS tools. Its Xiaomi-specific pre-wipe and post-wipe handling still needs qualification, and the root image and seed must fit the chosen sizes. See [the storage and stock recovery study](docs/results-2026-11-20-storage-layout-recovery.md).
+
+## Switching gap against v13.1y12d (2026-11-24)
+
+The v13.1y12d daily image inherits the maintainer's existing native layout and its OS switcher is validated only for a read-only RAM session. The upstream README states that a full switch to Android has not been tested. Concretely, the switching work still needed here is:
+
+1. Confirm the computer-side switcher source and that it matches this device's A-slot triplet (`init_boot_a`, `vendor_boot_a`, `boot_a`) and reported sizes, then extend it to record and verify each slot's `successful` flag and retry counter before and after an exchange.
+2. Implement and test the device-side menu path, not only the host-commanded swap.
+3. Run two complete Android→macOS→Android cycles, each preceded by a cold boot, with a Data write followed by a restart readback.
+4. Validate recovery after both a normal reboot and a hard reset, and confirm the stock 3.0.309 Android slot still boots.
+
+These are distinct from the storage migration problem in the table above: a working switcher only matters after a native root/Data/ESP layout exists. Neither the layout nor the full-switch path is qualified, so no device write is proposed by this note.
