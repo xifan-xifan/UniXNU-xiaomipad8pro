@@ -43,3 +43,35 @@ flashed; the probe RAM image has not been assembled yet, because the KC is
 embedded at offset `0x4c1d80` of `out/no-demura-control/boot-piano-ufs264cfg.img`
 and the embedded copy diverges from `piano-ufs264.kc` at `0x800`, so the container
 layout and its signature have to be checked before swapping the blob.
+
+## RAM image assembly
+
+`out/k27-acceptprobe/boot-piano-ufs265-probe.img`, 185,733,120 B, SHA-256
+`ba9285ec8cc73403a34f6383e2b85c2861d8071435c7c1aea4ce906fdcdc7f84`, boot id
+`f660cd6ef6ba97000f9ba922fd45cab4e8826076`.
+
+It is `boot-piano-ufs264cfg.img` with one file replaced inside the v2 ramdisk:
+the ramdisk starts at `0x411000` (FAT32, 512 B sectors, 4 sectors per cluster,
+32 reserved sectors, 2 x 686 FAT sectors), the path `EFI/UniXNU/Payloads/kernel.macho`
+is a 147,095,552 B file in a 71,824-cluster chain starting at cluster 5, and the
+new collection has the same length, so only the cluster contents change. The
+Android boot id at 0x240 is recomputed over kernel, ramdisk, second, recovery
+dtbo and dtb exactly as the archived `vm-mem-repack.py` does. Nothing else in the
+image moves: a byte diff against the ufs264 image has 898 differing bytes in 54
+runs - the 20-byte id, the 7 four-byte probe branches, and the 896-byte stub
+block - so the header, DTB, trustcache and `scratch-data.img` are untouched.
+
+The embedded copy of `kernel.macho` in `boot-piano-ufs264cfg.img` is byte-identical
+to `out/inputs/piano-ufs264.kc` (SHA-256 `529265c7...`), and the readback of the
+new image hashes to the probe collection (`30f0d673...`). The earlier note about a
+divergence at offset 0x800 came from searching for the collection's first bytes at
+a raw offset before mapping the FAT; it was not a real mismatch. The image carries
+no AVB footer (`avbtool verify_image` rejects both the old and new files the same
+way), and `fastboot boot` of a v2 boot image does not need one.
+
+The RAM swap helper is `out/fatswap.py` (`out/` is ignored): it parses the FAT32
+ramdisk, asserts the file size, writes through the existing cluster chain and
+re-reads the file to hash it. This replaces the `mcopy` call that the archived
+scripts made in WSL, which is not usable on this host now.
+
+Built and checked, to be run on the tablet.
