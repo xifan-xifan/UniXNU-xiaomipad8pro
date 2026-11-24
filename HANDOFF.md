@@ -1,3 +1,6 @@
+## 2026-11-25 — dump 重试仍失败；签名私钥与 v5 镜像确认不在本机
+
+一次无人值守 reader 启动后，第一条 `oem dump 8c0004000 100` 仍返回 `Too many links`，平板自行回到 HyperOS 3.0.309 且无写入，通道需主机 USB 重新枚举。签名链复核：历史 `keys/` 只有公钥记录，`piano-macos-c146/private` 为空，ARTIFACTS 写明私钥留在签名主机；Mac 上也没有 `persistent-v5` 或任何大于 100 MiB 的镜像。持久 boot 的写入前提仍缺签名 v5。详见 `docs/results-2026-11-25-dump-retry-and-signing-audit.md`。
 ## 2026-11-25 — 布局复核：候选 GPT、ESP、root 均已落地，Data 仍空白
 
 只读复核确认当前设备运行的是候选 GPT：`linux_rootfs` 20 GiB（sda35）、`linux_data` 64 GiB（sda36）、`esp` 1 GiB（sda37），`/data` 376 GiB，与候选表一致，不是原厂 461 GiB。此前的“当前没有 linux 分区”是 11-19 的旧状态。
