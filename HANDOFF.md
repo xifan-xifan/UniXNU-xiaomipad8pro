@@ -1,3 +1,8 @@
+## 2026-11-25 — 构建环境审计：本机和 Mac 都没有 native k27 树，源码级候选暂时无法产出
+
+查了能否把 2026-11-24 留下的 ufs185 发布序列改动编成镜像：本工作区没有 `PIANO_K27_TREE`、没有 `~/.config/piano/env`、没有 `out/kc/kc27.bin`、没有 `out/x12377` 生成头；Mac（192.168.31.183）同样没有 k27/xnu 树、没有 kc27.bin，只有 `~/Codex/k273-esp/inputs/piano-ufs264.kc` 和 `~/ufs151/NativeUfs.o`，而 `~/Codex/UniXNU-xiaomipad8pro` 还停在基线 `2438556` 且带本地改动。所以 `build-native-image.sh` / `build-native-ufs.sh` 都会停在 `k27-tree.sh`。
+
+含义：源码级改动（包括对照上游得出的"回到生产发布序列"候选）现在编不出来；能继续产出的只有像 ufs265/ufs266 那样在既有 KC 零填充区里打桩/跳板的二进制补丁。要恢复构建，需要 xnu-12377 的 k27 树（11ac316 + 基线 0001-0052）、`out/x12377` 生成头和 `out/kc/kc27.bin`。详见 `docs/results-2026-11-25-build-environment-audit.md`。设备仍未在 USB 上。
 ## 2026-11-25 — 与上游 ShengUfs 逐行对照：偏差只在 publishMedia/startMatching
 
 把 pin 的上游生产驱动（`UniXNU/ShengUfs` `fd420df0`，即 `CrossDarwin/UniXNU_macOS` 的 `docs/porting/ufs.md`、`docs/drivers/sheng-ufs.md` 指向的版本）读完了：它发布根卷只做 `IOBlockStorageDevice::start` + `registerService`，然后 `wait()` 里以 300×100 ms 轮询 `mediaWithUuidExists(uuid, window)`，`IOMedia` 由 `IOStorageFamily` 自己创建，**全程不调用 `IOService::startMatching`**。本地 `package/NativeUfs/RootPublication.h` 与上游该头文件逐字节相同（3,224 B），所以差异只在 `NativeUfsBlock::start` 和 `publishMedia()`：我们故意不设 `device-type=Generic`、自己 `new IOMedia` 并手动 `startMatching`。
