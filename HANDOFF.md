@@ -907,3 +907,12 @@ device on USB.
 (b0-b7 eight entries, slid base 0x1200), the default a0-a6 window, the no-hit fallback to the longest agreeing run,
 `vote()` bit-error tolerance and `entries()` counting, all nine checks pass on this host. No tablet access; device still
 absent from `adb devices` and `fastboot devices`, so ufs265/ufs266 probes remain unarmed.
+
+2026-11-25: [NativeUfs static audit](docs/results-2026-11-25-nativeufs-start-static.md). The kext in
+`out/inputs/piano-ufs264.kc` has no symtab, so its text was found by xref from its own cstrings:
+`NativeUfsBlock::start` at `0xfffffff008b514f8` only sets `Content`/`Content Hint`, logs and returns
+true; `publishMedia` at `0xfffffff008b516c0` calls `registerService` synchronously (`w1=2`); the
+publisher thread registers the window asynchronously (`w1=0`) and then calls `publishMedia`. The
+collection therefore matches the current source, and ufs171's stop inside Apple's
+`acceptNewMedia` happens before any of our media code. Probe images re-hashed and match:
+ufs265 `86b534f2…`, ufs266 `a56f132d…`, kc `9f276dff…`. Device still absent from `adb`/`fastboot`.
