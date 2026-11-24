@@ -817,3 +817,7 @@ attribute and the CRCs; `abl-final` requires slot A current and successful with 
 `getvar` values still have to be read on the tablet. The ESP manifest was also re-checked: `EFI/UniXNU/unixnu.toml` has the
 five entries, an 8 GiB `ram_window` paired with the 13 GiB FD, and `data-store-part=linux_data`.
 
+2026-11-25: the Mac build's uncompressed `FVMAIN.Fv` (8,065,024 B) contains `config: volume`, the UTF-16
+`taken (largest run)`, `UFSDxe` and `/soc/ufs%d`, so the FD built by `build-fd.sh` carries the UFS stack and both patch
+markers through packing.
+

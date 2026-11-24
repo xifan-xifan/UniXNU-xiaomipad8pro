@@ -47,3 +47,10 @@ artifact for the round after that trial.
 
 Nothing here touched the tablet. The tablet has been off USB since 03:18, and the next step is still one power press so the
 watcher can RAM-boot the `394c5c78…` image and capture the first `config: volume` log.
+
+## Volume-level check (same day)
+
+The uncompressed `Build/pianoPkg/DEBUG_CLANGPDB/FV/FVMAIN.Fv` is 8,065,024 bytes and contains all four markers directly -
+`config: volume`, `taken (largest run)` (UTF-16), `UFSDxe` and `/soc/ufs%d` - so the strings survive the packing the FD
+uses, not just the individual module files.
+
