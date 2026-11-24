@@ -125,6 +125,26 @@ def esp_store(record):
     return None
 
 
+def check_esp_placement(record, name='ESP'):
+    """The record's partition placement: LUN 0, partition 37, a 1 MiB aligned 1 GiB window inside LUN 0. A record without a
+    placement is the historical one (common.ESP_FIRST)."""
+    placement = (record or {}).get('partition')
+    if placement is None:
+        return {'lun': 0, 'index': common.ESP_INDEX + 1, 'first_lba': common.ESP_FIRST, 'blocks': common.ESP_BLOCKS}
+    if not isinstance(placement, dict):
+        raise Stop(f'{name}: partition placement is not an object')
+    if placement.get('lun') != 0 or placement.get('index') != common.ESP_INDEX + 1:
+        raise Stop(f'{name}: ESP placement is not LUN 0 partition {common.ESP_INDEX + 1}')
+    if placement.get('blocks') != common.ESP_BLOCKS:
+        raise Stop(f'{name}: ESP placement is {placement.get("blocks")} blocks, not {common.ESP_BLOCKS}')
+    first = placement.get('first_lba')
+    if not isinstance(first, int) or not 0 < first < 2**32 or first % 256:
+        raise Stop(f'{name}: ESP first LBA {first!r} is not a 1 MiB aligned FAT32 hidden-sector value')
+    if first + common.ESP_BLOCKS > common.LUN0_BLOCKS:
+        raise Stop(f'{name}: the ESP window at LBA {first} ends past LUN 0')
+    return placement
+
+
 def esp_root_part(record):
     """The partition an ESP's default entry mounts its root image from (native-ufs-root-part; NativeUfs's default linux_rootfs).
     The 27.3-only ESP of 2026-11-13 keeps it on linux_data with its store; the whole-disk layout (2026-11-14) on linux_rootfs, the store
@@ -306,12 +326,7 @@ class Session:
         if not path.is_file():
             return None
         record = json.loads(path.read_text())
-        placement = record.get('partition')
-        if placement is not None:
-            expected = {'lun': 0, 'index': common.ESP_INDEX + 1,
-                        'first_lba': common.ESP_FIRST, 'blocks': common.ESP_BLOCKS}
-            if not isinstance(placement, dict) or any(placement.get(key) != value for key, value in expected.items()):
-                raise Stop(f'{path.name}: ESP placement differs from the geometry supported by this maintenance session')
+        check_esp_placement(record, path.name)
         return record
 
     def save(self, **values):
@@ -1409,8 +1424,10 @@ def map_step(s):
     head, tail = s.region_sha(lun0, 0, 6), s.region_sha(lun0, TAIL_LBA, 5)
     new = (s.gpt or {}).get('gpt-head.bin', {}).get('sha256'), (s.gpt or {}).get('gpt-tail.bin', {}).get('sha256')
     if s.execute:
-        state = 'old' if (head, tail) == (common.GPT_PRIMARY_SHA256, common.GPT_BACKUP_SHA256) else 'new' if (head, tail) == new else 'unknown'
-        s.need(state != 'unknown', f'GPT copies are the known old (CRITICAL-BACKUP) or the new (gpt.json) tables: {state}')
+        candidate = (common.CANDIDATE_GPT_PRIMARY_SHA256, common.CANDIDATE_GPT_BACKUP_SHA256)
+        state = ('old' if (head, tail) == (common.GPT_PRIMARY_SHA256, common.GPT_BACKUP_SHA256) else
+                 'candidate' if (head, tail) == candidate else 'new' if (head, tail) == new else 'unknown')
+        s.need(state != 'unknown', f'GPT copies are the known old (CRITICAL-BACKUP), candidate or new (gpt.json) tables: {state}')
         s.save(gpt_state=state, gpt_head=head, gpt_tail=tail)
     else:
         s.log(f'  check GPT head/tail = {common.GPT_PRIMARY_SHA256[:16]}/{common.GPT_BACKUP_SHA256[:16]} (old) or gpt.json\'s (new)')
@@ -1788,6 +1805,51 @@ def esp_delta(s):
         common.write_json(OUT / 'installed.json', {'image': record['image'], 'sha256': record['sha256'], 'seed': record['seed'],
                                                    'inputs': record.get('inputs'), 'written': time.strftime('%Y-%m-%d %H:%M:%S'),
                                                    'by': f'esp-delta over {old_name}'})
+
+
+@step('esp-candidate', 'maintenance, WRITE the candidate layout\'s esp partition at the build record\'s LBA',
+      writes='LUN 0 partition esp as mapped, 1 GiB from the record\'s first LBA')
+def esp_candidate(s):
+    """The ESP image (--esp) onto the candidate GPT's own esp partition: the build record's first LBA and block count must equal
+    the live map's esp partition. Reads the whole target first (its SHA-256 is kept as the pre-write state, no NAS copy is made),
+    then writes and reads the whole window back through both the partition and LUN 0."""
+    record = s.esp_record(s.a.esp)
+    if not record:
+        raise Stop(f'{s.a.esp}: no build record in out/persistent (tooling/persist/build-esp.py)')
+    placement = check_esp_placement(record, record.get('image', s.a.esp))
+    first, blocks = placement['first_lba'], placement['blocks']
+    r = map_nodes(s)
+    dev = s.nodes.get('esp')
+    start, size = s.starts.get('esp'), (s.sizes.get('esp') or 0) // B
+    s.need(bool(dev) and start == first and size == blocks if s.execute else None,
+           f'esp is /dev/{dev} at LBA {start} with {size} blocks (the record says LBA {first}, {blocks})')
+    if s.execute and (s.state.get('gpt_state') not in ('candidate', 'new')):
+        raise Stop(f'the live GPT is {s.state.get("gpt_state")}, not the candidate table this ESP is placed for')
+    if r:
+        s.need(r['lun0_block_size'] == '4096' and r['lun0_bytes'] == str(LUN0_BYTES), f'LUN 0 {r["lun0"]}: 4096-byte blocks')
+        s.need(r['mounted'] == '0', 'nothing from UFS is mounted')
+    before = s.region_sha(s.nodes['lun0'], first, blocks, name='esp-before')
+    s.log(f'  info  ESP target LBA {first}-{first + blocks - 1}: pre-write sha256 {before}' if before else
+          f'  info  ESP target LBA {first}-{first + blocks - 1}: pre-write region read')
+    window = s.esp_window(record)
+    if window and window > common.OLD_DARWINBOOT_WINDOW_MAX:
+        s.pair(s.tablet_boot_a(), record, f'{record["image"]} asks for {window >> 20} MiB')
+    else:
+        s.log(f'  info  {record["image"]}: RAM window {window >> 20 if window else "-"} MiB, which every DarwinBoot takes')
+    s.fetch(record['image'], OUT / record['image'], record['sha256'])
+    if s.write(f'{record["image"]} (default {record["default"]}, profile {record.get("profile")}) -> /dev/{dev} '
+               f'(LUN 0 esp, LBA {first}, 1 GiB)'):
+        s.job('esp-candidate-write', 'write', record['image'], dev, 0, MiB, timeout=1800)
+    got = s.region_sha(dev, 0, 1024, MiB, name='esp-candidate-check')
+    got2 = s.region_sha(s.nodes['lun0'], first * B // MiB, 1024, MiB, name='esp-candidate-check-lun0')
+    s.need(got == record['sha256'] and got2 == record['sha256'] if s.execute else None,
+           f'ESP read back through /dev/{dev} and /dev/{s.nodes["lun0"]}: {got} / {got2} = {record["sha256"][:16]}')
+    s.sim['esp'] = record['sha256']
+    if s.execute:
+        s.save(esp_written=record['image'], esp_sha256=record['sha256'], esp_before=before, esp_first_lba=first)
+        common.write_json(OUT / 'installed.json', {'image': record['image'], 'sha256': record['sha256'], 'seed': record['seed'],
+                                                   'inputs': record.get('inputs'), 'layout': 'candidate',
+                                                   'first_lba': first, 'written': time.strftime('%Y-%m-%d %H:%M:%S')})
 
 
 @step('esp', 'maintenance, WRITE partition 37 (test-phase ESP)', writes='LUN 0 LBA 71527424-71789567')

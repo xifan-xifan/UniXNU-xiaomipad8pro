@@ -27,11 +27,12 @@ def parser():
     return argparse.ArgumentParser(prog='build-esp.py')
 
 
-def reject(fn, why):
+def reject(fn, why, exc=(SystemExit,)):
     try:
         fn()
-    except SystemExit as exc:
-        check(exc.code not in (0, None), f'{why}: refused')
+    except exc as caught:
+        code = getattr(caught, 'code', 1)
+        check(code not in (0, None), f'{why}: refused')
         return
     check(False, f'{why}: not refused')
 
@@ -61,5 +62,19 @@ tight_last = 107512576 + common.RESERVE_BLOCKS + 6291649 - 1
 check(common.data_store_lba(seed, [107512576, tight_last]) == 107512576,
       'an extent of exactly the store plus its reserve binds the store at its first LBA')
 reject(lambda: common.data_store_lba(seed, [107512576, tight_last - 1]), 'an extent one block short of the store and reserve')
+mspec = importlib.util.spec_from_file_location('maint_session', HERE / 'maint-session.py')
+maint = importlib.util.module_from_spec(mspec)
+mspec.loader.exec_module(maint)
+device_record = {'partition': {'lun': 0, 'index': 37, 'first_lba': 124289792, 'blocks': 262144}}
+check(maint.check_esp_placement(device_record)['first_lba'] == 124289792, 'maintenance accepts the device placement')
+check(maint.check_esp_placement({})['first_lba'] == common.ESP_FIRST, 'no placement means the historical layout')
+reject(lambda: maint.check_esp_placement({'partition': {'lun': 1, 'index': 37, 'first_lba': 124289792, 'blocks': 262144}}),
+       'a placement on another LUN', exc=(SystemExit, maint.Stop))
+reject(lambda: maint.check_esp_placement({'partition': {'lun': 0, 'index': 37, 'first_lba': 124289792, 'blocks': 1024}}),
+       'a placement with another size', exc=(SystemExit, maint.Stop))
+reject(lambda: maint.check_esp_placement({'partition': {'lun': 0, 'index': 37, 'first_lba': 124289793, 'blocks': 262144}}),
+       'an unaligned maintenance placement', exc=(SystemExit, maint.Stop))
+check((common.CANDIDATE_ESP_FIRST, common.CANDIDATE_ESP_LAST) == (124289792, 124551935), 'candidate ESP constants')
+check(common.CANDIDATE_ESP_LAST - common.CANDIDATE_ESP_FIRST + 1 == common.ESP_BLOCKS, 'candidate ESP is 1 GiB')
 print('esp geometry: ' + ('all checks passed' if not failures else f'{len(failures)} FAILED'))
 sys.exit(1 if failures else 0)

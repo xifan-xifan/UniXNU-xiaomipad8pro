@@ -30,6 +30,13 @@ ESP_BLOCKS = 262144                              # 1 GiB
 ESP_FIRST = ROOTFS_LAST + 1 - ESP_BLOCKS         # 71527424 = bs=1M seek=279404
 ROOTFS_NEW_LAST = ESP_FIRST - 1                  # 71527423
 ESP_TYPE = 'C12A7328-F81F-11D2-BA4B-00A0C93EC93B'
+# The candidate GPT already on this tablet (docs/results-2026-11-21-candidate-gpt-tablet.md): a second layout whose root, Data
+# and ESP windows differ from the historical whole-disk one. The GPT hashes are the ones piano-309-root preflights.
+CANDIDATE_GPT_PRIMARY_SHA256 = '12710135635beee2a5de1dd910924a3d2d26e09a6f368c191b879fd6b41a499b'
+CANDIDATE_GPT_BACKUP_SHA256 = '9acf222558a6766c4f1fcd09509a41cfd5be10d53f34a2a0f84a8cfe0a18c2f5'
+CANDIDATE_ROOTFS_FIRST, CANDIDATE_ROOTFS_LAST = 102269696, 107512575
+CANDIDATE_DATA_FIRST, CANDIDATE_DATA_LAST = 107512576, 124289791
+CANDIDATE_ESP_FIRST, CANDIDATE_ESP_LAST = 124289792, 124551935
 ESP_NAME = 'esp'
 # NativeUfs's reserve at the end of linux_rootfs (log-reserve, default 1024 MiB; unused while log=1 is never set) and the Data store
 # just below it: first LBA = partition last + 1 - reserve - W (native_ufs_store_open).
