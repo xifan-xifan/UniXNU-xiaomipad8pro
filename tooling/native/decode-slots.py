@@ -117,4 +117,5 @@ def main():
     hits = entries(raw, first, last)
     print(f'{hits} non-empty entries', file=sys.stderr)
 
-main()
+if __name__ == '__main__':
+    main()
