@@ -1491,16 +1491,17 @@
   },
   "switching_tool_audit": {
     "repository": "yzddmr6/xiaomipad-8pro-mainline",
-    "latest_release": "v1.6.1",
-    "release_date": "2026-11-18",
+    "latest_release": "v1.6.3",
+    "release_date": "2026-11-23",
     "observed_main_commit": "aa4095a02c8455dfabc3dc42a8bacdb11bacab6b",
     "tool_path": "tools/piano-switch.py",
     "tool_git_blob": "c504b603ba1cb3629057afeb501afe5740819766",
     "tool_bytes": 3111,
+    "v16_3_tool_unchanged": true,
     "release_tools_archive": {
-      "path": "D:\\Temp\\piano-ubuntu-v1.6.1-tools.zip",
-      "bytes": 35336074,
-      "sha256": "1e6b309b2a6c9f8be8d8ed02ea7ffe767b85cd1209ba0066cef21790111088e6",
+      "path": "D:\\Temp\\piano-ubuntu-v1.6.3-tools.zip",
+      "bytes": 35336434,
+      "sha256": "680377bf2eeef574b02639bb6229cea3aab4ea0431ebf74110bb5a194cf42938",
       "contained_script_blob_matches_tag": true
     },
     "release_stock_baseline": "OS3.0.303.0.WPYCNXM",

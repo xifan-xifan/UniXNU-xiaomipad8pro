@@ -1,4 +1,8 @@
-## 2026-11-25 — 上游复核：无新变化
+## 2026-11-25 — 切换工具审计：v1.6.3 电脑端脚本未变，设备内成功位方案可复用
+
+上游 `yzddmr6/xiaomipad-8pro-mainline` 最新 release 已到 v1.6.3（2026-11-23），tools 包 sha256 `680377bf2eee…`；`tools/piano-switch.py` 的 blob 仍是 `c504b603…`、3,111 B，与 v1.6.1 逐字节相同。该脚本只做 `getvar` 预检、哈希校验、顺序 `fastboot flash` 槽 A 三件套和失败回灌，没有成功位与重试门控、没有写后整分区读回；`INSTALL.en.md` 仍只支持 3.0.303 且会擦除 Android 数据。结论不变：电脑端安装器不采用。
+
+设备内 `piano-boot-switch`（整分区 SHA-256 判占用者、只碰槽 A 三件套、失败回灌）、`piano_bootslot.py`、`piano-slot-success`（fail-closed 只改 b54，两份 GPT 一致才写、逐字节读回）与 KernelSU 模块值得复用，并与我们 `maint-session.py slot-success`、`piano_309_gpt_write.py` 对齐。冷启动门控可参考 `tools/piano-cold-boot-accept.py` 的三态判据（PASS/FAIL/UNAVAILABLE，缺失即 UNAVAILABLE，第二次采集 UPTIME ≥ 200 s）。详见 `docs/results-2026-11-25-switch-tool-audit.md`。本审计未在平板执行任何切换。## 2026-11-25 — 上游复核：无新变化
 
 `git ls-remote`：`lenzhang/UniXNU-xiaomipad8pro` 的 `main` 仍是 `480c661a1ffeaf5b0a8e3ca25ff7a62d02aea9b4`；`CrossDarwin/UniXNU_macOS` 的 `main` 仍是 `392a41a298eaf804507d9598ae92e2b2a99277c5`。与 v2 计划比较时的基线一致，本轮没有需要重新锁定的上游变化。CrossDarwin 仍是 SM8550/sheng 平台，其 `memory/handoff-diagnostics` 只作参考。
 ## 2026-11-25 — `oem dump` 由可用退化为持续失败；`oem log` 仍正常
