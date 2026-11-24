@@ -797,3 +797,5 @@ The [SHA-256 HMAC final trial](docs/results-2026-11-22-sha2final-live.md) advanc
 
 
 
+
+2026-11-25: [UFS-capable FD](docs/results-2026-11-25-ufs-fd.md). The FD in the signed `boot_a` candidate has no UFS stack, which is why UEFI never reaches the ESP. Unpacking the LZMA FVMAIN of every local `*.fd` found `394c5c78…` (piano-macos-latest) with the Qualcomm UFS DXEs, the UniXNU `config: volume` patch and the 13 GiB DarwinBoot window. A trial image built by swapping that 3 MiB FD into the existing boot image was signed and `fastboot boot`ed with the older r9 FD: UEFI enumerated, then stopped enumerating without returning to ABL within six minutes, so its log was lost. No partition was written. The tablet needs one power cycle; the `394c5c78…` trial is prepared.
