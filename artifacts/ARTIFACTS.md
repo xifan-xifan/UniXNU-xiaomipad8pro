@@ -218,7 +218,7 @@ See [Mac FD build](../docs/results-2026-11-25-mac-fd-build.md).
 
 | File | Bytes | SHA-256 | What |
 |---|---|---|---|
-| `out/k27-acceptprobe/piano-ufs265.kc` | 147095552 | d4dfefb40e9508e6c6b1592c70ac4814075d5afc00f54e26db3b1788e084ab9e | ufs264 KC with 0xA0-0xA6 probes in `acceptNewMedia`; 0xA4 replays through a trampoline |
-| `out/k27-acceptprobe/boot-piano-ufs265-probe.img` | 185733120 | e820a349d3cfc1a98797faa18e2c4fecd87035262de4a9b1b57505534b15dde3 | v2 RAM image carrying that KC, boot id `195aa1b3`; `fastboot boot` only, not run yet |
+| `out/k27-acceptprobe/piano-ufs265.kc` | 147095552 | 05d8ccb53c61c7185f11f025fb8f698eccc342a50a455ccd1d40644077e1c89d | ufs264 KC with 0xA0-0xA6 probes in `acceptNewMedia`; 0xA4 replays through a trampoline; 0xA7/0xA8 hold the instantiate and attach return values |
+| `out/k27-acceptprobe/boot-piano-ufs265-probe.img` | 185733120 | 86b534f29c528058a85e4ae8660be07f860cfe1ce12d9ab62efac6f683cea5f7 | v2 RAM image carrying that KC, boot id `6d766e67`; `fastboot boot` only, not run yet |
 
 See [the probe result](../docs/results-2026-11-25-acceptnewmedia-probe.md).

@@ -841,10 +841,10 @@ compiling a `package/` kext still needs the absent `PIANO_K27_TREE` recipes and 
 tablet, which stayed off USB.
 
 2026-11-25: [acceptNewMedia probe](docs/results-2026-11-25-acceptnewmedia-probe.md). The probe collection
-`out/k27-acceptprobe/piano-ufs265.kc` (`d4dfefb4…`) carries codes 0xA0-0xA6 at `acceptNewMedia` entry, around
+`out/k27-acceptprobe/piano-ufs265.kc` (`05d8ccb5…`) carries codes 0xA0-0xA6 at `acceptNewMedia` entry, around
 `instantiateMediaObject`, `attach`, `attachToParent` and `registerService`; the stubs sit in the 1,657-byte zero hole at
 `0xfffffff00bc07988` and preserve x0-x18, NZCV and x30. It is installed in
-`out/k27-acceptprobe/boot-piano-ufs265-probe.img` (185,733,120 B, `e820a349…`, boot id `195aa1b3…`) by replacing
+`out/k27-acceptprobe/boot-piano-ufs265-probe.img` (185,733,120 B, `86b534f2…`, boot id `6d766e67…`) by replacing
 `EFI/UniXNU/Payloads/kernel.macho` inside the v2 ramdisk's FAT32 volume (file chain starts at cluster 5, 71,824 clusters,
 same length) and recomputing the Android id; `out/fatswap.py` does what the archived scripts did with `mcopy`, since WSL
 is unusable here. A byte diff against `boot-piano-ufs264cfg.img` shows 898 changed bytes in 54 runs: the id, the seven
@@ -863,6 +863,12 @@ current state: the tablet has been off USB since 03:18. Nothing has been flashed
 2026-11-25: conditional-branch replay fix in the probe collection. The 0xA4 site replays `cbz w0, 0xfffffff00aeb87d0`,
 a copied word whose ±1 MiB offset pointed into the hole from its new location, so the run would have died on the
 success path before 0xA5/0xA6. The stub now retargets that word at a helper at `0xfffffff00bc07d08` that branches to
-the original destination. New collection `d4dfefb4…`, image `e820a349…` (boot id `195aa1b3…`), 909 changed bytes in
+the original destination. New collection `05d8ccb5…`, image `86b534f2…` (boot id `6d766e67…`), 909 changed bytes in
 47 runs against the ufs264 image; re-verified by disassembling the `kernel.macho` extracted from the image.
 `_piano_dbg_kv` accepts codes `0x0b..0xca`, so 0xA0-0xA6 are stored and cleaned. Still not run: no device on USB.
+2026-11-25: the probe now stores return values as well as stop codes. 0xA7 takes `instantiateMediaObject`'s
+`x0` and 0xA8 takes `attach`'s `x0`, so a nonzero 0xA8 is the IOReturn to decode instead of an unexplained stop.
+Stubs are 192 B (7 x 192 = 1344 B of the 1657-byte hole) with the helper at +1344; sites 0xA2/0xA4 hold two
+`_piano_dbg_kv` calls. Collection `05d8ccb5…`, image `86b534f2…`, boot id `6d766e67…`, 1356 changed bytes in 48
+runs against the ufs264 image, re-verified by disassembling the `kernel.macho` in the image. Still not run: no
+device on USB.

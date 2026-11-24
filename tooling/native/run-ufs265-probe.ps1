@@ -12,7 +12,7 @@ $log = Join-Path $root 'out\k27-acceptprobe\probe-live.log'
 Set-Location (Join-Path $root 'out\k27-acceptprobe')
 
 function ShaH($p){ if(!(Test-Path $p)){ return '' }; (Get-FileHash -LiteralPath $p).Hash.ToLower() }
-if((ShaH $img) -ne 'e820a349d3cfc1a98797faa18e2c4fecd87035262de4a9b1b57505534b15dde3'){ throw 'probe image identity' }
+if((ShaH $img) -ne '86b534f29c528058a85e4ae8660be07f860cfe1ce12d9ab62efac6f683cea5f7'){ throw 'probe image identity' }
 if((ShaH $reader) -ne '708d0e79ffa8adae5227eae5dbdff27121da4fa7e9530db31f71dd5153570468'){ throw 'reader identity' }
 
 Start-Transcript -Path $log -Force | Out-Null

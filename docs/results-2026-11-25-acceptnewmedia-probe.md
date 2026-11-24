@@ -8,7 +8,7 @@ relink, no `paclr264.macho` and no keep list are needed.
 Input: `out/inputs/piano-ufs264.kc`, 147,095,552 B, SHA-256
 `529265c7839c51fe4d643af3228f4061297dd5d2ed5cce3e585fbc6bcca14a72`.
 Output: `out/k27-acceptprobe/piano-ufs265.kc`, same size, SHA-256
-`d4dfefb40e9508e6c6b1592c70ac4814075d5afc00f54e26db3b1788e084ab9e`.
+`05d8ccb53c61c7185f11f025fb8f698eccc342a50a455ccd1d40644077e1c89d`.
 
 | code | address | replaced instruction | position |
 |---|---|---|---|
@@ -47,8 +47,8 @@ layout and its signature have to be checked before swapping the blob.
 ## RAM image assembly
 
 `out/k27-acceptprobe/boot-piano-ufs265-probe.img`, 185,733,120 B, SHA-256
-`e820a349d3cfc1a98797faa18e2c4fecd87035262de4a9b1b57505534b15dde3`, boot id
-`195aa1b324bcaa5338130901c213d5a846a39991`.
+`86b534f29c528058a85e4ae8660be07f860cfe1ce12d9ab62efac6f683cea5f7`, boot id
+`6d766e67785a46c679870df467257b649aa87d8c`.
 
 It is `boot-piano-ufs264cfg.img` with one file replaced inside the v2 ramdisk:
 the ramdisk starts at `0x411000` (FAT32, 512 B sectors, 4 sectors per cluster,
@@ -63,7 +63,7 @@ trampoline - so the header, DTB, trustcache and `scratch-data.img` are untouched
 
 The embedded copy of `kernel.macho` in `boot-piano-ufs264cfg.img` is byte-identical
 to `out/inputs/piano-ufs264.kc` (SHA-256 `529265c7...`), and the readback of the
-new image hashes to the probe collection (`d4dfefb4...`). The earlier note about a
+new image hashes to the probe collection (`05d8ccb5...`). The earlier note about a
 divergence at offset 0x800 came from searching for the collection's first bytes at
 a raw offset before mapping the FAT; it was not a real mismatch. The image carries
 no AVB footer (`avbtool verify_image` rejects both the old and new files the same
@@ -93,7 +93,7 @@ at `0x8c5912880` held monotonic `0x001d86...003b0d..` values with spread 4 - not
 copies - so it was not the `piano_dbg_kv` table and could not have shown a probe.
 - The shipped image was re-checked from the file itself: extracting
 `EFI/UniXNU/Payloads/kernel.macho` out of `boot-piano-ufs265-probe.img` hashes to
-`d4dfefb4...`, all seven sites hold `b` to their stub in the hole, every stub sets
+`05d8ccb5...`, all seven sites hold `b` to their stub in the hole, every stub sets
 `w0` and `w1` to its code, calls `_piano_dbg_kv` and branches back to `site+4`.
 
 ## Conditional-branch replay fix (0xA4)
@@ -124,3 +124,21 @@ survive to the readback.`decode-slots.py --scan` also dumps every non-empty slot
 code is present it reports the longest run of agreeing 32-byte entries with the table base that run
 implies. That separates "the window is unmapped or the read landed elsewhere" from "the probe code is
 missing", which the bare hit/no-hit answer could not.
+## Return-value slots (0xA7, 0xA8)
+
+Knowing only "the last code set" leaves the interesting question open: when `attach` returns, was it a
+failure with an IOReturn, or did it never return? The 0xA2 and 0xA4 stubs now store the value live in
+`x0` as well: 0xA7 receives `instantiateMediaObject`'s return and 0xA8 receives `attach`'s return, each
+written into all four words of its slot like a probe code. A zero 0xA8 with 0xA4 set means success; a
+nonzero 0xA8 is the IOReturn to decode.
+
+Stubs grew from 128 B to 192 B to hold the second `_piano_dbg_kv` call (7 x 192 B = 1344 B inside the
+1657-byte hole, helper at +1344). The extra call is `ldr x1, [sp]` (the saved original `x0`),
+`mov w0, #slot`, `bl _piano_dbg_kv`; the register restores still follow it, so the replayed instruction
+sees the original `x0` and the original flags.
+
+Re-verified from the image: embedded `kernel.macho` hashes to `05d8ccb5…`, sites 0xA2 and 0xA4 each hold
+two `bl`s into `_piano_dbg_kv`, the other five hold one, 0xA4's conditional replay still reaches the
+helper at `0xfffffff00bc07ec8`, and the helper branches to `0xfffffff00aeb87d0`. The byte diff against
+the ufs264 image is 1356 bytes in 48 runs, all inside the boot id, the seven branches, the stub block and
+the helper.
