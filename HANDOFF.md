@@ -1,3 +1,10 @@
+## 2026-11-25 — ESP 记录审计：哈希、输入、几何、store 绑定全部自洽
+
+只读复核 `out/persistent/esp-device.json` 与本地 `out/esp-device.img`：本地/Mac/sda37/LUN0 四路都是 `68c28df1…`、1,073,741,824 B；KC/ADT/trustcache/seed 四个输入哈希与 pin 一致；`store.extent=[107512576,124289791]`（16,777,216 块=64 GiB）、`first_lba=117735999`、窗口 6,291,649 块落到 124,027,647、尾部 262,144 块=1 GiB 保留，与 `WRITE-PLAN.md` 第 77 行推导完全一致，`test-esp-geometry.py` 15 项全过。
+
+纠正上一轮我自己记错的一点：`7e9bd39b…` 是 seed identity（kernel 按页表算的哈希），文件哈希是 `48dbc08d…`、22,200,480 B / 逻辑 24 GiB。ESP 里装的正是这份 first-install seed，所以 ARTIFACTS 原文并不算错，只是把两个哈希的角色混在一起；已在该行标明 file 与 identity。
+
+新增一个必须带进刷写步骤的顺序约束：记录里 `data_store.installed_seed=null`、`same_seed=false`、`kc_has_store_guard=true`。主机测试覆盖"空白 store 窗口允许首次 `data-persist=2` 启动"，但一旦记录为已安装，空白 store 会被拒。所以写 Data 窗口的同时必须写入/记录 seed identity，否则后续启动会被 store guard 判成缺盘。详见 `docs/results-2026-11-25-esp-record-audit.md`。本审计未启动、未写入平板。
 ## 2026-11-25 — boot_a v4 已用实机跑过的 FD 重建；A 三件套写入计划就绪
 
 缺签名私钥不再阻塞：从 `out/no-demura-control/boot-piano-blendfix.img`（同 FD 共 353 份）取出 3 MiB FD `44531624…`，LZMA 解码后确认同时带 `unixnu/0001`（`config: volume %s`）和 `darwinboot/0001`（`taken (largest run)`），即 13 GiB 窗口，配当前 8 GiB ADT 合规。用同一 kernel field 的 192 字节 BootShim、本机找回的 `piano-boot.dtb`（`50636eff…`）和 pin 住的 `mkbootimg.py`（`37d84b3d…`）拼出 v4：3,301,376 B、`b267c758…`，头部与历史 v4 完全同构，未签名。详见 `docs/results-2026-11-25-boota-v4-rebuild.md`。
