@@ -91,3 +91,7 @@ entries whose four words are all a code in 0xa0-0xa6 and prints the implied tabl
 consensus over all hits, so a moved slide no longer hides the answer. The earlier 8 KiB read
 at `0x8c5912880` held monotonic `0x001d86...003b0d..` values with spread 4 - not four equal
 copies - so it was not the `piano_dbg_kv` table and could not have shown a probe.
+- The shipped image was re-checked from the file itself: extracting
+`EFI/UniXNU/Payloads/kernel.macho` out of `boot-piano-ufs265-probe.img` hashes to
+`d68bb240...`, all seven sites hold `b` to their stub in the hole, every stub sets
+`w0` and `w1` to its code, calls `_piano_dbg_kv` and branches back to `site+4`.
