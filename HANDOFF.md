@@ -1,3 +1,17 @@
+## 2026-11-26 - Mac 构建机解除硬阻塞：ld-classic 来自 CLT 26.6，fakeroot 通过，内核首链接
+
+上游 `upstream/main` 从 `3365412e` 推进到 `d70c16ce`（134 个提交，Mac 侧快照已同步；Mac 无 GitHub 权限，改用 `git bundle` 从本机增量传输）。维护者现在有一套装在盘上、从盘启动的日用的 macOS（v13.1y12m，2026-11-26），而 `docs/STATUS.md` 里 Android/macOS 切换仍是 RAM-only、只读，没有完整切换过一轮，正是本目标要实机验收的部分。
+
+**唯一硬阻塞 `ld-classic` 解除。** Xcode 27 与 CLT 27.2 的三个 `ld` 全是 `ld-27106.1`（ld-prime），拒绝 `-threaded_starts_section`；上游 `docs/ci.md` open item 2 与 G1 都把这块记为本地私有输入（"ld64-957 of an older Command Line Tools"）。用户下载 `Command_Line_Tools_26.6_Apple_silicon.dmg` 后取出 `~/bin/ld-classic`（`PROJECT:ld64-957.1`，2026-06-08 构建），直接调用它链接 `-static -threaded_starts_section` 成功产出 `__TEXT,__thread_starts`（size 4）。注意早先一次"不支持"的结论是我把 `ld-classic` 当作 clang 的输入文件传入，实际执行链接的仍是系统 ld，属于误判。上游 G1 的这一项就此对任何拥有该公开 dmg 的人关闭。
+
+**上游 `tooling/ci/k27-kernel.sh` 的 `tree/xnu/ld/fakeroot` 四阶段在本机全部通过**（`STAGE-RC=0`）：`libfirehose_kernel.a`（arm64e，sha256 `a6ad6d76591a20730cb8d748b362a08a8d6d8228076b648594deba3c0169042f`）从 libdispatch `701f4d1a` 源码构建，KDK 头（dortania/KdkSupportPkg `26C5035r`，sha256 `529ba51a476e1f22c34bda3b3eff357b70bf19a6869d4542c66201cbf2eaa8ff`，按上游 rsync 规则手工展开为 `kdk-notb`）被 `installhdrs` 接受。此前 `stage_fakeroot` 的失败原因是 `AvailabilityVersions` 用 `xcrun --find cmake`/`-GNinja` 而 Homebrew 不在 PATH；`brew install cmake ninja` 并在 PATH 前置 `/opt/homebrew/bin` 后解决（`xcrun` 会回落到 PATH 查找）。
+
+**内核首链接产物**：`out/kernel-k27-native.macho` 27,557,496 B arm64e Mach-O，sha256 `c896e2032bd35218fc57dba0081cd2db575244c64d35978d656864768ae7552f`，并按上游命名复制为 `out/k27/kernel-k27-0066-native.macho`。序列号核对无误：`K27_TREE_TOP=0066` 是基线树序列，0067-0075 由 `tooling/k273/prepare-k27-tree.sh` 在 27.3 克隆上后补。但 `kernel.log` 只有 74 行 libtool 警告，说明这一遍只是重链接，`.o` 来源需要坐实，因此把 `k27-native-obj` 移开做全量重编并与该 sha256 比对；一致才算本机自建，不一致则此前产物视为复用维护者对象，不能作为可复现证据。
+
+**设备侧只读复核**：`25091RP04C` / `piano` / 512 GB（`/data` 376 GiB），与 `skills/install-piano-macos` 要求的型号和 G10 布局一致；stock 为 `OS3.0.309.0.WPYCNXM`，技能写的是 `OS3.0.303.0.WPYCNXM`，这一处差异要在写入前确认影响。设备仍在 HyperOS（`7ccdd855 device`），本轮没有对它做任何写入。
+
+**按上游路线剩下的缺口**（G1 的 ld-classic 已关，k27 树已公开）：G4 Turnip/Mesa delta 未公开（没有它就没有 A830 桌面）、G6 写入工具仍锁参考机（`tooling/persist/common.py` 无 unit-profile 钩子，`tooling/repro/unit-profile.py` 只是只读起点）、G1b SystemOS boot shims、G2 基础信任包、G3 Data seed。详见 `docs/results-2026-11-26-mac-build-host-unblocked.md`。
+
 ## 2026-11-26 - ?????? k27 ????????????????????? v13.1y12k
 
 `git fetch upstream`?`upstream/main` ? `480c661a` ?? `b117da9e`?? 79 ????????? `d83e0912`?k27 ?????
