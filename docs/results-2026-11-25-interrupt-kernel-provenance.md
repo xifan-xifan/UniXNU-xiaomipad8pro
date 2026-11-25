@@ -62,3 +62,31 @@ Route A is the one the goal needs regardless (the patch has to be re-authored at
 tree), so route A's first step is a build that changes nothing: build the tree as it is, into a new output directory, and
 measure whether it produces a linkable kernel. The 2026-11-16 output tree is the only copy of that build and must not be
 overwritten.
+
+
+## 5. The series does not apply to any XNU source on this host (measured, 2026-11-25)
+
+The probe copied each candidate tree under `/root` and tested `patches/k273/0001` plus `patches/k27/0053-0073` (21 patches):
+
+| tree (WSL) | applies | already in source | fails |
+| --- | --- | --- | --- |
+| `xnu-k273-work` (as-is, patch text normalized to LF) | 4 | 1 | 16 |
+| `xnu-k27-final` | 2 | 6 | 13 |
+| `xnu-k27-patched` | 8 | 0 | 13 |
+
+The patches themselves carry CRLF context (a hunk of 0066 quotes `char buf[BOOT_LINE_LENGTH];` with a trailing CR), which says the
+tree they were made from lived on a Windows volume; and after normalizing line endings, 13 patches still fail against every
+local tree, so none of them is that base. `xnu-k27-final` having six of the series already in its source matches a tree that got
+as far as roughly 0052 plus a few of these, not past 0073.
+
+Two consequences, both narrowing route A:
+
+1. Rebuilding the 27.3 kernel means first re-deriving the base the series was written against. That is not a "set
+   `PIANO_K27_TREE` and run `prepare-k27-tree.sh`" situation; it is reconstructing a tree, and the mismatch is in the
+   tree's own source, not in the patch format.
+2. The shipped upstream release images cannot settle the interrupt question either: scanning `out/inputs/v110/release/boot/boot.img`,
+   `vendor_boot.img`, `boot-ram-check.img` and `out/persistent/boot-piano-macos-persistent-v4-avb.img` (all ~100 MB) for
+   `piano_gicv3_init`, `piano_gic_irq_handler`, `piano_delay_timer_service` and `piano-gic` gives zero, but their FAT payloads
+   are compressed, so zero hits here is absence of evidence, not evidence of absence. Reading the payload out with
+   `tooling/bootimg` and decompressing it is the cheap way to learn whether the author's shipped kernel already carries the
+   interrupt path, and it decides whether route B (extract a kernel from a paclr collection) is worth anything at all.

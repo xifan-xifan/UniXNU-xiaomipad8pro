@@ -4,7 +4,7 @@
 
 补丁则确实不在本机任何一份源码里：`grep -rln piano_gicv3_init` 在 `xnu-k27-final`、`xnu-k273-work`、`xnu-k27-patched/osfmk` 以及这两份内核二进制里全部零命中；WSL `/tmp`（2131 项）里没有 `piano-paclr*`，Mac `~/Codex`（含 11-24 的 `k273-esp`）和 `/private/tmp` 里连一个 `kernel.macho` 都没有。带那份代码的字节只剩两份 147 MB 集合：本机 `out/k27-smprobe/piano-ufs266.kc`（`9f276dff…`）与 Mac `~/Codex/k273-esp/inputs/piano-ufs264.kc`（`529265c7…`，同一尺寸不同哈希）。按字节扫 `piano-ufs266.kc`，`_piano_gicv3_init`/`_piano_gic_irq_handler`/`_piano_delay_timer_service` 落在同一段有序符号表里，旁边是 `arm_timer.c`、`pg: enable enter gic %d`，`piano-gic`/`piano-gic-irq` 在另一段字符串里——内核自己的段，不是 kext，改 kext 得不到。
 
-决定：走"重写中断补丁 + 本机构建"这条，因为 `DAIF.F` 的放开迟早要落进树里（`docs/results-2026-11-24-timer-masked-polling.md` 的下一步就是它）。第一步是**不改任何东西地构建一次**，量出这棵树今天还能不能产出可链接的内核，再谈补丁；2026-11-16 那份输出树是唯一副本，构建必须写到新目录，不覆盖它。另一条从 147 MB 集合反解内核的路线连同代价对照记在 `docs/results-2026-11-25-interrupt-kernel-provenance.md`（`tooling/` 里没有现成反解，kernelcache 的 fileset 头也不是 `kc-build273-piano.py` 接受的 `KERNEL`）。本轮设备零操作零写入，HyperOS `7ccdd855` 全程在线。
+决定：走"重写中断补丁 + 本机构建"这条，因为 `DAIF.F` 的放开迟早要落进树里（`docs/results-2026-11-24-timer-masked-polling.md` 的下一步就是它）。第一步是**不改任何东西地构建一次**，量出这棵树今天还能不能产出可链接的内核，再谈补丁；2026-11-16 那份输出树是唯一副本，构建必须写到新目录，不覆盖它。另一条从 147 MB 集合反解内核的路线连同代价对照记在 `docs/results-2026-11-25-interrupt-kernel-provenance.md`（`tooling/` 里没有现成反解，kernelcache 的 fileset 头也不是 `kc-build273-piano.py` 接受的 `KERNEL`）。补测（同日）：21 条 k27/k273 补丁在 xnu-k273-work/xnu-k27-final/xnu-k27-patched 上最多只有 8 条能套（补丁文本本身是 CRLF，说明原作者那棵树在 Windows 卷上），13 条对任何本地树都套不上，**本机没有那份基线树**；上游 v1.1.0 发布镜像按字节扫也是零命中，但那份 FAT 载荷是压缩的，只能算未测。下一步先解开发布镜像的载荷看作者随附内核有没有中断路径。本轮设备零操作零写入，HyperOS `7ccdd855` 全程在线。
 
 ## 2026-11-25 - 槽 A 被留在了 macOS 启动集上：HyperOS 已恢复并逐字节复核（`fastboot boot` 全拒的根因不是 platform-tools 版本）
 
