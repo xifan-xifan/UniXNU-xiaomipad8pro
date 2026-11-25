@@ -26,6 +26,8 @@ parser.add_argument('-I', dest='includes', action='append', default=[])
 parser.add_argument('-D', dest='defines', action='append', default=[], help='NAME[=VALUE], or U:NAME to undefine')
 parser.add_argument('--out', type=Path, help='output directory (default: out/native-kexts/NAME of this repository)')
 parser.add_argument('--obj', default='k27-native-obj', help='kernel object tree under out/x12377/build/xnu')
+parser.add_argument('--target', help='rewrite the recipe triple: a recipe kept from an older tree can pair --target=arm64e-apple-ios17.0.0 with its own -mios-version-min=27.0, which clang then rejects')
+parser.add_argument('--compiler', help="the recipe names its own compiler; a host without that path (or with a clang that lacks Apple's warning spellings) builds with --compiler instead, as the Mac runs of 2026-11-21 did with xcrun -f clang")
 parser.add_argument('--c-recipe', default='bsd/DEVELOPMENT/bsd_init.o.json',
                     help="the kernel C file whose flags the C sources take (osfmk/DEVELOPMENT/startup.o.json for osfmk's private headers)")
 args = parser.parse_args()
@@ -64,6 +66,8 @@ for source in args.sources:
         command += ['-U', define[2:]] if define.startswith('U:') else ['-D', define]
     command += ['-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter', '-Wno-c99-designator', '-Wno-reorder-init-list',
                 '-Wno-deprecated-enum-enum-conversion', '-Wno-unnecessary-virtual-specifier', '-Wno-missing-designated-field-initializers']
+    if args.target: command = [('--target=' + args.target if a.startswith('--target=') else a) for a in command]
+    if args.compiler: command[0] = args.compiler
     env = dict(os.environ, CCC_OVERRIDE_OPTIONS='+-Wno-error=missing-designated-field-initializers')
     # The kernel's recipe names its compiler and target (arm64e-apple-ios) but no sysroot: an SDKROOT from the caller's
     # environment (a macOS SDK) would become the sysroot and fail -Wincompatible-sysroot (host checklist run of 2026-11-13).

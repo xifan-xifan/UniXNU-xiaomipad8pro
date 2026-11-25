@@ -1,3 +1,34 @@
+## 2026-11-25 — k27 树在本机 WSL 里找到了：上游发布序列现在可以走源码级构建
+
+上午那条"本机和 Mac 都没有 k27 树、源码级候选编不出来"的结论只对了一半。`PIANO_K27_TREE` 在本机 WSL 发行版
+`UbuntuPiano` 里：`/root/piano-native/k273-compat/out/x12377` 同时有 `build/xnu/k27-native-obj/DEVELOPMENT_ARM64_BCM2837`
+的编译配方（`iokit/DEVELOPMENT/IOPlatformExpert.cpo.json`）和 kext 需要的生成头（`storage-abi/include`、`xnu-m/osfmk`、
+`inc-hid`、`inc-net-piano`、`inc-gfx`），`/root/piano-native/deps/UniXNU-sm8750-common/kits/Sm8750Platform` 是
+`build-native-ufs.sh` 要链进包含目录的那个 kit，`/root/xnu-linux/bin` 是那套 clang/ld。产出它的两个归档就在仓库里
+（`out/k27-independent-20261120/host-run/frozen-inputs-and-recipes.tar.gz` 12,084 个成员、
+`mac-object-checkpoint.tar.gz` 964 个内核对象 + 1,093 条配方），今天重新解包验证可用。
+
+`PIANO_K27_TREE=/root/piano-native/k273-compat tooling/k27/build-native-ufs.sh` 已经能走到编译器。两处主机差异都是
+2026-11-21 那次跑通时手工做过的（`out/verified-no-poll-23aca0b8/` 是它的产物）：配方把 `--target=arm64e-apple-ios17.0.0`
+和自身的 `-mios-version-min=27.0` 放在一起，clang 以 `-Woverriding-option` 报错；配方与本仓库追加的
+`-Wno-unnecessary-virtual-specifier`、`-Wno-missing-designated-field-initializers` 是 Apple clang 专有拼法，Ubuntu clang 18
+不认，`-Werror` 直接致命。所以 `tooling/k27/build-native-kext.py` 加了 `--target`、`--compiler` 四个字的开关（默认仍取配方值）。
+本机实测：带 `--target arm64e-apple-ios27.0` 后三元组冲突消失，只剩 Apple 告警拼法这一条，也就是说对象文件只差一个
+Apple clang 主机。合进来的上游 `package/NativeUfs/NativeUfs.cpp`（`registerService` + `mediaWithUuidExists` 轮询、全程不碰
+`IOService::startMatching`）现在就是眼前这份源码，`docs/results-2026-11-25-upstream-publication-diff.md` 点名的目标状态
+不必再靠零填充区手写跳板去逼近。
+
+锁定提交的来源今天再查一轮，结论没变：`unixnu.lock` 写的是 `branch el1/native-variant` @ `11ac316b…`，7 个相关仓库
+都没有这个分支，GitHub 提交搜索 0 命中；UniXNU 核心的 `profiles/os/macos-27.3-26C5035r` 钉的是同一个 XNU
+（`ac9718f…`）和同一个解开的 mac17j kernelcache（`d1003b51…`，Mac 上就是 `kc273-mac17j.bin`），但核心里没有 piano
+那条 KC 构建器（`kc27*`、`segaddrs.sh`、`kc-keep.txt` 都没有；公开的 `UniXNU/XnuPrelink` 只有 `fileset_*.py` 与
+`native_prelink.py`）。另记一条网络事实：本机到 `raw.githubusercontent.com` 被连接重置，`api.github.com` 正常，
+读文件走 contents API。详见 `docs/results-2026-11-25-k27-tree-in-wsl.md`。
+
+设备今天复测更差一步：`fastboot boot` 连 8 MiB 的 reader 都拒（`Load Error`），`fastboot reboot` 十几秒内又回到 ABL
+fastboot（等 150 s 没有 HyperOS），`oem log` 现在回 `unknown command`；`product`/`unlocked`/`is-userspace` 仍应答。
+这就是 `piano-usb=3` 那次实验留下的 ABL 下载通道退化，主机侧无解，需要机主断电重启一次。Mac 现在有 163 GiB 空闲，
+磁盘不再是限制。本轮没有向平板写入任何字节。
 ## 2026-11-25 — 构建环境审计：本机和 Mac 都没有 native k27 树，源码级候选暂时无法产出
 
 查了能否把 2026-11-24 留下的 ufs185 发布序列改动编成镜像：本工作区没有 `PIANO_K27_TREE`、没有 `~/.config/piano/env`、没有 `out/kc/kc27.bin`、没有 `out/x12377` 生成头；Mac（192.168.31.183）同样没有 k27/xnu 树、没有 kc27.bin，只有 `~/Codex/k273-esp/inputs/piano-ufs264.kc` 和 `~/ufs151/NativeUfs.o`，而 `~/Codex/UniXNU-xiaomipad8pro` 还停在基线 `2438556` 且带本地改动。所以 `build-native-image.sh` / `build-native-ufs.sh` 都会停在 `k27-tree.sh`。
