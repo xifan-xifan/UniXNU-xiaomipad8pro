@@ -1,3 +1,14 @@
+## 2026-11-26 - G6 落成代码：从我们自己的 GPT 头生成 device profile，写入工具可以按它覆盖几何（本机测试全绿）
+
+`tooling/persist/common.py` 里写死的是参考机分区 LBA，而 `build-gpt.py`/`maint-session.py`/`build-dual-esp.py` 与根镜像内嵌的计划器都读这些常量；我们这台 `linux_data` first 是 `107512576`，参考值 `71789568` 落在 `userdata`(3632128..102269695) 内部 —— 照发布的工具跑就会把 19.5 GiB 根镜像写进 Android 的 userdata，而 linux_data 一字节不动。这就是上游 G6（"第二台设备没有 device profile 之前不得写入"）在代码里的具体形态，本轮**在代码里关闭**而不只是记录。
+
+新增：`tooling/persist/unit_profile.py` 从 LUN0（可选 LUN4）GPT 头打印本机该用的几何（入口序号、first/last、两个分区的 Data reserve 位置、ESP 是否已存在），`--image-bytes` 直接给出写计划；遇到"没有 linux_data / rootfs 与 data 重叠 / esp 容量或入口序号不同 / esp 与 data 重叠"一律**拒绝并给原因**而不是猜；退出码 2 = 与参考布局 DIFFERENT。`common.py` 增加 `apply_unit_profile()`（import 时按 `PIANO_UNIT_PROFILE` 生效，重绑 `ROOTFS_*/DATA_*/ESP_*/GPT_PRIMARY_SHA256/BOOT_A_*`），**不重绑工具自身规则**（`LBA`/`ESP_BLOCKS`/`RESERVE_BLOCKS`：profile 只说这台机器的分区在哪，不改布局规则），`REFERENCE` 保留参考值供日志与测试，`clear_unit_profile()` 还原；不设变量时行为与之前完全一致（测试已断言）。`test-unit-profile.py` 23 项主机检查（合成 GPT 头）**全绿**。两条首轮失败是测试自己的算术：拒绝语料是 "does not end before"，越界用例必须真的越过 `data_reserve_from`（`(data_reserve_from - data_first + 1) * lba`），不是从镜像末尾倒推 `RESERVE_BLOCKS`。
+
+限制说清楚：`tooling/persist/` 其余测试在本机 Windows 没跑成也没跑：`test-abl-state.py`/`test-slot-success-crc.py` 要 `fcntl`，`test-persist.py` 要 `xxd`/`od`，`test-data-store.py` 要 `unixnu` 包，`test-esp-geometry.py`/`test-k273-only.py` 还缺本机没有的输入。built, to be run: 那 6 个既有测试需要在 POSIX 主机上跑一遍。
+
+持久写入前仍未关闭的一项：LUN4 GPT 头还没采集，所以本机的 profile 只覆盖 LUN0，`boot_a`/`vbmeta_a`/`dtbo`/`vendor_boot_a`/`init_boot_a` 的入口序号与起始偏移仍是参考值。它只是维护 RAM 镜像里前若干扇区的只读 `dd`，是下一件要从平板取的数据。本轮设备未动。
+
+详见 `docs/results-2026-11-26-unit-profile-g6-code.md`。
 ## 2026-11-26 - kext 阶段停在三份"私有 bootstrap 生成的头目录"（新发现的缺口，上游清单里没有）
 
 `PIANO_STOP_AFTER=kexts` 在本机跑到第二个 kext 就停：`ARMPlatformStandIn` 正常产出 5 个对象（公开输入足够），接着 `NativeUfs.cpp:7` 报 `IOKit/storage/IOBlockStorageDevice.h` 找不到。根因查清：`build-native-ufs.sh` 等 8 个 kext 脚本传 `-I $PIANO_K27_TREE/out/x12377/storage-abi/include`、`-I .../xnu-m/osfmk`，8 个还传 `-I .../inc-gfx`，而这三个目录**公开 k27 树里没有，本仓库和 `Droid-VM/UniXNU` 里也没有任何脚本创建它们**（只有脚本引用与 `scripts/audit-reference.py` 读取的 `build/storage-abi/interface-audit.json`）。xnu 源码顶不掉：`out/k27/xnu/iokit/IOKit` **没有 `storage` 子目录**（0 项），`installhdrs` 把那些头装到 `Kernel.framework/Versions/A/Headers/IOKitUser/`（`IOBlockStorageDevice.h` 加 23 个同级），与源码里 `<IOKit/storage/...>` 的写法不同名；KDK 展开 5.2 GB 里总共只有 76 个头、没有 IOKit 树。结论：`storage-abi` 是维护者 bootstrap 环境私有的头 shim，与 G1 其他本地件同源，但**上游 `skills/install-piano-macos` 的缺口清单没有列它**——我们已关闭 k27 树、信任包、Data seed，该阶段剩下的真实阻塞是 kext 需要的 `storage-abi`/`xnu-m`/`inc-gfx` 与 Metal 插件需要的 `UniXNU-turnip`。

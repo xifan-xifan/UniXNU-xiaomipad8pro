@@ -36,6 +36,77 @@ ESP_NAME = 'esp'
 RESERVE_BLOCKS = 1024 * 256
 # A copy of the store in the free gap of linux_rootfs, well above the root image and below both store places (plan 3.0).
 STORE_SCRATCH_FIRST = 64711424
+
+
+# A second unit (skills/install-piano-macos/SKILL.md gap G6): its own geometry, made from its own GPT heads by
+# tooling/persist/unit_profile.py, replaces the partition LBAs above when PIANO_UNIT_PROFILE names that JSON. Without the
+# variable every constant here stays the reference unit's, exactly as before. A profile says only where this unit's
+# partitions are; it never relaxes a check that this unit *is* the reference unit, and it is applied only when the operator
+# names it on every command line.
+UNIT_PROFILE = None
+# The reference unit's own values, snapshotted at import so they stay readable after a profile is applied (logs, tests,
+# and a host driving both units).
+REFERENCE = {n: v for n, v in (('GPT_PRIMARY_SHA256', GPT_PRIMARY_SHA256), ('ROOTFS_FIRST', ROOTFS_FIRST),
+                               ('ROOTFS_LAST', ROOTFS_LAST), ('DATA_FIRST', DATA_FIRST), ('DATA_LAST', DATA_LAST),
+                               ('ESP_FIRST', ESP_FIRST), ('ROOTFS_NEW_LAST', ROOTFS_NEW_LAST))}
+
+
+def apply_unit_profile(path=None):
+    """Read PIANO_UNIT_PROFILE (or PATH) and rebind the LUN 0 partition constants to that unit. Refuses a profile that is
+    not a tooling/persist/unit_profile.py product, that disagrees about the disk's block size or length, or whose
+    partitions overlap. Callers that already hold the constants read them as module attributes, so apply once at startup."""
+    global UNIT_PROFILE, REFERENCE, LBA, LUN0_BLOCKS, GPT_PRIMARY_SHA256
+    global ROOTFS_INDEX, ROOTFS_FIRST, ROOTFS_LAST, DATA_INDEX, DATA_FIRST, DATA_LAST
+    global ESP_INDEX, ESP_FIRST, ROOTFS_NEW_LAST, BOOT_A_START_512, BOOT_A_SIZE_512
+    if path is None:
+        path = os.environ.get('PIANO_UNIT_PROFILE', '').strip()      # Path('') is Path('.'), so stay a string until here
+        if not path:
+            return None
+    path = Path(path)
+    if not path.is_file():
+        raise SystemExit(f'PIANO_UNIT_PROFILE={path}: no such profile (make one with tooling/persist/unit_profile.py)')
+    p = json.loads(path.read_text())
+    for want in ('lba', 'lun0_blocks', 'rootfs_index', 'rootfs_first', 'rootfs_last', 'data_index', 'data_first',
+                 'data_last', 'esp_index', 'esp_first', 'esp_last', 'rootfs_new_last', 'unit_gpt_primary_sha256'):
+        if want not in p:
+            raise SystemExit(f'{path}: not a unit profile (no {want})')
+    for key, name in (('lba', 'LBA'), ('lun0_blocks', 'LUN0_BLOCKS')):
+        if p[key] != globals()[name]:
+            raise SystemExit(f'{path}: {key} {p[key]} is not the tooling constant {name} {globals()[name]} '
+                             '(the tooling assumes that value everywhere, a profile cannot change it)')
+    if not (p['rootfs_first'] <= p['rootfs_new_last'] < p['data_first'] <= p['data_last'] < p['lun0_blocks']):
+        raise SystemExit(f"{path}: linux_rootfs and linux_data do not lie in the order the write tooling assumes")
+    if p['data_first'] >= p['data_last'] + 1 - RESERVE_BLOCKS:
+        raise SystemExit(f"{path}: linux_data is smaller than NativeUfs's reserve")
+    if REFERENCE.get('DATA_FIRST') is None:      # keep the first pristine reference set, for logs and tests
+        REFERENCE = {n: globals()[n] for n in ('GPT_PRIMARY_SHA256', 'ROOTFS_FIRST', 'ROOTFS_LAST', 'DATA_FIRST',
+                                               'DATA_LAST', 'ESP_FIRST', 'ROOTFS_NEW_LAST')}
+    # ESP_TYPE and ESP_BLOCKS stay as the tooling defines them: a unit may move the ESP, but its type GUID and its 1 GiB
+    # size are the tooling's own rule, not per-unit facts.
+    for name, value in (('ROOTFS_INDEX', p['rootfs_index']), ('ROOTFS_FIRST', p['rootfs_first']),
+                        ('ROOTFS_LAST', p['rootfs_last']), ('DATA_INDEX', p['data_index']), ('DATA_FIRST', p['data_first']),
+                        ('DATA_LAST', p['data_last']), ('ESP_INDEX', p['esp_index']), ('ESP_FIRST', p['esp_first']),
+                        ('ROOTFS_NEW_LAST', p['rootfs_new_last']), ('GPT_PRIMARY_SHA256', p['unit_gpt_primary_sha256'])):
+        globals()[name] = value
+    four = p.get('lun4') or {}
+    if four.get('boot_a_start_512') is not None:
+        BOOT_A_START_512, BOOT_A_SIZE_512 = four['boot_a_start_512'], four['boot_a_size_512']
+    UNIT_PROFILE = str(path)
+    return p
+
+
+def clear_unit_profile():
+    """Undo apply_unit_profile (tests, and a host driving both a reference and another unit)."""
+    global UNIT_PROFILE, GPT_PRIMARY_SHA256, ROOTFS_INDEX, ROOTFS_FIRST, ROOTFS_LAST
+    global DATA_INDEX, DATA_FIRST, DATA_LAST, ESP_INDEX, ESP_FIRST, ROOTFS_NEW_LAST
+    global BOOT_A_START_512, BOOT_A_SIZE_512
+    if REFERENCE.get('DATA_FIRST') is not None:
+        for name, value in REFERENCE.items():
+            globals()[name] = value
+    UNIT_PROFILE = None
+
+
+apply_unit_profile()
 # The boot triplet on LUN 4 (CRITICAL-BACKUP/boot-partitions.json; backups in partition_backup()'s sde/).
 BOOT_A_SHA256 = '389d4271743bb4c69664bdb31c34440589978c8add3af0ce9190c46045259a87'      # 13-boot_a (Ubuntu, key f5151930)
 VENDOR_BOOT_A_SHA256 = '50f70e361b927945afa4adb5ddc9947e39a136cd2cd2e28a311a4c3d2163829a'  # 23-vendor_boot_a (Ubuntu)
