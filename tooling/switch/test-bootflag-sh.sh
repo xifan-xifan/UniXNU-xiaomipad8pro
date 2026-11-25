@@ -39,7 +39,9 @@ python3 -c "import sys;b=bytearray(open(sys.argv[1],'rb').read());b[0x49]=0x5c;o
 $SH "$S" once-android > /dev/null 2>&1; rc=$?; b=$(od -An -tu1 -j73 -N1 "$T/sdam" | tr -d ' ')
 ok $([ $rc = 3 ] && [ "$b" = 92 ]; echo $?) "foreign byte 0x5c refused (rc $rc), untouched"
 chmod 444 "$T/sdam"; python3 -c "import sys,os;os.chmod(sys.argv[1],0o644);b=bytearray(open(sys.argv[1],'rb').read());b[0x49]=0;open(sys.argv[1],'wb').write(b);os.chmod(sys.argv[1],0o444)" "$T/sdam"
+if [ "$(id -u)" = 0 ]; then n=$((n+1)); echo "SKIP read-only nvmem: root writes a 0444 file, run this test unprivileged"; else
 $SH "$S" once-android > /dev/null 2>&1; rc=$?; ok $([ $rc = 4 ] || [ $rc = 5 ]; echo $?) "read-only nvmem: write failure reported (rc $rc)"
+fi
 chmod 644 "$T/sdam"
 PIANO_BOOTFLAG_NVMEM=$T/missing $SH "$S" show > /dev/null 2>&1; ok $([ $? = 2 ]; echo $?) "missing nvmem: rc 2"
 unset PIANO_BOOTFLAG_NVMEM

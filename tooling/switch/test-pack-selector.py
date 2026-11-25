@@ -5,6 +5,7 @@ layout, check-signed; then, read only, the real stock android-set boot.img + mac
   test-pack-selector.py SELECTOR_BIN [--real ANDROID_BOOT UEFI_BOOT]"""
 import hashlib
 import json
+import importlib.util
 import os
 import struct
 import subprocess
@@ -169,8 +170,15 @@ def main():
             check(r.returncode == 0, 'pack the real stock boot + macos-set kernel: ' + (r.stdout + r.stderr).strip()[:200])
             if r.returncode == 0:
                 mj = json.load(open(p('real.img.avb.json')))
-                check(mj['avb']['props'].get('com.android.build.boot.security_patch') == '2026-02-01', 'real: patch level 2026-02-01 kept')
-                check(mj['avb']['rollback_index'] == 1769904000, 'real: rollback index 1769904000 kept')
+                spec = importlib.util.spec_from_file_location('packsel',
+                        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pack-selector.py'))
+                packs = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(packs)
+                stock = packs.avb_info(open(ra, 'rb').read())
+                check(mj['avb']['props'] == stock['props'], 'real: the stock props kept, patch level '
+                      + str(stock['props'].get('com.android.build.boot.security_patch')))
+                check(mj['avb']['rollback_index'] == stock['rollback_index'],
+                      'real: the stock rollback index ' + str(stock['rollback_index']) + ' kept')
                 check(0xA8010000 + mj['image_size_new'] <= 0xB6382000, "real: the image ends below Android's initrd 0xB6382000")
                 print('INFO real layout ' + json.dumps({k: hex(v) if isinstance(v, int) else v for k, v in mj.items() if k != 'avb'}))
         else:

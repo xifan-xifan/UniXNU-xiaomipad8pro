@@ -2,11 +2,12 @@
 # SPDX-License-Identifier: BSD-2-Clause-Patent
 """Checks of the built selector: one allocated section, no relocations, the entry at offset 0 saves x0..x3/sp/DAIF first,
 the metadata block once with our version tag, the bootargs strings present, size bounded, no FP/SIMD, all addresses in range."""
+import os
 import re
 import subprocess
 import sys
 
-LLVM = '/opt/homebrew/opt/llvm/bin'
+LLVM = os.environ.get('LLVM', '/opt/homebrew/opt/llvm/bin')
 obj, binf = sys.argv[1], sys.argv[2]
 data = open(binf, 'rb').read()
 fails = 0
