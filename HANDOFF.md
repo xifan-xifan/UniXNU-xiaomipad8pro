@@ -926,3 +926,12 @@ no manual `publishMedia`), the `k273` build line, `native-loop.sh` and the USB c
 11-24 kext-compile scene (`~/ufs1xx`, `debug-kext.py`, llvm-20.1.8) but its `/private/tmp` k27 tree was purged. The
 first ufs265 probe run ended with the known `oem dump` transport failure (control dump also fails); the tablet is
 still on USB in ABL fastboot. Next: merge upstream main and rebuild on its line.
+
+2026-11-25: [USB-C console attempt](docs/results-2026-11-25-usbc-console-try.md). ufs267 (`piano-usb=3` in place of
+`data-persist=0`, id recomputed, `0be526f8…`) booted and auto-returned to fastboot, but the host enumerated no serial
+device at all: the stop is inside `IOBlockStorageDriver::start` on the config thread, so the twelfth native kext
+(`PianoDwc3`) never takes over. After that run ABL rejected every RAM image with `Load Error` (even the hash-verified
+image that booted twice earlier today) and `fastboot reboot` came back to fastboot instead of HyperOS: the DWC3
+takeover leaves the link unusable for the next ABL download, the same symptom family as `Too many links`. Recovery
+needs one power cycle at the tablet; no partition was written, and `piano-usb=3` stays out of the main line until the
+storage stop is behind us.
