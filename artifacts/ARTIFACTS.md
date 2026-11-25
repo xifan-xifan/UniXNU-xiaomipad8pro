@@ -374,4 +374,13 @@ thought-proof build only: with its forced Android handoff the compiler removes t
 the selector's binary checks fail on purpose. It is never a candidate for a persistent write; the selector of record is the
 `b4130d11...` binary above.
 
-None of these have been put on the tablet yet; the first run is a `fastboot boot` of the probe image, expected to land in HyperOS.
+Both were run on the tablet as `fastboot boot`, and neither wrote to disk. `logs/selector-20261126-022452-…`: the probe image went
+out in 3.3 s and a freshly booted HyperOS `OS3.0.309.0.WPYCNXM` reported `boot_completed=1` 11 s later, so the selector really does
+run ahead of both payloads. `logs/selector-20261126-024000-…`: the combined image reached the macOS side and enumerated as the
+`piano-uefi` fastboot device 6.1 s after the boot command, which is the fail-safe of a macOS boot set with no SDAM request (this
+unit's flag is still the factory empty value). ABL's preflight read right in both runs (`product piano`, `current-slot a`,
+`successful yes`, `unbootable no`, `retry-count 6`) and `tooling/native/ensure-hyperos.ps1` brought the tablet back to completed
+HyperOS with the slot state untouched. One shape rule came out of the second run: the UEFI load of a combined image has to be the
+persistent one (`out/persistent/boot-piano-macos-persistent-v4-avb.img`), because `pack-selector.py` hands the UEFI payload only the
+FDT, so a RAM image that keeps its macOS payload inside its own Android ramdisk is invisible to the selector. See
+[the run result](../docs/results-2026-11-26-selector-first-runs.md).
