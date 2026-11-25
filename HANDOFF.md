@@ -916,3 +916,13 @@ publisher thread registers the window asynchronously (`w1=0`) and then calls `pu
 collection therefore matches the current source, and ufs171's stop inside Apple's
 `acceptNewMedia` happens before any of our media code. Probe images re-hashed and match:
 ufs265 `86b534f2…`, ufs266 `a56f132d…`, kc `9f276dff…`. Device still absent from `adb`/`fastboot`.
+
+2026-11-25: [k27 tree route](docs/results-2026-11-25-k27-tree-route.md) + upstream sync found. The locked k27 base is
+public: `apple-oss-distributions/xnu` tag `xnu-12377.121.6` = `ac9718fb…` (verified against the API this session), the
+baseline patch series lives in `UniXNU/UniXNU` `patches/xnu-12377/`, and the 27.3 IPSW member fetch is scripted with a
+direct Apple CDN URL in `tooling/k273/ipsw-members.py`. Upstream `main` moved 311 commits past our baseline
+(`480c661a`, not an ancestor of our HEAD): it contains the landed `NativeUfs` (plain `registerService`, IOBSD wait,
+no manual `publishMedia`), the `k273` build line, `native-loop.sh` and the USB console/ssh path. The Mac still has the
+11-24 kext-compile scene (`~/ufs1xx`, `debug-kext.py`, llvm-20.1.8) but its `/private/tmp` k27 tree was purged. The
+first ufs265 probe run ended with the known `oem dump` transport failure (control dump also fails); the tablet is
+still on USB in ABL fastboot. Next: merge upstream main and rebuild on its line.
