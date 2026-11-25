@@ -1,3 +1,30 @@
+## 2026-11-25 - 槽 A 被留在了 macOS 启动集上：HyperOS 已恢复并逐字节复核（`fastboot boot` 全拒的根因不是 platform-tools 版本）
+
+现象：冷开机直接进 fastboot，回不去 HyperOS；`fastboot boot` 任何镜像（含 8 MiB reader）都是 `Sending OKAY` 之后
+`Booting FAILED (Failed to load/authenticate boot image: Load Error)`，平板完全联系不上。第一轮 `getvar`：
+`slot-successful:a no` / `slot-unbootable:a yes` / `slot-retry-count:a 0`。`fastboot --set-active=a` 把 unbootable 清掉
+（retry 0→7），RAM 镜像立刻恢复 `Booting OKAY`；`fastboot 37.0.1` 与 `out/pt33` 的 `33.0.3` 表现一致，排除版本问题。
+
+取证（维护 RAM 镜像只读，NCM `192.168.88.2:2323`，主机侧 `192.168.88.10`）：候选 GPT 完好（userdata 止于 LBA 102,269,695，
+`linux_rootfs` 20 GiB、`linux_data` 64 GiB、`esp` 1 GiB）；启动分区在 LUN 4（`sde`）：`boot_a`=sde13、`vbmeta_a`=sde16、
+`dtbo_a`=sde17、`vendor_boot_a`=sde23、`init_boot_a`=sde28。三个哈希与原厂备份不符：`boot_a` `0d52dd5e…` 与
+`out/persistent/boot-piano-macos-persistent-v4-avb.img` **逐字节相同**，`vendor_boot_a` `7cbb06b9…`、`init_boot_a` `96057eb2…`
+正是 Ubuntu v1.1.0 那两份——即 `tools/piano-switch.py`（`a3d3cb88…`）的切换**已经执行过**，槽 A 装的是 macOS 启动集。
+`out/persistent/session/state.json` 仍停在切换前的哈希，已不可信，装机状态只能读设备。HyperOS 本体没伤到：
+`vbmeta_a` 全程未变（`84877c31…`），槽 B 没动，`super`/`userdata`/`metadata` 没动，只是活动槽上没有 Android 的启动链。
+
+恢复：`fastboot flash` 三份经主机校验的原厂备份（`out/backup-20261125/`）→ `--set-active=a` → `reboot`。回读逐字节等于备份
+（`7c444a2d…` / `7f766f1d…` / `56197797…`）；HyperOS `OS3.0.309.0.WPYCNXM` 起来了（`sys.boot_completed=1`，`/data` F2FS on
+`dm-56` 带 `inlinecrypt` 376 GiB，`/metadata` F2FS on `sda20`），本轮两次从维护镜像正常回到 Android。切换后 ABL 读回
+`slot-successful:a yes`、`unbootable:a no`、`retry 6`——Android 会把成功位写回，macOS 启动集不会。
+
+规则（写死进无人值守流程）：刷 `boot_a` 会清掉 GPT 属性 bit 54 且 macOS 永不写回，所以 macOS 启动集装着期间，每一次没能
+回到 Android 的启动都烧掉一次 retry；retry 归零 ABL 就把槽标 unbootable，然后**连 RAM 镜像一并拒绝**——这就是平板从
+"一个实验失败"变成"完全联系不上"的路径。在 macOS 能自己启动完成并交还控制权之前，槽 A 保留 Android 三件套，macOS 实验
+只走 `fastboot boot` 的 RAM 镜像；`--set-active=a` 是该状态的恢复手段且不丢数据。两个待办：切换工具没有"macOS 起不来时
+自动回退"的路径，主机侧要加一道闸（上一轮 macOS 没报成功就不许留在 macOS 集，每次切换后重读 retry）；`state.json`
+每次切换后要按设备重写。详见 `docs/results-2026-11-25-slot-a-bootset-revert.md`。
+
 ## 2026-11-25 - ufs269 的基座内核没有定时器与 GIC 路径，这一发不能用来判读根卷发布（"驱动是唯一变量"对启动行为不成立）
 
 `out/upstream-pub-20261125/piano-ufs269.kc` 的内核是 2026-11-22 的 `out/no-demura-control/blendfix.macho`（28,034,000 B `459904b3…`）：
