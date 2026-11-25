@@ -9,7 +9,7 @@ $pt = Join-Path $root 'out\pt33\platform-tools'
 $f = Join-Path $pt 'fastboot.exe'
 $a = Join-Path $pt 'adb.exe'
 
-function Line($m){ if($Log -ne ''){ Add-Content -LiteralPath $Log -Message $m } else { $m } }
+function Line($m){ if($Log -ne ''){ Add-Content -LiteralPath $Log -Value $m } else { $m } }
 function FastDevices { ((& $f devices 2>&1) | Out-String) }
 function AdbDevices { ((& $a devices 2>&1) | Out-String) }
 function PickFastboot {
@@ -35,6 +35,22 @@ try {
     $slot=((& $a -s $s shell getprop ro.boot.slot_suffix 2>&1 | Out-String).Trim())
     Line "hyperos=up serial=$s slot=$slot"
     exit 0
+  }
+  # A tablet that is on adb with Android still booting is neither up nor in fastboot. Asking ABL for its
+  # variables then hangs fastboot.exe forever, which would stall an unattended loop, so the boot gets
+  # WaitBoot seconds to finish before this script issues any fastboot command.
+  if($s -ne ''){
+    $until=(Get-Date).AddSeconds($WaitBoot)
+    while($s -ne '' -and (Get-Date) -lt $until){
+      Start-Sleep -Seconds 5
+      if(((& $a -s $s shell getprop sys.boot_completed 2>&1 | Out-String).Trim()) -eq '1'){
+        $slot=((& $a -s $s shell getprop ro.boot.slot_suffix 2>&1 | Out-String).Trim())
+        Line ("hyperos=up serial={0} slot={1} after waiting up to {2} s" -f $s,$slot,$WaitBoot)
+        exit 0
+      }
+      $s = PickAdb
+    }
+    if($s -ne ''){ Line "Android never reached boot_completed=1 inside $WaitBoot s; leaving it to ABL"; exit 3 }
   }
   $s = PickFastboot
   if($s -eq ''){ $s = $Serial }
