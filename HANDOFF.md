@@ -1,3 +1,16 @@
+## 2026-11-25 — 宿主测试恢复可跑：NativeUfs 四套全过；工作区 68 个 bash 脚本曾是 CRLF 导致文档里的构建入口全部失效
+
+`bash package/NativeUfs/tests/run-tests.sh` 在 WSL 里跑出 **24 项 PASS、退出码 0**（`RootCommands`/`RootPower`/
+`RootWindowRead`/`RootDirect` 各编 plain 与 ASan/UBSan 两遍，对着寄存器模型测 SM8750 链路与开发构建的可写根窗口）。
+但在那之前它根本跑不起来：`tooling`、`package`、`scripts` 下 99 个 `.sh` 里有 **68 个工作区字节是 CRLF 而 blob 是 LF**，
+而 `.gitattributes` 写了 `*.sh text eol=lf`——带 `text` 属性时 git 会先把工作区内容归一化再比较，所以这些文件在
+`git status` 里是"干净"的，`git checkout --` 也是空操作（我第一次就栽在这儿）。这类损坏会让 `docs/bringup-debugging.md` §4
+那一串入口（`prepare-k27-tree.sh`、`build-kc-k27.sh`、`tooling/persist/build-all.sh`、`sign.sh`）在 WSL/Linux 下一跑就
+`set: pipefail` 报错。做法：对"除行尾外与 blob 完全一致"的脚本按 blob 字节写回（68 个，**没有**任何一个带其它本地改动），
+结果是 git 依旧视为干净（因此没有提交，也不该有）。**记一条检查方法：这个工作区里 `git status` 检测不到这类问题，要看
+`git show HEAD:<path>`。** 详见 `docs/results-2026-11-25-worktree-eol.md`。
+
+设备状态没变：`fastboot boot` 连 8 MiB reader 仍拒（`Load Error`），`adb` 空，需要机主断电重启一次；本轮零写入。
 ## 2026-11-25 — 上游发布序列的根驱动已编译并链成 27.3 内核集合，实机候选就绪（未运行）
 
 接着上一条：那条记录说"对象文件只差一个 Apple clang 主机"，这句现在作废——不需要 Apple clang。用保留的 k27 配方加本机的

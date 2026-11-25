@@ -64,3 +64,10 @@ That matters because `3a753d8c` made `package/NativeUfs/NativeUfs.cpp` the **ups
 reader-staged console, normal return to HyperOS). **Built, to be run**: the tablet must first get one power cycle to make ABL
 accept a RAM image again. If the storage stop moves past `IOBlockStorageDriver::start`, the same link line becomes the way to
 iterate for the rest of the bring-up, with no binary patching inside a shipped collection.
+## Host tests of the driver (2026-11-25, after the link)
+
+`bash package/NativeUfs/tests/run-tests.sh` in WSL UbuntuPiano: **24 PASS assertions, exit 0**, four suites
+(`RootCommands`, `RootPower`, `RootWindowRead`, `RootDirect`) each built plain and under ASan/UBSan against the
+register model, with the SM8750 link handling and the development build's writable root windows as the kext builds them.
+That suite was unrunnable until the EOL repair in `docs/results-2026-11-25-worktree-eol.md`, so the driver line had no
+host-test signal since the merge of the upstream driver.
