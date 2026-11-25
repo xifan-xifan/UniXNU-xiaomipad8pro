@@ -1,3 +1,13 @@
+## 2026-11-26 - 27.3 内核本机产出；G4 的准确边界（只挡桌面）；上游主机检查 0 FAIL
+
+上游 `tooling/repro/check-host.sh` 在这台 Mac 上 **0 FAIL / 1 WARN（fastboot，仅平板步骤）/ 1 GAP（Data seed，用我们自己的 seed 即通过）**，并确认 `ld-classic` 已就位、`UNIXNU_RESEARCH` 齐备。`tooling/k273/prepare-k27-tree.sh 0066` 产出 **27.3 线内核** `kernel-k273-0075-s0001-native.macho` 27,669,352 B、sha256 `308a6dbf0101937d81ccbc9b66fea9eb3999bbc5d75fb4630347f2fd95abe516`，纯内核 Mach-O，克隆树已带 k27 0067-0075（含 0075 的 47 位用户地址空间），段地址按 27.3 的 mac17j KC 基座重写无冲突。
+
+**G4 的准确结论（修正我之前的乐观判断）**：`build-turnip-a830.sh` 的 Mesa 树来自 `UniXNU-turnip`（`$TURNIP_TREE/.cache/mesa-work` + `drivers/AdrenoMetal` + 它的 21 个 `patches/mesa`）。实测 GitHub：`Droid-VM/mesa` 公开且 pin `cecc0e96` 可取（113 MB 已验证）、`Droid-VM/UniXNU` 公开并带 `patches/mesa`（只有 8 个）与 `scripts/build-turnip-darwin.py`、`UniXNU/metal2vulkan` 公开、`Shad0w23333/Adreno830` 公开，但 **`Droid-VM/UniXNU-turnip` 与 `UniXNU/UniXNU-turnip` 都是"仓库不存在"**（GitHub 对不存在路径一律回落到凭据提示，重试稳定复现）。本仓库那套 `turnip-a830/{mesa,frontend,plugin}/*.patch` 确实已公开，但**它要作用的树没公开**。k27 树里预期预编译的 `out/metal/bridge/libnative_metal_bridge.a` 也不在公开树内，不过其构建脚本 + `UniXNU/metal2vulkan` 都在，桥可本机自建（需带 tier-3 `arm64e-apple-darwin` 的 Rust nightly）。因此边界是：**没有 UniXNU-turnip 就没有 A830 Metal 插件、也就没有 WindowServer 桌面**；内核、KC、kexts、RAM 启动、boot-flag 切换器、Data 持久化、恢复全都不依赖它，所以本目标的切换验收不等 G4，而"进桌面"这一里程碑等。用公开件拼 Mesa 是可行的，但那不是维护者构建的那棵树（21 个补丁 vs 公开的 8 个），属于我们自己的未验证变体，不能悄悄替代。
+
+另外把本机写计划固化成 `out/unit-profile/piano-7ccdd855-write-plan.json`：`linux_data` first `107512576`、5,111,552 块、末 `112,624,127`，分区内余 `11,665,664` 块；并把"参考机计划 71789568..76901119 在本机永远不可用"写进文件。ESP(37) 在我们这台位于 `linux_data` **之后**（124289792），而参考机工具是从 `linux_rootfs` 末尾切出 ESP——这是写入工具需要携带的又一处单机差异。
+
+详见 `docs/results-2026-11-26-k273-kernel-and-gpu-gap.md`。
+
 ## 2026-11-26 - 根镜像在本机构建完成，但它的写计划属于参考机（危险）
 
 `root.img` 20,936,916,992 B、sha256 `e682bd1f9b9c24744b535743cb7f1278be41c310640e744288057826f5e2165b` 在本机构建成功；SystemOS 窗口 `1947ac49e4c8...`、信任包 3 模块 `002db2e6ee90...`、seed `48dbc08d5955...`。27.3 的 Apple 输入全部从 Apple 取到并通过 pin（`PASS: every pinned Apple input is present and equal to its pin`）。G2 用我们自己的 3 模块信任包按上游第二选项关闭，G3 用我们自己的 seed。
