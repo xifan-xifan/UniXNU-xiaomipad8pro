@@ -1,3 +1,11 @@
+## 2026-11-25 - 中断投递缺的是内核代码；本机有 XNU 构建能力，但没有那份补丁（源码级路线的起点）
+
+承接"ufs269 基座内核没有定时器与 GIC 路径"：本轮只回答一个问题——本机能不能自己构建一个带中断路径的内核。答案是能力在、补丁不在。WSL `UbuntuPiano` 里 `/opt/unixnu-linux` 交叉工具链、`/root/piano-native/UniXNU`（`unixnu build ... kernel`）、`xnu-k27-final`/`xnu-k273-work` 源码树都在；`UniXNU/out/piano/macos-27.3-26C5035r/piano_macos/kernel/kernel.macho`（142,393,344 B `afe7646e…`，2026-11-16）是**本机已经构建出来的 27.3 内核**，`kernel.json` 记着 `format: MH_FILESET`、`inputs.kernelcache_sha256: d1003b51…`（正是 27.3 mac17j 的锁定哈希），`xnu-patches.list` 136 条。所以 `docs/results-2026-11-25-build-environment-audit.md` 的"源码级构建不可"只对 `tooling/k27` 要的那种 `out/k27/xnu` + `sources/UniXNU` 树成立，对构建能力本身不成立。
+
+补丁则确实不在本机任何一份源码里：`grep -rln piano_gicv3_init` 在 `xnu-k27-final`、`xnu-k273-work`、`xnu-k27-patched/osfmk` 以及这两份内核二进制里全部零命中；WSL `/tmp`（2131 项）里没有 `piano-paclr*`，Mac `~/Codex`（含 11-24 的 `k273-esp`）和 `/private/tmp` 里连一个 `kernel.macho` 都没有。带那份代码的字节只剩两份 147 MB 集合：本机 `out/k27-smprobe/piano-ufs266.kc`（`9f276dff…`）与 Mac `~/Codex/k273-esp/inputs/piano-ufs264.kc`（`529265c7…`，同一尺寸不同哈希）。按字节扫 `piano-ufs266.kc`，`_piano_gicv3_init`/`_piano_gic_irq_handler`/`_piano_delay_timer_service` 落在同一段有序符号表里，旁边是 `arm_timer.c`、`pg: enable enter gic %d`，`piano-gic`/`piano-gic-irq` 在另一段字符串里——内核自己的段，不是 kext，改 kext 得不到。
+
+决定：走"重写中断补丁 + 本机构建"这条，因为 `DAIF.F` 的放开迟早要落进树里（`docs/results-2026-11-24-timer-masked-polling.md` 的下一步就是它）。第一步是**不改任何东西地构建一次**，量出这棵树今天还能不能产出可链接的内核，再谈补丁；2026-11-16 那份输出树是唯一副本，构建必须写到新目录，不覆盖它。另一条从 147 MB 集合反解内核的路线连同代价对照记在 `docs/results-2026-11-25-interrupt-kernel-provenance.md`（`tooling/` 里没有现成反解，kernelcache 的 fileset 头也不是 `kc-build273-piano.py` 接受的 `KERNEL`）。本轮设备零操作零写入，HyperOS `7ccdd855` 全程在线。
+
 ## 2026-11-25 - 槽 A 被留在了 macOS 启动集上：HyperOS 已恢复并逐字节复核（`fastboot boot` 全拒的根因不是 platform-tools 版本）
 
 现象：冷开机直接进 fastboot，回不去 HyperOS；`fastboot boot` 任何镜像（含 8 MiB reader）都是 `Sending OKAY` 之后
