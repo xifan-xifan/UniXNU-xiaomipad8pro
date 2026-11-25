@@ -1,8 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- piano-wifi-join (docs/drivers/wifi.md section 13.2): hands PianoWifi the join profile once at boot, from the root-only
-     file /private/var/db/piano-wifi/profile, through the root-only sysctl machdep.piano_wifi_join. Exits at once when there
-     is no profile or no PianoWifi; never keeps the secret after it exits. -->
+<!-- After the airportd kick, verify or provision the daily Known Network from
+     /private/var/db/piano-wifi/profile and fall back to one CoreWLAN join. -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
@@ -11,8 +10,6 @@
   <array>
     <string>/usr/local/libexec/piano-wifi-join</string>
   </array>
-  <key>RunAtLoad</key>
-  <true/>
   <key>StandardOutPath</key>
   <string>/private/var/log/piano-wifi-join.log</string>
   <key>StandardErrorPath</key>

@@ -9,6 +9,7 @@
 #include <libkern/c++/OSString.h>
 #include <IOKit/IOBSD.h>
 #include <sys/param.h>
+#include <sys/sysctl.h>
 #include <libkern/crypto/sha2.h>
 #include <mach/machine.h>
 #include <machine/machine_routines.h>
@@ -21,7 +22,7 @@
 #include <libkern/libkern.h>
 #include "SparseDisk.h"
 #include "PersistOverlay.h"
-#include "DirectDisk.h"
+#include "ConcurrentDirect.h"
 #include "VolatileDisk.h"
 #include "VolatilePool.h"
 #include <IOKit/storage/IOStorage.h>
@@ -48,6 +49,8 @@ int native_ufs_store_open(uint64_t, uint64_t *, const char **);
 int native_ufs_store_read(uint64_t, uint32_t, void *);
 int native_ufs_store_write(uint64_t, uint32_t, const void *);
 int native_ufs_store_sync(void);
+int native_ufs_store_read_tracked(uint64_t, uint32_t, void *, bool *);
+int native_ufs_store_write_tracked(uint64_t, uint32_t, const void *, bool *);
 unsigned native_ufs_store_gpt_check(void);
 // UniXNU-piano (NativeUfs, native-ufs-suspend=1): the Data disk's power parent (nullptr: no part in a system sleep), and the veto a
 // failed store sync sends it (its suspend then leaves the link up).
@@ -63,6 +66,8 @@ volatile uint64_t native_data_persist_pages = 0, native_data_persist_loaded = 0,
                   native_data_persist_syncs = 0, native_data_persist_errors = 0, native_data_persist_first_lba = 0,
                   native_data_persist_present = 0, native_data_persist_flattened = 0, native_ram_block_volatile_bytes = 0;
 }
+
+SYSCTL_DECL(_machdep);
 
 // UniXNU-piano (2026-11-11, docs/forensics-2026-11-11.md): native-ram-trace=1 prints a short console line before and after each step
 // of the Data store's set-up: the waits for IOBSD and for NativeUfs's root layout, the GPT check, the window, the header and bitmap
@@ -203,9 +208,39 @@ class NativeRamBlock : public IOBlockStorageDevice {
   // Direct mode (the store is open read-write): changed pages live in the store window only, never in RAM; reads of them go to the
   // window. A failed store write stops all further writes (a page the system was told is written must be on the medium).
   bool direct = false, directFailed = false;
+  DirectAdmission admission;
+  DirectCommitQueue commits;
+  DirectWriteState writeState;
+  IOLock *commitGate = nullptr;  // non-null only when the boot opted in and setup acquired a pool
+  uint8_t *stages[DirectAdmission::kDepth] = {};
+  bool keepLegacyBitmap = false;  // a tracked serial write may still DMA from the live bitmap
+  uint64_t bitmapPublications = 0;
+  struct sysctl_oid modeOid = {}, statsOid = {};
+  bool sysctlsRegistered = false;
+
+  struct DirectEnv {
+    NativeRamBlock &disk;
+    void lock() { IOLockLock(disk.gate); }
+    void unlock() { IOLockUnlock(disk.gate); }
+    void wait() { IOLockSleep(disk.gate, &disk.admission, THREAD_UNINT); }
+    void wake() { IOLockWakeup(disk.gate, &disk.admission, false); }
+    void lockCommit() { IOLockLock(disk.commitGate); }
+    void unlockCommit() { IOLockUnlock(disk.commitGate); }
+  };
+  void configureDirect();
+  void registerDirectSysctls();
+  static int directModeSysctl(struct sysctl_oid *, void *, int, struct sysctl_req *);
+  static int directStatsSysctl(struct sysctl_oid *, void *, int, struct sysctl_req *);
+  IOReturn serveExperiment(IOMemoryDescriptor *, uint64_t, uint64_t, IOStorageCompletion *);
+  IOReturn experimentPower(unsigned long);
+  void directWriteAccounting(uint64_t actual) {
+    __atomic_fetch_add(&native_data_persist_writes, (actual + 4095) / 4096, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&native_data_persist_syncs, 1, __ATOMIC_RELAXED);
+  }
   struct StoreOps {
     // UniXNU-piano: the set-up's calls get native-ram-trace=1's lines (attachStore sets traceBitmap to the bitmap's size); 0: none.
-    uint64_t traceBitmap = 0;
+    uint64_t traceBitmap = 0, runtimeBitmap = 0;
+    uint64_t *bitmapPublications = nullptr;
     bool read(uint64_t b, uint32_t n, void *d) {
       __atomic_fetch_add(&native_data_persist_loaded, n, __ATOMIC_RELAXED);
       if (!traceBitmap) return native_ufs_store_read(b, n, d);
@@ -215,7 +250,11 @@ class NativeRamBlock : public IOBlockStorageDevice {
       return ok;
     }
     bool write(uint64_t b, uint32_t n, const void *s) {
-      if (!traceBitmap) return native_ufs_store_write(b, n, s);
+      if (!traceBitmap) {
+        const bool ok = native_ufs_store_write(b, n, s);
+        if (ok && b && b <= runtimeBitmap) __atomic_fetch_add(bitmapPublications, 1, __ATOMIC_RELAXED);
+        return ok;
+      }
       storeTraceIo('w', b, n, traceBitmap, false, false, nullptr);
       const bool ok = native_ufs_store_write(b, n, s);
       storeTraceIo('w', b, n, traceBitmap, true, ok, s);
@@ -291,7 +330,7 @@ public:
   void attachStore() {
     if (!gate) return;
     IOLockLock(gate);
-    if (storeAttached) { IOLockUnlock(gate); return; }
+    if (storeAttached || !online) { IOLockUnlock(gate); return; }
     storeAttached = true;
     char ours[9], theirs[9] = "-";
     seedText(seedHash, ours);
@@ -452,6 +491,10 @@ public:
           "direct %d, seed %s, store seed %s, flags %u, generation %llu, present %llu\n",
           native_data_persist_state, native_data_persist_header, native_data_persist_first_lba, native_data_persist_pages, direct,
           ours, theirs, native_data_persist_flags, overlay.generation, overlay.present);
+    configureDirect();
+    registerDirectSysctls();
+    IOLog("NativeRamBlock: Data I/O mode %s depth %u\n",
+          commitGate ? "concurrent" : direct ? "single-gate" : "volatile", commitGate ? admission.depth : 1);
     storeTrace("set-up done");
     IOLockUnlock(gate);
   }
@@ -479,15 +522,11 @@ public:
   IOReturn reportEjectability(bool *value) override { *value = false; return kIOReturnSuccess; }
   IOReturn reportMaxValidBlock(UInt64 *value) override { *value = capacity - 1; return kIOReturnSuccess; }
   IOReturn reportMediaState(bool *present, bool *changed) override {
-    *present = online; if (changed) *changed = false; return kIOReturnSuccess;
+    *present = __atomic_load_n(&online, __ATOMIC_RELAXED); if (changed) *changed = false; return kIOReturnSuccess;
   }
   IOReturn reportRemovability(bool *value) override { *value = false; return kIOReturnSuccess; }
   IOReturn reportWriteProtection(bool *value) override { *value = false; return kIOReturnSuccess; }
-  IOReturn doSynchronizeCache() override {
-    if (!online) return kIOReturnNotReady;
-    // Every changed page is on the medium, with its bitmap bit, before its write completed (PersistOverlay.h): nothing to flush.
-    return kIOReturnSuccess;
-  }
+  IOReturn doSynchronizeCache() override;
   IOReturn doSynchronize(UInt64, UInt64, IOOptionBits) override { return doSynchronizeCache(); }
   IOReturn getWriteCacheState(bool *value) override { *value = false; return kIOReturnSuccess; }
   IOReturn setWriteCacheState(bool) override { return kIOReturnUnsupported; }
@@ -590,7 +629,7 @@ bool NativeRamBlock::start(IOService *provider)
   native_ram_block_bytes = logical;
   native_ram_block_sparse=(sparse.pages||isBig)?1:0;
   native_ram_block_resident_bytes=isBig?big.resident:sparse.pages?sparse.resident:logical;
-  online = true;
+  __atomic_store_n(&online, true, __ATOMIC_RELAXED);
   native_ram_block_ready = 1;
   {   // UniXNU-piano: internal, solid state, Xiaomi's (PianoDiskIdentity.h); before the publish thread registers the disk
     const char *name = (&native_ufs_store_mode && native_ufs_store_mode()) ? "UFS 4.0 Data" : "RAM Data";
@@ -606,6 +645,195 @@ bool NativeRamBlock::start(IOService *provider)
   return true;
 }
 
+// Store setup precedes publication. Reuse the setup stage in slot zero; even cap one
+// can exercise the concurrent path. A failed lock allocation leaves the original path in use.
+void NativeRamBlock::configureDirect()
+{
+  uint32_t requested = 0;
+  if (!direct || !PE_parse_boot_argn("data-store-concurrent", &requested, sizeof requested) || requested != 1)
+    return;
+  auto *lock = IOLockAlloc();
+  if (!lock) return;
+  stages[0] = stage;
+  unsigned count = 1;
+  for (; count < DirectAdmission::kDepth; ++count) {
+    stages[count] = static_cast<uint8_t *>(IOMallocZero(kStagePages * persist::kBlock));
+    if (!stages[count]) break;
+  }
+  admission.configure(count);
+  if (directFailed) writeState.fail();  // a prepublication flatten may have failed
+  __atomic_store_n(&commitGate, lock, __ATOMIC_RELEASE);
+}
+
+int NativeRamBlock::directModeSysctl(struct sysctl_oid *oid, void *arg, int, struct sysctl_req *req)
+{
+  auto &disk = *static_cast<NativeRamBlock *>(arg);
+  DirectEnv env{disk};
+  env.lock();
+  int value = disk.admission.parallel;
+  env.unlock();
+  int error = sysctl_handle_int(oid, &value, 0, req);
+  if (error || !req->newptr) return error;
+  if (value != 0 && value != 1) return EINVAL;
+
+  env.lock();
+  if (!disk.commitGate) error = ENOTSUP;
+  else if (!disk.admission.beginFence(env)) error = ENXIO;
+  else {
+    if (disk.writeState.failed() || disk.admission.quarantined) error = EIO;
+    else if (disk.admission.parallel != (value != 0)) {
+      disk.admission.parallel = value != 0;
+      disk.admission.peak = 0;
+      disk.admission.waits = 0;
+      __atomic_store_n(&disk.bitmapPublications, 0, __ATOMIC_RELAXED);
+    }
+    disk.admission.endFence(env);
+  }
+  env.unlock();
+  return error;
+}
+
+int NativeRamBlock::directStatsSysctl(struct sysctl_oid *, void *arg, int, struct sysctl_req *req)
+{
+  auto &disk = *static_cast<NativeRamBlock *>(arg);
+  DirectEnv env{disk};
+  env.lock();
+  const bool direct = disk.direct, parallel = disk.admission.parallel;
+  const unsigned depth = parallel ? disk.admission.depth : 1;
+  const unsigned peak = disk.admission.peak;
+  const uint64_t waits = disk.admission.waits;
+  const uint64_t pubs = __atomic_load_n(&disk.bitmapPublications, __ATOMIC_RELAXED);
+  env.unlock();
+  char line[128];
+  snprintf(line, sizeof(line), "mode=%s depth=%u inflight_max=%u waits=%llu bitmap_publications=%llu",
+           parallel ? "concurrent" : direct ? "single-gate" : "volatile", depth, peak, waits, pubs);
+  return SYSCTL_OUT(req, line, strlen(line) + 1);
+}
+
+void NativeRamBlock::registerDirectSysctls()
+{
+  // Assign the handler and parent at run time for arm64e pointer authentication.
+  auto install = [this](struct sysctl_oid &oid, const char *name, int kind, const char *fmt, const char *desc,
+                        int (*handler)(struct sysctl_oid *, void *, int, struct sysctl_req *)) {
+    oid.oid_parent = &sysctl__machdep_children;
+    oid.oid_number = OID_AUTO;
+    oid.oid_kind = kind | CTLFLAG_OID2 | CTLFLAG_LOCKED;
+    oid.oid_arg1 = this;
+    oid.oid_name = name;
+    oid.oid_handler = handler;
+    oid.oid_fmt = fmt;
+    oid.oid_descr = desc;
+    oid.oid_version = SYSCTL_OID_VERSION;
+    sysctl_register_oid(&oid);
+  };
+  install(modeOid, "piano_data_concurrent", CTLTYPE_INT | CTLFLAG_RW, "I", "Direct Data mode (boot opt-in required)",
+          directModeSysctl);
+  install(statsOid, "piano_data_io", CTLTYPE_STRING | CTLFLAG_RD, "A", "Direct Data I/O mode and counters",
+          directStatsSysctl);
+  sysctlsRegistered = true;
+}
+
+IOReturn NativeRamBlock::doSynchronizeCache()
+{
+  if (!__atomic_load_n(&commitGate, __ATOMIC_ACQUIRE))
+    return __atomic_load_n(&online, __ATOMIC_RELAXED) ? kIOReturnSuccess : kIOReturnNotReady;
+  DirectEnv env{*this};
+  env.lock();
+  if (!admission.beginFence(env)) { env.unlock(); return kIOReturnNotReady; }
+  // Every admitted successful write already completed its data and bitmap FUA.
+  const IOReturn status = writeState.failed() ? kIOReturnIOError : kIOReturnSuccess;
+  admission.endFence(env);
+  env.unlock();
+  return status;
+}
+
+// Entered with gate held. Both completion and release run without driver locks.
+IOReturn NativeRamBlock::serveExperiment(IOMemoryDescriptor *buffer, uint64_t offset, uint64_t bytes, IOStorageCompletion *completion)
+{
+  DirectEnv env{*this};
+  retain();
+  buffer->retain();
+  const bool write = buffer->getDirection() == kIODirectionOut;
+  DirectAdmission::Request request(offset, bytes, write);
+  const int slot = admission.take(env, request);
+  if (slot == DirectAdmission::kOffline) {
+    env.unlock();
+    buffer->release();
+    release();
+    return kIOReturnNotReady;
+  }
+  const bool serial = slot == DirectAdmission::kSerial;
+  if (!serial) env.unlock();
+
+  struct BufferOps {
+    IOMemoryDescriptor *buffer;
+    uint64_t read(uint64_t at, void *p, uint64_t n) { return buffer->readBytes(at, p, n); }
+    uint64_t copy(uint64_t at, const void *p, uint64_t n) { return buffer->writeBytes(at, p, n); }
+  } bops{buffer};
+  struct TrackedStore {
+    NativeRamBlock &disk;
+    bool writeRequest, serial, liveDMA = false, liveBitmap = false;
+    bool read(uint64_t block, uint32_t n, void *dst) {
+      __atomic_fetch_add(&native_data_persist_loaded, n, __ATOMIC_RELAXED);
+      const bool ok = native_ufs_store_read_tracked(block, n, dst, &liveDMA);
+      if (!ok && writeRequest) disk.writeState.fail();
+      return ok;
+    }
+    bool write(uint64_t block, uint32_t n, const void *src) {
+      if (disk.writeState.failed()) return false;
+      const bool ok = native_ufs_store_write_tracked(block, n, src, &liveDMA);
+      if (!ok) disk.writeState.fail();
+      if (serial && block <= persist::bitmapBlocks(disk.overlay.pages)) {
+        liveBitmap = liveDMA;
+        if (ok) __atomic_fetch_add(&disk.bitmapPublications, 1, __ATOMIC_RELAXED);
+      }
+      return ok;
+    }
+    void published(uint64_t present) {
+      __atomic_store_n(&native_data_persist_present, present, __ATOMIC_RELAXED);
+      __atomic_fetch_add(&disk.bitmapPublications, 1, __ATOMIC_RELAXED);
+    }
+  } store{*this, write, serial};
+
+  uint64_t actual = 0;
+  bool storeError = false;
+  if (slot != DirectAdmission::kNoStage && (!write || !writeState.failed()) &&
+      (!serial || !(admission.quarantined & 1))) {
+    uint8_t *scratch = serial ? stage : stages[slot];
+    auto serve = [&](const auto &seed) {
+      if (serial)
+        return directDiskIO(seed, overlay, store, scratch, kStagePages, write, offset, bytes, bops, &storeError);
+      ConcurrentDirect<DirectEnv, TrackedStore> path{overlay, commits, env, store, scratch};
+      return directDiskIOWithPolicy(seed, overlay, store, scratch, kStagePages, write, offset, bytes, bops, &storeError, path);
+    };
+    actual = isBig ? serve(big) : serve(sparse);
+  }
+  if (storeError) {
+    __atomic_store_n(&native_data_persist_state, 5, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&native_data_persist_errors, 1, __ATOMIC_RELAXED);
+  }
+  if (write && actual) directWriteAccounting(actual);
+  __atomic_fetch_add(write ? &native_ram_block_writes : &native_ram_block_reads, 1, __ATOMIC_RELAXED);
+  const IOReturn status = actual == bytes ? kIOReturnSuccess : kIOReturnIOError;
+  if (status) __atomic_fetch_add(&native_ram_block_failures, 1, __ATOMIC_RELAXED);
+
+  if (serial) {
+    admission.peak = 1;
+    if (store.liveDMA && !store.liveBitmap) admission.quarantined |= 1;
+    if (store.liveBitmap) keepLegacyBitmap = true;
+    if (write && actual) __atomic_store_n(&native_data_persist_present, overlay.present, __ATOMIC_RELAXED);
+    env.unlock();
+  } else if (slot >= 0) {
+    env.lock();
+    admission.give(env, slot, store.liveDMA);
+    env.unlock();
+  }
+  completion->action(completion->target, completion->parameter, status, actual);
+  buffer->release();
+  release();
+  return kIOReturnSuccess;
+}
+
 IOReturn NativeRamBlock::doAsyncReadWrite(IOMemoryDescriptor *buffer, UInt64 block, UInt64 count,
     IOStorageAttributes *, IOStorageCompletion *completion)
 {
@@ -615,6 +843,7 @@ IOReturn NativeRamBlock::doAsyncReadWrite(IOMemoryDescriptor *buffer, UInt64 blo
   if (!gate) return kIOReturnNotReady;
   const uint64_t bytes = count * 512;
   IOLockLock(gate);
+  if (commitGate) return serveExperiment(buffer, block * 512, bytes, completion);
   // UniXNU-piano: a system sleep holds new requests from the store's sync until the UFS link is back (PowerHold.h).
   while (power.held) { ++powerWaits; IOLockSleep(gate, &power, THREAD_UNINT); }
   if (!online) { IOLockUnlock(gate); return kIOReturnNotReady; }
@@ -695,6 +924,9 @@ IOReturn NativeRamBlock::doAsyncReadWrite(IOMemoryDescriptor *buffer, UInt64 blo
         uint64_t copy(uint64_t at,const void *p,uint64_t n){return buffer->writeBytes(at,p,n);}
       } bops={buffer};
       StoreOps store;bool storeError=false;
+      admission.peak = 1;
+      store.runtimeBitmap = persist::bitmapBlocks(overlay.pages);
+      store.bitmapPublications = &bitmapPublications;
       if(write && directFailed)actual=0;
       else actual=isBig?directDiskIO(big,overlay,store,stage,kStagePages,write,block*512,bytes,bops,&storeError)
                        :directDiskIO(sparse,overlay,store,stage,kStagePages,write,block*512,bytes,bops,&storeError);
@@ -738,16 +970,33 @@ IOReturn NativeRamBlock::doAsyncReadWrite(IOMemoryDescriptor *buffer, UInt64 blo
 
 void NativeRamBlock::stop(IOService *provider)
 {
+  if (gate) {
+    DirectEnv env{*this};
+    env.lock();
+    if (commitGate) {
+      __atomic_store_n(&online, false, __ATOMIC_RELAXED);
+      admission.stop(env);
+    } else if (!storeAttached) {
+      // Prevent the publish thread from setting up new admission during an early stop.
+      __atomic_store_n(&online, false, __ATOMIC_RELAXED);
+    }
+    env.unlock();
+  }
   if (powerJoined) { PMstop(); powerJoined = false; }
   if (gate) {
     IOLockLock(gate);
-    online = false;
+    __atomic_store_n(&online, false, __ATOMIC_RELAXED);
     if (power.on()) IOLockWakeup(gate, &power, false);   // held requests see !online and fail
     refillStop = true;                                   // the refill thread ends (and releases its reference)
     IOLockWakeup(gate, &pool, false);
     IOLockWakeup(gate, &refillStop, false);              // its backoff
     IOLockWakeup(gate, &spareEvent, false);              // waiting writers see !online and fail
     IOLockUnlock(gate);
+  }
+  if (sysctlsRegistered) {
+    sysctl_unregister_oid(&modeOid);
+    sysctl_unregister_oid(&statsOid);
+    sysctlsRegistered = false;
   }
   IOBlockStorageDevice::stop(provider);
 }
@@ -873,6 +1122,7 @@ void NativeRamBlock::joinPower()
 IOReturn NativeRamBlock::setPowerState(unsigned long state, IOService *)
 {
   if (!powerJoined || !gate) return kIOPMAckImplied;
+  if (commitGate) return experimentPower(state);
   struct Store {
     bool sync() { return native_ufs_store_sync(); }
     void veto(const char *who) { native_ufs_power_veto(who); }
@@ -901,10 +1151,50 @@ IOReturn NativeRamBlock::setPowerState(unsigned long state, IOService *)
   return kIOPMAckImplied;
 }
 
+IOReturn NativeRamBlock::experimentPower(unsigned long state)
+{
+  DirectEnv env{*this};
+  env.lock();
+  if (!admission.beginFence(env)) { env.unlock(); return kIOPMAckImplied; }
+
+  if (state != pianopower::kOff) {
+    powerSeenOn = true;
+    admission.held = false;
+    if (power.on())
+      IOLog("NativeRamBlock: resume %u: Data I/O released (%llu admission waits)\n", power.holds, admission.waits);
+  } else if (powerSeenOn && !admission.held) {
+    struct Store {
+      bool sync() { return native_ufs_store_sync(); }
+      void veto(const char *who) { native_ufs_power_veto(who); }
+    } store;
+    // The fence stays closed across the command, while callers can sleep on the gate.
+    env.unlock();
+    const uint64_t started = mach_absolute_time();
+    const bool held = power.off(store, true);
+    uint64_t ns = 0;
+    absolutetime_to_nanoseconds(mach_absolute_time() - started, &ns);
+    env.lock();
+    admission.held = held;
+    if (held)
+      IOLog("NativeRamBlock: suspend %u: Data I/O drained and store synced in %llu us (generation %llu, %llu pages present)\n",
+            power.holds, ns / 1000, overlay.generation, overlay.present);
+    else
+      IOLog("NativeRamBlock: suspend: Data store sync FAILED (%llu us); Data admission reopened and UFS suspend vetoed\n", ns / 1000);
+  }
+
+  admission.endFence(env);
+  env.unlock();
+  return kIOPMAckImplied;
+}
+
 void NativeRamBlock::free()
 {
-  if (overlayBits) { IOFree(overlayBits, persist::bitmapBlocks(sparse.bytes / 4096) * persist::kBlock); overlayBits = nullptr; }
-  if (stage) { IOFree(stage, kStagePages * persist::kBlock); stage = nullptr; }
+  if (overlayBits && !keepLegacyBitmap) IOFree(overlayBits, persist::bitmapBlocks(sparse.bytes / 4096) * persist::kBlock);
+  // A stage the controller may still own stays wired until reboot, like the transport's poisoned slots.
+  if (stage && !(admission.quarantined & 1)) IOFree(stage, kStagePages * persist::kBlock);
+  for (unsigned i = 1; i < admission.depth; ++i)
+    if (!(admission.quarantined & (1U << i))) IOFree(stages[i], kStagePages * persist::kBlock);
+  if (commitGate) IOLockFree(commitGate);
   // The volatile disk's pages and leaves all live in the pool's chunks (the refill thread, which holds a reference, is gone by now).
   if (pool.chunks) {
     struct Release { void operator()(uint8_t *chunk, uint32_t pages, uint32_t kind) { volatileFreeChunk(chunk, pages, kind); } } release;

@@ -256,6 +256,8 @@ IOReturn A830Irq::attach(uint32_t intid)
 
 void A830Irq::fallBack()
 {
+    RecoveryAccess access(*this);
+    if(!access.allowed())return;
     if(!started_)return;
     __atomic_store_n(&polled_,true,__ATOMIC_RELEASE);
     /* The storm guard's own switch-off: RBBM_INT_0_MASK = 0 (GX on), armcpu_spi_disable, irq_off bit 0; off() from now on. */
@@ -265,6 +267,8 @@ void A830Irq::fallBack()
 /* ARCHITECTURE 4.12.3. No lock; with IFPC off only RBBM_INT_0_STATUS, RBBM_INT_CLEAR_CMD and RBBM_INT_0_MASK are touched. */
 void A830Irq::primary()
 {
+    RecoveryAccess access(*this);
+    if(!access.allowed())return;
     bump(stats_.entries);
     adreno830_status_add64(&adreno830_status.irqs,1);
     if(!__atomic_load_n(&gx_on_,__ATOMIC_ACQUIRE)) {
@@ -340,6 +344,8 @@ IOReturn A830Irq::attachCxHost(uint32_t intid)
 /* cx_host_irq (KGSL gen8_cx_host_irq_handler): read, clear, count the frequency-limit events. */
 void A830Irq::cxHost()
 {
+    RecoveryAccess access(*this);
+    if(!access.allowed())return;
     bump(stats_.cx_events);
     const A830Mmio &cx=config_.cx_misc;
     const uint32_t status=cx.read32(cx.cookie,A830_CX_MISC_REG_BYTE(A8XX_CX_MISC_INT_0_STATUS));
@@ -367,6 +373,7 @@ void A830Irq::snapshot(A830FaultReport *out)
     A830FaultReport r{};
     r.when=a830Now();
     if(A830Fence *fence=config_.fence) {r.fence=fence->completed();r.submitted=fence->lastSubmitted();}
+    if(config_.softwareFaultSnapshot) {*out=r;return;}
     if(config_.hooks.smmuSnapshot)config_.hooks.smmuSnapshot(config_.hooks.cookie,&r.smmu_fsr,&r.smmu_far);
     if(config_.gmu.valid())
         r.unmasked=config_.gmu.read32(config_.gmu.cookie,A830_GMU_REG_BYTE(A8XX_GMUAO_RBBM_INT_UNMASKED_STATUS_SHADOW));
@@ -404,6 +411,8 @@ void A830Irq::snapshot(A830FaultReport *out)
 
 bool A830Irq::probe(uint32_t *rptr,uint64_t *ib1_base,uint32_t *ib1_rem)
 {
+    RecoveryAccess access(*this);
+    if(!access.allowed())return false;
     if(!started_)return false;
     if(!gxAcquire()) {gxRelease();return false;}
     *rptr=gpuRead(A8XX_CP_RB_RPTR);
@@ -426,12 +435,14 @@ void A830Irq::report(A830FaultKind kind,uint16_t reason,uint32_t int_status,uint
  * (4.13.4); the others are recorded (Linux and KGSL only log them). */
 void A830Irq::faultWork()
 {
+    RecoveryAccess access(*this);
+    if(!access.allowed())return;
     const uint32_t bits=__atomic_exchange_n(&error_pending_,0u,__ATOMIC_ACQ_REL);
     if(!bits)return;
     A830IrqErrorRecord record=a830_irq_error_last;
     record.bits=bits;record.when=a830Now();++record.batches;
     bool stalled=false;
-    if(gxAcquire()) {
+    if(!config_.softwareFaultSnapshot && gxAcquire()) {
         /* Linux a8xx_fault_detect_irq: a hang while the SMMU stalls on a fault is the fault's, not a hang (the SMMU handler
          * resumes the transaction): the full mask comes back. Terminate mode with HUPCF should never get here. */
         if((bits&A8XX_INT_FATAL)==A8XX_RBBM_INT_0_HANG_DETECT &&
@@ -452,7 +463,7 @@ void A830Irq::faultWork()
         if(bits&A8XX_RBBM_INT_0_TSB_WRITE_ERROR)
             record.tsb=gpuRead(A8XX_RBBM_SECVID_TSB_STATUS)|uint64_t(gpuRead(A8XX_RBBM_SECVID_TSB_STATUS_HI))<<32;
     }
-    gxRelease();
+    if(!config_.softwareFaultSnapshot)gxRelease();
     a830_irq_error_last=record;
     if(!(bits&A8XX_INT_FATAL) || stalled) {
         if(config_.hooks.errorNoted)config_.hooks.errorNoted(config_.hooks.cookie,bits);
@@ -465,6 +476,8 @@ void A830Irq::faultWork()
 /* ARCHITECTURE 4.13.4: RBBM_INT_0_MASK = 0, snapshot, then the sink. */
 void A830Irq::escalate(A830FaultKind kind,uint16_t reason,uint64_t detail)
 {
+    RecoveryAccess access(*this);
+    if(!access.allowed())return;
     if(started_)lose(kind,reason,0,detail);
 }
 
@@ -477,8 +490,10 @@ void A830Irq::lose(A830FaultKind kind,uint16_t reason,uint32_t int_status,uint64
         a830_fault_last=r;
         return;
     }
-    if(gxAcquire())gpuWrite(A8XX_RBBM_INT_0_MASK,0);
-    gxRelease();
+    if(!config_.softwareFaultSnapshot) {
+        if(gxAcquire())gpuWrite(A8XX_RBBM_INT_0_MASK,0);
+        gxRelease();
+    }
     __atomic_store_n(&fatal_masked_,true,__ATOMIC_RELAXED);
     report(kind,reason,int_status,detail,&r);
     a830_fault_last=r;
@@ -511,6 +526,14 @@ IOReturn A830Irq::quiesce(bool force)
     return kIOReturnSuccess;
 }
 
+IOReturn A830Irq::quiesceForRecovery()
+{
+    __atomic_store_n(&recoveryQuiesced_,true,__ATOMIC_SEQ_CST);
+    const IOReturn gpu=gpu_guard_.suspend();
+    const IOReturn cx=cx_guard_.suspend();
+    return gpu!=kIOReturnSuccess?gpu:cx;
+}
+
 IOReturn A830Irq::restore()
 {
     if(!started_)return kIOReturnNotReady;
@@ -527,6 +550,7 @@ IOReturn A830Irq::restore()
     gxRelease();
     __atomic_store_n(&fatal_masked_,false,__ATOMIC_RELEASE);
     __atomic_store_n(&loss_active_,false,__ATOMIC_RELEASE);
+    __atomic_store_n(&recoveryQuiesced_,false,__ATOMIC_SEQ_CST);
     IOReturn result=polled?kIOReturnSuccess:gpu_guard_.off()?gpu_guard_.rearm():gpu_guard_.resume();
     if(cx_guard_.attached()) {
         if(cx_guard_.off() && config_.cx_misc.valid()) {

@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>AudioServerPlugIn_IOKitUserClients</key>
+	<array>
+		<string>PianoMicTapUserClient</string>
+	</array>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>PianoMicNS</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.unixnu.piano.micns</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>PianoMicNS</string>
+	<key>CFBundlePackageType</key>
+	<string>BNDL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleSupportedPlatforms</key>
+	<array>
+		<string>MacOSX</string>
+	</array>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFPlugInFactories</key>
+	<dict>
+		<key>5E0C6A3F-2B7D-4C19-8F4E-9A1D3B6C7E21</key>
+		<string>PianoMicNS_Create</string>
+	</dict>
+	<key>CFPlugInTypes</key>
+	<dict>
+		<key>443ABAB8-E7B3-491A-B985-BEB9187030DB</key>
+		<array>
+			<string>5E0C6A3F-2B7D-4C19-8F4E-9A1D3B6C7E21</string>
+		</array>
+	</dict>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+</dict>
+</plist>

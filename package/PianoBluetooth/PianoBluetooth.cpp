@@ -60,6 +60,15 @@ using pianopower::Window;
 extern "C" {
 // Post-mortem breadcrumb (also in the console log): the last stage reached, negative when it failed there.
 volatile int32_t piano_bt_stage = 0;
+bool qbt_bt_trace_enabled = false;
+bool qbt_bt_wait_baseline = false;
+
+uint64_t qbt_bt_uptime_ms(void)
+{
+  uint64_t ns = 0;
+  absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
+  return ns / 1000000;
+}
 }
 
 namespace {
@@ -120,7 +129,8 @@ void note(const char *fmt, ...)
   va_start(ap, fmt);
   vsnprintf(line, sizeof line, fmt, ap);
   va_end(ap);
-  IOLog("PianoBluetooth: %s\n", line);
+  if (qbt_bt_trace_enabled) IOLog("PianoBluetooth: %s [uptime_ms=%llu]\n", line, qbt_bt_uptime_ms());
+  else IOLog("PianoBluetooth: %s\n", line);
 }
 
 void stage(int32_t value, const char *what)
@@ -144,6 +154,31 @@ uint64_t nowUs()
   uint64_t ns = 0;
   absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
   return ns / 1000;
+}
+
+void watchdogTrace(void *, wait_result_t)
+{
+  // Same fixed read-only SMCCC STATUS as the kernel's watchdog setup.
+  // Firmware returns elapsed milliseconds since its last pet in a2 on success.
+  for (unsigned seq = 1; seq <= 900; ++seq) {
+    const uint64_t start = qbt_bt_uptime_ms();
+    register uint64_t a0 __asm__("x0") = 0x86000006;
+    register uint64_t a1 __asm__("x1") = 0;
+    register uint64_t a2 __asm__("x2") = 0;
+    register uint64_t a3 __asm__("x3") = 0;
+    __asm__ volatile("smc #0" : "+r"(a0), "+r"(a1), "+r"(a2), "+r"(a3) : :
+                     "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+    const uint64_t r0 = a0, r1 = a1, r2 = a2, r3 = a3;
+    const uint64_t end = qbt_bt_uptime_ms();
+    if (!r0 && r2 <= end) {
+      note("bt-reset-watchdog-v1: seq=%u sampled_ms=%llu call_ms=%llu a0=%llx a1=%llx a2=%llx a3=%llx age_ms=%llu last_pet_est_ms=%llu",
+           seq, end, end - start, r0, r1, r2, r3, r2, end - r2);
+    } else {
+      note("bt-reset-watchdog-v1: seq=%u sampled_ms=%llu call_ms=%llu a0=%llx a1=%llx a2=%llx a3=%llx age_ms=unknown last_pet_est_ms=unknown",
+           seq, end, end - start, r0, r1, r2, r3);
+    }
+    IOSleep(1000);
+  }
 }
 
 // ------------------------------------------------------------------------------------------------ MMIO pages, mapped on demand
@@ -944,6 +979,7 @@ class PianoBluetooth : public IOService {
   IOService *fRadio = nullptr;
   uint64_t fNextStats = 0;
   uint64_t fTxPackets = 0, fRxPackets = 0, fCompletions = 0, fLeReports = 0;
+  bool fFirstTx = false, fFirstRx = false;
   H4Decoder fTxDecoder, fRxDecoder;
   size_t fObserved = 0;
 
@@ -968,6 +1004,15 @@ IOService *PianoBluetooth::probe(IOService *provider, SInt32 *score)
 bool PianoBluetooth::start(IOService *provider)
 {
   if (!IOService::start(provider)) return false;
+  qbt_bt_trace_enabled = bootArg("piano-bt-reset-trace", 0) == 1;
+  qbt_bt_wait_baseline = gArgs.level == 5 && qbt_bt_trace_enabled &&
+                        bootArg("piano-bt-wait-baseline", 0) == 1;
+  if (qbt_bt_trace_enabled) {
+    thread_t sampler = nullptr;
+    const kern_return_t rc = kernel_thread_start(watchdogTrace, nullptr, &sampler);
+    note("bt-reset-watchdog-v1: sampler rc=%d interval_ms=1000", rc);
+    if (rc == KERN_SUCCESS) thread_deallocate(sampler);
+  }
   note("start: piano-bt=%u delay=%u%s se=%u smmu=%u hwcg=%u spmi=%u%s (WCN7860 Bluetooth on QUP2 SE6 %#llx \"UART14\", SPI %u, BT_EN "
        "PPID 0x%03x)",
        gArgs.level, gArgs.delay, gArgs.delayDefaulted && gArgs.delay ? " (piano-wifi runs in this boot)" : "", gArgs.se, gArgs.smmu,
@@ -1097,6 +1142,13 @@ void PianoBluetooth::transportResult()
 void PianoBluetooth::pump()
 {
   Port &p = gB.port;
+  const uint64_t rxBefore = p.rxBytes;
+  auto traceRx = [&]() {
+    if (qbt_bt_trace_enabled && !fFirstRx && p.rxBytes > rxBefore) {
+      fFirstRx = true;
+      note("bt-reset-phase: runtime UART first RX bytes=%llu", p.rxBytes - rxBefore);
+    }
+  };
   auto flush = [&]() {
     if (p.rawHave > fObserved) {
       fRxDecoder.feed(gStream + fObserved, p.rawHave - fObserved, [&](uint8_t type, const uint8_t *packet, size_t bytes) {
@@ -1104,7 +1156,11 @@ void PianoBluetooth::pump()
         ++fRxPackets;
         if (type == kH4Event && bytes >= 5 && packet[0] == kEvCommandComplete) {
           ++fCompletions;
-          if (fCompletions <= 24) note("bt-path1: command complete opcode=%04x status=%02x", le16(packet + 3), bytes > 5 ? packet[5] : 255);
+          if (fCompletions <= 24) {
+            note("bt-path1: command complete opcode=%04x status=%02x", le16(packet + 3), bytes > 5 ? packet[5] : 255);
+            if (qbt_bt_trace_enabled)
+              note("bt-reset-phase: HCI RX complete opcode=%04x bytes=%zu", le16(packet + 3), bytes);
+          }
         }
         if (type == kH4Event && bytes >= 3 && packet[0] == 0x3e && (packet[2] == 2 || packet[2] == 0x0d)) ++fLeReports;
       });
@@ -1119,11 +1175,22 @@ void PianoBluetooth::pump()
   };
   flush();
   (void)portPoll(p);
+  traceRx();
   flush();
   const uint32_t n = qbt_transport_tx_take(gTransportTx, sizeof gTransportTx);
   if (n) {
-    fTxDecoder.feed(gTransportTx, n, [&](uint8_t, const uint8_t *packet, size_t) { if (packet) ++fTxPackets; });
+    fTxDecoder.feed(gTransportTx, n, [&](uint8_t type, const uint8_t *packet, size_t bytes) {
+      if (!packet) return;
+      ++fTxPackets;
+      if (qbt_bt_trace_enabled && fTxPackets <= 24 && type == kH4Command && bytes >= 3)
+        note("bt-reset-phase: HCI TX queued opcode=%04x bytes=%zu", le16(packet), bytes);
+    });
     const int rc = portSend(p, gTransportTx, n, 1000);
+    if (qbt_bt_trace_enabled && !fFirstTx && !rc) {
+      fFirstTx = true;
+      note("bt-reset-phase: runtime UART first TX bytes=%u", n);
+    }
+    traceRx();
     if (rc && rc != kBtCancelled) {
       fBootError = EIO;
       note("bt-path1: H4 TX failed (%d); endpoint unavailable", rc);
@@ -1316,6 +1383,12 @@ void PianoBluetooth::run()
     note("waiting %u s", gArgs.delay);
     IOSleep(gArgs.delay * 1000);
   }
+  if (qbt_bt_wait_baseline) {
+    note("bt-reset-baseline-v1: waiting for saved baseline");
+    qbt_transport_wait_for_baseline();
+    note("bt-reset-baseline-v1: released");
+  }
+  if (qbt_bt_trace_enabled) note("bt-reset-phase: delayed hardware survey begin");
   survey();
   if (gArgs.level < 2) {
     unmapRegion(gCore);
@@ -1330,7 +1403,9 @@ void PianoBluetooth::run()
       IOLockSleep(fLock, &fWant, THREAD_UNINT);
     if (fWant) {
       fWant = false;
+      if (qbt_bt_trace_enabled) note("bt-reset-phase: hardware bring-up begin");
       levels();
+      if (qbt_bt_trace_enabled) note("bt-reset-phase: hardware bring-up end error=%d", fBootError);
     }
     // A BlueTool request on an initialized controller only acknowledges the
     // current result. It never races or repeats firmware download.

@@ -28,3 +28,10 @@ Facts, read as references only (no code taken):
   The Ubuntu project for piano (behaviour only): docs/ubuntu-history/device.md 2.2-2.3 (5 min idle suspend on battery, power key,
     HandleLidSwitchExternalPower=lock), kernel.md 2.3 and 2.9 (gpio95 rising only while blanked with the lid open, never gpio97,
     the lid wakes on opening only); docs/drivers/thermal.md 2, its Profiles row (Power Saver / Balanced caps, GPU 342 MHz).
+  macOS 27.3 (26C5035r), binaries read for facts for the AppleSMC stand-in (AppleSmc.cpp, Smc.h; no code taken): IOKit.framework
+    (decoded shared cache) smcSupportsHPM, _smcReadKey, callSMCFunction, smcSupportsSilentRunning and
+    IOPMFeatureIsAvailableWithSupportedTable ('MSHP', the user client's type, selectors and the parameter structure's offsets);
+    SystemAdministration's ADMPowerActivityManager and the Battery settings extension (the picker's conditions, its entitlements);
+    libSMC (type 0); powerd (its AppleSMC first match, the keys it reads and writes, the 168-byte form); thermalmonitord (its sensor
+    exchange writes); CoreBrightness (its thermal brightness cap read); the kernel collection's IOUSBHostFamily
+    (AppleUSBHostResourcesTypeC: probe and allocateDownstreamBusCurrentGated). Offsets and key names are data.

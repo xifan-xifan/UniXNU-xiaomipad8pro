@@ -760,6 +760,14 @@ static bool publishDevice(IOService *resources, bool input, const char *uid, con
 
 extern "C" int piano_audio_devices_stage(void) { return piano_audio_dev_stage; }
 
+// PianoAudioTap.cpp: the tap's user client linked under IOAudio2DeviceUserClient as the Mic's is, so coreaudiod's sandbox rule for
+// that class (com.apple.audio.coreaudiod.sb: iokit-open iokit-user-client-class "IOAudio2DeviceUserClient", which the Mic's user
+// client passes on the tablet) admits it too, besides the extension the driver service issues for the plug-in's
+// AudioServerPlugIn_IOKitUserClients. Only after the family's classes were found (piano_audio_devices_attach); 0 done, -1 not.
+extern "C" int piano_audio_reparent_user_client(const OSMetaClass *meta) {
+    return piano_audio_dev_stage >= 3 && reparent(meta, IOUserClient::metaClass, "IOAudio2DeviceUserClient") ? 0 : -1;
+}
+
 // Links the two classes under the family's (a native kext's classes are registered as it loads) and publishes a speaker and a
 // microphone device on the transport.
 extern "C" int piano_audio_devices_attach(const PianoPcmTransport *transport) {

@@ -50,12 +50,34 @@
 ["adt"."chosen"."bytes"]
 # configs/k27-adt.toml's note: 27's Image4 kext seeds its nonce magazine from it (no boot manifest: zeros, SHA-384 size).
 "boot-manifest-hash" = "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+# An erased system-configuration region (docs/identity.md section 9). Without /defaults ean-storage-present and with
+# kern.hv_vmm_present 0, libMobileGestalt's syscfg source reads this property first; when it is absent it waits up to 5 s, once in
+# every process, for an AppleDiagnosticDataAccessReadOnly service (on a Mac the driver of the NOR syscfg partition: piano has
+# none), and AppKit asks for it in every app's NSApplication init (the hardware accent color): the 5.0 s before every app's first
+# window. The value is what that service publishes on an Apple-silicon Mac read for this (128 KiB, all 0xFF: an erased partition;
+# MobileGestalt logs "syscfg is not initialized!" and keeps an empty dictionary), in 24 bytes, the length it reads before the magic.
+"syscfg-v2-data" = "ffffffffffffffffffffffffffffffffffffffffffffffff"
+# The Wi-Fi address libMobileGestalt answers (docs/identity.md section 9): read here first, as on a Mac (iBoot fills it there).
+# Without it MobileGestalt waits 5 s, every time a process asks (akd: about every 5 s), for an IONetworkController under a service
+# named wlan, sdio or marconi-wifi, which piano does not have. The value is piano's own locally administered address, the one the
+# Wi-Fi interface en0 takes by default (PianoNullEthernet's, docs/drivers/wifi.md piano-wifi-en0), not a unit's.
+"mac-address-wifi0" = "025049414e01"
 
 ["adt"."chosen"."asmb"."u64"]
 "lp-sip0" = 2
 
 ["adt"."chosen"."asmb"."u32"]
 "lp-sip1" = 1
+
+# Explicit retained diagnostics contract (k27 0071). The generator does not
+# copy DTS reserved-memory nodes into the ADT; these bounds are checked again
+# before the kernel maps the tail, separately from XNU's owned DRAM window.
+["adt"."chosen"."piano-retained-ram"."u64"]
+"cvp-base" = 0x9cb00000
+"cvp-size" = 0x700000
+"pstore-size" = 0x6f0000
+"reset-reason-base" = 0x9d1f0000
+"reset-reason-size" = 0x10000
 
 ["adt"."defaults"."u32"]
 "sleep-disabled" = 1

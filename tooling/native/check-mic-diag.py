@@ -98,8 +98,16 @@ def main():
     l = s.add_parser('lifecycle')
     l.add_argument('console')
     l.add_argument('logs', nargs=2)
+    d = s.add_parser('lifecycle-dir', help='grade the final saved capture artifacts')
+    d.add_argument('directory', type=Path)
     args = p.parse_args()
     try:
+        if args.cmd == 'lifecycle-dir':
+            # READY polling files and an older staged checker are not the final
+            # capture. Use this committed checker and the completed probe logs.
+            args.console = args.directory / 'mic-console-window.txt'
+            args.logs = [args.directory / name for name in
+                         ('first-probe.txt', 'restart-probe.txt')]
         bad = (windows(args.measure, args.pcm, args.timeline, args.report)
                if args.cmd == 'windows' else lifecycle(args.console, args.logs))
         print('mic diagnostic acceptance: ' + ('FAIL' if bad else 'PASS'))

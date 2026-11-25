@@ -379,6 +379,15 @@ int main()
         uint64_t iova=0;uint32_t dwords=0;
         CHECK(r.ibBefore(4,&iova,&dwords)==kIOReturnSuccess && iova==0x912345000ull && dwords==0x40);
         CHECK(r.ibBefore(5,&iova,&dwords)==kIOReturnUnsupported);
+#ifdef ADRENO830_MACOS
+        /* UniXNU-piano (2026-11-21): the packet whose buffer holds an address, walking back from a read pointer over the whole ring
+         * (a fault's IB1 size); an address past the buffer has none. */
+        CHECK(r.ibHolding(4,0x912345000ull,&iova,&dwords)==kIOReturnSuccess && iova==0x912345000ull && dwords==0x40);
+        CHECK(r.ibHolding(4,0x912345000ull+4*0x3f,&iova,&dwords)==kIOReturnSuccess && iova==0x912345000ull && dwords==0x40);
+        CHECK(r.ibHolding(0,0x912345000ull+8,&iova,&dwords)==kIOReturnSuccess && iova==0x912345000ull && dwords==0x40);
+        CHECK(r.ibHolding(4,0x912345000ull+4*0x40,&iova,&dwords)==kIOReturnUnsupported && !iova && !dwords);
+        CHECK(r.ibHolding(4,0x912345000ull,nullptr,&dwords)==kIOReturnBadArgument);
+#endif
         peer.fail_read=peer.reads.size()+1;
         CHECK(r.stallState(out)==kIOReturnIOError && r.poisoned());
         ++cases;

@@ -83,6 +83,24 @@ class PolicyTests(unittest.TestCase):
     def state(self, rig, name):
         return rig.root('/private/var/db/piano-userland/passd-policy') / name
 
+    def test_boot_and_live_repair_restrictive_state_parent(self):
+        for shell in base.SHELLS:
+            with self.subTest(shell=shell), tempfile.TemporaryDirectory() as d:
+                rig = self.rig(Path(d), shell, gui=False)
+                state_parent = self.state(rig, 'status').parent.parent
+                for mode in ('--boot', '--live'):
+                    if mode == '--live':
+                        state_parent.chmod(0o700)
+                    command = 'umask 077; exec "$@"' if mode == '--boot' else 'exec "$@"'
+                    r = subprocess.run([shell, '-c', command, 'fixture', shell,
+                                        str(rig.tmp / 'stage/install.sh'), mode],
+                                       env=rig.env, capture_output=True, text=True, timeout=15)
+                    self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                    self.assertIn(f'{mode} done: ok', r.stdout)
+                    self.assertEqual(state_parent.stat().st_mode & 0o777, 0o711)
+                    self.assertEqual(self.state(rig, 'status').parent.stat().st_mode & 0o777, 0o700)
+                    self.assertIn('PENDING gui/501 absent', self.state(rig, 'status').read_text())
+
     def test_installer_matrix(self):
         for shell in base.SHELLS:
             for gui in (False, True):

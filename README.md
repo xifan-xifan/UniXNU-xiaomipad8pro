@@ -13,67 +13,59 @@ SM8750 pieces to be shared later (the code still lives here, and the build pins 
 is the frozen archive of the earlier Linux + Gunyah guest path. The map of repositories, local trees and rules:
 [docs/PROJECT-MAP.md](docs/PROJECT-MAP.md).
 
-## State (2026-11-17, midday)
+## State (2026-11-24)
 
-- macOS boots natively on the tablet, also by itself from power-on (an installed copy, see below); root and Data are on UFS
-  (`package/NativeUfs`, `package/NativeRamBlock`).
-- The Adreno 830 GPU (`package/PianoA830` with Turnip) composites the login screen and, since 2026-11-11, the logged-in desktop
-  (Dock, menu bar, Finder, Control Center as GPU clients); the first sessions' resets and GPU map refusals are fixed, and
-  the display now draws the pointer layer and copies no frame before its GPU fence (built and host-tested, to be run:
-  `docs/drivers/native-gop-display.md` §5a).
-- Input: the Xiaomi keyboard cover (keys, touchpad) and the touch screen (taps, drags, two-finger scroll) reach macOS; the
-  touch screen's orientation on this unit and its controller watchdog recovery are fixed (built, to be run).
-- A USB-C debug console with a small kernel monitor (`package/PianoDwc3`, `tooling/native/usb-console.py`) and the buttons run;
-  the monitor's `reset fastboot` returns the tablet to ABL fastboot without buttons.
-- The installed system (2026-11-14): **macOS 27.3 (26C5035r) only**, Mac17,11 shown as "Xiaomi Pad 8 Pro" with a
-  "Snapdragon 8 Elite" chip, 13 GiB of RAM. Its root is on `linux_rootfs`; the owner's 200 GiB Data store spans `linux_data`
-  (LBA 71859642, seed `9bd6f902`). The retired 27.0.1 volume/store was cleared and has no menu entry
-  ([docs/persistent-boot.md](docs/persistent-boot.md) §13.8, [docs/results-2026-11-14.md](docs/results-2026-11-14.md)).
-  The USB root shell and ssh over the cable; charging that keeps going (level 2, the DSP started at once). The current ESP is
-  **v5** (installed 2026-11-14): it carries Wi-Fi's sleep and crash recovery. The desktop and the lock screen show Apple's stock
-  still picture and render right (run h1 on v5, photos).
-- Cameras: frames from both sensors and the first pictures through a user client (`piano-camera-grab`); a macOS camera
-  extension is next ([docs/drivers/camera.md](docs/drivers/camera.md)).
-- Wi-Fi: the installed system joins by itself at boot (WPA2, DHCP, DNS, HTTPS), rejoins after a drop, and came back by itself
-  after a system sleep and after a firmware crash (boot 10m; ESP v5 brings both to the installed system — its first boot joined
-  on its own). Joining through macOS itself works since 2026-11-17 on RAM boots (run wifi-join9b): `networksetup` -> airportd ->
-  IO80211's Apple80211Associate2 -> our driver -> WPA2 association, the four-way handshake by our supplicant, DHCP, gateway and
-  DNS ([docs/results-2026-11-17.md](docs/results-2026-11-17.md)); the menu's own list/click proof and the installed system's update
-  are next; user power/disconnect lifecycle is implemented with host coverage, awaiting its three-cycle tablet qualification ([docs/drivers/wifi-menu.md](docs/drivers/wifi-menu.md), [docs/drivers/wifi.md](docs/drivers/wifi.md)).
-- Sound (2026-11-17, RAM boots): the speakers play at the system volume (volume slider and keys, mute), one continuous tone per
-  test; the reference-aligned gain cap (231) and runtime 192/231 A/B switch have host coverage and await acoustic tablet validation;
-  opt-in reversible audio sleep has host coverage and awaits tablet acceptance; the microphone is next ([docs/drivers/audio.md](docs/drivers/audio.md)).
-- Hardware video decode (2026-11-17, RAM boots): the opt-in native VideoToolbox bridge delivered our 320×240 H.264
-  frame through Iris into an IOSurface-backed callback with the exact golden SHA-256 and safe teardown (`vid-v5c`).
-  A bounded Baseline/Main streaming implementation and owned 60-frame IP/IBP qualification clips now have host coverage;
-  continuous hardware decoding awaits tablet qualification. The post-PSC stall has passive first-timeout diagnostics
-  for the next test ([docs/drivers/video.md](docs/drivers/video.md)).
-  Normal app playback remains unqualified.
-- Bluetooth: power, Wi-Fi coexistence and the SE6 UART passed the original BT1 run (including 48/48 loopback).
-  An opt-in macOS 27.3 H4 transport and version-locked daemon runtime are prepared for one combined discovery test;
-  firmware initialization, the Bluetooth menu and discovery are not yet tablet-confirmed
-  ([Bluetooth](docs/drivers/bluetooth.md)).
-  The next test corrects the firmware partition's bounded FAT prefix and runtime activation when boot arguments exceed the user-space view.
-- Boot time is being worked on: most of launchd's 40 s is our 4 KiB code-signature pre-hash of the compressed dyld shared
-  cache (about 37 s on one CPU, hash-bound not disk-bound, probe ufs3). The owner decided 2026-11-14 to skip the eager
-  pre-hash on this development tablet behind a boot-arg switch (`cs-native4k-skip=1`, verification can be turned back on;
-  a parallel version stays the fallback); probes built, then into the installed ESP ([docs/boot-time.md](docs/boot-time.md) §9).
-- Not working yet: the Wi-Fi menu's own list (joining through macOS works on RAM boots), Bluetooth, the sensors, hardware video playback in apps, and
-  a clean restart — every reboot of the 27.3 line ends in IOPlatformExpert's panic 30 s after the halt begins
-  (`Halt/Restart Timed Out`, console captures since 2026-11-13).
-- Safari's synchronous Apple Pay query can hang while native lacks the AppleKeyStore unlock contract. A reversible UID 501
-  `passd` policy is implemented with host rehearsal; cold Safari response and persistence await tablet qualification
-  ([userland policy](docs/userland.md#passd-policy-2026-11-18-tablet-qualification-pending)). Wallet and payment handoff are unavailable with this policy.
-- Latest results: [docs/results-2026-11-17.md](docs/results-2026-11-17.md) (Wi-Fi join through macOS, sound with volume control, the
-  video firmware booting and talking HFI); before: [docs/results-2026-11-16.md](docs/results-2026-11-16.md) (macOS's Wi-Fi scan through our user client, the
-  video firmware authenticated, macOS sound output, the boot-window analysis); earlier: [docs/results-2026-11-14.md](docs/results-2026-11-14.md)
-  (Wi-Fi on the installed system with sleep and crash recovery, the built-in `en0` handed to Wi-Fi, the boot-time probes).
-- [Contract-bounded buck charging](docs/drivers/charging-buck-session.md): UCSI/RDO
-  validation and admin 80/75 health control are implemented and host-tested;
-  PD/PPS and the runtime stop/resume actuator await tablet verification.
-- Most other drivers (power and charging, touch, keyboard cover, backlight, audio, sensors, thermal, USB host, video,
-  Bluetooth, display processor, ...) are built and linked but inert behind their boot arguments, waiting for their tests on the
-  tablet. Per-driver state: [docs/PROJECT-MAP.md](docs/PROJECT-MAP.md) §7 and [docs/drivers/README.md](docs/drivers/README.md).
+Native macOS **27.3 (26C5035r)** boots on the tablet from power-on as well as from a RAM image. The current daily
+install is **v13.1y12d** (2026-11-24). The machine identifies as Mac17,11, shown as "Xiaomi Pad 8 Pro" with a
+"Snapdragon 8 Elite" chip and a 13 GiB RAM window. Root is on `linux_rootfs`; the owner's Data store is on
+`linux_data`. High Performance mode is the daily setting. The Android-aligned CPU/GPU frequency curve and the PD
+buck charging path are on by default; the charge pump stays off.
+
+A USB-C debug console (`package/PianoDwc3`, `tooling/native/usb-console.py`) and ssh over the cable are available;
+the monitor's `reset fastboot` returns the tablet to ABL without buttons. Everyday development uses `fastboot boot`
+RAM images, which take priority over the installed copy.
+
+### Hardware support
+
+Statuses are from tablet runs, not from host-only analysis or "built but not run" work. **Works** means verified on
+the installed daily image (v13.1y12d) unless a note says otherwise. **Partial** means it works with documented gaps.
+**RAM-qualified** means verified on a RAM boot but not present, or not yet qualified, on that installed image.
+**Not supported**, **deferred** and **untested** are what they say.
+
+| Area | Status | Notes |
+| --- | --- | --- |
+| Display / GPU (Adreno 830) | Works | The login window and the desktop (Dock, menu bar, Finder, Control Center) composite on the GPU. The daily image runs at 60 Hz. |
+| 120 Hz | Partial (RAM) | A 120 Hz mode starts and is published (3200x2136). Measured presentation is not a solid 120 fps yet (idle cadence around 90 fps; a 3D bench around 50 fps). The installed daily profile stays at 60 Hz. |
+| Touch | Works | Native multitouch has landed: tap, drag, pinch and rotate were verified end-to-end on RAM; daily images publish the native touch screen. |
+| Keyboard cover | Works | Keys and the touchpad work on the installed system. |
+| Buttons and backlight | Works | Power and volume keys, and backlight steps, run on the daily image. ALS-driven auto-brightness is present. |
+| Charging and battery | Partial | Battery percentage and 5 V charging work on the installed image, with the 80 % health hold (resume at 75 %) unchanged. On a computer USB-C port the firmware may request 3 A and then settle lower when VBUS sags (around 4.72 V, roughly 1.8 A). The PD buck path is on by default in v13.1y12d. The charge pump and MiPPS stay off until an attended official-charger test. A newer ladder / MiPPS state machine (mipps2) passed a 5 V smoke test on RAM image y12f — ICL never dropped to 100 mA, no 9 V step on that cable, MiPPS idle — but is not installed yet. |
+| Wi-Fi | Partial | The installed system joins at boot (WPA2, DHCP, DNS) and, on recent daily qualifications, comes back after radio off/on, a link drop, and simulated involuntary losses. An office-network (many access points) fix is in the tree; a real office-network test is still pending. |
+| Speakers | Works | Playback, system volume and mute work on the installed system. |
+| Microphone | Partial | A microphone path exists and a quiet-room noise-suppression check passed on RAM; daily microphone quality and speaker-protection work are still in progress. |
+| Bluetooth | Partial | Discovery has been seen on an installed system. Pairing a keyboard or mouse, and Bluetooth audio, are not reliably working yet (connect timeouts and radio issues remain open). |
+| Sleep and wake | Partial | Timer-wake suspend-to-idle passed on the v13.1y12d RAM qualification (Wi-Fi and the USB gadget recovered; the lock screen appeared after wake). Lid-close and power-button sleep are not fully signed off. |
+| Cameras | Partial | Front and rear cameras enumerate, and colour frames through AVFoundation have been demonstrated. Hardware encode is not built (recordings use the software encoder). Some stock-app and FaceTime gaps remain. |
+| Hardware video decode | Partial | Stock QuickTime has played AVC and HEVC fixtures, including a session on an installed image. Concurrent sessions, aerial wallpaper, and some 4K / HEVC cases are only partly qualified. |
+| Safari GPU / WebGPU | RAM-qualified, not installed | With the GPU addon view, Safari's GPU process can open the accelerator and WebGPU works (RAM runs safari1b and y12f). This is not on the installed y12d image. After y12f, the next install candidate is y12f2 (the addon view without the family1 Mac2 change). |
+| Chrome WebGL / Mac2 | Not supported | On y12f, Chrome started on the family1 (Mac2) plugin and the tablet reset to the bootloader about 11 seconds later, with no panic or GPU error on the console. y12f will not be installed as-is. Chrome stays on software rendering until a later RAM test captures reset evidence. |
+| OS switcher | RAM-qualified (read-only) | On y12f, and on an earlier y12e RAM run, the boot-flag sysctls are registered with writes off: the flag byte read `0x00` three times, a write was refused (`EPERM`), and the byte stayed `0x00`. A full switch to Android has not been tested. This is not in the installed y12d image. |
+| USB device console | Works | The USB-C debug console, a root shell and ssh over the cable work. |
+| USB host / OTG | Not yet | Host-mode code exists but has not been run with a real device on the tablet. |
+| DisplayPort | Not yet | A fake second display was exercised on RAM. A real DisplayPort partner has never been plugged on a native boot. |
+| Sensors and auto-rotate | Partial | ALS (auto-brightness) runs on the installed system. Auto-rotate is off in the current daily profile; parts of the chain have been demonstrated on RAM but not signed off end-to-end. |
+| IR blaster | Not supported | No native driver yet. |
+| Stylus | Untested | |
+| NPU | Deferred | No native driver. Core ML / Apple Neural Engine is not possible on this SoC. |
+| Fingerprint | Deferred | There is no Secure Enclave, so Touch ID is not possible. A non-SEP unlock path has not been started. |
+| Software restart | Known issue | Earlier 27.3 boots ended in a 30 s `Halt/Restart Timed Out` panic. This has not been re-qualified as fixed on the current daily image. |
+| Login notifications | Known issue | Background Items notifications for `piano-*` helpers still appear at login. |
+
+Per-driver pages, boot arguments and test levels: [docs/drivers/README.md](docs/drivers/README.md) and
+[docs/PROJECT-MAP.md](docs/PROJECT-MAP.md). Using, updating and recovering the installed system:
+[docs/USING.md](docs/USING.md). Earlier public write-ups include
+[docs/results-2026-11-19.md](docs/results-2026-11-19.md) and
+[docs/results-2026-11-17.md](docs/results-2026-11-17.md).
 
 ## Layout
 

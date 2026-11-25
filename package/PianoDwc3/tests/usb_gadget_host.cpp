@@ -43,6 +43,14 @@ struct FakeHal {
     if (off >= 0xc800 && off < 0xca00 && (off & 0xf) == 0xc) { command((off - 0xc800) / 16, v); return; }
     if (off == GEVNTCOUNT) { assert(v <= regs[off]); regs[off] -= v; return; }
     if (off == DCTL) {
+      if (v & DCTL_CSFTRST) {   // the core soft reset: every transfer, command and held SETUP gone
+        ++softResets;
+        stuck = owes = false;
+        held.clear();
+        for (EpModel &e : eps) e = EpModel{};
+        regs[GEVNTCOUNT] = 0;
+        evWrite = 0;
+      }
       v &= ~DCTL_CSFTRST;
       if (v & DCTL_RUN_STOP) regs[DSTS] &= ~DSTS_DEVCTRLHLT; else regs[DSTS] |= DSTS_DEVCTRLHLT;
     }
@@ -53,6 +61,12 @@ struct FakeHal {
     const uint32_t b = depcmdBase(phys);
     Cmd c{phys, v & 0xf, regs[b + 8], regs[b + 4], regs[b + 0]};
     cmds.push_back(c);
+    if (fsm && (stuck || (c.command == CMD_ENDTRANSFER && !held.empty()))) {   // not taken: CMDACT stays set
+      stuck = true;
+      ++stuckCmds;
+      regs[b + 12] = v | DEPCMD_CMDACT;
+      return;
+    }
     uint32_t result = v & ~DEPCMD_CMDACT;
     switch (c.command) {
     case CMD_STARTTRANSFER:
@@ -62,11 +76,43 @@ struct FakeHal {
       result = (result & 0xff80ffffu) | (phys + 1) << 16;
       break;
     case CMD_ENDTRANSFER: eps[phys].active = false; break;
-    case CMD_SETSTALL: eps[phys].stalled = true; break;
+    case CMD_SETSTALL:
+      eps[phys].stalled = true;
+      if (phys == 0) owes = false;   // EP0 stalled: the core's control state machine is back in its SETUP phase
+      break;
     case CMD_CLEARSTALL: eps[phys].stalled = false; break;
     default: break;
     }
     regs[b + 12] = result;
+    if (fsm && phys == 0 && (c.command == CMD_STARTTRANSFER || c.command == CMD_SETSTALL)) deliverHeld();
+  }
+  // The controller's own control-transfer state machine (USB-WEDGE.md), on with fsm: after a SETUP is handed out the core owes that
+  // transfer's stages until its status TRB completes or EP0 is stalled; a SETUP from the host meanwhile is held, not put into an armed
+  // SETUP TRB (chg-fix1, confirmed); END TRANSFER while a SETUP is held is not taken (the reference's rule, dwc3_stop_active_transfer)
+  // and once a command is stuck every later one is (inferred: energy-e4 after the replug); a bus reset drops a held SETUP but not a
+  // stuck command; DCTL.CSFTRST clears it all.
+  bool fsm = false, owes = false, stuck = false;
+  std::string held;
+  unsigned softResets = 0, stuckCmds = 0;
+  void deliverHeld()
+  {
+    if (held.empty() || owes || !eps[0].active || trbType(0) != TRBCTL_CONTROL_SETUP) return;
+    const std::string s = held;
+    held.clear();
+    complete(0, s);
+  }
+  // The host sends a SETUP: into the armed SETUP TRB, or held by the core (it owes a stage, or no SETUP TRB is armed). True: handed out.
+  bool hostSetup(const std::string &s)
+  {
+    if (!owes && eps[0].active && trbType(0) == TRBCTL_CONTROL_SETUP && held.empty()) { complete(0, s); return true; }
+    held = s;
+    return false;
+  }
+  void hostReset()
+  {
+    held.clear();
+    owes = false;
+    devEvent(DEVT_RESET);
   }
   uint64_t now = 0;
   void barrier() {}
@@ -136,6 +182,11 @@ struct FakeHal {
     assert(eps[phys].active);
     uint32_t *t = trb(phys);
     assert(t[3] & TRB_HWO);
+    if (phys < 2) {
+      const unsigned type = trbType(phys);
+      if (type == TRBCTL_CONTROL_SETUP) owes = true;
+      if (type == TRBCTL_CONTROL_STATUS2 || type == TRBCTL_CONTROL_STATUS3) owes = false;
+    }
     const uint32_t len = trbResidual(t[2]);
     std::string data;
     if (phys & 1) data.assign(reinterpret_cast<const char *>(at(uint64_t(t[1]) << 32 | t[0])), len);
@@ -909,6 +960,241 @@ static void sleepCycle(bool quiet)
   std::printf("sleep cycle: disconnected, connected again, enumerated afresh\n");
 }
 
+// EP0 left the controller's way and the controller recovery (USB-WEDGE.md), against the FakeHal's model of the core's control state
+// machine (fsm): energy-e4's stale requests after a kept sleep, chg-fix1's lost SET_ADDRESS at a bus reset, a SETUP_PENDING data stage,
+// a bus reset in the middle of a transfer, a command that never completes (the recovery), a silent wedge.
+static unsigned countAfter(const FakeHal &h, size_t from, uint32_t command, unsigned phys)
+{
+  unsigned n = 0;
+  for (size_t i = from; i < h.cmds.size(); ++i) n += h.cmds[i].command == command && h.cmds[i].phys == phys;
+  return n;
+}
+static void wedgeScenarios(bool quiet)
+{
+  auto boot = [&](FakeHal &h, G &g, bool net) {
+    h.quiet = quiet;
+    h.fsm = true;
+    g.bind(&h, 3, kProduct, 1000, net);
+    h.regs[DSTS] = DSTS_DEVCTRLHLT;
+    uint32_t w = 0;
+    CHECK(g.softReset(true, &w) && g.init() && g.run(10));
+  };
+  auto enumerate = [&](FakeHal &h, G &g, uint16_t address) {
+    h.hostReset();
+    h.regs[DSTS] = (h.regs[DSTS] & ~7u) | SPEED_HS;
+    h.devEvent(DEVT_CONNECT_DONE);
+    step(g);
+    controlNoData(h, g, setupBytes(0x00, 5, address, 0, 0));
+    controlNoData(h, g, setupBytes(0x00, 9, 1, 0, 0));
+    controlNoData(h, g, setupBytes(0x21, 0x22, 3, 0, 0));   // the console's DTR
+    CHECK(g.configured() && g.stats.address == address && h.lines[0] == 3 && !h.owes);
+  };
+  // energy-e4, wake 2: a 2-stage request the host sent while the system was frozen is answered after the thaw; the host gave up on it
+  // long ago and never runs its status stage. The watchdog leaves it with SET STALL (the core back in its SETUP phase), so the next
+  // request (the console's DTR drop at 11:25:36) lands; no command times out, bulk OUT keeps going.
+  {
+    FakeHal h;
+    G g{};
+    boot(h, g, true);
+    enumerate(h, g, 5);
+    const unsigned out0 = physOf(bulkEp(0), false);
+    CHECK(h.eps[out0].active);
+    CHECK(h.hostSetup(setupBytes(0x21, 0x22, 3, 4, 0)));   // the stale port-2 open
+    step(g);
+    CHECK(h.owes && !h.eps[1].active && g.stats.ep0Timeouts == 0);
+    const size_t mark = h.cmds.size();
+    h.now += 1500000;
+    step(g);
+    CHECK(g.stats.ep0Timeouts == 1 && countAfter(h, mark, CMD_SETSTALL, 0) == 1 && !h.owes);
+    CHECK(h.eps[0].active && h.trbType(0) == TRBCTL_CONTROL_SETUP && !g.wedged());
+    CHECK(h.hostSetup(setupBytes(0x21, 0x22, 0, 0, 0)));   // the console closed: handed out at once
+    step(g);
+    h.epEvent(1, EPT_XFER_NOT_READY, EP0_NOTREADY_STATUS);
+    step(g);
+    CHECK(h.eps[1].active && h.trbType(1) == TRBCTL_CONTROL_STATUS2);
+    h.complete(1);
+    step(g);
+    CHECK(h.lines[0] == 0 && h.eps[0].active && h.trbType(0) == TRBCTL_CONTROL_SETUP);
+    h.complete(out0, "x");
+    step(g);
+    CHECK(h.rx[0] == "x" && h.eps[out0].active);
+    CHECK(g.stats.cmdTimeouts == 0 && h.stuckCmds == 0 && !g.wedged());
+  }
+  // energy-e4, wake 1: a SET_LINE_CODING whose data stage never comes: its OUT TRB ended, EP0 stalled, SETUP again; the next request works.
+  {
+    FakeHal h;
+    G g{};
+    boot(h, g, false);
+    enumerate(h, g, 6);
+    CHECK(h.hostSetup(setupBytes(0x21, 0x20, 0, 4, 7)));
+    step(g);
+    CHECK(h.eps[0].active && h.trbType(0) == TRBCTL_CONTROL_DATA);
+    const size_t mark = h.cmds.size();
+    h.now += 1500000;
+    step(g);
+    CHECK(countAfter(h, mark, CMD_ENDTRANSFER, 0) == 1 && countAfter(h, mark, CMD_SETSTALL, 0) == 1 && !h.owes);
+    controlNoData(h, g, setupBytes(0x21, 0x22, 1, 4, 0));
+    CHECK(h.lines[2] == 1 && g.stats.cmdTimeouts == 0);
+  }
+  // A SETUP during an IN data stage: the core ends the data TRB with SETUP_PENDING and holds the SETUP until the status stage is done
+  // (the reference's ep0.c note); the gadget stalls and restarts at the status not-ready event, the held SETUP is handed out.
+  {
+    FakeHal h;
+    G g{};
+    boot(h, g, false);
+    enumerate(h, g, 7);
+    CHECK(h.hostSetup(setupBytes(0x80, 6, 0x0100, 0, 18)));
+    step(g);
+    CHECK(h.eps[1].active && h.trbType(1) == TRBCTL_CONTROL_DATA);
+    uint32_t *t = h.trb(1);
+    t[2] = (TRBSTS_SETUP_PENDING << 28) | trbResidual(t[2]);
+    t[3] &= ~TRB_HWO;
+    h.eps[1].active = false;
+    h.epEvent(1, EPT_XFER_COMPLETE);
+    h.held = setupBytes(0x21, 0x22, 0, 0, 0);
+    h.epEvent(0, EPT_XFER_NOT_READY, EP0_NOTREADY_STATUS);
+    const unsigned linesBefore = h.lines[0], setupsBefore = g.stats.setups;
+    step(g);
+    CHECK(linesBefore == 3 && h.held.empty() && g.stats.setups == setupsBefore + 1);   // handed out after the stall, and parsed
+    h.epEvent(1, EPT_XFER_NOT_READY, EP0_NOTREADY_STATUS);
+    step(g);
+    CHECK(h.eps[1].active && h.trbType(1) == TRBCTL_CONTROL_STATUS2);
+    h.complete(1);
+    step(g);
+    CHECK(h.lines[0] == 0 && g.stats.cmdTimeouts == 0);
+  }
+  // chg-fix1: the host's SET_ADDRESS lands in the armed SETUP TRB in the same batch as the bus reset. The armed TRB is kept, so the
+  // SETUP is not lost (ending and re-arming it made the completion look stale and left the core owing the status stage).
+  {
+    FakeHal h;
+    G g{};
+    boot(h, g, false);
+    h.hostReset();
+    h.regs[DSTS] = (h.regs[DSTS] & ~7u) | SPEED_HS;
+    h.devEvent(DEVT_CONNECT_DONE);
+    CHECK(h.hostSetup(setupBytes(0x00, 5, 9, 0, 0)));
+    step(g);
+    CHECK(((h.regs[DCFG] >> 3) & 0x7f) == 9 && g.stats.stale == 0);
+    h.epEvent(1, EPT_XFER_NOT_READY, EP0_NOTREADY_STATUS);
+    step(g);
+    h.complete(1);
+    step(g);
+    CHECK(g.stats.address == 9 && !h.owes);
+    // The dead end itself (a SETUP the software never saw, the core waiting for its status): SET STALL, the armed TRB stays, the
+    // host's retry lands.
+    h.owes = true;
+    const size_t mark = h.cmds.size();
+    h.epEvent(1, EPT_XFER_NOT_READY, EP0_NOTREADY_STATUS);
+    step(g);
+    CHECK(g.stats.ep0Resyncs == 1 && countAfter(h, mark, CMD_SETSTALL, 0) == 1 && countAfter(h, mark, CMD_STARTTRANSFER, 0) == 0);
+    CHECK(!h.owes && h.eps[0].active && h.trbType(0) == TRBCTL_CONTROL_SETUP);
+    controlNoData(h, g, setupBytes(0x00, 9, 1, 0, 0));
+    CHECK(g.configured());
+    // A not-ready with the transfer-active bit (the normal data-stage case) is no resync.
+    h.epEvent(1, EPT_XFER_NOT_READY, 8 | EP0_NOTREADY_DATA);
+    step(g);
+    CHECK(g.stats.ep0Resyncs == 1);
+  }
+  // A bus reset in the middle of a transfer: EP0 stalled and SETUP armed before any other END TRANSFER (a held SETUP would block them).
+  {
+    FakeHal h;
+    G g{};
+    boot(h, g, true);
+    enumerate(h, g, 3);
+    CHECK(h.hostSetup(setupBytes(0x21, 0x22, 1, 4, 0)));
+    step(g);
+    CHECK(h.owes);
+    const size_t mark = h.cmds.size();
+    h.devEvent(DEVT_RESET);   // the core: a reset in the status stage (no held SETUP)
+    step(g);
+    size_t stall = 0, firstBulkEnd = 0;
+    for (size_t i = mark; i < h.cmds.size(); ++i) {
+      if (!stall && h.cmds[i].command == CMD_SETSTALL && h.cmds[i].phys == 0) stall = i;
+      if (!firstBulkEnd && h.cmds[i].command == CMD_ENDTRANSFER && h.cmds[i].phys >= 2) firstBulkEnd = i;
+    }
+    CHECK(stall && firstBulkEnd && stall < firstBulkEnd);
+    CHECK(h.eps[0].active && h.trbType(0) == TRBCTL_CONTROL_SETUP && !g.configured() && g.stats.cmdTimeouts == 0);
+    h.owes = false;
+    enumerate(h, g, 4);
+  }
+  // A command that never completes (energy-e4 after the replug: END TRANSFER with a SETUP held): the gadget is wedged, issues nothing
+  // on top, and recover() (RUN_STOP off, DCTL.CSFTRST, the device side again, RUN_STOP on) brings a fresh enumeration; counters kept.
+  {
+    FakeHal h;
+    G g{};
+    boot(h, g, true);
+    enumerate(h, g, 5);
+    controlNoData(h, g, setupBytes(0x01, 0x0b, 1, 7, 0));   // the NCM data interface's alternate 1: the link up
+    CHECK(h.linkUp);
+    CHECK(h.hostSetup(setupBytes(0x21, 0x22, 3, 4, 0)));
+    step(g);
+    h.held = setupBytes(0x21, 0x22, 0, 0, 0);   // the host's next request, held: the core owes the status stage
+    h.hostReset();                               // as old code would: END TRANSFER with the SETUP held
+    h.held = setupBytes(0x21, 0x22, 0, 0, 0);
+    h.owes = true;
+    const unsigned out0 = physOf(bulkEp(0), false);
+    CHECK(h.eps[out0].active);
+    step(g);
+    CHECK(g.stats.cmdTimeouts == 0);   // the new order: EP0 first (the stall hands the held SETUP out), then the ENDs go through
+    CHECK(!g.wedged() && h.stuckCmds == 0);
+    // Now a command that is stuck for a reason we do not know: wedged at its timeout, nothing more issued.
+    enumerate(h, g, 6);
+    controlNoData(h, g, setupBytes(0x01, 0x0b, 1, 7, 0));
+    CHECK(h.linkUp);
+    h.stuck = true;
+    h.tx[0] = "after";
+    const size_t mark = h.cmds.size();
+    step(g);
+    CHECK(g.wedged() && g.stats.cmdTimeouts == 1 && g.stats.wedges == 1);
+    const size_t wedgedAt = h.cmds.size();
+    CHECK(wedgedAt == mark + 1);
+    h.tx[0] = "more";
+    h.now += 1500000;
+    step(g);
+    step(g);
+    CHECK(h.cmds.size() == wedgedAt && g.stats.cmdSkipped >= 1);   // nothing on top of the stuck command
+    const unsigned resets = g.stats.resets, setups = g.stats.setups, links = h.linkEvents;
+    uint32_t waited = 0;
+    CHECK(g.recover(true, &waited));
+    CHECK(h.softResets == 2 && !h.stuck && !g.wedged() && g.stats.recoveries == 1 && g.stats.wedges == 1);
+    CHECK(g.stats.resets == resets && g.stats.setups == setups && !g.configured() && h.lines[0] == 0);
+    CHECK(!h.linkUp && h.linkEvents == links + 1);   // the link went down with the recovery
+    CHECK((h.regs[DCTL] & DCTL_RUN_STOP) && h.eps[0].active && h.trbType(0) == TRBCTL_CONTROL_SETUP);
+    enumerate(h, g, 7);
+    CHECK(g.stats.resets == resets + 1);
+  }
+  // A silent wedge: four EP0 recoveries with no control transfer completed in between mark the gadget wedged.
+  {
+    FakeHal h;
+    G g{};
+    boot(h, g, false);
+    enumerate(h, g, 8);
+    for (unsigned i = 0; i < 4; ++i) {
+      CHECK(!g.wedged());
+      CHECK(h.hostSetup(setupBytes(0x21, 0x22, 3, 4, 0)));
+      step(g);
+      h.now += 1500000;
+      step(g);
+    }
+    CHECK(g.wedged() && g.stats.ep0Timeouts == 4 && g.stats.cmdTimeouts == 0);
+    uint32_t waited = 0;
+    CHECK(g.recover(true, &waited) && !g.wedged());
+    enumerate(h, g, 9);
+  }
+  // traceMore: a fresh budget after a wake, within the configured limit; SETUP notes again.
+  {
+    FakeHal h;
+    G g{};
+    h.quiet = quiet;
+    g.bind(&h, 2, kProduct, 0, false);
+    g.traceMore(32, 16);   // no trace configured: stays off
+    h.regs[DSTS] = DSTS_DEVCTRLHLT;
+    CHECK(g.init() && g.run(10));
+  }
+  std::printf("EP0 and the controller recovery: the e4 replay, a stale data stage, SETUP_PENDING, chg-fix1's lost SET_ADDRESS, a reset "
+              "mid-transfer, a stuck command recovered by the soft reset, a silent wedge\n");
+}
+
 // The core outside the device role (C6: the host role at the takeover): every entry that would touch a device register refuses, and
 // none is touched (no endpoint command, DCTL and DCFG as they were, the role left alone).
 static void hostRoleRefused()
@@ -931,6 +1217,7 @@ int main(int argc, char **argv)
   (void)argv;
   hostRoleRefused();
   sleepCycle(argc < 2);
+  wedgeScenarios(argc < 2);
   goldenDescriptors();
   scenario(2, false, argc < 2);
   scenario(3, false, argc < 2);

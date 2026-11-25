@@ -74,6 +74,12 @@ extern "C" {
 #define SSR_ARENA_BYTES 0x800000u       /* the arena: 2 MiB for the calls (blobs up to about 1.9 MiB), the rest the DSP's heap (apps_mem) */
 #define SSR_CALL_BYTES 0x200000u
 #define SSR_BOUNCE 0x10000u             /* normal memory the pack is read through */
+/* PianoSensors (UPSTREAM): a DSP call is served in normal memory, SsrConfig.shadow, SSR_SHADOW_BYTES: its in blob (as in the arena's
+ * in area), then its answer (as in the arena's out area); the arena itself is touched only through SensorsArena.h (it faults on an
+ * unaligned access on the tablet). */
+#define SSR_IN_CAPACITY 0xf000u
+#define SSR_OUT_CAPACITY (SSR_CALL_BYTES - 0x10000u)
+#define SSR_SHADOW_BYTES (SSR_IN_CAPACITY + SSR_OUT_CAPACITY)
 #define SSR_LIBRARY_PATH "/vendor/dsp/adsp;/vendor/dsp;/vendor/lib/rfsa/adsp;/odm/lib/rfsa/adsp;/vendor/dsp/sensors"
 #define SSR_LIBRARY_PATH_FILE "/.pagani/library_path"   /* in the pack: overrides it (Android's own ADSP_LIBRARY_PATH) */
 #define SSR_PACK_WAIT_MS 240000u        /* longest wait for the Data volume before going on with an empty pack */
@@ -136,6 +142,7 @@ typedef struct {
     uint32_t frame;                    /* the first framing: SSR_FRAME_* bits, SSR_FRAME_PAG for none; 0 SSR_FRAME_DEFAULT */
     uint32_t no_ladder;                /* 1: an init2 answered with an error is not tried again with the next framing */
     uint32_t deadline_ms;              /* 0: SSR_DEADLINE_MS */
+    uint8_t *shadow;                   /* SSR_SHADOW_BYTES of normal memory (required: without it the service stops before the attach) */
 } SsrConfig;
 
 enum {SSR_FILES = 32, SSR_DIRS = 8};

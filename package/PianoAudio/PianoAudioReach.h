@@ -23,6 +23,8 @@ extern "C" {
 #define AR_OP_GRAPH_STOP 0x01001003u
 #define AR_OP_GRAPH_CLOSE 0x01001004u
 #define AR_OP_SET_CFG 0x01001006u
+#define AR_OP_GET_CFG 0x01001007u
+#define AR_OP_RSP_GET_CFG 0x02001000u           /* payload {status}, then (in-band only) the parameters */
 #define AR_OP_MEM_MAP 0x0100100Cu
 #define AR_OP_MEM_UNMAP 0x0100100Du
 #define AR_OP_MEM_MAP_DONE 0x02001001u          /* payload {handle} */
@@ -113,6 +115,13 @@ uint32_t ar_config_speaker_mfc(uint8_t *out, uint32_t capacity, uint32_t port, u
 /* The TDM interface, the hardware endpoint's media format (f) and its frame size factor, in one packet. */
 uint32_t ar_config_speaker_tdm(uint8_t *out, uint32_t capacity, uint32_t port, uint32_t token, const ArTdm *t, const ArFormat *f);
 uint32_t ar_open_playback_stream(uint8_t *out, uint32_t capacity, uint32_t port, uint32_t token);
+/* The same stream subgraph, its last module linked to input port 2 of downstream_iid (the passthrough device's logger AR_IID_SPK_LOG,
+ * or the speaker-protection device graph's MFC: AudioSpkProt.h). */
+uint32_t ar_open_playback_stream_to(uint8_t *out, uint32_t capacity, uint32_t port, uint32_t token, uint32_t downstream_iid);
+/* The same, linked to input port downstream_port (even, >= 2) of downstream_iid: the MIPLAY subgraph's SYNC takes the deep-buffer
+ * stream on its port 6 (AudioSpkProt.h). */
+uint32_t ar_open_playback_stream_to_port(uint8_t *out, uint32_t capacity, uint32_t port, uint32_t token, uint32_t downstream_iid,
+                                         uint32_t downstream_port);
 /* The decoder's (interleaved) and the converter's (deinterleaved unpacked) output formats. */
 uint32_t ar_config_playback_stream(uint8_t *out, uint32_t capacity, uint32_t port, uint32_t token, const ArFormat *f);
 uint32_t ar_config_playback_logger(uint8_t *out, uint32_t capacity, uint32_t port, uint32_t token);
@@ -172,7 +181,9 @@ typedef struct {
     uint32_t flags, num_frames, md_status, md_handle, md_bytes;
     uint32_t payload_bytes;
 } ArAnswer;
-enum {ArUnknown = 0, ArBasicResult = 1, ArMapped = 2, ArWriteDone = 3, ArReadDone = 4, ArFrameworkState = 5, ArPrmDone = 6, ArBad = -1};
+/* ArGetCfgDone: APM_CMD_RSP_GET_CFG, status in `status` (an out-of-band GET leaves the parameters in the mapped buffer). */
+enum {ArUnknown = 0, ArBasicResult = 1, ArMapped = 2, ArWriteDone = 3, ArReadDone = 4, ArFrameworkState = 5, ArPrmDone = 6, ArGetCfgDone = 7,
+      ArBad = -1};
 int ar_parse(const uint8_t *in, uint32_t length, ArAnswer *a);
 
 #ifdef __cplusplus

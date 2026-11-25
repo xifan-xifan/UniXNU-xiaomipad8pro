@@ -487,7 +487,9 @@ static void fastrpc(void)
     arena = aligned_alloc(0x1000, SSR_ARENA_BYTES);
     CHECK(arena);
     memset(arena, 0, SSR_ARENA_BYTES);
-    const SsrConfig cfg = {arena, ARENA_PA, SSR_ARENA_BYTES, bounce, 5, PS_CONTEXT_BANK, 0, 0, 0, 0};
+    uint8_t *shadow = malloc(SSR_SHADOW_BYTES);
+    CHECK(shadow);
+    const SsrConfig cfg = {arena, ARENA_PA, SSR_ARENA_BYTES, bounce, 5, PS_CONTEXT_BANK, 0, 0, 0, 0, shadow};
     clock_ms = 1;
     ssr_core_init(&core, &ops, &cfg);
     ssr_core_channel(&core, 1);
@@ -495,6 +497,7 @@ static void fastrpc(void)
     CHECK(done_steps && step == 7);
     CHECK(!strcmp(SSR_CHANNEL, PS_GLINK_CHANNEL) && SSR_PD_SENSORS == PS_PD_SENSORS && SSR_MESSAGE == 40);
     free(arena);
+    free(shadow);
     printf("PASS fastrpc: attach, remotectl open, register, close, init2 and next2 as Linux and the IDL describe them; a declined call "
            "answered at once\n");
 }

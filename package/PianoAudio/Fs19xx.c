@@ -22,7 +22,7 @@
 
 static uint16_t le16(const uint8_t *p) {return (uint16_t)(p[0] | p[1] << 8);}
 
-unsigned fs19xx_gain_clamp(unsigned requested) {return requested > FS19XX_GAIN_CAP ? FS19XX_GAIN_CAP : requested;}
+unsigned fs19xx_gain_clamp(unsigned requested) {return requested > FS19XX_GAIN_HARD_LIMIT ? FS19XX_GAIN_HARD_LIMIT : requested;}
 int fs19xx_gain_db10(unsigned gain) {return gain > 255 ? 0 : -((int)(255 - gain) * 375 + 50) / 100;}
 
 const char *fs19xx_status_bit(unsigned bit)
@@ -334,7 +334,7 @@ unsigned fs19xx_group_check(const Fs19xxStatus *now, const Fs19xxStatus *first, 
     unsigned bad = 0;
     for (unsigned i = 0; i < count && i < 32; ++i) {
         const Fs19xxStatus *s = &now[i];
-        if (!fs19xx_status_running(s) || (s->volctrl >> 8) > FS19XX_GAIN_CAP ||
+        if (!fs19xx_status_running(s) || (s->volctrl >> 8) > FS19XX_GAIN_HARD_LIMIT ||
             (now[0].ok && (s->status & FS19XX_STATUS_BITS) != (now[0].status & FS19XX_STATUS_BITS)) ||
             (first && first[i].ok && (s->status & FS19XX_STATUS_BITS) != (first[i].status & FS19XX_STATUS_BITS)))
             bad |= 1u << i;

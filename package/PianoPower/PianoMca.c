@@ -137,6 +137,9 @@ int piano_mca_write_allowed(uint32_t property, uint32_t value, uint8_t bytes)
     }
 }
 
+static uint8_t gCpPps, gCpQc;   /* charge/cp-sess: piano_mca_allow_cp */
+void piano_mca_allow_cp(int pps, int qc) {gCpPps = (uint8_t)(pps != 0); gCpQc = (uint8_t)(qc != 0);}
+
 int piano_mca_write_allowed_for(const PianoMca *m, uint32_t property, uint32_t value, uint8_t bytes)
 {
     if (!m->external) return piano_mca_write_allowed(property, value, bytes);
@@ -149,16 +152,92 @@ int piano_mca_write_allowed_for(const PianoMca *m, uint32_t property, uint32_t v
     case PIANO_MCA_QC_VOLT: return bytes == 4 && m->qc3_allowed && (value == 5000 || value == 9000);
     case PIANO_MCA_PPS: {
         const uint32_t mv = (value >> 16) * 20, ma = (value & 0xffffu) * 50;
-        return bytes == 4 && m->pps_allowed && mv == 9000 && ma >= 500 && ma <= 3000;
+        return bytes == 4 && ((m->pps_allowed && mv == 9000 && ma >= 500 && ma <= 3000) ||
+                              (gCpPps && mv >= 5000 && mv <= 11000 && ma >= 1000 && ma <= 6000));
     }
+    case PIANO_MCA_QC_PULSE: return bytes == 4 && gCpQc && (value == 0x20u || value == 0x10u);
     case PIANO_MCA_INPUT_SUSPEND: return 0;   /* the built-in policy's opt-in only */
+    case PIANO_MCA_FCC:
+        if (m->fcc_fast) return bytes == 4 && value >= 100 && value <= PIANO_MCA_FCC_FAST;
+        return piano_mca_write_allowed(property, value, bytes);
+    case PIANO_MCA_TERM_VOLT: return bytes == 4 && m->fv_hot && (value == PIANO_MCA_FV_DEFAULT || value == PIANO_MCA_FV_HOT);
     default: return piano_mca_write_allowed(property, value, bytes);
     }
+}
+
+void piano_mca_allow_mipps(PianoMca *m, PianoMcaAux *aux)
+{
+    if (aux) zero(aux, sizeof *aux);
+    if (m->aux && m->aux->in_flight) m->in_flight = 0;   /* withdrawn mid-request: the answer, if it comes, is ignored */
+    m->aux = aux;
+}
+
+int piano_mca_aux_allowed(int write, uint32_t property, const uint8_t *data, uint32_t len)
+{
+    if (write) {
+        const uint32_t v = (len == 4 && data) ? le32(data) : 0xffffffffu;
+        switch (property) {
+        case 0x21002u: case 0x21010u: return len == 4 && v <= 1;         /* VERIFY_PROCESS, PD_VERIFIED */
+        case 0x21003u: case 0x21004u: case 0x21005u: return len == 4;    /* commands 1-3 */
+        case 0x21006u: case 0x21007u: return len == 16;                  /* command 4 (seed), 5 (challenge) */
+        case 0x21008u: case 0x21009u: return len == 4 && v <= 1;         /* commands 6, 7 with their flag */
+        default: return 0;                                               /* 0x2100a (command 8) and everything else: never */
+        }
+    }
+    switch (property) {
+    case 0x20002u: case 0x21003u: case 0x2100eu: case 0x21012u: return len == 4;   /* VBUS, version, adapter ID, UVDM state */
+    case 0x21007u: return len == 16;                                                 /* the adapter's answer */
+    default: return 0;
+    }
+}
+
+int piano_mca_aux_request(PianoMca *m, int write, uint32_t property, const uint8_t *data, uint32_t len)
+{
+    PianoMcaAux *a = m->aux;
+    if (!a) return -1;
+    if (a->wanted || a->in_flight || len > 16 || !piano_mca_aux_allowed(write, property, data, len)) {
+        a->refused++;
+        return -1;
+    }
+    a->write = write ? 1 : 0;
+    a->property = property;
+    a->len = (uint8_t)len;
+    zero(a->data, sizeof a->data);
+    if (write && data) for (uint32_t i = 0; i < len; i++) a->data[i] = data[i];
+    a->done = 0;
+    a->wanted = 1;
+    return 0;
+}
+
+int piano_mca_aux_take(PianoMca *m, int32_t *retcode, uint8_t *data, uint32_t *len)
+{
+    PianoMcaAux *a = m->aux;
+    if (!a || !a->done) return 0;
+    a->done = 0;
+    if (retcode) *retcode = a->result;
+    if (len) *len = a->reply_len;
+    if (data) for (uint32_t i = 0; i < a->reply_len; i++) data[i] = a->reply[i];
+    return 1;
 }
 
 uint32_t piano_mca_next(PianoMca *m, uint8_t out[PIANO_MCA_REQUEST_BYTES])
 {
     if (m->in_flight) return 0;
+    if (m->aux && m->aux->wanted) {
+        PianoMcaAux *a = m->aux;
+        zero(out, PIANO_MCA_REQUEST_BYTES);
+        header(out, PIANO_MCA_OWNER, a->write ? PIANO_MCA_OP_WRITE : PIANO_MCA_OP_READ);
+        put32(out + 12, a->property);
+        put32(out + 16, ++m->seq);
+        if (a->write) for (unsigned i = 0; i < a->len; i++) out[20 + i] = a->data[i];
+        m->sent_property = a->property;
+        m->sent_opcode = a->write ? PIANO_MCA_OP_WRITE : PIANO_MCA_OP_READ;
+        m->in_flight = 1;
+        a->in_flight = 1;
+        a->wanted = 0;
+        a->sent++;
+        return PIANO_MCA_REQUEST_BYTES;
+    }
     /* Writes go between cycles, so a cycle's readings belong to one setting. */
     while (m->queued && m->cursor == NO_CYCLE) {
         const uint32_t property = m->queue[0].property, value = m->queue[0].value;
@@ -232,6 +311,7 @@ void piano_mca_ucsi_timeout(PianoMca *m)
 }
 
 void piano_mca_allow_ucsi(PianoMca *m, int allow) {m->ucsi_allowed = allow != 0;}
+void piano_mca_clamp_pdos(PianoMca *m, int on) {m->pdo_clamp = on != 0;}
 
 /* ---- the policy ---- */
 uint32_t piano_mca_icl_for(int type, uint32_t pdo5v_ma)
@@ -292,6 +372,12 @@ void piano_mca_use_external_policy(PianoMca *m, int stop, int pps, int qc3)
     m->stop_allowed = m->policy && stop;
     m->pps_allowed = m->policy && pps;
     m->qc3_allowed = m->policy && qc3;
+}
+
+void piano_mca_allow_fast(PianoMca *m, int fcc_fast, int fv_hot)
+{
+    m->fcc_fast = (uint8_t)(m->policy && m->external && fcc_fast);
+    m->fv_hot = (uint8_t)(m->policy && m->external && fv_hot);
 }
 
 void piano_mca_allow_icl(PianoMca *m, uint32_t max_ma)
@@ -443,6 +529,13 @@ void piano_mca_timeout(PianoMca *m)
 {
     if (!m->in_flight) return;
     m->timeouts++;
+    if (m->aux && m->aux->in_flight) {
+        m->in_flight = m->aux->in_flight = 0;
+        m->aux->result = -60;
+        m->aux->reply_len = 0;
+        m->aux->done = 1;
+        return;
+    }
     if (m->sent_write) {
         /* the write counts as tried; its result is unknown until its answer comes after all (McaLateWritten) */
         m->in_flight = m->sent_write = 0;
@@ -571,6 +664,21 @@ int piano_mca_receive(PianoMca *m, const uint8_t *data, uint32_t length)
         if (!retcode) taken(m, property, m->late_value);
         return McaLateWritten;
     }
+    if (m->aux && m->aux->in_flight && m->in_flight && seq == m->seq && property == m->sent_property && opcode == m->sent_opcode) {
+        PianoMcaAux *a = m->aux;
+        m->in_flight = a->in_flight = 0;
+        a->result = (int32_t)retcode;
+        a->reply_len = 0;
+        if (!retcode && !a->write) {
+            const uint32_t have = length - 24, want = a->len;
+            const uint32_t n = have < want ? have : want;
+            for (uint32_t i = 0; i < n; i++) a->reply[i] = data[24 + i];
+            a->reply_len = (uint8_t)n;
+            if (n < want) a->result = -61;   /* a short answer */
+        }
+        a->done = 1;
+        return McaAuxDone;
+    }
     if (!m->in_flight || seq != m->seq || property != m->sent_property || opcode != m->sent_opcode) {
         m->ignored++;
         m->ignored_answers++;
@@ -604,8 +712,11 @@ int piano_mca_receive(PianoMca *m, const uint8_t *data, uint32_t length)
         m->pdos = 0;
         int good = have >= 7 * 12;
         for (unsigned i = 0; good && i < 7; ++i) {
-            const uint32_t lo = le32(payload + 12 * i), hi = le32(payload + 12 * i + 4), ma = le32(payload + 12 * i + 8);
+            const uint32_t lo = le32(payload + 12 * i), hi = le32(payload + 12 * i + 4);
+            uint32_t ma = le32(payload + 12 * i + 8);
             if (!lo && !hi && !ma) break;
+            /* a 67 W PPS object (e.g. 3.3-11 V 6.1 A) is still the source's list: at most 5 A of it is ever used */
+            if (m->pdo_clamp && ma > 5000 && ma <= (lo == hi ? 10230u : 6350u)) ma = 5000;
             if (lo < 3300 || hi < lo || hi > 21000 || !ma || ma > 5000) {good = 0; break;}
             m->pdo[m->pdos][0] = lo; m->pdo[m->pdos][1] = hi; m->pdo[m->pdos][2] = ma;
             m->pdos++;
@@ -643,6 +754,7 @@ const char *piano_mca_property_name(uint32_t property)
     case PIANO_MCA_CHARGE_ENABLE: return "charge enable";
     case PIANO_MCA_PD_FIXED: return "PD fixed request";
     case PIANO_MCA_PPS: return "PPS request";
+    case PIANO_MCA_QC_PULSE: return "QC3 pulse";
     case PIANO_MCA_QC_VOLT: return "QC voltage request";
     case PIANO_MCA_INPUT_SUSPEND: return "input suspend";
     case PIANO_MCA_CP_STATE: return "CP state";

@@ -1,0 +1,323 @@
+Turnip Darwin: a mapped reserve for command-stream BOs (the render server's), and counters.
+
+SPDX-License-Identifier: MIT
+Copyright (c) 2026 Leo Zhang
+
+tu_cs_add_bo maps every BO it adds; the BO cache gives back what it cached, mapped, so the CPU maps of WindowServer's encode
+thread are new BOs: command buffers made anew after the runtime's command pools were trimmed or made, while every reclaim and the
+2 s age empty the cache. Freed command-stream BOs (tu_cs_add_bo's flags: read only, dumpable) go to a reserve that keeps them
+whole and mapped (no age, no reclaim flush, a byte budget: 32 MiB in WindowServer, TU_DARWIN_CS_RESERVE_MB elsewhere, LRU past
+it), taken first by the next command stream of a fitting size (at most four times it), then a mapped cached BO, then any.
+/private/var/ngpu/debug/no-cs-reserve (read once a second) switches it off at run time: the old path exactly. Counters every
+10 s in the unified log (WindowServer, or TU_DARWIN_BO_REPORT=1): "NativeAdreno BO report: cs ... maps ...".
+Against 0001-0013 (0013: gpu/bo-race1 546d848a, the BO struct cleared under the retire lock: the installed line's).
+
+diff -ruN a/src/freedreno/vulkan/tu_knl.h b/src/freedreno/vulkan/tu_knl.h
+--- a/src/freedreno/vulkan/tu_knl.h	2026-11-22 11:00:39
++++ b/src/freedreno/vulkan/tu_knl.h	2026-11-22 11:00:39
+@@ -74,6 +74,7 @@
+    /* Size of the allocation behind a cacheable BO (its size class; 0: never cached) and its GPU permissions class. */
+    uint64_t darwin_alloc_size;
+    bool darwin_read_only;
++   bool darwin_cs;   /* 0014: a command stream's BO (tu_cs_add_bo's flags), for the mapped reserve */
+ #endif
+ 
+    bool implicit_sync : 1;
+diff -ruN a/src/freedreno/vulkan/tu_knl_darwin.cc b/src/freedreno/vulkan/tu_knl_darwin.cc
+--- a/src/freedreno/vulkan/tu_knl_darwin.cc	2026-11-22 11:00:39
++++ b/src/freedreno/vulkan/tu_knl_darwin.cc	2026-11-22 11:00:39
+@@ -21,6 +21,8 @@
+ #include <dispatch/dispatch.h>
+ #include <mach/mach.h>
+ #include <notify.h>
++#include <os/log.h>
++#include <sys/stat.h>
+ 
+ #include "NativeAdrenoABI.h"
+ #include "tu_knl_darwin_virtgpu.h"
+@@ -74,6 +76,7 @@
+    void *mapping;
+    uint32_t token, fence;
+    bool cacheable, read_only;
++   bool cs;   /* 0014: a command stream's BO */
+ };
+ 
+ /* A freed BO whose fence completed stays whole (kernel handle, GPU mapping, CPU lease) in a size-class cache and is handed to the next
+@@ -105,6 +108,22 @@
+    uint64_t small_lookups, small_hits, small_evictions;   /* of BOs in the small budget (darwin_small) */
+    uint64_t aged, trims, reclaims_asked, reclaims_seen, retries, retry_wins;   /* 0009: the idle trim and the reclaim */
+ };
++/* UniXNU-piano 0014 (2026-11-22, GFX-MEM sections 5-7): command-stream BOs. tu_cs_add_bo maps every BO it adds (BoCpuMap +
++ * IOConnectMapMemory64, the costly part: 20 of 89 busy samples of WindowServer's encode thread, perf-lag1 run-003449), and the BO
++ * cache gives back exactly what it cached, mapped; so the maps are of new BOs. A command buffer keeps one BO per stream across its
++ * resets (tu_cs_reset), so new ones are made when command buffers are new: the runtime's command pools are made when no spare is
++ * free and released after 20 s idle beyond the 8 newest, and all but 2 on a gpu-reclaim (the frontend's trim), and every reclaim
++ * notification and the 2 s age empty this cache. The reserve keeps freed command-stream BOs whole and mapped (kernel handle, GPU
++ * mapping, CPU view) for the next command stream of a fitting size: no age, no reclaim flush, a byte budget (the render server only
++ * by default, TU_DARWIN_CS_RESERVE_MB; LRU past it). /private/var/ngpu/debug/no-cs-reserve (read once a second) turns it off at run
++ * time, the old path exactly (an A/B on one WindowServer). The counters below go to the unified log every 10 s (WindowServer, or
++ * TU_DARWIN_BO_REPORT=1): which kind of BO each command stream got and how many CPU maps were made. */
++struct darwin_cs_stats {
++   uint64_t allocs, reserve_hits, cache_mapped, cache_unmapped, fresh;   /* command-stream allocations, by where the BO came from */
++   uint64_t maps, maps_cs;                                               /* CPU maps (BoCpuMap + IOConnectMapMemory64), of them cs */
++   uint64_t puts, evictions, drained;                                    /* into the reserve, out past its budget, out when switched off */
++   uint64_t reported_ns;
++};
+ 
+ /* The GPU address space as two red-black trees over the free holes (Mesa's rb_tree, the same algorithm as XNU's libkern/tree.h): by
+  * address, to find a hole's neighbours when a range is freed and merge them, and by (size, address), to find the smallest hole that
+@@ -133,6 +152,11 @@
+    uint64_t small_bytes;   /* of cache_bytes, those of BOs in the small budget */
+    uint32_t pressure_seen;
+    struct darwin_bo_cache_stats cache_stats;
++   /* 0014: the command-stream reserve (under `lock`) and its counters. */
++   struct darwin_cached_bo *cs_reserve;
++   unsigned cs_count, cs_capacity;
++   uint64_t cs_bytes, cs_stamp;
++   struct darwin_cs_stats cs_stats;
+    struct darwin_va va;
+    /* 0009: the idle trim's one-shot timer (on a serial queue of its own; armed under `lock`) and its device. */
+    dispatch_queue_t trim_queue;
+@@ -812,6 +836,135 @@
+    return true;
+ }
+ 
++/* 0014: the reserve's byte budget: TU_DARWIN_CS_RESERVE_MB, else 32 MiB in the render server and none elsewhere (each process's
++ * reserve is mapped memory of its own; WindowServer is the one whose frames wait for its encoding). */
++static uint64_t
++darwin_cs_budget(void)
++{
++   static uint64_t budget = UINT64_MAX;
++   if (budget == UINT64_MAX) {
++      const char *text = getenv("TU_DARWIN_CS_RESERVE_MB");
++      const uint64_t mb = text && *text ? strtoull(text, NULL, 10) : (strcmp(getprogname(), "WindowServer") ? 0 : 32);
++      budget = mb << 20;
++   }
++   return budget;
++}
++
++/* 0014: the reserve is on unless /private/var/ngpu/debug/no-cs-reserve exists (looked at once a second at most). */
++static bool
++darwin_cs_enabled(void)
++{
++   if (!darwin_cs_budget())
++      return false;
++   static uint64_t checked_ns;
++   static bool off;
++   const uint64_t now = os_time_get_nano();
++   if (!checked_ns || now - checked_ns >= 1000000000ull) {
++      struct stat st;
++      off = stat("/private/var/ngpu/debug/no-cs-reserve", &st) == 0;
++      checked_ns = now;
++   }
++   return !off;
++}
++
++/* 0014: called under retire->lock with a command-stream BO whose fence completed. True: the reserve took it whole. */
++static bool
++darwin_cs_put(struct tu_device *dev, struct darwin_retire_state *retire, const struct darwin_retired_bo *bo)
++{
++   const uint64_t budget = darwin_cs_budget();
++   if (!bo->cs || !bo->mapping || bo->size > budget || !darwin_cs_enabled())
++      return false;
++   if (retire->cs_count == retire->cs_capacity) {
++      const unsigned capacity = retire->cs_capacity ? retire->cs_capacity * 2 : 64;
++      struct darwin_cached_bo *grown = (struct darwin_cached_bo *)realloc(retire->cs_reserve, capacity * sizeof(*grown));
++      if (!grown)
++         return false;
++      retire->cs_reserve = grown;
++      retire->cs_capacity = capacity;
++   }
++   retire->cs_reserve[retire->cs_count++] = {bo->handle, bo->iova, bo->size, ++retire->cs_stamp, bo->mapping, bo->token,
++                                             bo->read_only, os_time_get_nano()};
++   retire->cs_bytes += bo->size;
++   ++retire->cs_stats.puts;
++   /* Past the budget the least recently kept go back to the kernel, never the one just kept. */
++   while (retire->cs_bytes > budget && retire->cs_count > 1) {
++      unsigned oldest = 0;
++      for (unsigned i = 1; i < retire->cs_count; ++i)
++         if (retire->cs_reserve[i].stamp < retire->cs_reserve[oldest].stamp)
++            oldest = i;
++      struct darwin_cached_bo *e = &retire->cs_reserve[oldest];
++      if (darwin_release_native(dev, retire, e->handle, e->iova, e->size, &e->mapping, &e->token) != VK_SUCCESS)
++         break;
++      retire->cs_bytes -= e->size;
++      *e = retire->cs_reserve[--retire->cs_count];
++      ++retire->cs_stats.evictions;
++   }
++   return true;
++}
++
++/* 0014: the smallest kept command-stream BO of at least `size` and at most four times it (the newest of equals). */
++static bool
++darwin_cs_get(struct darwin_retire_state *retire, uint64_t size, struct darwin_cached_bo *out)
++{
++   int best = -1;
++   for (unsigned i = 0; i < retire->cs_count; ++i) {
++      const struct darwin_cached_bo *e = &retire->cs_reserve[i];
++      if (e->size < size || e->size / 4 > size)
++         continue;
++      if (best < 0 || e->size < retire->cs_reserve[best].size ||
++          (e->size == retire->cs_reserve[best].size && e->stamp > retire->cs_reserve[best].stamp))
++         best = (int)i;
++   }
++   if (best < 0)
++      return false;
++   *out = retire->cs_reserve[best];
++   retire->cs_bytes -= out->size;
++   retire->cs_reserve[best] = retire->cs_reserve[--retire->cs_count];
++   return true;
++}
++
++/* 0014: switched off (or the process ends): what the reserve holds goes back to the kernel. Under retire->lock. */
++static void
++darwin_cs_drain(struct tu_device *dev, struct darwin_retire_state *retire)
++{
++   for (unsigned i = retire->cs_count; i-- > 0;) {
++      struct darwin_cached_bo *e = &retire->cs_reserve[i];
++      if (darwin_release_native(dev, retire, e->handle, e->iova, e->size, &e->mapping, &e->token) != VK_SUCCESS)
++         continue;
++      retire->cs_bytes -= e->size;
++      *e = retire->cs_reserve[--retire->cs_count];
++      ++retire->cs_stats.drained;
++   }
++}
++
++/* 0014: the counters, every 10 s, in the render server (or with TU_DARWIN_BO_REPORT=1). Under retire->lock. */
++static void
++darwin_cs_report(struct darwin_retire_state *retire, bool now_anyway = false)
++{
++   static int on = -1;
++   if (on < 0) {
++      const char *text = getenv("TU_DARWIN_BO_REPORT");
++      on = text && *text ? atoi(text) != 0 : !strcmp(getprogname(), "WindowServer");
++   }
++   const uint64_t now = os_time_get_nano();
++   if (!on || (!now_anyway && retire->cs_stats.reported_ns && now - retire->cs_stats.reported_ns < 10000000000ull))
++      return;
++   retire->cs_stats.reported_ns = now;
++   const struct darwin_cs_stats *c = &retire->cs_stats;
++   const struct darwin_bo_cache_stats *st = &retire->cache_stats;
++   os_log(OS_LOG_DEFAULT, "NativeAdreno BO report: cs %llu (reserve %llu, cache mapped %llu, unmapped %llu, new %llu) maps %llu "
++          "(cs %llu) | reserve %s %u BOs %llu KiB of %llu MiB, puts %llu evicted %llu drained %llu | cache lookups %llu hits %llu "
++          "cached %u %llu MiB flushes %llu aged %llu reclaims %llu/%llu | retiring %u",
++          (unsigned long long)c->allocs, (unsigned long long)c->reserve_hits, (unsigned long long)c->cache_mapped,
++          (unsigned long long)c->cache_unmapped, (unsigned long long)c->fresh, (unsigned long long)p_atomic_read(&c->maps),
++          (unsigned long long)p_atomic_read(&c->maps_cs), darwin_cs_enabled() ? "on" : "off", retire->cs_count,
++          (unsigned long long)(retire->cs_bytes >> 10), (unsigned long long)(darwin_cs_budget() >> 20), (unsigned long long)c->puts,
++          (unsigned long long)c->evictions, (unsigned long long)c->drained, (unsigned long long)st->lookups,
++          (unsigned long long)st->hits, retire->cache_count, (unsigned long long)(retire->cache_bytes >> 20),
++          (unsigned long long)st->flushes, (unsigned long long)st->aged, (unsigned long long)st->reclaims_seen,
++          (unsigned long long)st->reclaims_asked, retire->count);
++}
++
+ /* The most recently cached BO of a class (its pages are the warmest). A BO the caller needs zeroed must have a CPU view to zero it by. */
+ static bool
+ darwin_cache_get(struct darwin_retire_state *retire, uint64_t size, bool read_only, bool need_mapping, struct darwin_cached_bo *out)
+@@ -1023,7 +1176,7 @@
+             }
+          }
+       }
+-      if (ready && !(bo->cacheable && darwin_cache_put(dev, retire, bo))) {
++      if (ready && !(bo->cacheable && (darwin_cs_put(dev, retire, bo) || darwin_cache_put(dev, retire, bo)))) {
+          VkResult released = darwin_release_native(dev, retire, bo->handle, bo->iova, bo->size, &bo->mapping, &bo->token);
+          if (released == VK_NOT_READY)
+             ready = false;   /* the kernel still holds it: try again at the next sweep */
+@@ -1053,6 +1206,9 @@
+    if (result == VK_SUCCESS) {
+       darwin_cache_trim(dev, retire);
+       darwin_cache_age(dev, retire);   /* 0009 */
++      if (retire->cs_count && !darwin_cs_enabled())
++         darwin_cs_drain(dev, retire);   /* 0014: switched off: the old path exactly */
++      darwin_cs_report(retire);
+    }
+    pthread_mutex_unlock(&retire->lock);
+    return result;
+@@ -1508,10 +1664,39 @@
+    void *cached_mapping = NULL;
+    uint32_t cached_token = 0;
+    bool reused = false;
++   /* 0014: a command stream's BO (tu_cs_add_bo: read only, dumpable, nothing else), which its caller maps at once. */
++   const bool cs = cacheable && client_iova == 0 &&
++                   (flags & ~TU_BO_ALLOC_IMPLICIT_SYNC) == (TU_BO_ALLOC_GPU_READ_ONLY | TU_BO_ALLOC_ALLOW_DUMP) &&
++                   alloc_size <= ((uint64_t)4 << 20);
++   const bool cs_reserve = cs && darwin_cs_enabled();
+    if (cacheable) {
+       struct darwin_cached_bo hit;
+       pthread_mutex_lock(&retire->lock);
+-      reused = darwin_cache_get(retire, alloc_size, read_only, !!(flags & TU_BO_ALLOC_INTERNAL_RESOURCE), &hit);
++      if (cs_reserve) {
++         ++retire->cs_stats.allocs;
++         /* The reserve first, then a mapped cached BO of the class, then any. */
++         if (darwin_cs_get(retire, alloc_size, &hit)) {
++            reused = true;
++            ++retire->cs_stats.reserve_hits;
++         } else if ((reused = darwin_cache_get(retire, alloc_size, read_only, true, &hit))) {
++            ++retire->cs_stats.cache_mapped;
++         } else if ((reused = darwin_cache_get(retire, alloc_size, read_only, false, &hit))) {
++            ++retire->cs_stats.cache_unmapped;
++         } else {
++            ++retire->cs_stats.fresh;
++         }
++      } else {
++         reused = darwin_cache_get(retire, alloc_size, read_only, !!(flags & TU_BO_ALLOC_INTERNAL_RESOURCE), &hit);
++         if (cs) {
++            ++retire->cs_stats.allocs;
++            if (!reused)
++               ++retire->cs_stats.fresh;
++            else if (hit.mapping)
++               ++retire->cs_stats.cache_mapped;
++            else
++               ++retire->cs_stats.cache_unmapped;
++         }
++      }
+       pthread_mutex_unlock(&retire->lock);
+       if (reused) {
+          handle = hit.handle;
+@@ -1612,6 +1797,7 @@
+    bo->darwin_handle = handle;
+    bo->darwin_alloc_size = cacheable ? alloc_size : 0;
+    bo->darwin_read_only = read_only;
++   bo->darwin_cs = cs;
+    if (reused && cached_mapping) {
+       bo->map = cached_mapping;
+       bo->darwin_token = cached_token;
+@@ -1734,6 +1920,14 @@
+    }
+    NativeAdrenoAbiBoCpuMap req = {.handle = bo->darwin_handle};
+    NativeAdrenoAbiBoCpuMapReply reply = {};
++   {   /* 0014: the counters (atomic: no lock on the map path) */
++      struct darwin_retire_state *retire = (struct darwin_retire_state *)dev->darwin_retire;
++      if (retire) {
++         p_atomic_inc(&retire->cs_stats.maps);
++         if (bo->darwin_cs)
++            p_atomic_inc(&retire->cs_stats.maps_cs);
++      }
++   }
+    kern_return_t kr = dw_call(NativeAdrenoMethodBoCpuMap, &req, sizeof(req), &reply, sizeof(reply));
+    if (kr != KERN_SUCCESS)
+       return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED, "BoCpuMap failed: 0x%x", kr);
+@@ -1826,7 +2020,7 @@
+    /* 0013: what the retire record needs, taken before the struct is cleared (its fence below). */
+    const uint32_t gem_handle = bo->gem_handle;
+    struct darwin_retired_bo record = {bo->darwin_handle, bo->iova, bo->darwin_alloc_size ? bo->darwin_alloc_size : bo->size, bo->map,
+-                                      bo->darwin_token, 0, bo->darwin_alloc_size != 0, bo->darwin_read_only};
++                                      bo->darwin_token, 0, bo->darwin_alloc_size != 0, bo->darwin_read_only, bo->darwin_cs};
+    const bool late = darwin_bo_clear_late();
+ 
+    struct darwin_retire_state *retire = (struct darwin_retire_state *)dev->darwin_retire;
+@@ -2307,12 +2501,14 @@
+                    retire->count, (unsigned long long)retire->pressure_waits);
+       if (retire->cache_stats.lookups)
+          darwin_cache_log(retire);
++      darwin_cs_report(retire, true);   /* 0014: the counters of the whole device */
+       darwin_stats_state = NULL;
+       rb_tree_foreach_safe(struct darwin_va_hole, hole, &retire->va.address, by_address)
+          free(hole);
+       pthread_mutex_destroy(&retire->lock);
+       free(retire->entries);
+       free(retire->cache);
++      free(retire->cs_reserve);   /* 0014: its BOs went with the connection, as the cache's */
+       vk_free(&dev->vk.alloc, retire);
+       dev->darwin_retire = NULL;
+    }

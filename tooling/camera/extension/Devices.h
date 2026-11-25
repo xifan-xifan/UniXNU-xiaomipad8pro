@@ -1,0 +1,9 @@
+// SPDX-License-Identifier: BSD-2-Clause-Patent
+#pragma once
+
+#define PIANO_PATTERN_ID @"6A1F2A8E-4C2B-4E8F-9B57-50494E4F0001"
+#define PIANO_FRONT_ID @"6A1F2A8E-4C2B-4E8F-9B57-50494E4F0002"
+#define PIANO_REAR_ID @"6A1F2A8E-4C2B-4E8F-9B57-50494E4F0003"
+#define PIANO_PATTERN_NAME @"Piano Test Camera"
+#define PIANO_FRONT_NAME @"Front Camera"
+#define PIANO_REAR_NAME @"Rear Camera"

@@ -24,8 +24,8 @@ struct GaugeAlerts {
   {
     const uint32_t ib = 2u << (2 * pack), sb = 4u << (2 * pack);
     uint32_t reads = 0;
-    if (readField(bus, 0x72, isc[pack], firstIsc[pack], ib)) reads |= ib;
-    if (readField(bus, 0x70, soa[pack], firstSoa[pack], sb)) reads |= sb;
+    if (readField(bus, 0x72, isc[pack], firstIsc[pack], ib, 2)) reads |= ib;
+    if (readField(bus, 0x70, soa[pack], firstSoa[pack], sb, 1)) reads |= sb;
     return reads;
   }
 
@@ -45,15 +45,16 @@ struct GaugeAlerts {
   bool active() const { return alarms != 0; }
 
  private:
-  bool readField(I2cBus &bus, uint8_t reg, uint8_t &raw, uint8_t &first, uint32_t bit)
+  bool readField(I2cBus &bus, uint8_t reg, uint8_t &raw, uint8_t &first, uint32_t bit, unsigned maxRereads)
   {
     if (bus.readRegisterByte(kGaugeAddress, reg, &raw) != I2cResult::ok) return false;
     first = raw;
     if (raw == 0xff) {
       retried |= bit;
-      ++rereads;
-      uint8_t next = raw;
-      if (bus.readRegisterByte(kGaugeAddress, reg, &next) == I2cResult::ok) {
+      for (unsigned attempt = 0; attempt < maxRereads && raw == 0xff; ++attempt) {
+        ++rereads;
+        uint8_t next = raw;
+        if (bus.readRegisterByte(kGaugeAddress, reg, &next) != I2cResult::ok) break;
         raw = next;
         retryValid |= bit;
       }

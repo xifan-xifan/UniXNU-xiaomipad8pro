@@ -396,6 +396,9 @@ constexpr uint32_t kCsidBufStatus = 0x8c, kCsidBufMask = 0x90, kCsidBufClear = 0
 constexpr uint32_t kCsidRxStatus = 0x9c, kCsidRxMask = 0xa0, kCsidRxClear = 0xa4;
 constexpr uint32_t kCsidRxCfg0 = 0x200, kCsidRxCfg1 = 0x204;
 constexpr uint32_t kCsidRdiCfg0 = 0x500, kCsidRdiCtrl = 0x504, kCsidRdiCfg1 = 0x510;
+// CSID980-lite uses the lite880 RDI0 layout for the byte counters and frame measurement.
+constexpr uint32_t kCsidRdiBytesPing = 0x520, kCsidRdiBytesPong = 0x524, kCsidRdiMeasureCtrl = 0x580, kCsidRdiMeasure0 = 0x588;
+constexpr uint32_t kRdiMeasureEnable = 1u << 3, kRdiMeasureCompare = 3u;
 constexpr uint32_t kCsidRdiStatus = 0xec, kCsidRdiMask = 0xf0, kCsidRdiClear = 0xf4;
 constexpr uint32_t kCsidRstDone = 1u << 0, kCsidTopBufDone = 1u << 13, kCsidBufRdi0 = 1u << 1;
 constexpr uint32_t kCsidRstValue = 1u << 4 | 1u << 0, kCsidRstCmdValue = 1u << 0 | 1u << 2;
@@ -419,6 +422,7 @@ constexpr uint64_t kTfeLite0 = 0x0ad6e000, kTfeLiteBytes = 0x3000;
 constexpr uint32_t kTfeCgcOverride = 0x208, kTfeTestBus = 0x328, kWm0 = 0x700;
 constexpr uint32_t kWmCfg = 0x0, kWmImageAddr = 0x4, kWmFrameIncr = 0x8, kWmImageCfg0 = 0xc, kWmImageCfg2 = 0x14, kWmPacker = 0x18,
                    kWmSubPeriod = 0x30, kWmSubPattern = 0x34, kWmPrefetch = 0x60, kWmPrefetchMax = 0x64;
+constexpr uint32_t kWmLastConsumed = 0x90, kWmLastFrame = 0x94, kWmFifoCount = 0x98, kWmCurrentAddr = 0x9c;
 constexpr uint32_t kWmEnable = 1u << 0, kWmFrameMode = 1u << 16, kWmCgcAll = 0x7ffffff;
 constexpr uint64_t kWmAddressLimit = 1ull << 40;   // address >> 8 in 32 bits
 

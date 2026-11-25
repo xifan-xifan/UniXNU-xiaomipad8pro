@@ -1,0 +1,532 @@
+SPDX-License-Identifier: MIT
+Copyright (c) 2026, Leo Zhang.
+
+Bound optional IOSurface import retains and propagate GPU pressure to the frontend/runtime.
+Only safe cache ownership is dropped; textures and commands keep their real resources.
+Capacity failures get one frontend retry after the runtime call and all import locks unwind.
+This does not change the terminal WindowServer capture failure boundary.
+
+--- a/frontend.mm
++++ b/frontend.mm
+@@ -12,6 +12,8 @@
+ #import <objc/runtime.h>
+ #import <objc/message.h>
+ #include <os/log.h>
++#include <notify.h>
++#include <pthread.h>
+ #include <algorithm>
+ #include <array>
+ #include <memory>
+@@ -964,9 +966,9 @@
+   if(nbLine<=8)fprintf(stderr,"%s: %.140s\n",getprogname(),nbText.UTF8String?:"?");\
+   else if(!(nbLine&(nbLine-1)))fprintf(stderr,"%s: [#%u] %.130s\n",getprogname(),nbLine,nbText.UTF8String?:"?");}}while(0)
+ static constexpr uint64_t kLargeAllocationBytes=uint64_t(64)<<20;
+-// Device memory the runtime allocated so far (nmb_device_memory_counts word 5): the difference across a call is what it allocated for
+-// that call (and for any other thread of the process meanwhile).
+-static uint64_t runtimeAllocatedBytes() {uint64_t mc[10]={};return gDevice && nmb_device_memory_counts(gDevice,mc)?mc[5]:0;}
++// Current backing held by the runtime: occupied pools + empty pools + dedicated + imports.
++// Word 1 is a subset of word 0; word 5 is cumulative allocations, not current residency.
++static uint64_t runtimeAllocatedBytes() {uint64_t mc[10]={};return gDevice && nmb_device_memory_counts(gDevice,mc)?mc[0]+mc[2]+mc[3]+mc[4]:0;}
+ static NSString *nbMiB(uint64_t bytes) {return [NSString stringWithFormat:@"%.1fM",bytes/1048576.0];}
+ // A four-character code as text ('444v'), or its hex when a byte is not printable.
+ static NSString *fourCC(uint32_t code) {
+@@ -1185,102 +1187,278 @@
+ // caller-owned no-copy buffers do not enter this cache.
+ static NSMapTable<NSValue *,NBBuffer *> *gSurfaceImports;
+ static std::mutex gSurfaceImportLock;
+-// Core Animation makes a texture of each window surface at every frame and drops it when the frame completes, so the weak table
+-// lost the import between frames and each frame imported every surface again (allocate, map, free). As Metal keeps a surface's GPU
+-// mapping for as long as the surface lives, an import stays held while anything else in this process still retains its surface (the
+-// import's own retain is the only one left once the surface is gone), and everything held goes back when the system reports memory
+-// pressure. No count or age limit: held imports whose surface is gone are let go at the next import, at every command buffer's
+-// completion and on memory pressure (native_bridge_metal_trim_surface_imports).
++// The held cache owns only an optional NBBuffer retain. Eviction never changes a live texture/command's
++// references, IOSurface use counts, mappings or fences. 64 MiB is a cache ceiling, not a GPU working-set
++// promise/reservation; imports bigger than it still work and simply are not held between uses.
+ #include <map>
+ #include <tuple>
+-struct HeldImport {NBBuffer *buffer;IOSurfaceRef surface;};
+-// Under gSurfaceImportLock. Never destroyed: a completion thread may still trim it while the process exits.
+-static auto &gHeldImports=*new std::map<std::tuple<uint64_t,uint64_t,uint64_t>,HeldImport>;
+-static NSUInteger gSurfaceImportsPruned=64;     // the table size at which dead associations are next pruned
+-// Drops (into `gone`, released by the caller outside the lock) every held import whose surface only the import still retains, or every
+-// one when `all`. A held import's surface is the one its import retains (NBBuffer.importedSurface), never a caller's: the same surface
+-// (identity, address, size) reaches a hit through another IOSurfaceRef object, which its owner may release while the import is still
+-// held, and its retain count was then read from freed memory (backboardd faulted in this loop on a completion thread).
+-static void pruneHeldImports(bool all,std::vector<NBBuffer *> &gone) {
+- for(auto it=gHeldImports.begin();it!=gHeldImports.end();) {
+-  if(all || CFGetRetainCount(it->second.surface)<=1){gone.push_back(it->second.buffer);it=gHeldImports.erase(it);}
+-  else ++it;
+- }
++// BEGIN piano import policy (also compiled by frontend_pressure_host.py).
++template<class Key,class Value> class HeldImportPolicy {
++ struct Entry {Value value;uint64_t bytes,lastUse,order;};
++ std::map<Key,Entry> entries;
++ uint64_t held=0,sequence=0;
++ void remove(typename std::map<Key,Entry>::iterator it,std::vector<Value> &gone) {
++  gone.push_back(it->second.value);held-=it->second.bytes;entries.erase(it);
++ }
++public:
++ uint64_t bytes() const {return held;}
++ size_t count() const {return entries.size();}
++ template<class Dead> void prune(uint64_t now,uint64_t budget,uint64_t age,bool all,Dead dead,std::vector<Value> &gone) {
++  for(auto it=entries.begin();it!=entries.end();) {
++   auto old=it++;
++   if(all || dead(old->second.value) || (now>=old->second.lastUse && now-old->second.lastUse>=age))remove(old,gone);
++  }
++  while(held>budget) {
++   auto oldest=std::min_element(entries.begin(),entries.end(),[](const auto &a,const auto &b){return a.second.order<b.second.order;});
++   remove(oldest,gone);
++  }
++ }
++ void hold(const Key &key,const Value &value,uint64_t bytes,uint64_t now,uint64_t budget,std::vector<Value> &gone) {
++  auto it=entries.find(key);
++  if(it!=entries.end()){it->second.lastUse=now;it->second.order=++sequence;return;}
++  if(!bytes || bytes>budget)return;
++  prune(now,budget-bytes,UINT64_MAX,false,[](const Value &){return false;},gone);
++  entries.emplace(key,Entry{value,bytes,now,++sequence});held+=bytes;
++ }
++};
++struct ImportPressureWindow {
++ bool system=false;uint64_t quietUntil=0;
++ void raise(uint64_t now){quietUntil=now>UINT64_MAX-5000000?UINT64_MAX:now+5000000;}
++ bool active(uint64_t now) const {return system || now<quietUntil;}
++};
++static bool importCapacityError(const char *error) {
++ if(!error)return false;
++ const std::string e(error);
++ if(e.find("DeviceLost")!=std::string::npos || e.find("DEVICE_LOST")!=std::string::npos)return false;
++ // Exact runtime/Vulkan capacity tags only: shape, unsupported and DeviceLost errors must not retry.
++ return e.find("OutOfMemory(Device)")!=std::string::npos || e.find("OutOfMemory(Host)")!=std::string::npos ||
++  e.find("VK_ERROR_OUT_OF_DEVICE_MEMORY")!=std::string::npos || e.find("VK_ERROR_OUT_OF_HOST_MEMORY")!=std::string::npos ||
++  e.find("ERROR_OUT_OF_DEVICE_MEMORY")!=std::string::npos || e.find("ERROR_OUT_OF_HOST_MEMORY")!=std::string::npos;
++}
++// END piano import policy.
++using ImportKey=std::tuple<uint64_t,uint64_t,uint64_t>;
++struct HeldImport {NBBuffer *buffer;IOSurfaceRef surface;uint64_t bytes;};
++// Never destroyed: completion threads may still trim during process exit. All policy access is under the import lock.
++static auto &gHeldImports=*new HeldImportPolicy<ImportKey,HeldImport>;
++static constexpr uint64_t kHeldImportBytes=64ull<<20,kHeldImportIdleUs=2000000;
++static std::atomic<bool> gNoHoldImports{false};
++static std::atomic<uint64_t> gHeldImportBytes,gHeldImportCount,gHeldImportsDropped,gHeldImportBytesDropped,gSurfaceImportFailures;
++static std::atomic<uint64_t> gSurfaceImportHits,gSurfaceImportJoined,gSurfaceImportBypassed;
++struct SurfaceImportFlight {
++ dispatch_group_t done=dispatch_group_create();
++ pthread_t owner=pthread_self();
++ NBBuffer *buffer=nil;
++ NSString *error=nil;
++ SurfaceImportFlight(){dispatch_group_enter(done);}
++};
++static std::map<ImportKey,std::shared_ptr<SurfaceImportFlight>> gSurfaceImportFlights;
++static std::atomic<uint64_t> gGpuReclaimRequested,gGpuReclaimDelivered,gGpuReclaimRuns,gGpuReclaimFreed,gGpuReclaimBlocks;
++static std::atomic<uint64_t> gCapacityFailures,gCapacityRetries,gCapacityRecovered,gCapacityRetryFailures;
++static NSUInteger gSurfaceImportsPruned=64;
++static void countHeldImports(uint64_t before) {
++ gHeldImportBytes=gHeldImports.bytes();gHeldImportCount=gHeldImports.count();
++ if(before>gHeldImports.bytes())gHeldImportBytesDropped+=before-gHeldImports.bytes();
++}
++static void pruneHeldImports(bool all,std::vector<HeldImport> &gone) {
++ const uint64_t before=gHeldImports.bytes();const size_t count=gone.size();
++ gHeldImports.prune(nowUs(),gNoHoldImports?0:kHeldImportBytes,kHeldImportIdleUs,all,
++  [](const HeldImport &v){return CFGetRetainCount(v.surface)<=1;},gone);
++ gHeldImportsDropped+=gone.size()-count;countHeldImports(before);
+ }
+ static void trimHeldImports(bool all) {
+- std::vector<NBBuffer *> gone;
++ std::vector<HeldImport> gone;
+  {std::lock_guard<std::mutex> lock(gSurfaceImportLock);pruneHeldImports(all,gone);}
+- gone.clear();   // the imports' last frontend references go here, outside the lock
++ gone.clear(); // only cache retains go here, outside the import lock; runtime release can take/reenter other locks
+ }
+ extern "C" void native_bridge_metal_trim_surface_imports(void) {trimHeldImports(false);}
++static char gImportPressureQueueKey;
++static dispatch_queue_t importPressureQueue() {
++ static dispatch_queue_t queue;static dispatch_once_t once;
++ dispatch_once(&once,^{queue=dispatch_queue_create("org.unixnu.piano.frontend-reclaim",DISPATCH_QUEUE_SERIAL);
++  dispatch_queue_set_specific(queue,&gImportPressureQueueKey,&gImportPressureQueueKey,nullptr);});
++ return queue;
++}
++// Queue-confined. Runtime calls below hold no frontend mutex. Synchronous allocation recovery runs only AFTER
++// the failed runtime allocation has returned (and released its Memory/host-import locks).
++static ImportPressureWindow gImportPressure;
++static uint64_t gLastGpuReclaimRequestUs=0; // shared by all allocation wrapper instantiations, queue-confined
++static bool gInGpuReclaim=false; // queue-confined; custom no-copy deallocators may reenter Metal
++static void reclaimGpuMemory(const char *reason) {
++ if(gInGpuReclaim)return;
++ gInGpuReclaim=true;gGpuReclaimRuns++;gImportPressure.raise(nowUs());gNoHoldImports=true;
++ const uint64_t before=runtimeAllocatedBytes(),held=gHeldImportBytes.load();
++ size_t blocks=0;
++ if(gDevice)blocks+=nmb_device_hold_back_memory(gDevice,true);
++ trimHeldImports(true);
++ if(gDevice){const uint32_t trimmed=nmb_device_trim_memory(gDevice,0);gTrimmedBlocks+=trimmed;
++  blocks+=trimmed;blocks+=nmb_device_release_kept_memory(gDevice);}
++ const uint64_t after=runtimeAllocatedBytes(),freed=before>after?before-after:0;
++ gGpuReclaimFreed+=freed;gGpuReclaimBlocks+=blocks;gInGpuReclaim=false;
++ // These are observed runtime bytes; concurrent live allocations can hide frees. Held-drop counters are exact cache ownership.
++ NBNOTE(@"native-metal: gpu-reclaim %s requested=%llu delivered=%llu run=%llu freed=%llu blocks=%llu held=%llu/%llu made=%llu released=%llu failures=%llu",
++  reason,(unsigned long long)gGpuReclaimRequested.load(),(unsigned long long)gGpuReclaimDelivered.load(),
++  (unsigned long long)gGpuReclaimRuns.load(),(unsigned long long)freed,(unsigned long long)blocks,
++  (unsigned long long)held,(unsigned long long)gHeldImportBytes.load(),(unsigned long long)gSurfaceImportsMade.load(),
++  (unsigned long long)gSurfaceImportsReleased.load(),(unsigned long long)gCapacityFailures.load());
++}
+ static void watchImportPressure() {
+  static dispatch_once_t once;
+  dispatch_once(&once,^{
+-  dispatch_source_t source=dispatch_source_create(DISPATCH_SOURCE_TYPE_MEMORYPRESSURE,0,
+-   DISPATCH_MEMORYPRESSURE_NORMAL|DISPATCH_MEMORYPRESSURE_WARN|DISPATCH_MEMORYPRESSURE_CRITICAL,dispatch_get_global_queue(QOS_CLASS_UTILITY,0));
+-  if(!source)return;
+-  // The runtime's kept empty blocks (fork patch 0013) and its spare and kept blocks (bridge patch 0021) go too, as Metal's resource
+-  // cache gives memory back. The source fires as the level changes, not while it stays raised, and the room the runtime keeps ahead
+-  // of its placements came back with the next frame: while the level is raised the runtime keeps none (fork patch 0020), until the
+-  // source reports the normal level again. Every block is wired guest memory here; the render server kept 547-616 MiB of empty ones.
+-  dispatch_source_set_event_handler(source,^{
+-   const bool raised=(dispatch_source_get_data(source)&(DISPATCH_MEMORYPRESSURE_WARN|DISPATCH_MEMORYPRESSURE_CRITICAL))!=0;
+-   if(gDevice)(void)nmb_device_hold_back_memory(gDevice,raised);
+-   if(!raised)return;
+-   trimHeldImports(true);
+-   if(gDevice){gTrimmedBlocks+=nmb_device_trim_memory(gDevice,0);(void)nmb_device_release_kept_memory(gDevice);}
+-  });
+-  dispatch_activate(source);
++  dispatch_queue_t queue=importPressureQueue();
++  // notify deliveries are asynchronous; peer failures can reclaim this process without reentering a runtime Memory lock.
++  static int token;
++  const int status=notify_register_dispatch("org.unixnu.piano.gpu-reclaim",&token,queue,^(int){gGpuReclaimDelivered++;reclaimGpuMemory("notify");});
++  if(status!=NOTIFY_STATUS_OK)NBLOG(@"native-metal: gpu-reclaim notify registration failed %d",status);
++  static dispatch_source_t source;source=dispatch_source_create(DISPATCH_SOURCE_TYPE_MEMORYPRESSURE,0,
++   DISPATCH_MEMORYPRESSURE_NORMAL|DISPATCH_MEMORYPRESSURE_WARN|DISPATCH_MEMORYPRESSURE_CRITICAL,queue);
++  if(source) {
++   dispatch_source_set_event_handler(source,^{
++    gImportPressure.system=(dispatch_source_get_data(source)&(DISPATCH_MEMORYPRESSURE_WARN|DISPATCH_MEMORYPRESSURE_CRITICAL))!=0;
++    if(gImportPressure.system)reclaimGpuMemory("system");
++    // NORMAL does not immediately undo GPU pressure: the idle timer clears hold-back after five quiet seconds.
++   });
++   dispatch_activate(source);
++  } else NBLOG(@"native-metal: memory-pressure source unavailable");
+  });
+ }
+-// The runtime's kept empty memory blocks that have stayed empty for two seconds go, every two seconds, and all of them on memory
+-// pressure (watchImportPressure): it keeps the last empty block of each memory pool for its next placements however long it stays
+-// empty, and on this guest every block is wired memory -- the render server held 72-136 MiB of them at the home screen, a wallpaper or
+-// widget renderer its own. A pool whose placements come each frame refills its kept block within the frame, so only blocks no frame
+-// asked for in two seconds go. (Waiting for the process to commit nothing for two seconds never trimmed the render server: the home
+-// screen's clock keeps it drawing.)
+ static void watchIdleMemory() {
+  static dispatch_once_t once;
+  dispatch_once(&once,^{
+-  dispatch_source_t timer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_global_queue(QOS_CLASS_UTILITY,0));
++  watchImportPressure();
++  static dispatch_source_t timer;timer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,importPressureQueue());
+   if(!timer)return;
+   dispatch_source_set_timer(timer,dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),2*NSEC_PER_SEC,250*NSEC_PER_MSEC);
+-  dispatch_source_set_event_handler(timer,^{if(gDevice)gTrimmedBlocks+=nmb_device_trim_memory(gDevice,2000);});
++  dispatch_source_set_event_handler(timer,^{
++   const bool raised=gImportPressure.active(nowUs());
++   if(gNoHoldImports.load() && !raised){if(gDevice)(void)nmb_device_hold_back_memory(gDevice,false);gNoHoldImports=false;}
++   trimHeldImports(false);
++   if(gDevice)gTrimmedBlocks+=nmb_device_trim_memory(gDevice,raised?0:2000);
++   // Opt-in every-process census, toggled live by the qualification spec. The
++   // unified log keeps the full record; stderr's ordinary rate limit still applies.
++   if(gDevice && access("/private/var/ngpu/debug/client-mem",F_OK)==0) {
++    uint64_t mc[10]={};nmb_device_memory_counts(gDevice,mc);
++    NBNOTE(@"native-metal: ws-oom2 census held=%llu count=%llu dropped=%llu made=%llu released=%llu retries=%llu recovered=%llu mc=%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu",
++     (unsigned long long)gHeldImportBytes.load(),(unsigned long long)gHeldImportCount.load(),(unsigned long long)gHeldImportsDropped.load(),
++     (unsigned long long)gSurfaceImportsMade.load(),(unsigned long long)gSurfaceImportsReleased.load(),
++     (unsigned long long)gCapacityRetries.load(),(unsigned long long)gCapacityRecovered.load(),
++     (unsigned long long)mc[0],(unsigned long long)mc[1],(unsigned long long)mc[2],(unsigned long long)mc[3],(unsigned long long)mc[4],
++     (unsigned long long)mc[5],(unsigned long long)mc[6],(unsigned long long)mc[7],(unsigned long long)mc[8],(unsigned long long)mc[9]);
++    NBNOTE(@"native-metal: ws-oom2 imports hit=%llu joined=%llu bypassed=%llu failed=%llu nocopy=%llu/%llu",
++     (unsigned long long)gSurfaceImportHits.load(),(unsigned long long)gSurfaceImportJoined.load(),
++     (unsigned long long)gSurfaceImportBypassed.load(),(unsigned long long)gSurfaceImportFailures.load(),
++     (unsigned long long)gNoCopyMade.load(),(unsigned long long)gNoCopyReleased.load());
++    static void *turnip=gLoaderPath.empty()?nullptr:dlopen(gLoaderPath.c_str(),RTLD_NOW|RTLD_NOLOAD);
++    static auto counts=turnip?(bool (*)(uint64_t *))dlsym(turnip,"tu_darwin_capacity_counts"):nullptr;
++    uint64_t bc[14]={};
++    if(counts && counts(bc))NBNOTE(@"native-metal: ws-oom2 backend va=%llu/%llu largest=%llu holes=%llu heap=%llu/%llu cached=%llu pending=%llu retries=%llu wins=%llu asked=%llu seen=%llu failure=%lld version=%llu",
++     (unsigned long long)bc[0],(unsigned long long)bc[1],(unsigned long long)bc[2],(unsigned long long)bc[3],
++     (unsigned long long)bc[4],(unsigned long long)bc[5],(unsigned long long)bc[6],(unsigned long long)bc[7],
++     (unsigned long long)bc[8],(unsigned long long)bc[9],(unsigned long long)bc[10],(unsigned long long)bc[11],
++     (long long)bc[12],(unsigned long long)bc[13]);
++   }
++  });
+   dispatch_activate(timer);
+  });
+ }
+-// The entry records the surface object the import itself retains, never the caller's: a hit may come with another object for the same
+-// surface, which nothing here retains, and a later prune read its retain count after the caller freed it (backboardd died on the isa
+-// authentication inside CFGetRetainCount, called from pruneHeldImports at a command buffer's completion).
+-static void holdImport(uint64_t identity,uint64_t address,uint64_t bytes,NBBuffer *buffer,std::vector<NBBuffer *> &gone) {
++// ONE retry, only for known capacity failures. Reclaim is on the serial coordinator with no import/runtime lock
++// held by this caller. A no-copy make must create and relinquish its own callback context on EVERY failed attempt.
++template<class Make> static auto allocationWithReclaim(const char *what,Make make)->decltype(make()) {
++ auto handle=make();if(handle || !importCapacityError(nmb_last_error()))return handle;
++ gCapacityFailures++;watchImportPressure();
++ // A custom deallocator called by reclaim may itself allocate. Do not recurse into reclaim or sync to our own queue.
++ if(dispatch_get_specific(&gImportPressureQueueKey) && gInGpuReclaim)return handle;
++ const std::string why=nmb_last_error();
++ dispatch_block_t recover=^{
++  const uint64_t now=nowUs();
++  if(!gLastGpuReclaimRequestUs || now-gLastGpuReclaimRequestUs>=1000000){gLastGpuReclaimRequestUs=now;gGpuReclaimRequested++;notify_post("org.unixnu.piano.gpu-reclaim");}
++  reclaimGpuMemory("allocation");
++ };
++ if(dispatch_get_specific(&gImportPressureQueueKey))recover();else dispatch_sync(importPressureQueue(),recover);
++ gCapacityRetries++;handle=make();if(handle)gCapacityRecovered++;else gCapacityRetryFailures++;
++ NBNOTE(@"native-metal: gpu-capacity %s retry=%s first=%s held=%llu count=%llu made=%llu released=%llu",
++  what,handle?"recovered":"refused",why.c_str(),(unsigned long long)gHeldImportBytes.load(),(unsigned long long)gHeldImportCount.load(),
++  (unsigned long long)gSurfaceImportsMade.load(),(unsigned long long)gSurfaceImportsReleased.load());
++ return handle;
++}
++static void holdImport(const ImportKey &key,NBBuffer *buffer,std::vector<HeldImport> &gone) {
+  pruneHeldImports(false,gone);
+- gHeldImports[{identity,address,bytes}]={buffer,buffer.importedSurface};
++ const size_t count=gone.size();
++ gHeldImports.hold(key,{buffer,buffer.importedSurface,std::get<2>(key)},std::get<2>(key),nowUs(),gNoHoldImports?0:kHeldImportBytes,gone);
++ gHeldImportsDropped+=gone.size()-count;
++ // Insertions can replace LRU entries with the same byte count; count drops from the actual retirement list.
++ uint64_t dropped=0;for(size_t i=count;i<gone.size();i++)dropped+=gone[i].bytes;
++ gHeldImportBytesDropped+=dropped;countHeldImports(0);
+ }
+-static NBBuffer *surfaceBuffer(IOSurfaceRef surface,void *base,size_t bytes) {
++static NBBuffer *surfaceBuffer(IOSurfaceRef surface,void *base,size_t bytes,NSString **error=nullptr) {
+  struct Key {uint64_t identity,address,bytes;};
+- const Key value={IOSurfaceGetID(surface),(uintptr_t)base,bytes};
++ const Key value={IOSurfaceGetID(surface),(uintptr_t)base,bytes};const ImportKey heldKey={value.identity,value.address,value.bytes};
+  NSValue *key=value.identity?[NSValue valueWithBytes:&value objCType:@encode(Key)]:nil;
+  watchImportPressure();
+- std::vector<NBBuffer *> gone;   // declared before the lock: released after it
+- std::lock_guard<std::mutex> lock(gSurfaceImportLock);
+- if(!gSurfaceImports)gSurfaceImports=[NSMapTable strongToWeakObjectsMapTable];
+- NBBuffer *buffer=key?[gSurfaceImports objectForKey:key]:nil;
+- if(buffer){if(key)holdImport(value.identity,value.address,value.bytes,buffer,gone);return buffer;}
+- // The surface keeps its CPU mapping (the imported pages) until the import is freed.
+- NmbBuffer *handle=nmb_buffer_new_no_copy_releasing(gDevice,base,bytes,MTLResourceStorageModeShared,releaseSurface,(void *)CFRetain(surface));
+- if(!handle){CFRelease(surface);NBLOG(@"native-metal: surface import refused: %@",lastError());return nil;}
+- gSurfaceImportsMade++;buffer=[NBBuffer new];buffer.handle=handle;buffer.options=MTLResourceStorageModeShared;buffer.importedSurface=surface;
+- if(key) {
+-  // Associations whose import is gone are pruned whenever the table has doubled since the last pruning; a live one is never evicted.
+-  if(gSurfaceImports.count>=gSurfaceImportsPruned) {
+-   for(NSValue *old in gSurfaceImports.keyEnumerator.allObjects)
+-    if(![gSurfaceImports objectForKey:old])[gSurfaceImports removeObjectForKey:old];
+-   gSurfaceImportsPruned=MAX(gSurfaceImports.count*2,(NSUInteger)64);
++ std::vector<HeldImport> gone;NBBuffer *buffer=nil;
++ std::shared_ptr<SurfaceImportFlight> flight;bool lead=false;
++ {
++  std::lock_guard<std::mutex> lock(gSurfaceImportLock);
++  if(!gSurfaceImports)gSurfaceImports=[NSMapTable strongToWeakObjectsMapTable];
++  buffer=key?[gSurfaceImports objectForKey:key]:nil;
++  if(buffer){gSurfaceImportHits++;holdImport(heldKey,buffer,gone);}
++  else if(key) {
++   const auto pending=gSurfaceImportFlights.find(heldKey);
++   if(pending==gSurfaceImportFlights.end()) {
++    flight=std::make_shared<SurfaceImportFlight>();gSurfaceImportFlights.emplace(heldKey,flight);lead=true;
++   }else if(!pthread_equal(pending->second->owner,pthread_self()) && !dispatch_get_specific(&gImportPressureQueueKey)) {
++    flight=pending->second;gSurfaceImportJoined++;
++   }else gSurfaceImportBypassed++;
++  }
++ }
++ gone.clear();if(buffer)return buffer;
++ if(flight && !lead) {
++  dispatch_group_wait(flight->done,DISPATCH_TIME_FOREVER);
++  std::lock_guard<std::mutex> lock(gSurfaceImportLock);
++  if(error)*error=flight->error;
++  return flight->buffer;
++ }
++ // Surface mapping and callback ownership are per attempt. A failed call never invokes releaseSurface.
++ NmbBuffer *handle=allocationWithReclaim("surface import",[&]{
++  void *context=(void *)CFRetain(surface);
++  NmbBuffer *made=nmb_buffer_new_no_copy_releasing(gDevice,base,bytes,MTLResourceStorageModeShared,releaseSurface,context);
++  if(!made)CFRelease((CFTypeRef)context);return made;
++ });
++ if(!handle){
++  NSString *failure=lastError();gSurfaceImportFailures++;
++  if(flight) {
++   {
++    std::lock_guard<std::mutex> lock(gSurfaceImportLock);buffer=[gSurfaceImports objectForKey:key];
++    flight->buffer=buffer;flight->error=buffer?nil:failure;gSurfaceImportFlights.erase(heldKey);
++   }
++   dispatch_group_leave(flight->done);
++   if(buffer)return buffer;
++  }
++  if(error)*error=failure;
++  NBLOG(@"native-metal: surface import refused: %@ (held %llu bytes/%llu imports, made %llu released %llu)",
++   failure,(unsigned long long)gHeldImportBytes.load(),(unsigned long long)gHeldImportCount.load(),
++   (unsigned long long)gSurfaceImportsMade.load(),(unsigned long long)gSurfaceImportsReleased.load());return nil;
++ }
++ gSurfaceImportsMade++;NBBuffer *candidate=[NBBuffer new];candidate.handle=handle;candidate.options=MTLResourceStorageModeShared;candidate.importedSurface=surface;
++ if(!key)return candidate;
++ {
++  std::lock_guard<std::mutex> lock(gSurfaceImportLock);
++  // Another thread may have imported the same identity while we allocated without the lock. Prefer its live
++  // buffer; the candidate's runtime handle is released after unlocking, with its own callback exactly once.
++  buffer=[gSurfaceImports objectForKey:key];
++  if(!buffer) {
++   buffer=candidate;
++   if(gSurfaceImports.count>=gSurfaceImportsPruned) {
++    for(NSValue *old in gSurfaceImports.keyEnumerator.allObjects)
++     if(![gSurfaceImports objectForKey:old])[gSurfaceImports removeObjectForKey:old];
++    gSurfaceImportsPruned=MAX(gSurfaceImports.count*2,(NSUInteger)64);
++   }
++   [gSurfaceImports setObject:buffer forKey:key];
+   }
+-  [gSurfaceImports setObject:buffer forKey:key];
+-  holdImport(value.identity,value.address,value.bytes,buffer,gone);
+- }
+- return buffer;
++  holdImport(heldKey,buffer,gone);
++  if(flight){flight->buffer=buffer;gSurfaceImportFlights.erase(heldKey);}
++ }
++ if(flight)dispatch_group_leave(flight->done);
++ gone.clear();candidate=nil;return buffer;
+ }
+ // PVRTC (PowerVR's compressed formats, MTLPixelFormatPVRTC_* 160-167) has no Vulkan format on Adreno, and metal2vulkan keeps such a
+ // texture's blocks for copies only: every command that samples it is refused (GFXBench's T-Rex drew nothing, half its command
+@@ -1504,7 +1683,7 @@
+ }
+ static NBTexture *textureOnBuffer(NBBuffer *buffer,MTLTextureDescriptor *d,NSUInteger offset,NSUInteger row,bool surface) {
+  NmbTextureDescriptor descriptor;if(!buffer || !textureDescriptor(d,&descriptor))return nil;
+- NmbTexture *handle=nmb_texture_new_on_buffer(buffer.handle,&descriptor,offset,row,surface);
++ NmbTexture *handle=allocationWithReclaim("texture over buffer",[&]{return nmb_texture_new_on_buffer(buffer.handle,&descriptor,offset,row,surface);});
+  if(!handle){NBLOG(@"native-metal: texture over buffer refused: %@",lastError());return nil;}
+  NBTexture *texture=[NBTexture new];texture.handle=handle;nmb_texture_describe(handle,&descriptor);texture.descriptor=descriptor;
+  texture.buffer=buffer;texture.offset=offset;texture.rowBytes=row;return texture;
+@@ -1535,8 +1714,8 @@
+  uint64_t chromaOffset=chroma>=base?chroma-base:0,chromaRow=IOSurfaceGetBytesPerRowOfPlane(surface,1);
+  size_t computed[4];   // myron: a 'b3a8' surface without plane rows
+  if(!chromaRow && b3a8Planes(surface,IOSurfaceGetAllocSize(surface),computed)){chromaOffset=computed[2];chromaRow=computed[3];}
+- NmbTexture *handle=nmb_texture_new_on_surface(buffer.handle,&descriptor,offset,row,IOSurfaceGetPixelFormat(surface),plane,
+-  IOSurfaceGetWidth(surface),IOSurfaceGetHeight(surface),chromaOffset,chromaRow);
++ NmbTexture *handle=allocationWithReclaim("texture over surface",[&]{return nmb_texture_new_on_surface(buffer.handle,&descriptor,offset,row,IOSurfaceGetPixelFormat(surface),plane,
++  IOSurfaceGetWidth(surface),IOSurfaceGetHeight(surface),chromaOffset,chromaRow);});
+  if(!handle)return nil;
+  NBTexture *texture=[NBTexture new];texture.handle=handle;nmb_texture_describe(handle,&descriptor);texture.descriptor=descriptor;
+  texture.buffer=buffer;texture.offset=offset;texture.rowBytes=row;return texture;
+@@ -1571,7 +1750,7 @@
+ }
+ - (id<MTLTexture>)newLinearTextureWithDescriptor:(MTLTextureDescriptor *)d offset:(NSUInteger)offset bytesPerRow:(NSUInteger)row bytesPerImage:(NSUInteger)image {
+  NmbTextureDescriptor descriptor;if(!textureDescriptor(d,&descriptor))return nil;
+- NmbTexture *handle=nmb_texture_new_linear(self.handle,&descriptor,offset,row,image);
++ NmbTexture *handle=allocationWithReclaim("linear texture",[&]{return nmb_texture_new_linear(self.handle,&descriptor,offset,row,image);});
+  if(!handle){NBLOG(@"native-metal: linear texture refused: %@",lastError());return nil;}
+  NBTexture *texture=[NBTexture new];texture.handle=handle;nmb_texture_describe(handle,&descriptor);texture.descriptor=descriptor;
+  texture.buffer=self;texture.offset=offset;texture.rowBytes=row;return (id<MTLTexture>)texture;
+@@ -4455,7 +4634,7 @@
+  return (MTLPurgeableState)answer;
+ }
+ - (id<MTLBuffer>)bufferWithLength:(NSUInteger)length options:(MTLResourceOptions)options offset:(uint64_t)offset {
+- NmbBuffer *handle=nmb_heap_new_buffer(_handle,length,options,offset);
++ NmbBuffer *handle=allocationWithReclaim("heap buffer",[&]{return nmb_heap_new_buffer(_handle,length,options,offset);});
+  if(!handle){NBLOG(@"native-metal: heap buffer refused: %@",lastError());return nil;}
+  NBBuffer *buffer=[NBBuffer new];buffer.handle=handle;buffer.options=options;buffer.parentHeap=(id<MTLHeap>)self;
+  buffer.heapOffset=offset==UINT64_MAX?0:offset;return (id<MTLBuffer>)buffer;
+@@ -4466,7 +4645,7 @@
+ }
+ - (id<MTLTexture>)textureWithDescriptor:(MTLTextureDescriptor *)d offset:(uint64_t)offset {
+  NmbTextureDescriptor descriptor;if(!textureDescriptor(d,&descriptor))return nil;
+- NmbTexture *handle=nmb_heap_new_texture(_handle,&descriptor,offset);
++ NmbTexture *handle=allocationWithReclaim("heap texture",[&]{return nmb_heap_new_texture(_handle,&descriptor,offset);});
+  // An automatic heap promises its textures no shared memory, only a place: one the heap cannot take is made on its own, so the caller
+  // (Core Image's intermediate images, iconservicesagent, i-33765e1ad) gets a texture instead of nil, which it dereferenced. A placement
+  // heap's texture aliases the memory at its offset; that one stays refused.
+@@ -4481,7 +4660,7 @@
+         (unsigned long)_heapType,(unsigned long long)answer[0],(unsigned long long)answer[1],(unsigned long)nmb_heap_size(_handle),
+         (unsigned long)nmb_heap_used_size(_handle),(unsigned long)nmb_heap_max_available_size(_handle,answer[1]?answer[1]:1));
+   if(offset!=UINT64_MAX)return nil;
+-  handle=nmb_texture_new(gDevice,&descriptor);
++  handle=allocationWithReclaim("standalone heap texture",[&]{return nmb_texture_new(gDevice,&descriptor);});
+   if(!handle){NBLOG(@"native-metal: texture (fmt %lu %lux%lu, %lu levels) refused: %@",(unsigned long)d.pixelFormat,(unsigned long)d.width,(unsigned long)d.height,(unsigned long)d.mipmapLevelCount,lastError());return nil;}
+   NBTexture *own=[NBTexture new];own.handle=handle;countAskedTexture(own,descriptor);nmb_texture_describe(handle,&descriptor);own.descriptor=descriptor;
+   if(isPvrtc(d.pixelFormat))own.pvrtc=(uint32_t)d.pixelFormat;
+@@ -4618,7 +4797,7 @@
+ - (NSUInteger)maxTextureDimensionCube {return (NSUInteger)gTurnipLimits[7];}
+ - (NSUInteger)maxTextureBufferWidth {return (NSUInteger)gTurnipLimits[9];}
+ - (uint64_t)recommendedMaxWorkingSetSize {return gTurnipLimits[3];}
+-- (NSUInteger)currentAllocatedSize {uint64_t mc[10]={};return gDevice && nmb_device_memory_counts(gDevice,mc)?(NSUInteger)(mc[0]+mc[3]):0;}
++- (NSUInteger)currentAllocatedSize {uint64_t mc[10]={};return gDevice && nmb_device_memory_counts(gDevice,mc)?(NSUInteger)(mc[0]+mc[2]+mc[3]+mc[4]):0;}
+ - (BOOL)hasUnifiedMemory {return YES;}
+ - (BOOL)respondsToSelector:(SEL)selector {
+  if(selector==sel_registerName("targetDeviceInfo"))return NO;   // the inherited _MTLDevice one, NULL without IOGPU
+@@ -4680,7 +4859,7 @@
+ }
+ - (id<MTLHeap>)newHeapWithDescriptor:(MTLHeapDescriptor *)d {
+  if(!d)return nil;
+- NmbHeap *handle=nmb_heap_new(gDevice,d.type,d.size,(uint64_t)d.resourceOptions);
++ NmbHeap *handle=allocationWithReclaim("heap",[&]{return nmb_heap_new(gDevice,d.type,d.size,(uint64_t)d.resourceOptions);});
+  if(!handle){NBLOG(@"native-metal: heap refused: %@",lastError());return nil;}
+  NBLOG(@"native-metal: heap %lu bytes type %ld options %lx -> %llu",(unsigned long)d.size,(long)d.type,(unsigned long)d.resourceOptions,nmb_heap_size(handle));
+  NBHeap *heap=[NBHeap new];heap.handle=handle;heap.options=d.resourceOptions;heap.heapType=d.type;
+@@ -4730,7 +4909,7 @@
+ }
+ - (id<MTLCommandQueue>)newCommandQueueWithMaxCommandBufferCount:(NSUInteger)count {(void)count;return [(id<MTLDevice>)self newCommandQueue];}
+ - (id<MTLBuffer>)newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)options {
+- NmbBuffer *handle=nmb_buffer_new(gDevice,length,options,nullptr);
++ NmbBuffer *handle=allocationWithReclaim("buffer",[&]{return nmb_buffer_new(gDevice,length,options,nullptr);});
+  // UniXNU-piano (0003): the length and the limit with a refusal; a large buffer on the console.
+  if(!handle){NBLOG(@"native-metal: buffer of %@ (options %lx, maxBufferLength %@) refused: %@",nbMiB(length),(unsigned long)options,
+   nbMiB(nmb_device_max_buffer_length(gDevice)),lastError());return nil;}
+@@ -4742,20 +4921,21 @@
+ }
+ - (id<MTLBuffer>)newBufferWithBytes:(const void *)bytes length:(NSUInteger)length options:(MTLResourceOptions)options {
+  if(!bytes)return nil;
+- NmbBuffer *handle=nmb_buffer_new(gDevice,length,options,bytes);
++ NmbBuffer *handle=allocationWithReclaim("buffer with bytes",[&]{return nmb_buffer_new(gDevice,length,options,bytes);});
+  if(!handle){NBLOG(@"native-metal: buffer refused: %@",lastError());return nil;}
+  NBBuffer *buffer=[NBBuffer new];buffer.handle=handle;buffer.options=options;
+  {NmbTextureDescriptor none={};none.options=options;buffer.asked=askedToken(1,length,none);}
+  return (id<MTLBuffer>)buffer;
+ }
+ - (id<MTLBuffer>)newBufferWithBytesNoCopy:(void *)pointer length:(NSUInteger)length options:(MTLResourceOptions)options deallocator:(void (^)(void *,NSUInteger))deallocator {
+- void *context=deallocator?(__bridge_retained void *)[deallocator copy]:nullptr;
+- NmbBuffer *handle=nmb_buffer_new_no_copy_releasing(gDevice,pointer,length,options,context?releaseBlock:nullptr,context);
+- if(!handle) {
+-  if(context)(void)(__bridge_transfer id)context;
+-  NBLOG(@"native-metal: no-copy buffer refused: %@",lastError());return nil;
+- }
+- gNoCopyAll++;if(context)gNoCopyMade++;
++ NmbBuffer *handle=allocationWithReclaim("no-copy buffer",[&]{
++  void *context=deallocator?(__bridge_retained void *)[deallocator copy]:nullptr;
++  NmbBuffer *made=nmb_buffer_new_no_copy_releasing(gDevice,pointer,length,options,context?releaseBlock:nullptr,context);
++  if(!made && context)(void)(__bridge_transfer id)context; // release block object, never invoke caller's deallocator on failure
++  return made;
++ });
++ if(!handle){NBLOG(@"native-metal: no-copy buffer refused: %@",lastError());return nil;}
++ gNoCopyAll++;if(deallocator)gNoCopyMade++;
+  NBBuffer *buffer=[NBBuffer new];buffer.handle=handle;buffer.options=options;buffer.wrapped=pointer;
+  return (id<MTLBuffer>)buffer;
+ }
+@@ -4766,7 +4946,7 @@
+   std::max<uint64_t>(descriptor.array_length,1)*std::max<uint64_t>(descriptor.samples,1);
+  uint64_t layout[2]={0,0};
+  if(texels>=(uint64_t(16)<<20)){NmbTextureDescriptor asked=descriptor;if(!nmb_device_heap_texture_size_and_align(gDevice,&asked,layout))layout[0]=0;}
+- NmbTexture *handle=nmb_texture_new(gDevice,&descriptor);noteFormat((uint32_t)descriptor.format,handle!=nullptr);
++ NmbTexture *handle=allocationWithReclaim("texture",[&]{return nmb_texture_new(gDevice,&descriptor);});noteFormat((uint32_t)descriptor.format,handle!=nullptr);
+  if(handle && layout[0]>=kLargeAllocationBytes)
+   NBNOTE(@"native-metal: texture %llux%llux%llu fmt %llu L%llu s%llu a%llu: made, %@ by the runtime's layout (maxBufferLength %@)",
+    (unsigned long long)descriptor.width,(unsigned long long)descriptor.height,(unsigned long long)descriptor.depth,
+@@ -4810,9 +4990,10 @@
+- NBBuffer *buffer=surfaceBuffer(surface,base,bytes);
++ NSString *importError=nil;
++ NBBuffer *buffer=surfaceBuffer(surface,base,bytes,&importError);
+  if(!buffer){
+   refuseSurface(4,surface,d,plane,start-(uintptr_t)base,row);
+-  noteSurfaceTexture(false,4,d,surface,plane,start-(uintptr_t)base,row,0,[@"import: " stringByAppendingString:lastError()]);return nil;}
++  noteSurfaceTexture(false,4,d,surface,plane,start-(uintptr_t)base,row,0,[@"import: " stringByAppendingString:importError?:@"unknown"]);return nil;}
+  NBTexture *texture=planes>=2?textureOnSurface(buffer,d,surface,plane,start-(uintptr_t)base,row):textureOnBuffer(buffer,d,start-(uintptr_t)base,row,true);
+- const uint64_t made=runtimeAllocatedBytes()-before;
++ const uint64_t after=runtimeAllocatedBytes(),made=after>before?after-before:0;
+  if(!texture){
+   refuseSurface(5,surface,d,plane,start-(uintptr_t)base,row);
+   noteSurfaceTexture(false,5,d,surface,plane,start-(uintptr_t)base,row,made,lastError());return nil;}
+@@ -5517,6 +5698,14 @@
+  row("N no-copy %llu dealloc %llu/%llu surface %llu/%llu",(unsigned long long)gNoCopyAll.load(),(unsigned long long)gNoCopyReleased.load(),
+   (unsigned long long)gNoCopyMade.load(),
+   (unsigned long long)gSurfaceImportsReleased.load(),(unsigned long long)gSurfaceImportsMade.load());
++ row("N held imports count=%llu bytes=%llu dropped=%llu drop-bytes=%llu failed=%llu",(unsigned long long)gHeldImportCount.load(),
++  (unsigned long long)gHeldImportBytes.load(),(unsigned long long)gHeldImportsDropped.load(),(unsigned long long)gHeldImportBytesDropped.load(),
++  (unsigned long long)gSurfaceImportFailures.load());
++ row("N gpu-reclaim requested=%llu delivered=%llu runs=%llu observed-freed=%llu blocks=%llu hold=%u",(unsigned long long)gGpuReclaimRequested.load(),
++  (unsigned long long)gGpuReclaimDelivered.load(),(unsigned long long)gGpuReclaimRuns.load(),(unsigned long long)gGpuReclaimFreed.load(),
++  (unsigned long long)gGpuReclaimBlocks.load(),gNoHoldImports.load()?1:0);
++ row("N capacity failures=%llu retries=%llu recovered=%llu refused=%llu",(unsigned long long)gCapacityFailures.load(),
++  (unsigned long long)gCapacityRetries.load(),(unsigned long long)gCapacityRecovered.load(),(unsigned long long)gCapacityRetryFailures.load());
+  {uint64_t remaps[2]={};if(nmb_no_copy_remaps(remaps))row("N no-copy ranges checked %llu remapped %llu",(unsigned long long)remaps[0],(unsigned long long)remaps[1]);}
+  // The runtime's VkPipeline makings (the creation log, METAL2VULKAN_LOG_PIPELINES; they happen at draws, not at the state's creation) and
+  // its shader cache: where the driver's compile time goes.

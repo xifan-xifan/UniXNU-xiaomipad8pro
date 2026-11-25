@@ -15,7 +15,12 @@
 // meta, meta -> meta+ctx4 -> meta+ctx4+tid, the framing kept for next2), the ladder exhausted (released, no next2), the release withheld
 // from a DSP the glue says may not be told, the deadline (an open never answered: released well inside the PD's minute), an abort by
 // the glue, no release after a link loss, and the guard's file-service strike.
+#include <signal.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include "check.h"
+#include "../SensorsArena.h"
 #include "../SensorsGuard.h"
 #include "../SensorsRpc.h"
 
@@ -30,6 +35,34 @@ static void wr32(uint8_t *p, uint32_t v) {for (unsigned i = 0; i < 4; ++i) p[i] 
 static void wr64(uint8_t *p, uint64_t v) {wr32(p, (uint32_t)v); wr32(p + 4, (uint32_t)(v >> 32));}
 
 static uint8_t *arena;
+static uint8_t *shadow;
+
+/* The arena as the tablet has it, as far as a host can: unreadable (PROT_NONE) except inside SensorsArena.c's functions (SAR_CHECK's
+ * enter/leave) and the simulated DSP's own turn, and every access SensorsArena.c makes is checked for its natural alignment. A direct
+ * access to the arena anywhere else in the service, like s1b's merged get32, ends the test with a fault. */
+static int arena_depth;
+static unsigned long arena_accesses, arena_bytes[9];
+static void arena_open(void)
+{
+    if (arena_depth++ == 0) CHECK(!mprotect(arena, SSR_ARENA_BYTES, PROT_READ | PROT_WRITE));
+}
+static void arena_close(void)
+{
+    CHECK(arena_depth > 0);
+    if (--arena_depth == 0) CHECK(!mprotect(arena, SSR_ARENA_BYTES, PROT_NONE));
+}
+void sar_enter(void) {arena_open();}
+void sar_leave(void) {arena_close();}
+void sar_access(const volatile void *address, unsigned bytes)
+{
+    const uintptr_t a = (uintptr_t)address;
+    CHECK(bytes == 1 || bytes == 4 || bytes == 8);
+    CHECK(!(a & (bytes - 1)));                                            /* naturally aligned, or a byte */
+    CHECK(a >= (uintptr_t)arena && a + bytes <= (uintptr_t)arena + SSR_ARENA_BYTES);
+    CHECK(arena_depth > 0);
+    arena_accesses++;
+    arena_bytes[bytes]++;
+}
 static uint8_t bounce[SSR_BOUNCE];
 static SsrCore core;
 static uint64_t clock_ms;
@@ -48,7 +81,97 @@ static struct {
     uint64_t next2_ctx;
     uint32_t next2_tid;
     uint32_t order[16];
+    unsigned mmaps;
 } dsp;
+
+/* The DSP's calls, delivered with next2 (the listener's blob: each in buffer a u32 length, aligned to 8 when not empty, its bytes; then
+ * a u32 per out buffer, unaligned after the last in buffer), and what the answer must be (-999: any). */
+typedef struct {
+    uint32_t handle, method;                  /* method above 30: sent as 31 with the id as in buffer 0's first word */
+    unsigned in_count, out_count;
+    const uint8_t *in[5];
+    uint32_t in_n[5], out_n[4];
+    int32_t result;
+    void (*check)(uint8_t *const out[4]);     /* the answer's out buffers (result 0) */
+} DspCall;
+static const DspCall *script;
+static unsigned script_count, delivered, answered, fuzz_left;
+static DspCall fuzz_call;
+static uint8_t fuzz_bytes[5][48];
+static uint32_t fuzz_seed = 12345;
+static uint32_t last_length;
+static const DspCall *in_flight;                 /* the call whose answer the next next2 brings */
+static int session_ended;                        /* the DSP had no more calls: it took the link away */
+
+static uint32_t pack_call(uint8_t *blob, uint32_t cap, const DspCall *k)
+{
+    uint32_t at = 0;
+    for (unsigned i = 0; i < k->in_count; ++i) {
+        CHECK(at + 4 <= cap);
+        wr32(blob + at, k->in_n[i]);
+        at += 4;
+        if (!k->in_n[i]) continue;
+        at = (at + 7) & ~7u;
+        CHECK(at + k->in_n[i] <= cap);
+        memcpy(blob + at, k->in[i], k->in_n[i]);
+        at += k->in_n[i];
+    }
+    for (unsigned i = 0; i < k->out_count; ++i) {
+        CHECK(at + 4 <= cap);
+        wr32(blob + at, k->out_n[i]);
+        at += 4;
+    }
+    return at;
+}
+
+/* The previous call's answer as next2 brings it back: its ctx, its result, its out buffers exactly as asked. */
+static void check_answer(const DspCall *k, uint32_t ctx, int32_t result, const uint8_t *blob, uint32_t length)
+{
+    CHECK(ctx == 0x100 + answered);
+    if (k->result != -999) CHECK(result == k->result);
+    answered++;
+    if (result) {
+        CHECK(length == 0);
+        return;
+    }
+    static uint8_t copy[0x10000];
+    CHECK(length <= sizeof copy);
+    memcpy(copy, blob, length);
+    uint8_t *out[4] = {0};
+    uint32_t at = 0;
+    for (unsigned i = 0; i < k->out_count; ++i) {
+        CHECK(at + 4 <= length && rd32(copy + at) == k->out_n[i]);
+        at += 4;
+        if (!k->out_n[i]) continue;
+        at = (at + 7) & ~7u;
+        out[i] = copy + at;
+        at += k->out_n[i];
+    }
+    CHECK(at == length);
+    if (k->check) k->check(out);
+}
+
+static uint32_t fuzz_next(void) {fuzz_seed = fuzz_seed * 1103515245u + 12345u; return fuzz_seed >> 8;}
+static const DspCall *fuzz_make(void)
+{
+    static const uint32_t handles[4] = {0, 1, 2, 9};
+    DspCall *k = &fuzz_call;
+    memset(k, 0, sizeof *k);
+    k->handle = handles[fuzz_next() % 4];
+    k->method = fuzz_next() % 36;
+    k->in_count = 1 + fuzz_next() % 4;
+    k->out_count = fuzz_next() % 4;
+    for (unsigned i = 0; i < k->in_count; ++i) {
+        k->in_n[i] = fuzz_next() % 41;
+        for (unsigned b = 0; b < sizeof fuzz_bytes[i]; ++b) fuzz_bytes[i][b] = (uint8_t)fuzz_next();
+        if (k->in_n[i] && fuzz_next() % 2) fuzz_bytes[i][k->in_n[i] - 1] = 0;    /* often a string */
+        k->in[i] = fuzz_bytes[i];
+    }
+    if (k->method > 30) wr32(fuzz_bytes[0], 31 + fuzz_next() % 3);
+    for (unsigned i = 0; i < k->out_count; ++i) k->out_n[i] = fuzz_next() % 300;
+    k->result = -999;
+    return k;
+}
 
 static uint64_t op_now(void *c) {(void)c; return clock_ms;}
 static void op_trace(void *c, const char *line)
@@ -134,6 +257,13 @@ static void dsp_turn(void)
         respond(0);
         return;
     }
+    if (handle == 1 && method == 4) {                 /* apps_mem's mmap (a fuzzed map64): the address the DSP gives the pages */
+        CHECK(pid == 0 && sc == 0x04020100u);
+        wr64(buffer(meta, n, 2, &len), 0xe0000000ull);
+        dsp.mmaps++;
+        respond(0);
+        return;
+    }
     CHECK(pid == CLIENT);
     if (handle == 0 && method == 0) {                 /* remotectl open */
         CHECK(sc == 0x00020200u);
@@ -171,12 +301,35 @@ static void dsp_turn(void)
         respond(ok ? 0 : EBADPARM);
         return;
     }
-    CHECK(method == 4 && sc == 0x04020200u);          /* next2: the session serves; the test ends it by taking the link away */
+    CHECK(method == 4 && sc == 0x04020200u);          /* next2: the previous answer, then the next call (or the session ends) */
     dsp.next2s++;
     dsp.next2_ctx = ctx;
     dsp.next2_tid = tid;
-    dsp.pending = 0;
-    ssr_core_channel(&core, 0);
+    uint64_t prim_n = 0, prev_n = 0, out_n = 0, cap = 0;
+    const uint8_t *prim = buffer(meta, n, 0, &prim_n);
+    const uint8_t *prev = buffer(meta, n, 1, &prev_n);
+    uint8_t *out = buffer(meta, n, 2, &out_n), *blob = buffer(meta, n, 3, &cap);
+    CHECK(prim_n == 16 && rd32(prim + 8) == prev_n && rd32(prim + 12) == cap && out_n == 16);
+    if (in_flight) check_answer(in_flight, rd32(prim), (int32_t)rd32(prim + 4), prev, (uint32_t)prev_n);
+    else CHECK(rd32(prim) == 0 && rd32(prim + 4) == 0xffffffffu && prev_n == 0);   /* the first next2 */
+    const DspCall *k = script && delivered < script_count ? &script[delivered] : fuzz_left ? fuzz_make() : NULL;
+    if (!k) {
+        session_ended = 1;
+        dsp.pending = 0;
+        ssr_core_channel(&core, 0);                    /* the test ends the session by taking the link away */
+        return;
+    }
+    if (!(script && delivered < script_count)) fuzz_left--;
+    const uint32_t length = pack_call(blob, (uint32_t)cap, k);
+    last_length = length;
+    const uint32_t m31 = k->method > 30 ? 31 : k->method;
+    wr32(out, 0x100 + delivered);
+    wr32(out + 4, k->handle);
+    wr32(out + 8, m31 << 24 | k->in_count << 16 | k->out_count << 8);
+    wr32(out + 12, length);
+    delivered++;
+    in_flight = k;
+    respond(0);
 }
 
 /* The DSP answers within a millisecond; with nothing to answer the wait runs its whole time. */
@@ -185,7 +338,9 @@ static void op_wait(void *c, uint32_t ms)
     (void)c;
     if (dsp.pending) {
         clock_ms += 1;
+        arena_open();                                  /* the DSP's own turn: it reads and writes the arena as it likes */
         dsp_turn();
+        arena_close();
         return;
     }
     clock_ms += ms ? ms : 1;
@@ -199,11 +354,17 @@ static void start(uint32_t frame, uint32_t no_ladder, int rule)
     memset(&dsp, 0, sizeof dsp);
     dsp.init_rule = rule;
     dsp.tell = 1;
+    arena_open();
     memset(arena, 0x5a, SSR_ARENA_BYTES);             /* junk: the page's fds and crcs must be cleared by the service */
+    arena_close();
+    script = NULL;
+    script_count = delivered = answered = fuzz_left = 0;
+    in_flight = NULL;
+    session_ended = 0;
     logused = 0;
     logbuf[0] = 0;
     clock_ms = 1000;
-    const SsrConfig cfg = {arena, ARENA_PA, SSR_ARENA_BYTES, bounce, CLIENT, BANK, 2, frame, no_ladder, 0};
+    const SsrConfig cfg = {arena, ARENA_PA, SSR_ARENA_BYTES, bounce, CLIENT, BANK, 2, frame, no_ladder, 0, shadow};
     ssr_core_init(&core, &ops, &cfg);
     ssr_core_channel(&core, 1);
 }
@@ -213,7 +374,7 @@ static int run(unsigned budget)
 {
     for (unsigned i = 0; i < budget; ++i) {
         if (!ssr_core_step(&core)) return 0;
-        if (dsp.next2s) return 1;
+        if (session_ended) return 1;
     }
     return 1;
 }
@@ -321,6 +482,94 @@ static void withheld_and_deadline(void)
            "attach; the glue's abort; nothing before an attach or after a link loss\n");
 }
 
+/* The DSP's calls at odd offsets, starting with s1b's first: remotectl open "apps_std" (handle 0, sc 0x20200, a 0x29-byte blob with the
+ * out-buffer lengths at 0x21 and 0x25). Everything the service reads or writes in the arena goes through SensorsArena.c (checked); the
+ * answers come back exactly as asked; then 400 fuzzed calls of odd shapes. */
+static uint32_t lengths[16];
+static void open_std(uint8_t *const out[4]) {CHECK(rd32(out[0]) == 1 && rd32(out[0] + 4) == 0); for (int i = 0; i < 256; ++i) CHECK(!out[1][i]);}
+static void open_mem(uint8_t *const out[4]) {CHECK(rd32(out[0]) == 2 && rd32(out[0] + 4) == 0);}
+static void getenv_path(uint8_t *const out[4])
+{
+    const uint32_t n = (uint32_t)strlen(SSR_LIBRARY_PATH);
+    CHECK(rd32(out[0]) == n + 1 && n + 1 <= 97 && !memcmp(out[1], SSR_LIBRARY_PATH, n) && out[1][n] == 0);
+}
+static void exists_no(uint8_t *const out[4]) {CHECK(out[0][0] == 0);}
+
+static void odd_offsets(void)
+{
+    static uint8_t p_std[8], p_mem[8], p_msgd[8], p_fopen[8], p_getenv[8], p_print[8], p_exists[8], p_stat[8], p_close[8];
+    static const char std[] = "apps_std", mem[] = "apps_mem", msgd[] = "adspmsgd_apps", path[] = "/vendor/etc/sensors/x.json", mode[] = "r",
+                      env[] = "ADSP_LIBRARY_PATH", text[] = "hello, piano", odm[] = "/odm/etc/sensors/a.json", persist[] = "/persist/x";
+    wr32(p_std, sizeof std); wr32(p_std + 4, 256);
+    wr32(p_mem, sizeof mem); wr32(p_mem + 4, 256);
+    wr32(p_msgd, sizeof msgd); wr32(p_msgd + 4, 255);
+    wr32(p_fopen, sizeof path); wr32(p_fopen + 4, sizeof mode);
+    wr32(p_getenv, sizeof env); wr32(p_getenv + 4, 97);
+    wr32(p_print, sizeof text); wr32(p_print + 4, 0);
+    wr32(p_exists, sizeof odm); wr32(p_exists + 4, 1);
+    wr32(p_stat, 31); wr32(p_stat + 4, sizeof persist);
+    wr32(p_close, 1); wr32(p_close + 4, 0);
+    const DspCall calls[] = {
+        {0, 0, 2, 2, {p_std, (const uint8_t *)std}, {8, sizeof std}, {8, 256}, 0, open_std},          /* s1b's first call */
+        {0, 0, 2, 2, {p_mem, (const uint8_t *)mem}, {8, sizeof mem}, {8, 256}, 0, open_mem},
+        {0, 0, 2, 2, {p_msgd, (const uint8_t *)msgd}, {8, sizeof msgd}, {8, 255}, -5, NULL},         /* not here: -5, nothing back */
+        {1, 0, 3, 1, {p_fopen, (const uint8_t *)path, (const uint8_t *)mode}, {8, sizeof path, sizeof mode}, {4}, SSR_EFAILED, NULL},
+        {1, 16, 2, 2, {p_getenv, (const uint8_t *)env}, {8, sizeof env}, {4, 97}, 0, getenv_path},
+        {1, 15, 2, 0, {p_print, (const uint8_t *)text}, {8, sizeof text}, {0}, 0, NULL},
+        {1, 22, 2, 1, {p_exists, (const uint8_t *)odm}, {8, sizeof odm}, {1}, 0, exists_no},           /* a 1-byte answer */
+        {1, 31, 2, 1, {p_stat, (const uint8_t *)persist}, {8, sizeof persist}, {96}, SSR_EFAILED, NULL},
+        {0, 1, 1, 2, {p_close}, {8}, {4, 0}, 0, NULL},
+    };
+    start(0, 0, INIT_ALWAYS);
+    script = calls;
+    script_count = sizeof calls / sizeof calls[0];
+    const unsigned long before = arena_accesses;
+    CHECK(run(200) && dsp.next2s == script_count + 1 && answered == script_count);
+    CHECK(core.status.calls == script_count && core.status.missing == 3);
+    CHECK(logged("first call of the DSP handle=0 sc=0x20200") && logged("[sensors] dsp: hello, piano") &&
+          logged("missing /vendor/etc/sensors/x.json") && logged("adspmsgd_apps: no such interface here"));
+    /* s1b's blob, byte for byte: the out lengths at 0x21 and 0x25, 0x29 in all (the service read them through SensorsArena.c) */
+    DspCall first = calls[0];
+    uint8_t blob[64];
+    CHECK(pack_call(blob, sizeof blob, &first) == 0x29 && rd32(blob + 0x21) == 8 && rd32(blob + 0x25) == 256);
+    CHECK(arena_accesses > before && arena_bytes[1] && arena_bytes[4] && arena_bytes[8]);
+    (void)lengths;
+
+    /* fuzzed calls of odd shapes: every one answered, every answer exactly as asked when it succeeds, no access outside the accessors */
+    start(0, 0, INIT_ALWAYS);
+    fuzz_left = 400;
+    CHECK(run(2000) && answered == 400 && dsp.next2s == 401);
+    printf("PASS odd offsets: s1b's first call (remotectl open \"apps_std\", out lengths at 0x21) and eight more of odd lengths, then "
+           "400 fuzzed calls; the arena unreadable outside SensorsArena.c, all %lu of its accesses aligned (%lu bytes, %lu words, %lu "
+           "doublewords)\n", arena_accesses, arena_bytes[1], arena_bytes[4], arena_bytes[8]);
+}
+
+/* The checks themselves catch what they are for: a direct read of the arena faults, an unaligned word is refused. */
+static int child_fails(void (*body)(void))
+{
+    fflush(stdout);
+    fflush(stderr);
+    const pid_t pid = fork();
+    CHECK(pid >= 0);
+    if (!pid) {
+        FILE *quiet = freopen("/dev/null", "w", stderr);
+        (void)quiet;
+        body();
+        _exit(0);
+    }
+    int status = 0;
+    CHECK(waitpid(pid, &status, 0) == pid);
+    return !(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+static void raw_read(void) {const volatile uint8_t *p = arena + 0x1021; (void)*p;}
+static void unaligned_word(void) {arena_open(); sar_access(arena + 0x1021, 4);}
+static void aligned_word(void) {arena_open(); sar_access(arena + 0x1020, 4); sar_access(arena + 0x1021, 1); arena_close();}
+static void controls(void)
+{
+    CHECK(child_fails(raw_read) && child_fails(unaligned_word) && !child_fails(aligned_word));
+    printf("PASS controls: a direct read of the arena faults, an unaligned word is refused, aligned words and bytes pass\n");
+}
+
 static void guard_strike(void)
 {
     SgGuard g;
@@ -338,14 +587,21 @@ static void guard_strike(void)
 
 int main(void)
 {
-    arena = aligned_alloc(0x1000, SSR_ARENA_BYTES);
-    CHECK(arena);
+    void *map = mmap(NULL, SSR_ARENA_BYTES, PROT_NONE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    CHECK(map != MAP_FAILED);
+    arena = map;
+    shadow = malloc(SSR_SHADOW_BYTES);
+    CHECK(shadow);
+    controls();
     default_framing();
     tablet_failure();
     ladder();
     withheld_and_deadline();
+    odd_offsets();
     guard_strike();
-    free(arena);
+    CHECK(arena_depth == 0);
+    munmap(map, SSR_ARENA_BYTES);
+    free(shadow);
     printf("PASS PianoSensors bring-up tests: %u checks\n", checks);
     return 0;
 }

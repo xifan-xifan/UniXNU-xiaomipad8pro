@@ -47,3 +47,7 @@ UniXNU-piano changes of 2026-11-11 (docs/data-store.md):
   with kIOReturnIOError (was kIOReturnNoSpace / kIOReturnNoMemory); the admit deadline 10 s (was 2 s); the status line also from the
   backoff, with ready MiB, the reserve and the fallback counts; a line when the reservation is complete. Test/volatile-pool.cpp
   (new): the incident's model, fragmentation, the backoff, bursts, unmap and the reads after it.
+
+Concurrent direct serving (docs/data-store.md): adapted from UniXNU RamBlock 525abe587a43b5cc6b4ed704a965e62136469354,
+BSD-2-Clause-Patent. The caller-thread stage pool and separate range/commit phases use piano's shared/exclusive reservations,
+write-through FUA, atomic bitmap publication and power drains.

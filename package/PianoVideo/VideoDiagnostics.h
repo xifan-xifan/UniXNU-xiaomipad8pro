@@ -44,9 +44,9 @@ struct Hardware {
   uint32_t queue[3][6]={},head[2][32]={},headWords[2]={};
   // Snapshot each domain only through the existing owner readability contract.
   // Never touch A2HSOFTINTCLR or CPU_IC_SOFTINT (both have side effects).
-  template<class Owner> void capture(Owner &o) {
-    startUs=o.hw.nowUs(); cc=o.power.ccReadable();
-    controller=o.power.controllerReadable();queues=o.mem.uc!=nullptr;
+  template<class Owner> void capture(Owner &o, bool sampleMmio = true) {
+    startUs=o.hw.nowUs(); cc=sampleMmio&&o.power.ccReadable();
+    controller=sampleMmio&&o.power.controllerReadable();queues=o.mem.uc!=nullptr;
     if(cc) {
       const uint32_t g[]={kGccVideoAhb,kGccVideoAxi0,kGccVideoAxi1};
       const uint32_t c[]={kCcPll0,kCcMvs0Rcg,kCcMvs0Rcg+4,kCcMvs0cGdsc,kCcMvs0cGdsc+4,kCcMvs0Gdsc,kCcMvs0Gdsc+4,

@@ -9,12 +9,45 @@
 #include "NativeAdrenoPublish.h"
 #ifdef ADRENO830_MACOS
 #include "NativeAdrenoMapLines.h"
+#include "NativeAdrenoSubmit.h"
 #endif
 #include <cstdio>
 #include <cstring>
 #ifdef ADRENO830_MACOS
 #define CHECK(x) do {++checks;if(!(x)){std::fprintf(stderr,"line %d: %s\n",__LINE__,#x);std::exit(1);}}while(0)
 static unsigned checks;
+
+static void failureSnapshots()
+{
+    NativeAdrenoFailureSnapshot s{};s.captured=true;s.sequence=UINT64_MAX;
+    s.alloc={NativeAdrenoAllocWhyImport,NativeAdrenoMethodBoImport,UINT64_MAX,UINT64_MAX,UINT64_MAX,UINT64_MAX,UINT64_MAX};
+    s.alloc.failure={"import-readonly-descriptor",kIOReturnNoMemory};
+    s.map={NativeAdrenoMapWhyVm,UINT64_MAX,UINT64_MAX,UINT64_MAX,UINT64_MAX,
+        {NativeAdrenoVmWhySpans,UINT64_MAX,UINT64_MAX,UINT64_MAX,nullptr,UINT64_MAX,UINT64_MAX,UINT64_MAX,UINT64_MAX,UINT64_MAX,UINT64_MAX},true};
+    s.usage={UINT64_MAX,UINT64_MAX,UINT64_MAX,UINT64_MAX,UINT64_MAX,UINT64_MAX};
+    s.objects=s.capacity=s.pool=s.other=s.imports=UINT64_MAX;
+    s.backing={UINT64_MAX,UINT64_MAX,UINT64_MAX,UINT64_MAX,UINT64_MAX,UINT64_MAX};
+    char line[NativeAdrenoMapLineBytes];
+    for(uint32_t method:{uint32_t(NativeAdrenoMethodBoAlloc),uint32_t(NativeAdrenoMethodBoImport),uint32_t(NativeAdrenoMethodBoMap)})
+        for(unsigned row=0;row<NativeAdrenoFailureLines;++row) {
+            const int n=NativeAdrenoFailureLine(line,sizeof line,row,s,31,2147483647,method,kIOReturnNoMemory);
+            CHECK(n>0 && size_t(n)<sizeof line && std::strstr(line,"refusal n=18446744073709551615"));
+        }
+    NativeAdrenoFailureRecord first{};
+    CHECK(!first.line(line,sizeof line,0) && !line[0]);
+    CHECK(!first.remember(s,2,2399,NativeAdrenoMethodBoImport,kIOReturnBadArgument));
+    CHECK(first.remember(s,2,2399,NativeAdrenoMethodBoImport,kIOReturnNoMemory));
+    s.sequence=2;s.alloc.failure.stage="overwritten";
+    CHECK(!first.remember(s,7,159,NativeAdrenoMethodBoMap,kIOReturnNoResources));
+    CHECK(first.line(line,sizeof line,0)>0 && std::strstr(line,"pid=2399 slot=2") && std::strstr(line,"n=18446744073709551615"));
+    CHECK(first.line(line,sizeof line,1)>0 && std::strstr(line,"import-readonly-descriptor") && !std::strstr(line,"overwritten"));
+    NativeAdrenoResidencyRecord residency{"1234567890123456789",UINT32_MAX,2147483647,
+        {UINT64_MAX,UINT64_MAX,UINT64_MAX,UINT64_MAX,UINT64_MAX,UINT64_MAX}};
+    char residency_line[NativeAdrenoResidencyLineBytes];
+    const int n=residency.line(residency_line,sizeof(residency_line)-1,31,"closed",UINT64_MAX,UINT64_MAX);
+    CHECK(n>0 && size_t(n)<sizeof(residency_line)-1);
+    CHECK(std::strstr(residency_line,"largest-vm-hole=18446744073709551615"));
+}
 
 static void windows()
 {
@@ -23,8 +56,8 @@ static void windows()
     CHECK(NativeAdrenoClientWindowsEnd(w)==0x3FFFFE000ull && NativeAdrenoClientWindowsStayBelowLines(w));
     CHECK(w[0].start==0x20000000ull && w[0].start+w[0].bytes==0x100000000ull);   /* the render server: 3.5 GiB up to 4 GiB */
     for(unsigned s=1;s<=NativeAdrenoLargeSlots;++s)CHECK(w[s].bytes==0x30000000ull && w[s].start==0x100000000ull+(s-1)*0x30000000ull);
-    for(unsigned s=NativeAdrenoLargeSlots+1;s<NativeAdrenoMaxClients;++s) {
-        CHECK(w[s].bytes==(s+1<NativeAdrenoMaxClients?0x14000000ull:0x37FFE000ull));
+    for(unsigned s=NativeAdrenoLargeSlots+1;s<=NativeAdrenoDecoderSlot;++s) {
+        CHECK(w[s].bytes==(s<NativeAdrenoDecoderSlot?320ull<<20:(1536ull<<20)-8192));
         CHECK(w[s].start>=w[s-1].start+w[s-1].bytes && w[s].start>>32==(w[s].start+w[s].bytes-1)>>32);
         CHECK(NativeAdrenoClientSlotAt(w,w[s].start)==s && NativeAdrenoClientSlotAt(w,w[s].start+w[s].bytes-1)==s);
     }
@@ -32,17 +65,81 @@ static void windows()
     CHECK(NativeAdrenoClientSlotAt(w,0x1F4000000ull)==NativeAdrenoMaxClients && NativeAdrenoClientSlotAt(w,0x2F0000000ull)==NativeAdrenoMaxClients);
     CHECK(NativeAdrenoClientSlotAt(w,0x20000000ull)==0 && NativeAdrenoClientSlotAt(w,0xFFFFF000ull)==0 &&
           NativeAdrenoClientSlotAt(w,0x100000000ull)==1 && NativeAdrenoClientSlotAt(w,0x3FFFFE000ull)==NativeAdrenoMaxClients);
-    /* The slot choice is the table's: the render server slot 0, the large class 1-3, apps 24 small ones, the listed the last four. */
+    CHECK(NativeAdrenoDecoderClient(true,NativeAdrenoDecoderSigningId));
+    CHECK(!NativeAdrenoDecoderClient(false,NativeAdrenoDecoderSigningId));
+    CHECK(!NativeAdrenoDecoderClient(true,"VTDecoderXPCService"));
+    CHECK(!NativeAdrenoDecoderClient(true,"com.apple.coremedia.videodecoder.other"));
+    CHECK(!NativeAdrenoDecoderClient(true,nullptr));
+    CHECK(!w[30].bytes && !w[31].bytes);
+    /* The render server, large clients and listed clients cannot borrow the decoder window. */
     bool taken[NativeAdrenoMaxClients]={};
     CHECK(NativeAdrenoClientSlotFor(true,false,true,w,taken)==0 && NativeAdrenoClientSlotFor(false,true,true,w,taken)==1);
+    CHECK(NativeAdrenoClientSlotFor(false,false,false,w,taken,true)==NativeAdrenoDecoderSlot);
+    CHECK(NativeAdrenoClientSlotFor(false,false,false,NativeAdrenoClientWindows4G,taken,true)==4);
+    taken[NativeAdrenoDecoderSlot]=true;
+    CHECK(NativeAdrenoClientSlotFor(false,false,false,w,taken,true)==4);
+    taken[NativeAdrenoDecoderSlot]=false;
     taken[0]=true;
     unsigned count=0,last=0;
     for(unsigned s;(s=NativeAdrenoClientSlotFor(false,false,false,w,taken))<NativeAdrenoMaxClients;taken[s]=true) {++count;last=s;}
-    CHECK(count==NativeAdrenoMaxClients-1-NativeAdrenoLargeSlots-NativeAdrenoListedSmallKeep16G && last==27);
+    /* 2026-11-22 (GPU-SLOTS): 23 small (the keep is 2) and then large 1 and 2 (the last large one kept): 25 apps, not 21. */
+    CHECK(count==25 && last==2 && NativeAdrenoClientSmallFree(w,taken)==2 && taken[1] && taken[2] && !taken[3]);
+    for(unsigned s;(s=NativeAdrenoClientSlotFor(false,false,true,w,taken))<NativeAdrenoMaxClients;taken[s]=true) {
+        CHECK(s!=NativeAdrenoDecoderSlot);
+    }
+    CHECK(taken[3] && !NativeAdrenoClientSmallFree(w,taken));   /* the listed: the kept two, then large 3 */
+    CHECK(NativeAdrenoClientSlotFor(false,false,false,w,taken,true)==NativeAdrenoDecoderSlot);
     /* The windows' sum: the client range less the gaps under the 8 and 12 GiB lines (slot 0 ends on 4 GiB, no gap there). */
     uint64_t total=0;
     for(unsigned s=0;s<NativeAdrenoMaxClients;++s)total+=w[s].bytes;
     CHECK(total==0x3FFFFE000ull-0x20000000ull-(0x200000000ull-0x1F4000000ull)-(0x300000000ull-0x2F0000000ull));
+}
+
+/* 2026-11-22 (GPU-SLOTS): the 64 GiB aperture's table (pagani-gpu-va=64): 59 windows of the 64 slots. WindowServer's 3.5 GiB, large 1 at
+ * 2 GiB and 2-3 at 1 GiB, 54 ordinary 1 GiB windows from 8 GiB, the decoder's 1.5 GiB at the top; every window inside one 4 GiB block,
+ * every address attributed; the slot choice: 52 apps in ordinary windows (2 kept), then two large ones borrowed; the decoder its own. */
+static void windows64()
+{
+    const NativeAdrenoClientWindow *w=NativeAdrenoClientWindowsFor(0x20000000ull+0xFE0000000ull);
+    CHECK(w==NativeAdrenoClientWindows64G && NativeAdrenoClientWindowsFor(0x400000000ull)==NativeAdrenoClientWindows16G &&
+          NativeAdrenoClientWindowsFor(0x400001000ull)==NativeAdrenoClientWindows64G);
+    CHECK(NativeAdrenoMaxClients==64 && NativeAdrenoSubmitRanges==64 && NativeAdrenoSubmitJobs==76);
+    CHECK(NativeAdrenoClientWindowsValid(w,0x20000000ull,0xFFFFFE000ull) && !NativeAdrenoClientWindowsValid(w,0x20000000ull,0xFFFFFD000ull));
+    CHECK(NativeAdrenoClientWindowsEnd(w)==0xFFFFFE000ull && NativeAdrenoClientWindowsEnd(w)<=(UINT64_C(1)<<36) &&
+          NativeAdrenoClientWindowsStayBelowLines(w) && NativeAdrenoClientWindowCount(w)==59);
+    CHECK(w[0].start==0x20000000ull && w[0].bytes==0xE0000000ull);
+    CHECK(w[1].start==0x100000000ull && w[1].bytes==2ull<<30 && w[2].start==0x180000000ull && w[2].bytes==1ull<<30 &&
+          w[3].start==0x1C0000000ull && w[3].bytes==1ull<<30);
+    for(unsigned s=NativeAdrenoLargeSlots+1;s<NativeAdrenoDecoderSlot64G;++s)
+        CHECK(w[s].start==0x200000000ull+uint64_t(s-4)*(1ull<<30) && w[s].bytes==1ull<<30);
+    CHECK(w[NativeAdrenoDecoderSlot64G].start==0xFA0000000ull && w[NativeAdrenoDecoderSlot64G].bytes==(1536ull<<20)-8192);
+    for(unsigned s=NativeAdrenoDecoderSlot64G+1;s<NativeAdrenoMaxClients;++s)CHECK(!w[s].bytes);
+    for(unsigned s=0;s<=NativeAdrenoDecoderSlot64G;++s)
+        CHECK(NativeAdrenoClientSlotAt(w,w[s].start)==s && NativeAdrenoClientSlotAt(w,w[s].start+w[s].bytes-1)==s &&
+              (!s || w[s].start>=w[s-1].start+w[s-1].bytes));
+    CHECK(NativeAdrenoClientSlotAt(w,0x1FFFF000)==NativeAdrenoMaxClients && NativeAdrenoClientSlotAt(w,0xF80000000ull)==NativeAdrenoMaxClients &&
+          NativeAdrenoClientSlotAt(w,0xFFFFFE000ull)==NativeAdrenoMaxClients && NativeAdrenoClientSlotAt(w,0x1000000000ull)==NativeAdrenoMaxClients);
+    CHECK(NativeAdrenoIsDecoderSlot(w,NativeAdrenoDecoderSlot64G) && !NativeAdrenoIsDecoderSlot(w,NativeAdrenoDecoderSlot) &&
+          NativeAdrenoListedSmallKeep(w)==2);
+    bool taken[NativeAdrenoMaxClients]={};
+    CHECK(NativeAdrenoClientSlotFor(true,false,true,w,taken)==0 && NativeAdrenoClientSlotFor(false,true,true,w,taken)==1 &&
+          NativeAdrenoClientSlotFor(false,false,false,w,taken,true)==NativeAdrenoDecoderSlot64G &&
+          NativeAdrenoClientSlotFor(false,false,false,w,taken)==4 && NativeAdrenoClientSlotFor(false,false,true,w,taken)==4);
+    taken[0]=taken[1]=taken[NativeAdrenoDecoderSlot64G]=true;   /* WindowServer, iconservicesagent, the decoder */
+    unsigned count=0,last=0;
+    for(unsigned s;(s=NativeAdrenoClientSlotFor(false,false,false,w,taken))<NativeAdrenoMaxClients;taken[s]=true) {
+        CHECK(s!=NativeAdrenoDecoderSlot64G && s);
+        ++count;last=s;
+    }
+    CHECK(count==52+1 && last==2 && NativeAdrenoClientSmallFree(w,taken)==2 && !taken[3]);   /* 52 ordinary, large 2; 3 kept */
+    CHECK(NativeAdrenoClientSlotFor(false,false,false,w,taken,true)==NativeAdrenoMaxClients);   /* the decoder slot is taken: as an app */
+    CHECK(NativeAdrenoClientSlotFor(false,true,true,w,taken)==3);   /* the large list's kept one */
+    count=0;
+    for(unsigned s;(s=NativeAdrenoClientSlotFor(false,false,true,w,taken))<NativeAdrenoMaxClients;taken[s]=true)++count;
+    CHECK(count==3 && !NativeAdrenoClientSmallFree(w,taken));   /* the listed: the kept two, then large 3 */
+    uint64_t total=0;
+    for(unsigned s=0;s<NativeAdrenoMaxClients;++s)total+=w[s].bytes;
+    CHECK(total==0xE0000000ull+(4ull<<30)+54*(1ull<<30)+(1536ull<<20)-8192);
 }
 
 static void refusalLines()
@@ -166,19 +263,57 @@ static void eventCounts()
     CHECK(NativeAdrenoEventNote(&table,"",3,0)==1 && !NativeAdrenoEventNote(&table,"",3,0));   /* no process: never restarts */
     CHECK(table.keys[0].pid==98 && table.keys[1].pid==0 && !table.others);
 }
+
+/* 2026-11-21 (20261121-ws-crash: "WindowServer[102] slot 0 Submit -> BadArgument" said nothing more): a Submit's reason
+ * (lastSubmitRefusal), the entry's figures for the entry checks, every reason within the ring's line at its widest. */
+static void submitLines()
+{
+    char line[NativeAdrenoMapLineBytes];
+    const IOReturn bad=IOReturn(0xe00002c2u);
+    auto says=[&](const NativeAdrenoSubmitRefusal &r,const char *text) {
+        NativeAdrenoSubmitRefusalLine(line,sizeof line,r);
+        if(std::strcmp(line,text))std::fprintf(stderr,"got  \"%s\"\nwant \"%s\"\n",line,text);
+        return !std::strcmp(line,text) && std::strlen(line)<NativeAdrenoMapLineBytes;
+    };
+    CHECK(says({NativeAdrenoSubmitWhyHandle,3,12,0,0x5d5b1000,8028,0,0,0x4d2,0,bad},
+               "submit refused: handle unknown: entry 3/12 handle 0 iova 0x5d5b1000 bytes 8028 (not mapped), no live object, next handle 0x4d2"));
+    CHECK(says({NativeAdrenoSubmitWhyNotMapped,1,2,0x56,0x21000000,64,0,16384,0,0,bad},
+               "submit refused: not mapped: entry 1/2 handle 0x56 iova 0x21000000 bytes 64 (not mapped), object of 16 KiB"));
+    CHECK(says({NativeAdrenoSubmitWhyNotMapped,1,2,0x56,0x21000000,64,0,0,0,0x99,bad},
+               "submit refused: not mapped: entry 1/2 handle 0x56 iova 0x21000000 bytes 64 (not mapped), VM mapping 0x99: 0xe00002c2 BadArgument"));
+    CHECK(says({NativeAdrenoSubmitWhyRange,0,1,0x55,0x5d5b1000,8192,0x5d5b0000,0x1000,3,0x99,bad},
+               "submit refused: range: entry 0/1 handle 0x55 iova 0x5d5b1000 bytes 8192 (mapped 0x5d5b0000+0x1000), permissions 0x3"));
+    CHECK(says({NativeAdrenoSubmitWhyBytes,5,6,0x57,0x21000000,6,0,0,0,0,bad},
+               "submit refused: bytes: entry 5/6 handle 0x57 iova 0x21000000 bytes 6 (mapping not looked up)"));
+    CHECK(says({NativeAdrenoSubmitWhyCount,UINT32_MAX,0,0,0,0,0,0,0,0,bad},"submit refused: count: 0 buffers (1..128), reserved 0"));
+    CHECK(says({NativeAdrenoSubmitWhyQueue,UINT32_MAX,4,0,0,0,0,0,9,0,bad},
+               "submit refused: queue: 9 is not an open queue of this connection (4 buffers)"));
+    CHECK(says({NativeAdrenoSubmitWhyWaitFence,UINT32_MAX,1,0,0,0,0,0,3,0,bad},
+               "submit refused: wait fence: 3 was never issued (0xe00002c2 BadArgument, 1 buffers)"));
+    CHECK(says({NativeAdrenoSubmitWhyOther,UINT32_MAX,7,0,0,0,0,0,0,0,IOReturn(0xe00002bdu)},
+               "submit refused: other: 0xe00002bd NoMemory (7 buffers)"));
+    for(uint8_t why=NativeAdrenoSubmitWhyNone;why<=NativeAdrenoSubmitWhyOther;++why)
+        for(uint32_t index:{0u,UINT32_MAX-1,UINT32_MAX}) {
+            NativeAdrenoSubmitRefusal r{why,index,UINT32_MAX,UINT64_MAX,UINT64_MAX,UINT64_MAX,UINT64_MAX,UINT64_MAX,UINT64_MAX,UINT64_MAX,bad};
+            NativeAdrenoSubmitRefusalLine(line,sizeof line,r);
+            CHECK(std::strlen(line)<NativeAdrenoMapLineBytes && !std::strncmp(line,"submit refused: ",16));
+        }
+}
 #endif
 
 int main()
 {
 #ifdef ADRENO830_MACOS
-    windows();
+    failureSnapshots();windows();windows64();
     refusalLines();
+    submitLines();
     allocLines();
     accounting();
     sizeLines();
     eventCounts();
     std::printf("PASS: macOS GPU address space: the 16 GiB windows (3.5 GiB render server, 768 MiB large, 320 MiB small, none across 4 GiB), "
-                "BoMap, BoAlloc and BoImport refusal lines for every reason within the ring's line, the address-space totals and "
+                "the 64 GiB windows (59 of 64 slots: 54 ordinary 1 GiB, large 2/1/1 GiB, apps borrow large but the last), "
+                "BoMap, BoAlloc, BoImport and Submit refusal lines for every reason within the ring's line, the address-space totals and "
                 "per-connection lines, the objects by size, failure counts per process (%u checks)\n",checks);
 #else
     std::printf("PASS: macOS GPU address space: nothing in the upstream pass\n");

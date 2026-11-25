@@ -183,6 +183,7 @@ struct A830IrqConfig {
      * profile's hw_init masks every GPU interrupt; with pagani-gpu-irq=1 the orchestrator sets A830_INT_MASK_FENCE_ONLY here,
      * so only the ring fence interrupts and the error bits stay with annibale's polled checks and the watchdog. */
     uint32_t own_mask;
+    bool softwareFaultSnapshot=false; // R3b records only software state before its checked force-off
 };
 
 /* Counters of the interrupt path (relaxed; status block counters are updated as well). */
@@ -211,6 +212,15 @@ class A830Irq final {
     uint32_t self_lock_=0;        /* aperture serialization without a hook */
     bool started_=false,gx_on_=true,ifpc_=false,fatal_masked_=false,loss_active_=false;
     bool polled_=false;           /* fallBack(): 332 stays off for the boot, restore() leaves it off */
+    uint32_t recoveryUsers_=0;
+    bool recoveryQuiesced_=false;
+    class RecoveryAccess {
+        A830Irq &irq_;
+    public:
+        explicit RecoveryAccess(A830Irq &irq):irq_(irq) {__atomic_fetch_add(&irq_.recoveryUsers_,1u,__ATOMIC_SEQ_CST);}
+        ~RecoveryAccess() {__atomic_fetch_sub(&irq_.recoveryUsers_,1u,__ATOMIC_SEQ_CST);}
+        bool allowed() const {return !__atomic_load_n(&irq_.recoveryQuiesced_,__ATOMIC_SEQ_CST);}
+    };
     static void primaryTrampoline(void *context);
     static void cxHostTrampoline(void *context);
     static void retireCall(void *param0,void *param1);
@@ -273,6 +283,8 @@ public:
      * GX on, the fatal mask state cleared, 332 (and 112) enabled again at the GIC, guards re-armed and irq_off cleared;
      * after fallBack() 332 stays off. */
     IOReturn quiesce(bool force);
+    IOReturn quiesceForRecovery(); // host IRQs only, safe even when GX is unreachable
+    bool recoveryUsersDrained() const {return !__atomic_load_n(&recoveryUsers_,__ATOMIC_SEQ_CST);}
     IOReturn restore();
     /* IFPC (P2, M13): the top half and the snapshot keep GX alive (GMU KEEPALIVE, AHB fence poll 100 x 1 us). */
     void setIfpc(bool on) {__atomic_store_n(&ifpc_,on,__ATOMIC_RELEASE);}

@@ -66,6 +66,9 @@ struct GadgetStats {
   uint64_t inBytes, outBytes;
   uint32_t lastSetupLo, lastSetupHi, lastCmdFailure;
   uint8_t speed, address, configuration, linkState;
+  // EP0 back to its SETUP phase the controller's way (USB-WEDGE.md): SET STALL for a stage the core still owes; commands not issued
+  // while the gadget is wedged; the controller recoveries (RUN_STOP off, DCTL.CSFTRST, device side again) and the wedges behind them.
+  uint32_t ep0Resyncs, cmdSkipped, wedges, recoveries;
 };
 
 template <class Hal>
@@ -85,6 +88,11 @@ public:
     productId = product;
     traceLimit = traceEvents;
     netOn = net;
+    wedged_ = false;
+    wedgeWhy = "";
+    wedgeInfo = 0;
+    noProgress = 0;
+    setupPending = false;
     fifoPlan = TxFifoPlan{};
     netStats = ncm::NetStats{};
     netStats.ntbInSize = ncm::kNtbMax;
@@ -140,6 +148,7 @@ public:
   bool init()
   {
     using namespace dwc3;
+    wedged_ = false;   // after a core soft reset (the takeover, recover()): no command of before is active any more
     uint8_t *m = h->dma();
     for (uint32_t i = 0; i < Layout::kEventBytes; ++i) m[Layout::kEvents + i] = 0;
     const uint64_t ring = h->dmaPhys() + Layout::kEvents;
@@ -171,6 +180,9 @@ public:
     netNotifyPending = 0;
     pendNetAlt = false;
     phase = kIdle;
+    setupPending = false;
+    noProgress = 0;
+    resyncNotes = 0;
     ep0Mps = 64;
     highSpeed = true;
     setupNotes = 0;
@@ -278,20 +290,22 @@ public:
   bool ep0Active() const { return phase == kData || phase == kWaitStatus || phase == kStatus; }
 
   // Call from the poll loop. EP0 watchdog: a control transfer that has not moved for 1 s (no event for its data or status
-  // stage) is logged with the whole EP0 state, ended, and SETUP is armed again, so the host's retry gets through. While a host
-  // is attached but has not configured the device: a snapshot every 2 s (at most 30 per bus reset).
+  // stage; a host that gave up on it, typically a request it sent while the system was frozen with the gadget kept) is logged
+  // with the whole EP0 state and left the controller's way: its TRB ended, SET STALL on EP0, SETUP armed (restartControl), so the
+  // core's own control state machine is back in its SETUP phase and the host's next request lands. Arming SETUP alone left the
+  // core owing that stage: no SETUP completed any more (energy-e4 after wake 2, USB-WEDGE.md). While a host is attached but has
+  // not configured the device: a snapshot every 2 s (at most 30 per bus reset). Nothing while wedged (the USB thread recovers).
   void tick()
   {
     const uint64_t now = h->nowUs();
-    if (!stats.connects) return;
+    if (!stats.connects || wedged_) return;
     if ((phase == kData || phase == kWaitStatus || phase == kStatus) && now - ep0Since > 1000000) {
       ++stats.ep0Timeouts;
-      snapshot("EP0 stuck 1 s: ending it, SETUP again");
-      endXfer(0);
-      endXfer(1);
-      pendAddress = pendConfig = pendNetAlt = false;
-      pendLinePort = outPort = -1;
-      armSetup();
+      snapshot("EP0 stuck 1 s: stall and SETUP again");
+      restartControl();
+      if (++noProgress >= kNoProgressMax)
+        markWedged("EP0: no control transfer completed across several recoveries (a silent wedge)", noProgress);
+      return;
     } else if (phase == kSetup && !ep[0].busy && now - ep0Since > 100000) {
       snapshot("SETUP not armed: arming");
       armSetup();
@@ -342,6 +356,58 @@ public:
     return ok && run(50);
   }
 
+  // ------------------------------------------------------------------------------------------- wedged: the controller recovery
+  // Wedged: an endpoint command whose CMDACT did not clear (the core still owns it; more commands on top of it are undefined, and
+  // with a SETUP waiting for a TRB the core takes no END TRANSFER of any endpoint, so they pile up: energy-e4 after the replug), or
+  // EP0 recovered kNoProgressMax times with no control transfer completed in between. From then on no endpoint command is issued;
+  // the USB thread runs recover(). The reference's error recovery (Linux dwc3_err_recovery_work: soft disconnect, then soft connect
+  // with DCTL.CSFTRST) is the only way out; a replug alone is a disconnect and a bus reset to the core and does not end it.
+  static constexpr unsigned kNoProgressMax = 4;
+  static constexpr uint32_t kSetupNotes = 48;   // SETUP packets logged one by one after a bus reset
+  bool wedged() const { return wedged_; }
+  const char *wedgeReason() const { return wedgeWhy; }
+  void markWedged(const char *why, uint32_t info)
+  {
+    if (wedged_) return;
+    wedged_ = true;
+    wedgeWhy = why;
+    wedgeInfo = info;
+    ++stats.wedges;
+    h->note("wedge %u: %s (%#x): no further endpoint command; the USB thread resets the controller (DSTS %08x DEPCMD0 %08x DEPCMD1 %08x)",
+            stats.wedges, why, info, h->rd(dwc3::DSTS), h->rd(dwc3::depcmdBase(0) + 12), h->rd(dwc3::depcmdBase(1) + 12));
+  }
+  // The recovery (the reference's soft disconnect + soft connect): the software state forgotten as after a disconnect (lines dropped,
+  // the link down, the console's unconfirmed bytes counted) without one endpoint command (the soft reset ends every transfer), RUN_STOP
+  // off with the events taken while it halts, DCTL.CSFTRST, the event buffer and the device side again, RUN_STOP on: the host sees a
+  // detach and enumerates afresh. The counters are kept. False: the soft reset or the restart did not go through (still wedged).
+  bool recover(bool dwc31, uint32_t *waitedUs)
+  {
+    using namespace dwc3;
+    *waitedUs = 0;
+    if (!deviceRole()) return false;
+    wedged_ = true;   // abandon() and the halt issue no command
+    abandon();
+    h->wr(DCTL, h->rd(DCTL) & ~DCTL_RUN_STOP);
+    for (unsigned i = 0; i < 1000 && !(h->rd(DSTS) & DSTS_DEVCTRLHLT); ++i) {   // the reference: events acknowledged while it halts
+      const uint32_t count = h->rd(GEVNTCOUNT) & 0xffffu;
+      if (count) h->wr(GEVNTCOUNT, count);
+      h->udelay(100);
+    }
+    const GadgetStats kept = stats;
+    if (!softReset(dwc31, waitedUs)) return false;   // still wedged
+    const bool ok = init();   // clears wedged_; DEPSTARTCFG, EP0, the transfer resources, the TX FIFO plan
+    stats = kept;
+    ++stats.recoveries;
+    return ok && run(50);
+  }
+  // After a wake (the gadget kept across the freeze): a fresh budget for the event trace and the SETUP notes, so the requests the host
+  // sent while the system was frozen (answered late) and their recovery show in the log.
+  void traceMore(uint32_t events, uint32_t setups)
+  {
+    if (traceLimit && traceBudget < events) traceBudget = events < traceLimit ? events : traceLimit;
+    if (setupNotes > kSetupNotes - setups) setupNotes = setups > kSetupNotes ? 0 : kSetupNotes - setups;
+  }
+
   void snapshot(const char *why)
   {
     using namespace dwc3;
@@ -372,6 +438,12 @@ private:
   uint64_t ep0Since, lastSnapshot;    // EP0's last progress; the last periodic snapshot
   uint64_t lastSetupUs;               // the last SETUP packet
   uint32_t snapshots, reconnects;
+  bool wedged_ = false;               // markWedged(): no endpoint command until recover()
+  const char *wedgeWhy = "";
+  uint32_t wedgeInfo = 0;
+  uint32_t noProgress = 0;            // EP0 recoveries (watchdog, a stage the core owed) since the last completed control transfer
+  bool setupPending = false;          // a data stage completed with TRBSTS SETUP_PENDING: stall and restart at its status stage
+  uint32_t resyncNotes = 0;
   EpState ep[kPhys];
   uint32_t inEnded[kPorts] = {};   // takeInUnconfirmed(): bulk IN bytes ended unfinished
   Phase phase;
@@ -408,6 +480,10 @@ private:
   bool cmd(unsigned phys, uint32_t command, uint32_t p0, uint32_t p1, uint32_t p2, uint32_t *result)
   {
     using namespace dwc3;
+    if (wedged_) {   // a command of before is still active in the core: nothing on top of it (recover() resets the core)
+      ++stats.cmdSkipped;
+      return false;
+    }
     const uint32_t base = depcmdBase(phys);
     h->wr(base + 0, p2);
     h->wr(base + 4, p1);
@@ -431,6 +507,7 @@ private:
     ++stats.cmdTimeouts;
     stats.lastCmdFailure = phys << 24 | (command & 0xf) << 16 | 0xffff;
     h->note("ep %u command %#x: timeout", phys, command);
+    markWedged("an endpoint command did not complete (CMDACT still set)", phys << 16 | (command & 0xffffu));
     return false;
   }
 
@@ -505,12 +582,41 @@ private:
   void stallRestart()
   {
     ++stats.stalls;
+    restartControl();
+  }
+  // The control transfer left the controller's way (the reference's dwc3_ep0_reset_state / dwc3_ep0_stall_and_restart): the data or
+  // status TRB still owned by the core ended, SET STALL on EP0 (the core's control state machine goes back to its SETUP phase; the core
+  // clears the stall with the next SETUP), SETUP armed. Used for a request we refuse, a stage in the wrong direction, the watchdog, a
+  // SETUP_PENDING data stage and a bus reset in the middle of a transfer.
+  void restartControl()
+  {
     endXfer(0);
     endXfer(1);
-    cmd(0, dwc3::CMD_SETSTALL, 0, 0, 0, nullptr);   // the core clears it with the next SETUP
+    cmd(0, dwc3::CMD_SETSTALL, 0, 0, 0, nullptr);
     pendAddress = pendConfig = pendNetAlt = false;
     pendLinePort = outPort = -1;
+    setupPending = false;
     armSetup();
+  }
+  // The software state as after a disconnect, without one endpoint command (recover(): the core soft reset ends every transfer). The
+  // console's bulk IN bytes still in flight are counted as not delivered (takeInUnconfirmed), as endXfer would.
+  void abandon()
+  {
+    for (unsigned phys = 0; phys < kPhys; ++phys) {
+      for (unsigned p = 0; p < kPorts; ++p)
+        if (phys == physOf(bulkEp(p), true) && ep[phys].busy) inEnded[p] += ep[phys].posted;
+      ep[phys].busy = false;
+      ep[phys].configured = false;
+    }
+    stats.address = stats.configuration = 0;
+    pendAddress = pendConfig = pendNetAlt = false;
+    pendLinePort = outPort = -1;
+    netDown();
+    for (unsigned p = 0; p < kPorts; ++p)
+      if (lineState[p]) { lineState[p] = 0; h->lineState(p, 0); }
+    phase = kIdle;
+    setupPending = false;
+    noProgress = 0;
   }
 
   const char *phaseName() const
@@ -608,16 +714,31 @@ private:
     }
   }
 
+  // A bus reset (rearm) or a disconnect. A bus reset takes EP0 first, as the reference does (dwc3_gadget_reset_interrupt): an armed
+  // SETUP TRB is kept (a SETUP may already be in it: ending and re-arming it lost the host's SET_ADDRESS in chg-fix1 and left the core
+  // owing its status stage), a transfer in progress is stalled and restarted; only then END TRANSFER for the other endpoints (the core
+  // takes none while a SETUP waits for a TRB). A disconnect ends EP0's transfers too and leaves SETUP to the next bus reset.
   void busReset(bool rearm)
   {
     using namespace dwc3;
+    const bool keepSetup = rearm && phase == kSetup && ep[0].busy && !ep[1].busy;
+    if (rearm && !keepSetup) {
+      if (phase == kData || phase == kWaitStatus || phase == kStatus) restartControl();
+      else {
+        endXfer(0);
+        endXfer(1);
+        armSetup();
+      }
+    }
     for (unsigned phys = 2; phys < kPhys; ++phys) {
       endXfer(phys);
       ep[phys].configured = false;
     }
     h->wr(DALEPENA, 3);
-    endXfer(0);
-    endXfer(1);
+    if (!rearm) {
+      endXfer(0);
+      endXfer(1);
+    }
     h->wr(DCFG, h->rd(DCFG) & ~DCFG_DEVADDR_MASK);
     stats.address = stats.configuration = 0;
     pendAddress = pendConfig = pendNetAlt = false;
@@ -628,8 +749,11 @@ private:
     if (stats.resets + stats.disconnects <= 8) traceBudget = traceLimit;   // a host that resets in a loop does not flood the log
     for (unsigned p = 0; p < kPorts; ++p)
       if (lineState[p]) { lineState[p] = 0; h->lineState(p, 0); }
-    phase = kIdle;
-    if (rearm) armSetup();
+    noProgress = 0;
+    if (!rearm) {
+      phase = kIdle;
+      setupPending = false;
+    }
   }
 
   void ep0Event(unsigned phys, unsigned type, unsigned status)
@@ -641,13 +765,21 @@ private:
       ep[phys].busy = false;
       ep0Since = h->nowUs();
       const uint32_t residual = trbResidual(t[2]), trbsts = trbStatus(t[2]);
+      setupPending = false;
       switch (phase) {
       case kSetup:
         if (phys == 0) setup();
         else ++stats.stale;
         return;
       case kData:
-        if (trbsts == TRBSTS_SETUP_PENDING) { armSetup(); return; }   // the host gave up on this request
+        // The host sent a new SETUP instead of this data stage: the core still wants the status stage before its SETUP phase (the
+        // reference: complete_data sets setup_packet_pending, xfernotready(STATUS) then stalls and restarts). Arming SETUP at once
+        // left the core owing that stage.
+        if (trbsts == TRBSTS_SETUP_PENDING) {
+          setupPending = true;
+          phase = kWaitStatus;
+          return;
+        }
         if (phys != dataPhys) { ++stats.stale; return; }
         if (phys == 0 && outPort >= 0) dataOut(residual <= ep[0].posted ? ep[0].posted - residual : 0);
         phase = kWaitStatus;
@@ -663,9 +795,32 @@ private:
       }
     }
     if (type != EPT_XFER_NOT_READY) return;
+    // The core waits for a data or status stage (no transfer active for it) while the software is in its SETUP phase with the SETUP TRB
+    // armed: a request the software never saw (its SETUP lost, chg-fix1) or one it left without telling the core. In that state no SETUP
+    // completes (chg-fix1's three failed enumerations). SET STALL on EP0 only, the armed SETUP TRB stays (the reference's stall and
+    // restart with a SETUP already started): the core's state machine goes back to its SETUP phase and the host's retry lands.
+    if (phase == kSetup && ep[0].busy && !(status & 8) &&
+        ((status & 3) == EP0_NOTREADY_STATUS || (status & 3) == EP0_NOTREADY_DATA)) {
+      ++stats.ep0Resyncs;
+      if (resyncNotes < 8) {
+        ++resyncNotes;
+        h->note("EP0: the core waits for the %s stage of a request not seen here (ep %u, phase setup, SETUP armed): SET STALL on EP0, the "
+                "SETUP stays armed (%u so far)", (status & 3) == EP0_NOTREADY_STATUS ? "status" : "data", phys, stats.ep0Resyncs);
+      }
+      cmd(0, CMD_SETSTALL, 0, 0, 0, nullptr);
+      if (++noProgress >= kNoProgressMax)
+        markWedged("EP0: no control transfer completed across several recoveries (a silent wedge)", noProgress);
+      return;
+    }
     if ((status & 3) == EP0_NOTREADY_DATA && phase == kData && phys != dataPhys) {
       h->note("data stage in the other direction (ep %u, expected %u): stall", phys, dataPhys);
       stallRestart();
+      return;
+    }
+    if ((status & 3) == EP0_NOTREADY_STATUS && setupPending && phase == kWaitStatus) {   // the reference's setup_packet_pending
+      ep0Since = h->nowUs();
+      h->note("EP0: a SETUP came during the data stage (SETUP_PENDING): stall and SETUP again");
+      restartControl();
       return;
     }
     if ((status & 3) == EP0_NOTREADY_STATUS && (phase == kWaitStatus || phase == kData)) {
@@ -696,7 +851,7 @@ private:
     const uint16_t n = r.len < length ? r.len : length;
     const bool zlp = r.kind == kIn && n < length && n && n % ep0Mps == 0;
     const uint32_t outSize = (uint32_t(length) + ep0Mps - 1) / ep0Mps * ep0Mps;
-    if (setupNotes < 48) {
+    if (setupNotes < kSetupNotes) {
       ++setupNotes;
       if (r.kind == kIn)
         h->note("setup %02x %02x %04x %04x %u -> in %u of %u bytes%s (%u packets of %u)", u[0], u[1], u[2] | u[3] << 8,
@@ -874,6 +1029,7 @@ private:
 
   void statusDone()
   {
+    noProgress = 0;   // a control transfer went through
     if (pendAddress) stats.address = newAddress;
     if (pendConfig) stats.configuration = newConfig;
     if (pendLinePort >= 0) {

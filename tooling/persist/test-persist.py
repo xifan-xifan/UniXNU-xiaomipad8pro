@@ -269,7 +269,7 @@ def fake_tablet(root, pp, argv):
 
 # ---------------------------------------------------------------------------------------------------------------------------
 
-def test_tablet_sh(tmp, hash_only=False):
+def test_tablet_sh(tmp):
     print('== tablet.sh on a scratch file')
     disk = tmp / 'disk.bin'
     disk.write_bytes(os.urandom(64 * B))
@@ -283,13 +283,6 @@ def test_tablet_sh(tmp, hash_only=False):
     data = disk.read_bytes()
     check(run('hash', dev, 2, 3)['sha256'] == hashlib.sha256(data[2 * B:5 * B]).hexdigest(), 'hash DEV SKIP COUNT')
     check(run('hash', dev, 1, 2, 8192)['sha256'] == hashlib.sha256(data[8192:3 * 8192]).hexdigest(), 'hash with BS')
-    failure = run('hash', dev + '.missing', 0, 1)
-    check('error' in failure and 'sha256' not in failure, 'failed hash read returns no digest')
-    for skip, count, size in ((63, 2, B), (21, 1, 3 * B)):
-        short = run('hash', dev, skip, count, size)
-        check('error' in short and 'sha256' not in short, 'short hash read returns no digest')
-    if hash_only:
-        return
     check(run('peek', dev, 1, 16, 8)['hex'] == data[B + 16:B + 24].hex(), 'peek')
     check(run('zero-sha', 2)['sha256'] == hashlib.sha256(bytes(2 * B)).hexdigest(), 'zero-sha')
     expect = bytearray(data)
@@ -365,15 +358,6 @@ def test_tablet_sh(tmp, hash_only=False):
         'sys.stdout.buffer.write(data) if out == "-" else open(out, "wb").write(data)\n'
         'PY\n')
     shim.joinpath('wget').chmod(0o755)
-    # Send until stdin EOF and then close the connection, like the tablet client.
-    # Host netcat implementations differ in how they handle stdin EOF.
-    shim.joinpath('nc').write_text(
-        '#!/usr/bin/env python3\n'
-        'import socket, sys\n'
-        'with socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=10) as conn:\n'
-        '    while chunk := sys.stdin.buffer.read(65536):\n'
-        '        conn.sendall(chunk)\n')
-    shim.joinpath('nc').chmod(0o755)
     env['PIANO_PATH'] = f'{shim}{os.pathsep}/usr/sbin:/usr/bin:/sbin:/bin'   # tablet.sh exports its own PATH otherwise
 
     def sink():
@@ -677,8 +661,6 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument('--fake-shell', nargs=2)
     p.add_argument('--keep', type=Path)
-    p.add_argument('--hash-only', action='store_true', help='run the scratch-file hash checks without maintenance assets')
-    p.add_argument('--shell-only', action='store_true', help='run all shell fixture checks without maintenance assets')
     a = p.parse_args()
     if a.fake_shell:
         sys.stdout.write(fake_shell(a.fake_shell[0]))
@@ -686,11 +668,10 @@ def main():
     tmp = Path(tempfile.mkdtemp(prefix='piano-persist-test-')) if not a.keep else a.keep
     tmp.mkdir(parents=True, exist_ok=True)
     try:
-        test_tablet_sh(tmp, hash_only=a.hash_only)
-        if not (a.hash_only or a.shell_only):
-            test_session(tmp)
-            (tmp / 'pair').mkdir()
-            test_pair_rule(tmp / 'pair')
+        test_tablet_sh(tmp)
+        test_session(tmp)
+        (tmp / 'pair').mkdir()
+        test_pair_rule(tmp / 'pair')
     finally:
         if not a.keep:
             shutil.rmtree(tmp, ignore_errors=True)

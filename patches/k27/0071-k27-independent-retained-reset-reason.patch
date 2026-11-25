@@ -1,0 +1,560 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Leo Zhang
+Date: Wed, 18 Nov 2026 00:00:00 +0800
+Subject: [PATCH] k27: independent retained CVP reset reason before panic and reset
+
+Reserve the last 64 KiB of CVP independently of the pstore ring. Read before
+clear on the next native boot, recover eleven spaced copies by bitwise majority,
+and validate epoch/session, version, final commit and CRC. Bounded lock-free
+writers use separate first-event slots so panic survives its requested reboot.
+No allocation, I/O, service lookup or USB drain in the record producer.
+
+Record panic before debugger collection, and guard/timed/requested resets before
+their reset or shutdown operations. Explicit watchdog fallback/test intent has its
+own class; absent evidence is never diagnosed as a watchdog bite. A root-only,
+boot-argument-gated sysctl panics for the two-boot RAM qualification.
+
+The header and runtime are maintained/tested in tooling/k27/piano-reset-reason.
+Requires a rebuilt native kernel. Relinking kexts against an older kernel cannot
+install these call sites.
+---
+diff --git a/bsd/dev/arm64/sysctl.c b/bsd/dev/arm64/sysctl.c
+--- a/bsd/dev/arm64/sysctl.c
++++ b/bsd/dev/arm64/sysctl.c
+@@ -4,6 +4,11 @@
+ #include <sys/param.h>
+ #include <sys/kernel.h>
+ #include <sys/sysctl.h>
++#include <sys/errno.h>
++#include <kern/debug.h>
++#if defined(XNU_VM_GUEST)
++#include <console/piano_reset_reason.h>
++#endif
+ 
+ #include <machine/machine_routines.h>
+ 
+@@ -21,6 +26,31 @@
+ #if HYPERVISOR
+ #include <kern/hv_support.h>
+ #include <kern/bits.h>
++#endif
++
++
++#if defined(XNU_VM_GUEST)
++static int piano_reset_reason_pstore_size = PRR_PSTORE_BYTES;
++SYSCTL_INT(_machdep, OID_AUTO, piano_reset_reason_pstore_size,
++    CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &piano_reset_reason_pstore_size, 0,
++    "CVP console extent with the retained reset tail reserved");
++/* 0071: no CTLFLAG_ANYBODY/KERN: the normal sysctl write gate requires root.
++ * The destructive test additionally needs both an armed record and its boot arg.
++ */
++static int
++sysctl_piano_reset_reason_test SYSCTL_HANDLER_ARGS
++{
++#pragma unused(arg1, arg2)
++	int value = piano_reset_reason_test_enabled() ? 1 : 0;
++	int err = sysctl_handle_int(oidp, &value, 0, req);
++	if (err || !req->newptr) return err;
++	if (!piano_reset_reason_test_enabled()) return EPERM;
++	if (value != 1) return EINVAL;
++	panic("diag-reason1 deliberate panic");
++}
++SYSCTL_PROC(_machdep, OID_AUTO, piano_reset_reason_test,
++    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, 0, 0,
++    sysctl_piano_reset_reason_test, "I", "root-only retained reset record panic test; boot-arg gated");
+ #endif
+ 
+ #define __STR(x)        #x
+diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -975,6 +975,7 @@
+ #include <arm64/piano_pm.h>
+ #include "piano_guard_policy.h"
+ #include "piano_halt_policy.h"
++#include <console/piano_reset_reason.h>
+ #define GH_WDT_CONTROL  0x86000005ULL
+ #define GH_WDT_STATUS   0x86000006ULL
+ #define GH_WDT_PING     0x86000007ULL
+@@ -1074,9 +1075,11 @@
+ 	uint64_t now;
+ 	absolutetime_to_nanoseconds(mach_absolute_time(), &now);
+ 	if (now >= piano_reset_after_ns) {
++		piano_reset_reason_record(PRR_REQUESTED, "piano-reset-after deadline");
+ 		printf("piano-reset-after: %llu s reached, PSCI SYSTEM_RESET\n", piano_reset_after_ns / NSEC_PER_SEC);
+ 		delay(200000);
+ 		piano_psci_reset();
++		piano_reset_reason_record(PRR_WATCHDOG, "timed PSCI reset returned; pings stopped");
+ 		return;   /* still here: the watchdog (no more pets) takes the tablet down within 32 s */
+ 	}
+ 	piano_watchdog_ping();
+@@ -1245,6 +1248,7 @@
+ void
+ piano_restart_begin(const char *who, int wait)
+ {
++	piano_reset_reason_record(PRR_REQUESTED, who);
+ 	const uint32_t old = piano_restart_mark(&piano_restart_word);
+ 	if ((old & PIANO_RESTART_STARTED) == 0) {
+ 		piano_restart_ns = piano_guard_uptime_ns();
+@@ -1457,12 +1461,14 @@
+ 	if (piano_guard_cpus && !piano_guard_silent) {
+ 		int stuck = piano_guard_check_cpus();
+ 		if (stuck >= 0) {
++			piano_reset_reason_record(PRR_GUARD, "CPU failed boot-guard interrupt liveness check");
+ 			piano_guard_stuck = stuck;
+ 			piano_guard_silent = true;
+ 			printf("piano-boot-guard: CPU %d took no interrupt across %u ticks (a nop IPI each): hung; no more pings, PSCI reset "
+ 			    "into %s\n", stuck, PIANO_GUARD_QUIET_TICKS, into);
+ 			delay(200000);
+ 			piano_psci_reset();
++			piano_reset_reason_record(PRR_WATCHDOG, "guard PSCI reset returned; pings stopped");
+ 			return;   /* still here: no more pings, the watchdog bites within 32 s */
+ 		}
+ 	}
+@@ -1472,6 +1478,7 @@
+ 		piano_guard_healthy(now);
+ 		break;
+ 	case PIANO_GUARD_GO_FAILED:
++		piano_reset_reason_record(PRR_GUARD, "boot milestone deadline failed");
+ 		piano_guard_decided_ns = now;
+ 		piano_guard_state = PIANO_GUARD_FAILED;
+ 		piano_guard_silent = true;
+@@ -1480,6 +1487,7 @@
+ 		piano_guard_log();
+ 		delay(200000);
+ 		piano_psci_reset();
++		piano_reset_reason_record(PRR_WATCHDOG, "guard PSCI reset returned; pings stopped");
+ 		return;   /* still here: no more pings, the watchdog bites within 32 s */
+ 	default:
+ 		break;
+@@ -1511,6 +1519,7 @@
+ 		printf("piano-boot-guard: test: the watchdog is off, so no CPU is stopped (nothing would reset the tablet)\n");
+ 		return;
+ 	}
++	piano_reset_reason_record(PRR_WATCHDOG, "boot-guard test: all CPUs stop; pings stopped");
+ 	piano_guard_silent = true;
+ 	printf("piano-boot-guard: test: every CPU stops now with interrupts masked (piano-boot-guard-test=hang-at=%u): the watchdog "
+ 	    "resets into %s within 32 s\n", piano_guard_hang_at, piano_guard_reason == 2 ? "ABL fastboot" : "the installed system");
+@@ -1571,6 +1580,7 @@
+ 	    piano_guard_cpus ? "on" : "off", secs, piano_guard_need_exec ? "the exec of " : "the uptime alone",
+ 	    piano_guard_need_exec ? piano_guard_exec_name : "");
+ 	if (wdt && !piano_guard_ping) {
++		piano_reset_reason_record(PRR_WATCHDOG, "boot-guard test: watchdog enabled without pings");
+ 		printf("piano-boot-guard: test: no pings (piano-boot-guard-ping=0): the watchdog bites about 32 s from now, into %s\n",
+ 		    piano_guard_reason == 2 ? "ABL fastboot" : "the installed system");
+ 	}
+diff --git a/osfmk/console/Makefile b/osfmk/console/Makefile
+--- a/osfmk/console/Makefile
++++ b/osfmk/console/Makefile
+@@ -9,6 +9,7 @@
+ DATAFILES =
+ 
+ PRIVATE_DATAFILES = \
++	piano_reset_reason.h \
+ 	video_console.h \
+ 	serial_protos.h
+ 
+diff --git a/osfmk/console/piano_reset_reason.h b/osfmk/console/piano_reset_reason.h
+new file mode 100644
+--- /dev/null
++++ b/osfmk/console/piano_reset_reason.h
+@@ -0,0 +1,209 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent
++ * Copyright (c) 2026 Leo Zhang.
++ * Retained CVP reset evidence, independent of the console ring and USB.
++ * Plain C shared by the native kernel patch and fault-injection host tests.
++ */
++#ifndef PIANO_RESET_REASON_H
++#define PIANO_RESET_REASON_H
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#define PRR_CVP_BASE UINT64_C(0x9cb00000)
++#define PRR_PSTORE_BYTES UINT64_C(0x6f0000)
++#define PRR_BASE (PRR_CVP_BASE + PRR_PSTORE_BYTES)
++#define PRR_BYTES 0x10000u
++#define PRR_COPIES 11u
++#define PRR_STRIDE 0x1000u
++#define PRR_TEXT_BYTES 200u
++#define PRR_MAGIC 0x31525250u /* PRR1 */
++#define PRR_COMMIT 0x54494d43u /* CMIT */
++#define PRR_VERSION 1u
++#define PRR_SLOTS 5u /* boot stamp, panic, watchdog intent, guard, requested */
++
++enum prr_reason { PRR_BOOT = 0, PRR_PANIC, PRR_WATCHDOG, PRR_GUARD, PRR_REQUESTED };
++enum prr_previous { PRR_NONE, PRR_INVALID, PRR_VALID };
++
++/* Little-endian native ABI. No pointers, compiler padding, unit identity or payloads.
++ * Commit is stored last, after all eleven bodies reach the device mapping.
++ */
++struct prr_record {
++    uint32_t magic;
++    uint16_t version, bytes;
++    uint64_t generation, boot_session, uptime_ns;
++    uint32_t reason, text_bytes;
++    uint8_t text[PRR_TEXT_BYTES];
++    uint64_t reserved;
++    uint32_t crc, commit;
++};
++_Static_assert(sizeof(struct prr_record) == 256, "retained record ABI");
++_Static_assert(offsetof(struct prr_record, crc) == 248, "CRC covers the body");
++_Static_assert(offsetof(struct prr_record, commit) == 252, "commit word last");
++_Static_assert((PRR_COPIES - 1) * PRR_STRIDE + PRR_SLOTS * 256 <= PRR_BYTES, "tail bounds");
++
++/* Store hooks let tests interrupt the real encoder at every store boundary. */
++#ifndef PRR_STORE
++#define PRR_STORE(p, v) (*(p) = (v))
++#endif
++#ifndef PRR_BARRIER
++#if defined(__aarch64__) || defined(__arm64__)
++#define PRR_BARRIER() __asm__ volatile("dsb sy" ::: "memory")
++#else
++#define PRR_BARRIER() __atomic_thread_fence(__ATOMIC_SEQ_CST)
++#endif
++#endif
++
++static inline bool prr_layout_ok(uint64_t base, uint64_t bytes)
++{
++    return base == PRR_CVP_BASE && bytes >= 0x10000 && bytes <= PRR_PSTORE_BYTES;
++}
++
++static inline uint32_t prr_crc(const void *data, size_t bytes)
++{
++    const uint8_t *p = data;
++    uint32_t crc = ~0u;
++    for (size_t i = 0; i < bytes; ++i) {
++        crc ^= p[i];
++        for (unsigned b = 0; b < 8; ++b) crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1)));
++    }
++    return ~crc;
++}
++
++static inline bool prr_valid(const struct prr_record *r, unsigned slot)
++{
++    return r->magic == PRR_MAGIC && r->version == PRR_VERSION && r->bytes == sizeof(*r) &&
++           r->generation && r->boot_session && r->reason == slot && slot < PRR_SLOTS &&
++           r->text_bytes <= PRR_TEXT_BYTES && !r->reserved && r->commit == PRR_COMMIT &&
++           r->crc == prr_crc(r, offsetof(struct prr_record, crc));
++}
++
++static inline void prr_make(struct prr_record *r, uint64_t generation, uint64_t session,
++                            enum prr_reason reason, uint64_t uptime_ns, const char *text)
++{
++    /* Byte initialization also makes the unused text deterministic for CRC. */
++    uint8_t *p = (uint8_t *)r;
++    for (size_t i = 0; i < sizeof(*r); ++i) p[i] = 0;
++    r->magic = PRR_MAGIC;
++    r->version = PRR_VERSION;
++    r->bytes = sizeof(*r);
++    r->generation = generation;
++    r->boot_session = session;
++    r->uptime_ns = uptime_ns;
++    r->reason = reason;
++    while (text && r->text_bytes < PRR_TEXT_BYTES && text[r->text_bytes]) {
++        r->text[r->text_bytes] = (uint8_t)text[r->text_bytes];
++        ++r->text_bytes;
++    }
++    r->crc = prr_crc(r, offsetof(struct prr_record, crc));
++    r->commit = PRR_COMMIT;
++}
++
++static inline volatile uint32_t *prr_at(volatile void *base, unsigned copy, unsigned slot)
++{
++    /* Caller maps a page-aligned base; every offset is a whole aligned word. */
++    return (volatile uint32_t *)base + (copy * PRR_STRIDE + slot * sizeof(struct prr_record)) / sizeof(uint32_t);
++}
++
++static inline void prr_write(volatile void *base, const struct prr_record *r)
++{
++    /* Invalidate every copy first. Readback never accepts a partially replaced body. */
++    for (unsigned c = 0; c < PRR_COPIES; ++c) PRR_STORE(prr_at(base, c, r->reason) + 63, 0);
++    PRR_BARRIER();
++    for (unsigned w = 0; w < 63; ++w) {
++        uint32_t value = 0;
++        const uint8_t *p = (const uint8_t *)r + w * 4;
++        for (unsigned b = 0; b < 4; ++b) value |= (uint32_t)p[b] << (b * 8);
++        for (unsigned c = 0; c < PRR_COPIES; ++c) PRR_STORE(prr_at(base, c, r->reason) + w, value);
++    }
++    PRR_BARRIER();
++    for (unsigned c = 0; c < PRR_COPIES; ++c) PRR_STORE(prr_at(base, c, r->reason) + 63, PRR_COMMIT);
++    PRR_BARRIER();
++}
++
++static inline void prr_read(volatile void *base, unsigned slot, struct prr_record *r)
++{
++    uint8_t *out = (uint8_t *)r;
++    for (unsigned w = 0; w < sizeof(*r) / 4; ++w) {
++        unsigned votes[32] = {0};
++        for (unsigned c = 0; c < PRR_COPIES; ++c) {
++            uint32_t v = prr_at(base, c, slot)[w];
++            for (unsigned b = 0; b < 32; ++b) votes[b] += (v >> b) & 1u;
++        }
++        uint32_t v = 0;
++        for (unsigned b = 0; b < 32; ++b) if (votes[b] > PRR_COPIES / 2) v |= 1u << b;
++        for (unsigned b = 0; b < 4; ++b) out[w * 4 + b] = (uint8_t)(v >> (b * 8));
++    }
++}
++
++/* Read the old epoch and all events before modifying any byte. Panic wins over a
++ * later requested reboot during panic recovery. A valid event may coexist with a
++ * torn lower-priority event; it remains useful, but damaged evidence is reported.
++ */
++static inline enum prr_previous prr_previous(volatile void *base, struct prr_record *stamp,
++                                            struct prr_record *event, bool *damaged)
++{
++    static const unsigned order[] = {PRR_PANIC, PRR_GUARD, PRR_WATCHDOG, PRR_REQUESTED};
++    prr_read(base, PRR_BOOT, stamp);
++    bool boot_ok = prr_valid(stamp, PRR_BOOT), found = false;
++    *damaged = false;
++    for (unsigned i = 0; i < 4; ++i) {
++        struct prr_record r;
++        prr_read(base, order[i], &r);
++        bool blank = true;
++        for (size_t b = 0; b < sizeof(r); ++b) if (((uint8_t *)&r)[b]) blank = false;
++        if (blank) continue;
++        if (!boot_ok || !prr_valid(&r, order[i]) || r.generation != stamp->generation ||
++            r.boot_session != stamp->boot_session) { *damaged = true; continue; }
++        if (!found) { *event = r; found = true; }
++    }
++    bool stamp_blank = true;
++    for (size_t b = 0; b < sizeof(*stamp); ++b) if (((uint8_t *)stamp)[b]) stamp_blank = false;
++    if (!boot_ok && !stamp_blank) *damaged = true;
++    return found ? PRR_VALID : *damaged ? PRR_INVALID : PRR_NONE;
++}
++
++static inline void prr_clear(volatile void *base)
++{
++    /* Old stamp invalidated before events. Unused page bytes are never touched. */
++    for (unsigned c = 0; c < PRR_COPIES; ++c) PRR_STORE(prr_at(base, c, PRR_BOOT) + 63, 0);
++    PRR_BARRIER();
++    for (unsigned s = 0; s < PRR_SLOTS; ++s)
++        for (unsigned w = 0; w < 64; ++w)
++            for (unsigned c = 0; c < PRR_COPIES; ++c) PRR_STORE(prr_at(base, c, s) + w, 0);
++    PRR_BARRIER();
++}
++
++/* Each class has its own first-writer latch and storage. No lock, spin/retry,
++ * shared formatting buffer, allocator, or console use in a producer. A nested
++ * panic cannot wait on a writer it interrupted, or overwrite the first panic.
++ */
++struct prr_context {
++    volatile void *base;
++    uint64_t generation, boot_session;
++    uint32_t claimed[PRR_SLOTS], ready;
++};
++
++static inline bool prr_claim(struct prr_context *ctx, enum prr_reason reason)
++{
++    uint32_t expected = 0;
++    return reason > PRR_BOOT && reason < PRR_SLOTS && __atomic_load_n(&ctx->ready, __ATOMIC_ACQUIRE) &&
++           __atomic_compare_exchange_n(&ctx->claimed[reason], &expected, 1, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED);
++}
++
++static inline void prr_publish_claimed(struct prr_context *ctx, enum prr_reason reason,
++                                      uint64_t uptime_ns, const char *text)
++{
++    struct prr_record r;
++    prr_make(&r, ctx->generation, ctx->boot_session, reason, uptime_ns, text);
++    prr_write(ctx->base, &r);
++}
++
++#ifdef KERNEL_PRIVATE
++void piano_reset_reason_init(uint64_t pstore_base, uint64_t pstore_bytes);
++void piano_reset_reason_record(enum prr_reason reason, const char *text);
++bool piano_reset_reason_panic_claim(void);
++void piano_reset_reason_panic_publish(const char *text);
++bool piano_reset_reason_test_enabled(void);
++#endif
++#endif
+diff --git a/osfmk/console/serial_console.c b/osfmk/console/serial_console.c
+--- a/osfmk/console/serial_console.c
++++ b/osfmk/console/serial_console.c
+@@ -43,6 +43,8 @@
+ #include <console/video_console.h>
+ #include <console/serial_protos.h>
+ #include <kern/startup.h>
++#include <console/piano_reset_reason.h>
++#include <pexpert/device_tree.h>
+ #include <kern/thread.h>
+ #include <kern/cpu_data.h>
+ #include <kern/sched_prim.h>
+@@ -582,6 +584,133 @@
+ 	__builtin_arm_dsb(0xf);
+ }
+ 
++#if defined(__arm64__) && defined(XNU_VM_GUEST)
++/* SPDX-License-Identifier: BSD-2-Clause-Patent
++ * Copyright (c) 2026 Leo Zhang.
++ * Patch 0071 inserts this code into osfmk/console/serial_console.c.
++ * Only init maps/prints; producers touch the premapped device memory, stack,
++ * lock-free claim words, and the monotonic clock. Never flush through USB.
++ */
++static struct prr_context piano_reason;
++static bool piano_reason_test;
++
++static uint64_t
++piano_reason_uptime(void)
++{
++	uint64_t ns;
++	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++	return ns;
++}
++
++static const char *
++piano_reason_name(unsigned reason)
++{
++	switch (reason) {
++	case PRR_PANIC: return "panic";
++	case PRR_WATCHDOG: return "watchdog-intent";
++	case PRR_GUARD: return "guard";
++	case PRR_REQUESTED: return "requested";
++	default: return "unknown";
++	}
++}
++
++static bool
++piano_reason_dt_bound(DTEntry entry, const char *name, uint64_t expected)
++{
++	const void *data;
++	unsigned size;
++	uint64_t actual;
++	if (SecureDTGetProperty(entry, name, &data, &size) != kSuccess || size != sizeof(actual)) return false;
++	__builtin_memcpy(&actual, data, sizeof(actual));
++	return actual == expected;
++}
++
++void
++piano_reset_reason_init(uint64_t pstore_base, uint64_t pstore_bytes)
++{
++	uint32_t enabled = 1, test = 0;
++	(void)PE_parse_boot_argn("piano-reset-reason", &enabled, sizeof(enabled));
++	if (!enabled) return;
++	if (!prr_layout_ok(pstore_base, pstore_bytes)) {
++		printf("reset-reason: disabled: unqualified pstore layout\n");
++		return;
++	}
++	DTEntry layout;
++	if (SecureDTLookupEntry(NULL, "/chosen/piano-retained-ram", &layout) != kSuccess ||
++	    !piano_reason_dt_bound(layout, "cvp-base", PRR_CVP_BASE) ||
++	    !piano_reason_dt_bound(layout, "cvp-size", PRR_PSTORE_BYTES + PRR_BYTES) ||
++	    !piano_reason_dt_bound(layout, "pstore-size", PRR_PSTORE_BYTES) ||
++	    !piano_reason_dt_bound(layout, "reset-reason-base", PRR_BASE) ||
++	    !piano_reason_dt_bound(layout, "reset-reason-size", PRR_BYTES)) {
++		printf("reset-reason: disabled: missing or mismatched ADT reservation\n");
++		return;
++	}
++	vm_offset_t va = ml_io_map((vm_offset_t)PRR_BASE, (vm_size_t)PRR_BYTES);
++	if (!va) {
++		printf("reset-reason: disabled: mapping failed\n");
++		return;
++	}
++	volatile void *base = (volatile void *)va;
++	struct prr_record stamp, event;
++	bool damaged;
++	enum prr_previous previous = prr_previous(base, &stamp, &event, &damaged);
++	bool stamp_ok = prr_valid(&stamp, PRR_BOOT);
++	if (previous == PRR_VALID) {
++		char text[PRR_TEXT_BYTES + 1];
++		for (unsigned i = 0; i < event.text_bytes; ++i) {
++			uint8_t c = event.text[i];
++			text[i] = c >= 32 && c <= 126 ? (char)c : '.';
++		}
++		text[event.text_bytes] = 0;
++		printf("reset-reason: previous boot class=%s generation=%llu boot-session=%llu uptime-ms=%llu bytes=%u text=%s damaged=%u\n",
++		    piano_reason_name(event.reason), event.generation, event.boot_session,
++		    event.uptime_ns / 1000000, event.text_bytes, text, (unsigned)damaged);
++	} else {
++		printf("reset-reason: previous boot %s (unknown reset cause)\n", previous == PRR_NONE ? "none" : "invalid");
++	}
++	/* Read and print before clear; retain epoch continuity in an independent stamp. */
++	uint64_t generation = stamp_ok && stamp.generation != UINT64_MAX ? stamp.generation + 1 : 1;
++	prr_clear(base);
++	piano_reason.base = base;
++	piano_reason.generation = generation;
++	piano_reason.boot_session = mach_absolute_time();
++	if (!piano_reason.boot_session) piano_reason.boot_session = 1;
++	prr_make(&stamp, generation, piano_reason.boot_session, PRR_BOOT, piano_reason_uptime(), "native boot");
++	prr_write(base, &stamp);
++	(void)PE_parse_boot_argn("piano-reset-reason-test", &test, sizeof(test));
++	piano_reason_test = test == 1;
++	__atomic_store_n(&piano_reason.ready, 1, __ATOMIC_RELEASE);
++	printf("reset-reason: armed v1 producer=kernel copies=11 generation=%llu boot-session=%llu test=%u\n",
++	    generation, piano_reason.boot_session, (unsigned)piano_reason_test);
++}
++
++void
++piano_reset_reason_record(enum prr_reason reason, const char *text)
++{
++	if (prr_claim(&piano_reason, reason)) {
++		prr_publish_claimed(&piano_reason, reason, piano_reason_uptime(), text);
++	}
++}
++
++bool
++piano_reset_reason_panic_claim(void)
++{
++	return prr_claim(&piano_reason, PRR_PANIC);
++}
++
++void
++piano_reset_reason_panic_publish(const char *text)
++{
++	prr_publish_claimed(&piano_reason, PRR_PANIC, piano_reason_uptime(), text);
++}
++
++bool
++piano_reset_reason_test_enabled(void)
++{
++	return __atomic_load_n(&piano_reason.ready, __ATOMIC_ACQUIRE) && piano_reason_test;
++}
++#endif
++
+ void console_pstore_init(void);
+ void
+ console_pstore_init(void)
+@@ -593,6 +722,11 @@
+ 		return;
+ 	}
+ 	(void)PE_parse_boot_argn("pstore-console-size", &bytes, sizeof(bytes));
++#if defined(__arm64__) && defined(XNU_VM_GUEST)
++	/* 0071: reserve the tail even with a legacy full-CVP argument or recording disabled. */
++	if (base == PRR_CVP_BASE && bytes > PRR_PSTORE_BYTES) bytes = PRR_PSTORE_BYTES;
++	piano_reset_reason_init(base, bytes);
++#endif
+ 	if (bytes < 0x10000 || bytes > 0x1000000) {
+ 		console_pstore_wanted = false;
+ 		return;
+diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
+--- a/osfmk/kern/debug.c
++++ b/osfmk/kern/debug.c
+@@ -70,6 +70,9 @@
+ #include <kern/socd_client.h>
+ #include <kern/misc_protos.h>
+ #include <kern/clock.h>
++#if defined(__arm64__) && defined(XNU_VM_GUEST)
++#include <console/piano_reset_reason.h>
++#endif
+ #include <kern/telemetry.h>
+ #include <kern/trap_telemetry.h>
+ #include <kern/ecc.h>
+@@ -1253,6 +1256,18 @@
+ {
+ #pragma clang diagnostic pop
+ 
++#if defined(__arm64__) && defined(XNU_VM_GUEST)
++	/* 0071: claim before formatting so a nested panic never waits on/replaces this one. */
++	if (piano_reset_reason_panic_claim()) {
++		char text[PRR_TEXT_BYTES + 1];
++		va_list args;
++		va_copy(args, *panic_args);
++		vsnprintf(text, sizeof(text), panic_format_str, args);
++		va_end(args);
++		piano_reset_reason_panic_publish(text);
++	}
++#endif
++
+ #if defined(__x86_64__) && (DEVELOPMENT || DEBUG)
+ 	read_lbr();
+ #endif

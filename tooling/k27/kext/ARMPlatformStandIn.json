@@ -21,5 +21,13 @@
     "com.apple.kpi.iokit": "18.0.0",
     "com.apple.kpi.libkern": "18.0.0"
   },
-  "personalities": {}
+  "personalities": {
+    "AppleDiagnosticDataAccessReadOnly": {
+      "CFBundleIdentifier": "com.unixnu.driver.ARMPlatformStandIn",
+      "IOClass": "AppleDiagnosticDataAccessReadOnly",
+      "IOProviderClass": "IOResources",
+      "IOResourceMatch": "IOKit",
+      "IOMatchCategory": "AppleDiagnosticDataAccess"
+    }
+  }
 }

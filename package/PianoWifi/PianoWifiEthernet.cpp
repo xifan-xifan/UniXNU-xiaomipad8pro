@@ -91,6 +91,7 @@ class PianoWifiEthernet : public IOEthernetController {
   // Ethernet personality has no additional event work; PianoWifi80211 uses
   // the hook for the sheng event pair.
   virtual void linkChanged(bool) {}
+  void syncRunning(bool authorized, bool force = false);
 
   // The link's medium, for PianoWifi80211 (the subclass included at the end of this file): the Ethernet one is always there,
   // the IEEE 802.11 one (piano-wifi-sheng bit 0x1, the UniXNU-sheng macOS fact: "the framework lists wireless interfaces by
@@ -217,27 +218,31 @@ void PianoWifiEthernet::netLink(void *ctx, int up, const uint8_t *mac)
     if (!same) note("the station's address is not the interface's: its frames would carry the wrong source (the interface "
                     "keeps its own; docs §13.7)");
   }
-  if (now == self->fLinkUp) return;
+  if (now == self->fLinkUp) { self->syncRunning(now); return; }
   self->fLinkUp = now;
   ++self->fLinkChanges;
   IONetworkMedium *medium = (self->fMedium11On && self->fMedium11) ? self->fMedium11 : self->fMedium;
   self->setLinkStatus(now ? (kIONetworkLinkValid | kIONetworkLinkActive) : kIONetworkLinkValid, medium,
                       now ? kLinkSpeed : 0);
-  // IONetworkController's medium notification is what drives the family
-  // status, but configd's DHCP gate also reads the BSD running bit.  Set and
-  // read it explicitly at the same authorization edge and leave IFF_UP alone.
-  ifnet_t ifp = self->fInterface ? self->fInterface->getIfnet() : nullptr;
-  if (ifp) {
-    ifnet_set_flags(ifp, now ? IFF_RUNNING : 0, IFF_RUNNING);
-    const uint32_t flags = uint32_t(ifnet_flags(ifp));
-    note("the authorized link set IFF_RUNNING=%u (ifnet flags %#x; DHCP gate %s)", (flags & IFF_RUNNING) ? 1u : 0u, flags,
-         (flags & IFF_RUNNING) ? "open" : "closed");
-  } else {
-    note("the authorized link changed before the BSD ifnet existed (IFF_RUNNING deferred)");
-  }
+  self->syncRunning(now, true);
   self->linkChanged(now);
   note("the link is %s (PianoWifi's port %s)", now ? "up" : "down", now ? "is authorized" : "closed: the association ended");
   self->counters(now ? "at the link's up" : "at the link's down");
+}
+
+// Family enable can set RUNNING while the station is still waiting for its
+// first profile. A repeated down is also meaningful after late BSD attach or
+// re-enable; repair only this bit, without changing administrative IFF_UP.
+void PianoWifiEthernet::syncRunning(bool authorized, bool force)
+{
+  ifnet_t ifp = fInterface ? fInterface->getIfnet() : nullptr;
+  if (ifp) {
+    if (!force && ((ifnet_flags(ifp) & IFF_RUNNING) != 0) == authorized) return;
+    ifnet_set_flags(ifp, authorized ? IFF_RUNNING : 0, IFF_RUNNING);
+    const uint32_t flags = uint32_t(ifnet_flags(ifp));
+    note("the authorized link set IFF_RUNNING=%u (PianoWifiBsdLinkV1 ifnet flags %#x; DHCP gate %s)", (flags & IFF_RUNNING) ? 1u : 0u, flags,
+         (flags & IFF_RUNNING) ? "open" : "closed");
+  }
 }
 
 UInt32 PianoWifiEthernet::outputPacket(mbuf_t packet, void *)

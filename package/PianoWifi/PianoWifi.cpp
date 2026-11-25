@@ -132,10 +132,11 @@ struct Args {
   uint32_t rddm, defer, wake;
   uint32_t deadlineMs;
   uint32_t l7, l7wait, l7hold, l7tries, l7scans, l7frame, l7step, l7file, l7cands;
+  bool nativeBoot;
   uint32_t l8, l8status, l8blocks, l8tracems;
   uint32_t sleepOff, rejoin, dropTest, clientWaitMs;
   uint32_t restart, restartCap, crashTest, fastRestart, haltWatch, en0, ps, psIdleMs, l8stats, bgScanS, phy, apple80211;
-  uint32_t rxba, reoPool;
+  uint32_t rxba, reoPool, kickoutEnds;
 };
 Args gArgs;
 
@@ -240,7 +241,10 @@ void readArgs()
   // piano-wifi-l7file=0: the profile only through the sysctl (by default the kext also reads the root-only profile file
   // itself while it waits, every 2 s: a RAM probe's Data may have no helper); piano-wifi-l7cands=N: how many access points of
   // the profile's name are tried in turn (4, at most 6).
-  gArgs.l7file = bootArg("piano-wifi-l7file", 1);
+  // Daily Wi-Fi starts from airportd's SET20. The file is still available to
+  // the userland helper and to kernel-only RAM probes.
+  gArgs.nativeBoot = bootArg("piano-wifi-native-boot", 0) != 0;
+  gArgs.l7file = !gArgs.nativeBoot && bootArg("piano-wifi-l7file", 1);
   gArgs.l7cands = bootArg("piano-wifi-l7cands", 4);
   if (!gArgs.l7cands || gArgs.l7cands > kStaCandidatesMax) gArgs.l7cands = 4;
   gArgs.l7frame = bootArg("piano-wifi-l7frame", kAssocFrameWaitMs);
@@ -290,7 +294,7 @@ void readArgs()
   // piano-wifi-crashtest=S: a test, S s after the port first opens on a pass a restart began, the chip is asked once for its
   // crash dump environment (MHI's SoC reset request, as the MHI host forces a dump), so that one boot shows a crash's restart.
   gArgs.restart = bootArg("piano-wifi-restart", gArgs.level >= 8 ? 1 : 0);
-  gBootPower.enabled = bootArg("piano-wifi-boot-on", 1) != 0;
+  gBootPower.enabled = bootArg("piano-wifi-boot-on", gArgs.nativeBoot ? 0 : 1) != 0;
   gArgs.restartCap = bootArg("piano-wifi-restarts", 6);
   if (!gArgs.restartCap || gArgs.restartCap > 100) gArgs.restartCap = 6;
   gArgs.crashTest = bootArg("piano-wifi-crashtest", 0);
@@ -327,6 +331,8 @@ void readArgs()
   gArgs.rxba = bootArg("piano-wifi-rxba", kBaModeAccept);
   if (gArgs.rxba > kBaModeAcceptAmsdu) gArgs.rxba = kBaModeAccept;
   gArgs.reoPool = bootArg("piano-wifi-reopool", 1) ? 1 : 0;
+  // piano-wifi-kickout-ends=1 (2026-11-20, WIFI-DEAF-REJOIN.md): the firmware's kickout ends the association, as before
+  gArgs.kickoutEnds = bootArg("piano-wifi-kickout-ends", 0) ? 1 : 0;
   // piano-wifi-bgscan=S (review of ee9980a, #3): a background scan every S s while associated, its list published for the
   // menu's snapshot; by default 120 with the menu binding on (piano-wifi-apple80211=1), 0 (only a fast pass's one) without.
   gArgs.apple80211 = bootArg("piano-wifi-apple80211", 0);
@@ -336,6 +342,10 @@ void readArgs()
 }
 
 uint64_t nowMs();
+
+// 2026-11-20 (WIFI-DEAF-REJOIN.md): how the last association ended when it was not ours (StaDisconnect; 0: ours or none). The
+// next join then scans before its choice.
+uint32_t gRejoinScanCause = 0;
 
 // ---- the ladder's stack (boots 10c, 10d and 10d-ctl, 2026-11-14) ----
 // The ladder's thread has XNU's 16 KiB kernel stack. Level 6 inlined two whole-object resets (Link and HttRx, about 12 KiB of
@@ -2743,6 +2753,7 @@ Dp gDp;                             // level 8: the data path's rings (WifiDp.h)
 bool gDpPlanned;
 Link gLink;
 volatile bool gLinkRunning;         // the ladder's thread is inside level 6 or 7: the power hook asks it to stop instead of racing
+volatile uint32_t gRadioUsable;     // 1 from a pass's level 6 hand-off to level 7 until chip-down or level 7's end (DRIVER_AVAILABLE)
 volatile uint32_t gStopRequested;   // set by the power hook, read by the ladder each turn
 const char *volatile gStopWhy = "a stop";   // what asked (stopRadio's caller: "suspend", "shutdown")
 bool profileOwnMac(uint8_t *mac);   // level 7's join profile (below): the station's address, when it names one
@@ -3230,7 +3241,16 @@ uint32_t gProfileGeneration;   // under gProfileLock
 bool gProfileSet;
 piano_wifi_profile_stamp gProfileStamp;   // the file's at the last read (profileFileCheck)
 bool gProfileStampValid, gProfileFromFile, gProfileFromMenu, gProfileReadOnce;
-volatile uint32_t gMenuJoinRequested;
+WifiJoinRequest gJoinRequest;  // under gProfileLock
+
+WifiJoinRequest joinRequest()
+{
+  if (!gProfileLock) return {};
+  IOLockLock(gProfileLock);
+  const auto request = gJoinRequest;
+  IOLockUnlock(gProfileLock);
+  return request;
+}
 
 void profileClear()
 {
@@ -3239,6 +3259,7 @@ void profileClear()
   piano_wifi_profile_wipe(&gProfile);
   gProfileSet = false;
   gProfileFromMenu = false;
+  if (gJoinRequest.nativeOwner) gJoinRequest.cancel();
   IOLockUnlock(gProfileLock);
 }
 
@@ -3248,9 +3269,10 @@ int sysctlJoin(struct sysctl_oid *, void *, int, struct sysctl_req *req)
   IOLockLock(gProfileLock);
   if (gProfileSet)
     snprintf(line, sizeof line, "set (generation %u): a network name of %u byte(s), %s%s, the access point %s, the station's "
-             "address %s", gProfileGeneration, unsigned(gProfile.ssid_len), piano_wifi_security_name(gProfile.security),
+             "address %s, source %s", gProfileGeneration, unsigned(gProfile.ssid_len), piano_wifi_security_name(gProfile.security),
              gProfile.psk_len ? " with a passphrase" : "", (gProfile.flags & PianoWifiProfileBssid) ? "given" : "not given",
-             (gProfile.flags & PianoWifiProfileMac) ? "given" : "not given");
+             (gProfile.flags & PianoWifiProfileMac) ? "given" : "not given",
+             gProfileFromMenu ? "apple-set20" : gProfileFromFile ? "file" : "sysctl");
   else
     snprintf(line, sizeof line, "not set");
   IOLockUnlock(gProfileLock);
@@ -3270,6 +3292,11 @@ int sysctlJoin(struct sysctl_oid *, void *, int, struct sysctl_req *req)
     return EINVAL;
   }
   IOLockLock(gProfileLock);
+  if (gJoinRequest.nativeOwner) {
+    IOLockUnlock(gProfileLock);
+    piano_wifi_profile_wipe(&incoming);
+    return EBUSY;
+  }
   gProfile = incoming;
   gProfileSet = true;
   gProfileFromFile = false;
@@ -3335,6 +3362,33 @@ int sysctlPowerExplicit(struct sysctl_oid *, void *, int, struct sysctl_req *req
 }
 struct sysctl_oid gOidPowerExplicit;
 
+// A root diagnostic asks the worker for one involuntary-loss simulation. It
+// never changes user intent (unlike SET22), and never accesses WMI here.
+volatile uint32_t gLinkDropRequested;
+int sysctlLinkDrop(struct sysctl_oid *, void *, int, struct sysctl_req *req)
+{
+  int value = int(__atomic_load_n(&gLinkDropRequested, __ATOMIC_ACQUIRE));
+  int err = SYSCTL_OUT(req, &value, sizeof value);
+  if (err || !req->newptr) return err;
+  int incoming = 0;
+  if (req->newlen != sizeof incoming) return EINVAL;
+  err = SYSCTL_IN(req, &incoming, sizeof incoming);
+  if (err) return err;
+  if (incoming < 0 || incoming > 2) return EINVAL;   // 2 (T-18): the loss handled as one not ours (a beacon miss)
+  if (gArgs.level < 8 || !gArgs.rejoin) return ENOTSUP;
+  if (incoming) {
+    struct piano_wifi_assoc_snapshot snapshot = {};
+    if (piano_wifi_assoc_snapshot(&snapshot) || !snapshot.authorized) return ENOTCONN;
+    uint32_t empty = 0;
+    if (!__atomic_compare_exchange_n(&gLinkDropRequested, &empty, uint32_t(incoming), false,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return EBUSY;
+  } else __atomic_store_n(&gLinkDropRequested, 0u, __ATOMIC_RELEASE);
+  note("PianoWifiUsable2 link-loss probe %s%s", incoming ? "requested" : "cancelled",
+       incoming == 2 ? " (PianoWifiLossSimV1: handled as an end not ours, the beacon-miss path)" : "");
+  return 0;
+}
+struct sysctl_oid gOidLinkDrop;
+
 // machdep.piano_wifi_phy (boot 10r): the most wanted PHY of a join (0 legacy, 1 HT, 2 VHT); a change makes the associated
 // station leave and join again with it (level 7).
 int sysctlPhy(struct sysctl_oid *, void *, int, struct sysctl_req *req)
@@ -3385,6 +3439,13 @@ int sysctlApple80211(struct sysctl_oid *, void *, int, struct sysctl_req *req)
 }
 struct sysctl_oid gOidApple80211;
 
+int sysctlNativeBoot(struct sysctl_oid *, void *, int, struct sysctl_req *req)
+{
+  int value = gArgs.nativeBoot ? 1 : 0;
+  return SYSCTL_OUT(req, &value, sizeof value);
+}
+struct sysctl_oid gOidNativeBoot;
+
 }  // namespace
 
 // The Apple80211 front end lives in PianoWifiEthernet.cpp.  SET 20 is parsed there
@@ -3408,9 +3469,9 @@ extern "C" int piano_wifi_net_menu_join_profile(const struct piano_wifi_profile 
   gProfileFromFile = false;
   gProfileFromMenu = true;
   const uint32_t generation = ++gProfileGeneration;
+  gJoinRequest.accept(generation, nowMs());
   IOLockUnlock(gProfileLock);
-  gProfileStampValid = false;
-  __atomic_store_n(&gMenuJoinRequested, 1u, __ATOMIC_RELEASE);
+  note("PianoWifiBootJoinReceiptV1: SET20 accepted; PianoWifiSET20Generation=%u", generation);
   note("PianoWifiMenuJoinProfile: menu join profile set (generation %u): a network name of %u byte(s), %s%s, the access point %s (none of it is logged)",
        generation, unsigned(incoming->ssid_len), piano_wifi_security_name(incoming->security),
        incoming->psk_len ? " with a passphrase" : "", (incoming->flags & PianoWifiProfileBssid) ? "given" : "not given");
@@ -3419,21 +3480,38 @@ extern "C" int piano_wifi_net_menu_join_profile(const struct piano_wifi_profile 
 
 extern "C" int piano_wifi_user_control(uint32_t operation)
 {
-  if (gArgs.level < 8 || !gArgs.restart) return ENOTSUP;
+  if (gArgs.level < 8 || !gArgs.restart || !gProfileLock) return ENOTSUP;
+  if (operation > PIANO_WIFI_USER_LEAVE) return EINVAL;
+  IOLockLock(gProfileLock);
   uint32_t w;
-  if (operation == PIANO_WIFI_USER_LEAVE) w = gUserControl.disconnect();
-  else if (operation <= PIANO_WIFI_USER_ON) {
+  if (operation == PIANO_WIFI_USER_LEAVE) {
+    w = gUserControl.disconnect();
+    gJoinRequest.cancel();
+  } else {
+    const bool alreadyNative = gJoinRequest.nativeOwner;
     if (!gBootPower.setPower(gUserControl, operation == PIANO_WIFI_USER_ON)) {
-      note("PianoWifiBootPowerGuardV1 unarmed OFF acknowledged: owner stays ON, no physical stop");
-      return 0;
+      IOLockUnlock(gProfileLock);
+      note("PianoWifiBootPowerGuardV1 unarmed OFF refused: owner stays ON, no physical stop");
+      return EBUSY;
     }
     w = gUserControl.read();
+    if (!alreadyNative || operation == PIANO_WIFI_USER_OFF) gJoinRequest.cancel();
   }
-  else return EINVAL;
+  IOLockUnlock(gProfileLock);
   note("PianoWifiPowerLifecycleV1 request %s serial %u: power %u, join %u, cycle %u",
        operation == PIANO_WIFI_USER_LEAVE ? "leave" : operation == PIANO_WIFI_USER_ON ? "on" : "off",
        WifiUserControl::serial(w), WifiUserControl::power(w) ? 1u : 0u, (w & WifiUserControl::kJoin) ? 1u : 0u,
        (w & WifiUserControl::kCycle) ? 1u : 0u);
+  if (operation == PIANO_WIFI_USER_OFF) {
+    const uint64_t deadline = nowMs() + 4000;
+    while (!gUserControl.radioOffConfirmed(w)) {
+      if (nowMs() >= deadline) {
+        note("PianoWifiPowerLifecycleV1 OFF unconfirmed serial %u: returning ETIMEDOUT", WifiUserControl::serial(w));
+        return ETIMEDOUT;
+      }
+      IOSleep(10);
+    }
+  }
   return 0;
 }
 
@@ -3471,6 +3549,17 @@ void registerPhySysctls()
   gOidApple80211.oid_descr = "the kernel argument piano-wifi-apple80211 as PianoWifi read it";
   gOidApple80211.oid_version = SYSCTL_OID_VERSION;
   sysctl_register_oid(&gOidApple80211);
+  gOidNativeBoot.oid_parent = &sysctl__machdep_children;
+  gOidNativeBoot.oid_number = OID_AUTO;
+  gOidNativeBoot.oid_kind = int(CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_OID2);
+  gOidNativeBoot.oid_name = "piano_wifi_native_boot";
+  gOidNativeBoot.oid_handler = sysctlNativeBoot;
+  gOidNativeBoot.oid_fmt = "I";
+  gOidNativeBoot.oid_descr = "airportd owns boot association and the native saved profile";
+  gOidNativeBoot.oid_version = SYSCTL_OID_VERSION;
+  sysctl_register_oid(&gOidNativeBoot);
+  note("PianoWifiNativeBootV1 airportd_owner=%u profile_file=%u",
+       gArgs.nativeBoot ? 1u : 0u, gArgs.l7file ? 1u : 0u);
 }
 
 void registerPsSysctl()
@@ -3484,8 +3573,17 @@ void registerPsSysctl()
   gOidPowerExplicit.oid_descr = "write 1 as root to allow physical Wi-Fi OFF explicitly (one-way per boot)";
   gOidPowerExplicit.oid_version = SYSCTL_OID_VERSION;
   sysctl_register_oid(&gOidPowerExplicit);
+  gOidLinkDrop.oid_parent = &sysctl__machdep_children;
+  gOidLinkDrop.oid_number = OID_AUTO;
+  gOidLinkDrop.oid_kind = int(CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_OID2);
+  gOidLinkDrop.oid_name = "piano_wifi_link_drop";
+  gOidLinkDrop.oid_handler = sysctlLinkDrop;
+  gOidLinkDrop.oid_fmt = "I";
+  gOidLinkDrop.oid_descr = "root one-shot simulated link loss: 1 request, 0 cancel; worker consumes when authorized";
+  gOidLinkDrop.oid_version = SYSCTL_OID_VERSION;
+  sysctl_register_oid(&gOidLinkDrop);
   note("PianoWifiBootPowerGuardV1 piano-wifi-boot-on=%u: unarmed OFF %s; only explicit root arm enables physical OFF",
-       gBootPower.enabled ? 1u : 0u, gBootPower.enabled ? "acknowledged with radio ON" : "unrestricted");
+       gBootPower.enabled ? 1u : 0u, gBootPower.enabled ? "refused" : "unrestricted");
   __atomic_store_n(&gPsWanted, gArgs.ps, __ATOMIC_RELEASE);
   gOidPs.oid_parent = &sysctl__machdep_children;
   gOidPs.oid_number = OID_AUTO;
@@ -3505,6 +3603,7 @@ void registerJoinSysctl()
 {
   gProfileLock = IOLockAlloc();
   if (!gProfileLock) return;
+  if (gArgs.nativeBoot) gJoinRequest.cancel();
   gOidJoin.oid_parent = &sysctl__machdep_children;
   gOidJoin.oid_number = OID_AUTO;
   // a string to read (the status line); a write needs root, as every sysctl without CTLFLAG_ANYBODY does
@@ -3553,19 +3652,32 @@ bool profileOwnMac(uint8_t *mac)
 // name, the security and the preferred access point cross; the passphrase stays in the profile (the four-way handshake is
 // user space's, piece 3).
 uint32_t gStaProfileGeneration;   // the profile generation the join machine holds (profileToSta)
-bool profileToSta(Sta &s, uint32_t &generationSeen)
+bool profileToSta(Sta &s, uint32_t &generationSeen, uint64_t now)
 {
   if (!gProfileLock) return false;
   bool handed = false;
   IOLockLock(gProfileLock);
-  if (gProfileSet && gProfileGeneration != generationSeen) {
+  if (gProfileSet && gProfileGeneration != generationSeen && gJoinRequest.canStart(now)) {
     handed = staSetProfile(s, gProfile.ssid, gProfile.ssid_len, gProfile.security,
                            (gProfile.flags & PianoWifiProfileBssid) ? gProfile.bssid : nullptr);
     generationSeen = gProfileGeneration;
-    if (handed) gStaProfileGeneration = gProfileGeneration;
+    if (handed) {
+      gStaProfileGeneration = gProfileGeneration;
+      gJoinRequest.consume();
+    }
   }
   IOLockUnlock(gProfileLock);
   return handed;
+}
+
+void recordAppleJoin(uint32_t generation, uint32_t result, uint64_t now)
+{
+  if (!generation || !gProfileLock) return;
+  IOLockLock(gProfileLock);
+  const bool done = gJoinRequest.finish(generation, result, now);
+  const uint32_t terminal = gJoinRequest.result(now);
+  IOLockUnlock(gProfileLock);
+  if (done) note("PianoWifiAppleJoinV1 terminal generation %u result %u", generation, terminal);
 }
 
 // The root-only profile file against the profile in use (review of 2026-11-14, F2): the supplicant reads the same file at each
@@ -3576,10 +3688,7 @@ __attribute__((noinline)) bool profileFileCheck(const char *when)
 {
   static const char *lastProblem;
   if (!gArgs.l7file || !gProfileLock) return false;
-  IOLockLock(gProfileLock);
-  const bool menuOwnsProfile = gProfileFromMenu;
-  IOLockUnlock(gProfileLock);
-  if (menuOwnsProfile) return false;
+  if (joinRequest().nativeOwner) return false;
   piano_wifi_profile_stamp stamp = {};
   const int rc = piano_wifi_profile_file_stamp(&stamp);
   if (rc == ENOENT) {
@@ -3620,6 +3729,11 @@ __attribute__((noinline)) bool profileFileCheck(const char *when)
   bool changed = false, overSysctl = false;
   uint32_t generation = 0;
   IOLockLock(gProfileLock);
+  if (gJoinRequest.nativeOwner) {
+    IOLockUnlock(gProfileLock);
+    piano_wifi_profile_wipe(&fromFile);
+    return false;
+  }
   overSysctl = gProfileSet && !gProfileFromFile;
   if (gProfileSet) {
     const uint8_t *a = reinterpret_cast<const uint8_t *>(&gProfile), *b = reinterpret_cast<const uint8_t *>(&fromFile);
@@ -3662,8 +3776,9 @@ __attribute__((noinline)) void profileBeforeJoin(const char *when)
   if (!gProfileLock) return;
   IOLockLock(gProfileLock);
   const uint32_t generation = gProfileGeneration;
+  const bool native = gJoinRequest.nativeOwner;
   IOLockUnlock(gProfileLock);
-  if (gSta.profileSet && gStaProfileGeneration != generation) {
+  if (gSta.profileSet && (native || gStaProfileGeneration != generation)) {
     gSta.profileSet = false;   // staBegin then waits for the profile, which profileToSta hands over at once
     for (unsigned i = 0; i < kSsidMax; ++i) gSta.ssid[i] = 0;
     gSta.ssidLength = 0;
@@ -3680,6 +3795,13 @@ enum : uint32_t { kBgScanNone = 0, kBgScanArmed, kBgScanSent, kBgScanOver };
 uint32_t gBgScan, gBgScanIdNow, gBgScanSeed, gBgScanCount;
 bool gBgScanDone, gBgScanRefused;
 uint64_t gBgScanAt, gBgScanNext;
+// 2026-11-23 (20261123-wifi-rejoin/ANALYSIS.md, PianoWifiScanExpireV1): an idle background scan (no station) ends its round
+// with scanExpire; the access point of an association that ended by itself is its suspect, and until gBgScanQuickUntil the
+// idle scans come every kBgScanQuickS s, so that a network back on the air is in the list (and airportd's next scan) soon.
+constexpr uint32_t kBgScanQuickS = 30, kBgScanQuickMs = 600000, kScanExpireRounds = 2;
+bool gBgScanIdle, gBgSuspectSet;
+uint8_t gBgSuspect[6];
+uint64_t gBgScanQuickUntil;
 bool bgScanEvent(uint32_t id, const uint8_t *payload, uint32_t length)
 {
   if (id != uint32_t(kWmiEvtScan)) return false;
@@ -3836,6 +3958,10 @@ void staReport(void *, uint32_t what, uint32_t a, uint32_t b)
     note(a ? "level 7: the peer's association confirmed after %u ms"
            : "level 7: the peer's association not confirmed within %u ms (the join goes on)", b);
     return;
+  case kStaRepKickoutKept:
+    note("level 7: PianoWifiKickoutKeptV1 the firmware's kickout (reason %u, %u in this association): reported, the association "
+         "kept (ath12k reports it as low ack; a dead link ends by the beacon miss)", a, b);
+    return;
   case kStaRepDisconnect:
     note("level 7: the association ended: %s, reason %u (%s), %u ms after the station came up", staDisconnectName(a), b,
          (a == kStaDiscDeauth || a == kStaDiscDisassoc) ? dot11ReasonName(uint16_t(b)) : "the firmware's code",
@@ -3946,26 +4072,39 @@ uint8_t gL8Out[kStaOutBytes + 64];   // a command of level 8's own (a key is 25 
 // snapshot instead of reaching into the supplicant's mutable objects.  It is
 // intentionally a read-only, best-effort view: the front end polls it and
 // emits kev transitions when the association generation changes.
+extern "C" int piano_wifi_assoc_radio_usable(void)
+{
+  return __atomic_load_n(&gRadioUsable, __ATOMIC_SEQ_CST) && WifiUserControl::power(gUserControl.read()) &&
+         !gUserControl.radioStop() ? 1 : 0;
+}
+
 extern "C" int piano_wifi_assoc_snapshot(struct piano_wifi_assoc_snapshot *out)
 {
   if (!out) return EINVAL;
   bzero(out, sizeof *out);
   out->version = PIANO_WIFI_ASSOC_SNAPSHOT_VERSION;
-  const uint32_t user = gUserControl.read();
-  out->power = (gArgs.level >= 2 && WifiUserControl::power(user)) ? 1 : 0;
-  bool newRequest = false;
+  uint32_t user;
+  WifiJoinRequest request;
+  uint32_t stationGeneration = 0;
   if (gProfileLock) {
     IOLockLock(gProfileLock);
-    newRequest = gProfileFromMenu && gProfileSet && gProfileGeneration != gStaProfileGeneration;
+    user = gUserControl.read();
+    request = gJoinRequest;
+    stationGeneration = gStaProfileGeneration;
     IOLockUnlock(gProfileLock);
-  }
-  out->user_stop = !gUserControl.allowed(user) || newRequest;
+  } else user = gUserControl.read();
+  // Keep GET19 and the power event at ON until the worker confirms physical OFF.
+  out->power = (gArgs.level >= 2 && (WifiUserControl::power(user) || (user & WifiUserControl::kCycle))) ? 1 : 0;
+  const bool nativeStation = request.consumed && request.generation == stationGeneration;
+  const uint32_t nativeResult = request.result(nowMs());
+  out->join_generation = request.generation;
+  out->user_stop = !gUserControl.allowed(user) || (request.nativeOwner && !nativeStation && nativeResult != 9);
   out->op_mode = 1;
   out->state = 0;
   out->noise_dbm = -95;
   const bool canceled = !WifiUserControl::power(user) || !(user & WifiUserControl::kJoin);
-  out->associate_result = canceled ? 2u : staAppleAssociateResult(gSta, newRequest);
-  if (out->user_stop) return 0;
+  out->associate_result = canceled ? 2u : request.nativeOwner ? nativeResult : staAppleAssociateResult(gSta);
+  if (out->user_stop || (request.nativeOwner && (!nativeStation || nativeResult > 1))) return 0;
   // ASSOCIATE_RESULT is a public progress/result code: 0 while the station or
   // its WPA2 port is still running, 1 only after authorization, 9 for a
   // timeout/no-answer, and 2 for every other completed failure.
@@ -3974,7 +4113,8 @@ extern "C" int piano_wifi_assoc_snapshot(struct piano_wifi_assoc_snapshot *out)
                     (gSta.step == kStaPeerAssoc || gSta.step == kStaVdevUp || gSta.step == kStaAuthorize ||
                      gSta.step == kStaAssociated);
   out->associated = live && gSta.vdevUp;
-  out->authorized = out->associated && gSta.authorized;
+  out->authorized = out->associated && gSta.authorized && (!request.nativeOwner || nativeResult == 1);
+  if (out->associate_result == 1 && !out->authorized) out->associate_result = 2;
   out->state = out->associated ? (out->authorized ? 4 : 3) : 0;
   if (!out->associated) return 0;
   out->ssid_length = gSta.choice.net.ssidLength <= PIANO_WIFI_ASSOC_SSID_MAX ? gSta.choice.net.ssidLength : PIANO_WIFI_ASSOC_SSID_MAX;
@@ -4501,6 +4641,8 @@ void level8Status(uint64_t now, const char *why)
        "exceptions %u (push %u, error %u); refill tail %u",
        why, st.rxRecycled, st.rxRecycleFull, st.relEntries, st.relDelivered, st.relRecycled, st.relOther, st.excEntries,
        st.lastPushReason, st.lastErrorCode, gHtt.refillTaken);
+  note("level 8 %s: PianoWifiRxRecycleV1 exceptions %u: link descriptors %u (foreign %u), buffers posted again %u, not ours %u",
+       why, st.excEntries, st.excLinks, st.excLinkForeign, st.excBufRecycled, st.excBufOther);
   note("level 8 %s: sent %u frames (%u bytes, %u EAPOL); completions %u (acked %u, not %u, last reason %u, firmware %u, "
        "other %u, bad cookie %u)",
        why, st.txFrames, st.txBytes, st.txEapol, st.txCompletions, st.txAcked, st.txNotAcked, st.lastTxReason, st.txFwReleased,
@@ -4653,10 +4795,14 @@ void level8Deliver(uint32_t kind, const uint8_t *frame, uint32_t length, uint64_
 // The association's state, as the join machine has it, into the data path, en0 and the port.
 void level8Follow(uint64_t now)
 {
+  const auto request = joinRequest();
+  const uint32_t result = request.result(now);
+  const bool matchesRequest = !request.nativeOwner ||
+                              (request.generation == gStaProfileGeneration && request.consumed && result <= 1);
   // Live from the association's answer on: the access point sends message 1 of the handshake right after it, before the
   // peer's association and the station's up have gone out, and the port must have the association's generation by then. The
   // transmit side waits for the station's up (a frame before it is the firmware's to drop): EAPOL_TX frames wait in the queue.
-  const bool live = gUserControl.allowed(gUserControl.read()) &&
+  const bool live = matchesRequest && gUserControl.allowed(gUserControl.read()) &&
                     gSta.assocAnswered && gSta.assocStatus == kDot11StatusSuccess && !gSta.disconnect &&
                     (gSta.step == kStaPeerAssoc || gSta.step == kStaVdevUp || gSta.step == kStaAuthorize ||
                      gSta.step == kStaAssociated);
@@ -4695,7 +4841,7 @@ void level8Follow(uint64_t now)
          peer && peer->hasSearch ? "from the peer map" : "0: the peer map carried none");
     deferPhase();
   }
-  if (up && gSta.authorized && !gL8.linkUpTold) {
+  if (up && gSta.authorized && (!request.nativeOwner || result == 1) && !gL8.linkUpTold) {
     if (gBgScan == kBgScanNone && (gPass.fast || gArgs.bgScanS)) gBgScan = kBgScanArmed;
     gL8.linkUpTold = true;
     gL8.authorizedAt = now;
@@ -5051,13 +5197,13 @@ __attribute__((noinline)) void restartTurn(IOService *owner, uint64_t now, uint6
   }
 }
 
-__attribute__((noinline)) void bgScanTurn(IOService *owner, uint64_t now, uint64_t openedAt, bool stopping)
+__attribute__((noinline)) void bgScanTurn(IOService *owner, uint64_t now, uint64_t openedAt, bool stopping, bool idle = false)
 {
-  if (!gUserControl.allowed(gUserControl.read())) return;
+  if (gUserControl.radioStop() || (!idle && !gUserControl.allowed(gUserControl.read()))) return;
   // (review of ee9980a, #3) with the menu binding on (piano-wifi-apple80211), a scan again every piano-wifi-bgscan s while
   // associated, so that the menu's snapshot follows the networks around; without it only the fast pass's one
   if (gBgScan == kBgScanOver && gArgs.bgScanS && gBgScanNext && now >= gBgScanNext && !stopping) gBgScan = kBgScanArmed;
-  if (gBgScan == kBgScanArmed && !stopping && gSta.step == kStaAssociated && now >= openedAt + 10000) {
+  if (gBgScan == kBgScanArmed && !stopping && (idle || (gSta.step == kStaAssociated && now >= openedAt + 10000))) {
     static WmiScanRequest request;   // a few hundred bytes: not on the ladder's stack
     request = gLink.request;         // level 6's channels (the regulatory list's), its dwell times
     gBgScanIdNow = kBgScanId + (gBgScanCount & 1u);   // the two ids in turn: a late event of the last one ends nothing
@@ -5077,19 +5223,46 @@ __attribute__((noinline)) void bgScanTurn(IOService *owner, uint64_t now, uint64
     gBgScanSeed = gLink.scan.count;
     ++gBgScanCount;
     gBgScan = rc == 1 ? kBgScanSent : kBgScanOver;
-    gBgScanNext = gArgs.bgScanS ? now + uint64_t(gArgs.bgScanS) * 1000 : 0;
-    note("level 7: a background scan beside the association (the fast restart published no list): %u channel(s), %s",
+    // an idle scan is a round of the list (scanExpire); soon after an association ended by itself the idle ones come quicker
+    // T-18 (office): a full scan while associated is a round too (wpa_supplicant counts every full scan), so that a long
+    // association keeps the list's signals current and forgets what went away; the network the station is on stays
+    gBgScanIdle = rc == 1;
+    gLink.scan.keepSet = gSta.vdevUp && !gSta.disconnect;
+    for (unsigned k = 0; k < 6; ++k) gLink.scan.keepBssid[k] = gLink.scan.keepSet ? gSta.bssid[k] : 0;
+    if (gBgScanIdle) scanRoundBegin(gLink.scan);
+    const uint32_t every = idle && now < gBgScanQuickUntil && gArgs.bgScanS > kBgScanQuickS ? kBgScanQuickS : gArgs.bgScanS;
+    gBgScanNext = every ? now + uint64_t(every) * 1000 : 0;
+    note("level 7: background scan: %u channel(s), %s",
          request.channelCount, rc == 1 ? "asked for" : "NOT sent (the command could not be built or was refused)");
     return;
   }
   if (gBgScan == kBgScanSent && (gBgScanDone || now > gBgScanAt + gArgs.scanWaitMs + 3000 || stopping)) {
     gBgScan = kBgScanOver;
+    // 2026-11-23 (PianoWifiScanExpireV1): an idle scan that ran to its end forgets the networks it and the one before did not
+    // hear, and the suspect already when it did not hear it; an idle scan that did not end is no round at all
+    uint32_t expired = 0;
+    if (gBgScanIdle) {
+      gBgScanIdle = false;
+      if (gBgScanDone && !gBgScanRefused) {
+        const bool onNetwork = gSta.vdevUp && !gSta.disconnect;
+        const bool looked = gLink.scan.roundFrames != 0;
+        expired = scanExpire(gLink.scan, kScanExpireRounds, gBgSuspectSet ? gBgSuspect : nullptr, onNetwork ? gSta.bssid : nullptr);
+        if (expired || gBgSuspectSet)
+          note("level 7: PianoWifiScanExpireV1 round %u: %u frame(s), %u network(s) forgotten (not heard in %u rounds%s), %u kept",
+               gLink.scan.round, gLink.scan.roundFrames, expired, kScanExpireRounds,
+               gBgSuspectSet ? (looked ? "; the lost access point looked for" : "; the lost access point kept: nothing heard") : "",
+               gLink.scan.count);
+        if (looked) gBgSuspectSet = false;
+      } else if (gLink.scan.round) {
+        --gLink.scan.round;
+      }
+    }
     // (review of ee9980a, #1 and #6) a list is published only from a scan that ran to its end and found more than it began
     // with; a refusal, a timeout or a stop keeps the list published before (a fast pass's one seeded entry must never replace
     // the boot's whole list)
     // (a list that began with more than the fast pass's one seeded entry is published refreshed even when it did not grow: its
-    // entries' signals and ages are the scan's)
-    const bool publish = gBgScanDone && !gBgScanRefused && (gLink.scan.count > gBgScanSeed || gBgScanSeed > 1);
+    // entries' signals and ages are the scan's; and one that forgot a network is published, so that airportd stops seeing it)
+    const bool publish = gBgScanDone && !gBgScanRefused && (gLink.scan.count > gBgScanSeed || gBgScanSeed > 1 || expired);
     note("level 7: the background scan %s after %llu ms: %u network(s) in the list (%u before it), %s",
          gBgScanRefused ? "was refused at its start" : gBgScanDone ? "ended" : stopping ? "was cut short by the stop" : "ran out of time",
          (unsigned long long)(now - gBgScanAt), gLink.scan.count, gBgScanSeed,
@@ -5260,6 +5433,7 @@ __attribute__((noinline)) void baTurn(uint64_t now, bool stopping)
 // nothing may reach the endpoint's registers any more).
 void chipDown(PowerState &power, const Options &opt)
 {
+  __atomic_store_n(&gRadioUsable, 0u, __ATOMIC_SEQ_CST);
   if (gWin[kWinTlmm].va) safeOff(gHw, power, opt);
   const bool held = gChipHeld;
   if (held) chipPut();
@@ -5370,6 +5544,9 @@ __attribute__((noinline)) void userStopScans()
     } while (nowMs() < until);
     note("PianoWifiPowerLifecycleV1 stop scan: %s", rc == 1 ? "sent" : "transport refused or timed out");
   }
+  // an idle round cut short counts for nothing (PianoWifiScanExpireV1)
+  if (gBgScanIdle && gBgScan == kBgScanSent && gLink.scan.round) --gLink.scan.round;
+  gBgScanIdle = false;
   gBgScan = kBgScanNone;
   gBgScanNext = 0;
 }
@@ -5460,27 +5637,41 @@ int level7(IOService *owner)
   // a fast pass scans beside its association (bgScanTurn); with the menu binding on, every pass does, and again periodically
   gBgScan = gPass.fast || gArgs.bgScanS ? kBgScanArmed : kBgScanNone;
   gBgScanNext = 0;
+  gBgScanIdle = gBgSuspectSet = false;
+  gBgScanQuickUntil = 0;
   if (!gPass.level7At) gPass.level7At = nowMs();
   if (gPass.fast && gLastNetValid) {
     // the fast restart: the last network as the only entry of the list (level 6 did not scan)
     gLink.scan.entries[0] = gLastNet;
+    gLink.scan.entries[0].heardRound = gLink.scan.round;
     gLink.scan.count = 1;
     note("level 7: the fast restart: the last network (%u MHz, channel %u) is joined directly, without a scan", gLastNet.freq,
          unsigned(gLastNet.channel));
   }
   for (;;) {
-  // A user leave is an idle station, not a failed join to retry from the
-  // retained profile. A subsequent SET20 releases this gate. No scan runs here.
-  while (!gUserControl.allowed(gUserControl.read())) {
+  // In native mode only a fresh SET20 can start a station attempt.
+  gLink.hook = staHook;
+  for (;;) {
     const uint32_t user = gUserControl.read();
     if (gUserControl.radioStop() || __atomic_load_n(&gStopRequested, __ATOMIC_ACQUIRE)) {
       stoppedOnRequest = true;
       break;
     }
-    gUserControl.stopped(user);  // no station exists between joins
     const uint64_t now = nowMs();
+    const WifiJoinRequest request = joinRequest();
+    if (gUserControl.allowed(user) && request.canStart(now)) {
+      if (gBgScan == kBgScanSent) userStopScans();
+      break;
+    }
+    gUserControl.stopped(user);  // no station exists between joins
+    if (request.nativeOwner && !request.terminal && request.result(now) == 9)
+      recordAppleJoin(request.generation, 9, now);
     linkRun(gLink, now);
     if (gArgs.level >= 8) level8Turn(now);
+    if (request.nativeOwner && gArgs.bgScanS) {
+      if (gBgScan == kBgScanNone) gBgScan = kBgScanArmed;
+      bgScanTurn(owner, now, 0, false, true);
+    }
     if (gLink.step == kLinkStopped || mhiHealth(gMhiIo, gBoot.bhi).dead()) { why = "the idle firmware stopped"; break; }
     IOSleep(20);
   }
@@ -5511,6 +5702,11 @@ int level7(IOService *owner)
          poolQueues ? "fresh memory of the pool" : (joins % 2 == 0 ? "the second block" : "the first block"));
   profileBeforeJoin(joins == 1 ? "at the join's start" : "before the rejoin");
   o.phy = __atomic_load_n(&gPhyWanted, __ATOMIC_ACQUIRE);
+  o.kickoutEnds = gArgs.kickoutEnds != 0;
+  o.scanFirst = gRejoinScanCause != 0;
+  if (o.scanFirst)
+    note("level 7: PianoWifiRejoinScanV1 join %u: the last association ended by %s (not ours): one scan of our own before the "
+         "choice", joins, staDisconnectName(gRejoinScanCause));
   staBeginOnce(o, env, nowMs());
   gLink.hook = staHook;
   uint32_t generation = 0;
@@ -5538,6 +5734,7 @@ int level7(IOService *owner)
       bgScanTurn(owner, now, firstOpenAt, stopping);
     }
     const uint32_t user = gUserControl.read();
+    const WifiJoinRequest request = joinRequest();
     if (!stopping && (gUserControl.pending(user) || gUserControl.radioStop())) {
       userStop = user;
       userStopped = true;
@@ -5548,16 +5745,43 @@ int level7(IOService *owner)
       note("PianoWifiPowerLifecycleV1 teardown serial %u: deauth, vdev down, peer delete, vdev stop",
            WifiUserControl::serial(user));
     }
+    if (!stopping && request.nativeOwner) {
+      const bool replaced = generation && generation != request.generation;
+      const bool expired = request.result(now) == 9;
+      if (replaced || expired || (!generation && !request.canStart(now))) {
+        if (expired) recordAppleJoin(request.generation, 9, now);
+        staStop(gSta, now, 300u);
+        stopping = true;
+        stopAt = now;
+      }
+    }
     phyTurn(now, stopping);
     baTurn(now, stopping);
-    if (gArgs.dropTest && !gDropDone && firstOpenAt && now >= firstOpenAt + uint64_t(gArgs.dropTest) * 1000 && !stopping &&
-        gSta.step == kStaAssociated) {
-      gDropDone = true;   // once a boot (a restart's pass does not drop again)
-      dropThisJoin = true;
+    const bool timedDrop = gArgs.dropTest && !gDropDone && firstOpenAt &&
+                           now >= firstOpenAt + uint64_t(gArgs.dropTest) * 1000;
+    if (!stopping && gSta.step == kStaAssociated && gSta.authorized &&
+        (timedDrop || __atomic_load_n(&gLinkDropRequested, __ATOMIC_ACQUIRE))) {
+      const uint32_t requestedKind = __atomic_exchange_n(&gLinkDropRequested, 0u, __ATOMIC_ACQ_REL);
+      const bool requestedDrop = requestedKind != 0;
+      if (timedDrop) gDropDone = true;   // once a boot (a restart's pass does not drop again)
+      // T-18 (PianoWifiLossSimV1): kind 2 is the office's loss on the tablet's own bench: the teardown is ours (the access
+      // point stays on the air) but everything after it takes the path of a beacon miss (an end not ours: the rejoin scans
+      // first, the lost access point is the suspect, the idle scans come every 30 s, airportd sees an involuntary link down)
+      const bool simulateNotOurs = requestedKind == 2 && !timedDrop;
+      dropThisJoin = !simulateNotOurs;
+      if (simulateNotOurs) {
+        gSta.disconnect = kStaDiscBeaconMiss;
+        gSta.disconnectReason = 0;
+        gSta.disconnectMs = gSta.associatedAt ? uint32_t(now - gSta.associatedAt) : 0;
+        note("level 7: PianoWifiLossSimV1 the association ends as a beacon miss would (the teardown ours, the rejoin not)");
+        stadetail::say(gSta, kStaRepDisconnect, gSta.disconnect, 0);
+        stadetail::beginTeardown(gSta, now);   // the firmware's roam event (beacon miss) takes exactly this step (WifiSta.h)
+      }
+      if (requestedDrop) note("PianoWifiUsable2 link-loss probe consumed: authorized station teardown, user intent unchanged");
       note("level 7: the drop test (piano-wifi-droptest=%u): the station leaves its association now (our deauthentication); "
            "the rejoin follows",
            gArgs.dropTest);
-      staStop(gSta, now);   // the teardown sends our deauthentication: the access point drops us as it would on its own
+      if (!simulateNotOurs) staStop(gSta, now);   // the teardown sends our deauthentication: the access point drops us as it would on its own
     }
     if (!stopping && (__atomic_load_n(&gStopRequested, __ATOMIC_ACQUIRE) || levelLate())) {
       const bool requested = __atomic_load_n(&gStopRequested, __ATOMIC_ACQUIRE) != 0;
@@ -5581,6 +5805,8 @@ int level7(IOService *owner)
       why = linkErrorName(gLink.error);
       break;
     }
+    if (generation == request.generation && !stopping)
+      recordAppleJoin(generation, staAppleAssociateResult(gSta), nowMs());
     if (gArgs.level >= 8) level8Turn(now);
     // The root-only profile file, read by the kext itself while the join waits (a RAM probe's Data may have no helper): when
     // there is one, it is the profile's source (§13.2); the sysctl is the way in without one.
@@ -5595,23 +5821,13 @@ int level7(IOService *owner)
       holdForClient = clientWaitHold(now, clientWaitFrom, generation);
       if (waiting && !clientWaitFrom) clientWaitOver = true;
     }
-    if (!holdForClient && !gSta.profileSet && profileToSta(gSta, generation) && !profileNoted) {
+    if (!stopping && !holdForClient && !gSta.profileSet && profileToSta(gSta, generation, now) && !profileNoted) {
       profileNoted = true;
       if (!gPass.profileAt) gPass.profileAt = now;
       note("level 7: the join profile was handed over after %llu ms: a network name of %u byte(s), %s, the access point %s "
            "(none of it is logged)",
            (unsigned long long)(now - started), unsigned(gSta.ssidLength), piano_wifi_security_name(gSta.security),
            gSta.bssidGiven ? "given" : "not given");
-    }
-    if (!stopping && __atomic_exchange_n(&gMenuJoinRequested, 0u, __ATOMIC_ACQ_REL) && gSta.profileSet && gProfileLock) {
-      IOLockLock(gProfileLock);
-      const uint32_t requestedGeneration = gProfileGeneration;
-      IOLockUnlock(gProfileLock);
-      if (requestedGeneration != gStaProfileGeneration) {
-        note("level 7: menu association replaced the active join profile (generation %u): the station leaves and joins the new request",
-             requestedGeneration);
-        staStop(gSta, now);
-      }
     }
     staRunOnce(now);
     if (gSta.outLength) {
@@ -5633,6 +5849,28 @@ int level7(IOService *owner)
     }
     IOSleep(gSta.step == kStaProfileWait ? 20 : 2);
   }
+  const uint64_t finishedAt = nowMs();
+  recordAppleJoin(generation, 2, finishedAt);
+  // an end that was not ours (the firmware's beacon miss, the access point's deauthentication or disassociation, a kickout with
+  // piano-wifi-kickout-ends=1) makes the next join scan first; any other end clears it
+  // 2026-11-23 (20261123-wifi-rejoin/ANALYSIS.md): a join that failed before an association keeps the cause, so that every
+  // rejoin after such an end scans first until one associates (the access point may be gone, or back on another channel)
+  const bool notOurs = !userStopped && !dropThisJoin;
+  const bool failedBeforeAssoc = notOurs && !gSta.disconnect && !gSta.associatedAt;
+  gRejoinScanCause = notOurs && gSta.disconnect ? gSta.disconnect : failedBeforeAssoc ? gRejoinScanCause : 0;
+  // PianoWifiScanExpireV1: the access point of an association that ended by itself, or of a join it never answered, is looked
+  // for by the next idle scan (soon: the idle scans come quicker for a while) and forgotten when that scan does not hear it
+  if (notOurs && gSta.choice.found && (gSta.disconnect || (failedBeforeAssoc && !gSta.authAnswered))) {
+    for (unsigned i = 0; i < 6; ++i) gBgSuspect[i] = gSta.bssid[i];
+    gBgSuspectSet = true;
+    const uint64_t at = nowMs();
+    gBgScanQuickUntil = at + kBgScanQuickMs;
+    gBgScanNext = at;   // a background scan still running ends first; the idle one follows at once
+    if (gBgScan == kBgScanOver || gBgScan == kBgScanNone) gBgScan = kBgScanArmed;
+    note("level 7: PianoWifiScanExpireV1 join %u ended by %s: the next idle scan looks for its access point (idle scans every "
+         "%u s for %u min)", joins, gSta.disconnect ? staDisconnectName(gSta.disconnect) : "no answer from the access point",
+         gArgs.bgScanS > kBgScanQuickS ? kBgScanQuickS : gArgs.bgScanS, kBgScanQuickMs / 60000);
+  }
   if (gArgs.level >= 8) level8Follow(nowMs());
   if (userStopped) {
     if (gUserControl.radioStop()) stoppedOnRequest = true;
@@ -5642,9 +5880,16 @@ int level7(IOService *owner)
     note("PianoWifiPowerLifecycleV1 station stopped serial %u: down %u, peer %u, stop %u",
          WifiUserControl::serial(userStop), gSta.downSent ? 1u : 0u, gSta.peerDeleted ? 1u : 0u,
          gSta.vdevStopped ? 1u : 0u);
-    if (!stoppedOnRequest) continue;
+    if (!stoppedOnRequest) {
+      if (!joinRequest().canStart(nowMs())) note("PianoWifiAppleJoinV1 station idle: waiting for another SET20");
+      continue;
+    }
   }
   gLink.hook = nullptr;
+  if (!why && !stoppedOnRequest && joinRequest().nativeOwner) {
+    note("PianoWifiAppleJoinV1 station idle: waiting for another SET20");
+    continue;
+  }
   // ---- the rejoin's decision: only an association that ended or a join that failed, never a stop, a dead chip, a dead link
   // or a missing profile
   const bool joinEndedByItself = !why && !stoppedOnRequest && gSta.error != kStaErrNoProfile;
@@ -5703,6 +5948,7 @@ int level7(IOService *owner)
   gSta.ssidLength = 0;
   linkTeardown();
   gLinkRunning = false;
+  __atomic_store_n(&gRadioUsable, 0u, __ATOMIC_SEQ_CST);
   // A stop that a suspend or a shutdown asked for is the level's normal end, not its failure (boot 10i's "FAILED at stage
   // 718" was the restart that ended the run).
   gL7EndedOnRequest = stoppedOnRequest && !gChipDead;
@@ -6304,6 +6550,7 @@ int PianoWifi::runPass(uint32_t pass, PowerState &power, const Options &opt)
   }
   if (gLink.step == kLinkHandOff) {
     // ---- level 7 -------------------------------------------------------------------------------------------------------
+    if (gArgs.level >= 7) __atomic_store_n(&gRadioUsable, 1u, __ATOMIC_SEQ_CST);   // scans and joins are served from here
     reportStack("level 7 begins");
     e.level = 7;
     // Its own hard deadline: the profile's wait, its scans, the join's steps and the watch, with room for the teardown. A
@@ -6393,15 +6640,18 @@ bool PianoWifi::restartWait(uint32_t pass, PowerState &power, const Options &opt
     const uint32_t idleUser = gUserControl.read();
     if (gUserControl.pending(idleUser) && !(idleUser & WifiUserControl::kCycle))
       gUserControl.stopped(idleUser);  // level7/its station have ended
-    if (gUserControl.radioStop()) {
+    if (gUserControl.radioStop() && (!userParked || (idleUser & WifiUserControl::kCycle))) {
       if (chipOn) { chipDown(power, opt); chipOn = false; }
       const uint32_t user = gUserControl.read();
-      gUserControl.radioOff(user);
-      if (!userParked) {
+      const bool off = gWin[kWinTlmm].va && wifiOffPins(gHw);
+      if (off && (!userParked || (user & WifiUserControl::kCycle))) {
         note("PianoWifiPowerLifecycleV1 radio off: WLAN_EN low, PERST asserted, scans stopped serial %u",
              WifiUserControl::serial(user));
         setProperty("piano-wifi-user-radio", "off: WLAN_EN low, scans stopped");
+      } else if (!off && !userParked) {
+        note("PianoWifiPowerLifecycleV1 radio off readback failed serial %u", WifiUserControl::serial(user));
       }
+      if (off) gUserControl.radioOff(user);
       userParked = true;
     }
     if (userParked && WifiUserControl::power(gUserControl.read()) && !gUserControl.radioStop() &&
@@ -6439,12 +6689,13 @@ bool PianoWifi::restartWait(uint32_t pass, PowerState &power, const Options &opt
         woke = true;
         break;
       }
-    } else if (gUserControl.allowed(gUserControl.read()) &&
-               __atomic_load_n(&gMenuJoinRequested, __ATOMIC_ACQUIRE)) {
-      userRestart = true;
-      break;
-    } else if (!untilWake && nowMs() >= until) {
-      break;
+    } else {
+      const auto request = joinRequest();
+      if (request.nativeOwner && request.canStart(nowMs()) && gUserControl.allowed(gUserControl.read())) {
+        userRestart = true;
+        break;
+      }
+      if (!untilWake && nowMs() >= until) break;
     }
     IOSleep(50);
   }
@@ -6460,7 +6711,7 @@ bool PianoWifi::restartWait(uint32_t pass, PowerState &power, const Options &opt
     gRestartWhy = userRestart ? "Wi-Fi user power on" : "the wake from a system sleep";
     if (userRestart) {
       setProperty("piano-wifi-user-radio", "on: firmware restarting");
-      note("PianoWifiPowerLifecycleV1 radio on: clean firmware restart, retained profile available to auto-join");
+      note("PianoWifiPowerLifecycleV1 radio on: clean firmware restart");
     }
   } else {
     ++gRestartRun;
@@ -6470,7 +6721,8 @@ bool PianoWifi::restartWait(uint32_t pass, PowerState &power, const Options &opt
   }
   // A fast pass after a wake or the firmware's death, when a port has opened before and the pass that just ended was not a fast
   // one that failed to open it; a failed level, or that, restarts with the scans.
-  gFastNext = gArgs.fastRestart && gLastNetValid && (woke || userRestart || gChipDead) && !(e.fast && !e.opened);
+  gFastNext = !joinRequest().nativeOwner && gArgs.fastRestart && gLastNetValid &&
+              (woke || userRestart || gChipDead) && !(e.fast && !e.opened);
   gRestartBegan = nowMs();
   char line[200];
   snprintf(line, sizeof line, "%u restart(s): %u at a wake, %u after the firmware died, %u after a failed level; the last: %s",

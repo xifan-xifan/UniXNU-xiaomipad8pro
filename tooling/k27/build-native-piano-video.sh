@@ -33,17 +33,29 @@ for f in Sm8750Scm.c Sm8750Scm.h; do
 done
 "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -I "$P" "$P/tests/video_host.cpp" -o "$O/host-tests/video_host"
 "$O/host-tests/video_host" || { echo "Error: PianoVideo host tests failed (level 1)" >&2; exit 1; }
+"${CXX:-c++}" -std=c++20 -O2 -Wall -Wextra -Werror -I "$P" "$P/tests/geometry_host.cpp" -o "$O/host-tests/geometry_host"
+"$O/host-tests/geometry_host" || { echo "Error: PianoVideo AVC geometry tests failed" >&2; exit 1; }
 "${CXX:-c++}" -std=c++20 -O2 -Wall -Wextra -Werror -I "$P" "$P/tests/session_host.cpp" -o "$O/host-tests/session_host"
 "$O/host-tests/session_host" || { echo "Error: PianoVideo V4 protocol/arena tests failed" >&2; exit 1; }
 "${CXX:-c++}" -std=c++20 -O2 -Wall -Wextra -Werror -I "$P" "$P/tests/stream_host.cpp" -o "$O/host-tests/stream_host"
 "$O/host-tests/stream_host" || { echo "Error: PianoVideo V6 streaming ownership tests failed" >&2; exit 1; }
+"${CXX:-c++}" -std=c++20 -O2 -Wall -Wextra -Werror -I "$P" "$P/tests/hevc_host.cpp" -o "$O/host-tests/hevc_host"
+"$O/host-tests/hevc_host" || { echo "Error: PianoVideo HEVC admission tests failed" >&2; exit 1; }
+python3 "$P/tests/hevc_files_host.py" --host "$O/host-tests/hevc_host" "$P/tests/fixtures/v9/main10-1080.mp4" "$P/tests/fixtures/v9/main8-1080.mp4" \
+  || { echo "Error: PianoVideo owned HEVC files failed admission" >&2; exit 1; }
 python3 "$P/tests/fixture_host.py" || { echo "Error: PianoVideo own AVC fixture/golden check failed" >&2; exit 1; }
 "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -I "$P/vt" "$P/tests/vt_host.cpp" -o "$O/host-tests/vt_host"
 "$O/host-tests/vt_host" || { echo "Error: PianoVideo VT wire host tests failed" >&2; exit 1; }
 "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -I "$P/vt" "$P/tests/vt_surface_host.cpp" -o "$O/host-tests/vt_surface_host"
 "$O/host-tests/vt_surface_host" || { echo "Error: PianoVideo VT surface lifetime tests failed" >&2; exit 1; }
+"${CXX:-c++}" -std=c++20 -O2 -Wall -Wextra -Werror -I "$P/vt" "$P/tests/vt_sync_host.cpp" -o "$O/host-tests/vt_sync_host"
+"$O/host-tests/vt_sync_host" || { echo "Error: PianoVideo VT synchronous ownership tests failed" >&2; exit 1; }
 "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -I "$P/vt" "$P/tests/vt_contract_host.cpp" -o "$O/host-tests/vt_contract_host"
 "$O/host-tests/vt_contract_host" || { echo "Error: PianoVideo V5a contract tests failed" >&2; exit 1; }
+xcrun clang++ -std=c++20 -O2 -Wall -Wextra -Werror -Wno-deprecated-declarations \
+  "$P/tests/vt_serializer_host.mm" -framework CoreFoundation -framework CoreMedia -framework CoreVideo -framework VideoToolbox \
+  -o "$O/host-tests/vt_serializer_host"
+"$O/host-tests/vt_serializer_host" || { echo "Error: PianoVideo real CoreMedia HEVC serializer test failed" >&2; exit 1; }
 "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -c "$P/QcomMdt.c" -o "$O/host-tests/QcomMdt.o"
 "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -I "$P" -I "$D/package/include" "$P/tests/bringup_host.cpp" "$O/host-tests/QcomMdt.o" \
   -o "$O/host-tests/bringup_host"

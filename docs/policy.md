@@ -128,13 +128,42 @@ require the password immediately). `piano-backlight-lid=1` (PianoBacklight) cuts
   lifted: with PianoA830's slots ours is client 1 and the lowest slot wins (§5.3), without them ours is never written over or
   cleared (a race between the read and the write is repaired by putting it back).
 - **The agent** (`tooling/native/piano-policy-agent/piano-policy-agent.sh`, root): one `notifyutil -w` on
-  `com.apple.system.lowpowermode` and `com.apple.system.powermanagement.clamshellstate`; LPM → `sysctl -w machdep.piano_policy_lpm`;
+  `com.apple.system.lowpowermode` and `com.apple.system.powermanagement.clamshellstate` (and the names of §4.1);
+  LPM → `sysctl -w machdep.piano_policy_lpm`;
   closed without sleep (root domain's `AppleClamshellCausesSleep` No) → `pmset displaysleepnow`. Stock tools, no polling.
   Installed by the userland pipeline (`configs/userland.toml`, `docs/userland.md`): `/usr/local/libexec/piano-policy-agent` and
   the LaunchDaemon `com.unixnu.piano-policy-agent.plist`, on in the installed profile, through the Data seed's boot job (a new
   seed identity, `docs/data-store.md`) or a live update. By hand from the USB root shell:
   `launchctl submit -l com.unixnu.piano-policy-agent -- /bin/sh <the script>`.
 - Nothing to power: no power-tree membership; across a suspend the thread is frozen with the rest (contract, `power.md` §4).
+
+### 4.1 The power state of background services (slim, 2026-11-22)
+
+The static list of services turned off on piano was the VM-era Data-seed trim (a 4 GiB 27.0.1 guest); natively only the labels with
+native evidence stay off (class A: watchdogd, xprotectd, mobileactivationd, PerfPowerServices, cryptexd, passd, AppSSODaemon,
+routined; fskitd until a retest of its own). The RAM boot slim-dyn1 (2026-11-22) measured them on 27.3: PerfPowerServices 100 % of a
+core, xprotectd exit 1 in a respawn loop, AppSSODaemon SIGABRT every 10 s once the login window asks for it (the login did not
+complete), routined an on-demand respawn every ~10 s (exit 0). Siri.agent is Apple's: its override follows the Siri setting
+(disabled while Siri is off, as on any Mac). The other 33 user and 8 system services are enabled again by an install step, and the
+agent adds a power state on top:
+- **States.** Normal: on power with Low Power Mode off, or High Power on battery. Save: Low Power Mode on, or on battery outside
+  High Power. The power source is `com.apple.system.powersources.source` (read with `pmset -g ps`), the modes the two notify names
+  above. Save is applied after 30 s of a stable wish (PD renegotiation, fast-charge flaps) and never before 120 s of uptime;
+  Normal is restored at once. A delayed Save is one sleeping child that posts `com.unixnu.piano.slim.tick` (no polling).
+- **What Save does.** For each class-C entry (`PAUSE` in the script: `MODE DOMAIN LABEL PROCESS`): `bg` = `taskpolicy -b -p` on the
+  job's pid (darwin background; `-B` in Normal), `unload` = `launchctl bootout`, then `bootstrap` in Normal. The list is **empty**:
+  dasd already defers the background tasks of the re-enabled services on battery and in Low Power Mode (they need external power
+  or follow `com.apple.system.lowpowermode`); a label comes in only with a measured idle cost that dasd leaves. Never a signal
+  (a stopped XPC server hangs its clients), never a persistent override (`launchctl disable`, `mdutil`): a crash leaves nothing off.
+- **Safety.** Every boot starts Normal (the record carries the boot's session UUID); after a restart of the agent its own actions of
+  this boot are undone first. An action that fails twice (an rc, a failed reload, a new crash report of the process within 10 min of
+  a transition) puts the label in `broken.tsv`: restored and left alone. Class A is refused even as a test entry. The file
+  `slim/off` is the kill switch (all undone, nothing applied); `piano-policy-agent --restore` undoes everything at once.
+- **Login.** The Aqua agent `com.unixnu.piano-slim-session` (unit `piano-slim-session`) posts `com.unixnu.piano.slim.session`; in
+  Save the agent applies the gui entries to the new session.
+- **State.** `/private/var/db/piano-userland/slim/`: `state` (one line: state, generation, the inputs), `log`, `applied`,
+  `fail.tsv`, `broken.tsv`; `test-pause` (test-only entries, read only while the file exists). `piano-policy-agent --status`.
+- Tests: `tooling/native/piano-policy-agent/test-piano-policy-agent.py` (the real script under sh and dash on a stub launchd).
 
 ## 5. What the other drivers must add (their owners; nothing here changes their packages)
 
@@ -209,16 +238,20 @@ implement the cover-open-only and keyboard-only-when-open rules.
 | `piano-policy=N` | 0 | 0 inert (no probe); 1 decisions logged, nothing sent; 2 act |
 | `piano-policy-lid=1` | 0 | act on the cover (clamshell, clamshell sleep, AC adaptor); only after the hall polarity is verified, and with `piano-keyboard-lid=0` |
 | `piano-policy-profile=0` | 1 | no PianoThermal profile, no GPU ceiling |
+| `piano-policy-profile=2` | 1 | Low Power Mode is the only switch (2026-11-22): on = Power Saver (PianoThermal profile 1, the GPU ceiling), off = Balanced (profile 2) on battery too, no GPU ceiling |
 | `piano-policy-gpu-mhz=M` | 342 | Power Saver's GPU ceiling (160..1100; 0 none); sent only when `piano-gpu-dcvs-max` (above M) or `piano-gpu-maxlevel` is given |
 | `piano-policy-powerkey=0` | 1 | the power key stays macOS's |
 | `piano-policy-kbd=0` | 1 | no display wake by gpio95 |
 | `piano-policy-kbd-holdoff=MS` | 1000 | the display off at least this long before gpio95 counts (0..10000) |
 | `piano-policy-lpm=1` | 0 | Low Power Mode on from boot (`machdep.piano_policy_lpm` starts at 1; writing 0 turns it off): a test's switch, for an unattended run with the Mac's cable (external power) |
 | `piano-policy-display-tick=1` | 0 | the 5 s display tick of before 2026-11-12 while a keyboard wake could come, even with NativeGopDisplay's messages (the A/B switch) |
+| `piano-smc=N` | 0 | the AppleSMC stand-in (§12): 0 none; 1 published, client type 1 only (IOKit.framework, powerd: the Energy Mode path); 2 also type 0 (libSMC's users). Independent of `piano-policy` |
+| `piano-smc-mshp=0` | 1 | the stand-in answers `MSHP` "not found" too (an SMC without keys and without High Power Mode: the A/B) |
 
 Read, not owned: `piano-keyboard-lid`, `piano-gpu-dcvs-max`, `piano-gpu-maxlevel`, `piano-thermal`, `piano-thermal-gpu-mhz`; PianoA830's
 property `piano-gpu-ceiling-clients`. sysctl:
-`machdep.piano_policy` (state, decisions, counters), `machdep.piano_policy_lpm` (root, 0/1).
+`machdep.piano_policy` (state, decisions, counters), `machdep.piano_policy_lpm` (root, 0/1), `machdep.piano_policy_hpm` (root, 0/1,
+§12.5), `machdep.piano_smc` (the stand-in's clients, keys and counters, §12).
 
 ## 7. Idle sleep on battery: macOS's timers (pmset)
 
@@ -338,7 +371,8 @@ before `sleep`.
 
 ## 11. Files
 
-`package/PianoPolicy/` (`PianoPolicy.cpp`, `Policy.h`, `tests/policy_host.cpp`, `README.md`, `UPSTREAM`, `LICENSE`),
+`package/PianoPolicy/` (`PianoPolicy.cpp`, `Policy.h`, `tests/policy_host.cpp`, `AppleSmc.cpp`, `Smc.h`, `tests/smc_host.cpp`,
+`README.md`, `UPSTREAM`, `LICENSE`),
 `tooling/k27/build-native-piano-policy.sh`, `tooling/k27/kext/PianoPolicy.json`, `configs/k27-native-kexts.txt`,
 `tooling/k27/build-policy-test-images.sh`, `tooling/native/piano-policy-agent/piano-policy-agent.sh` and its
 `com.unixnu.piano-policy-agent.plist` (installed by `configs/userland.toml`).
@@ -357,3 +391,69 @@ The first unattended sleep test uses `piano-policy-lid-arm=0`
 (`machdep.piano_policy_lid_arm`, root writes 0/1) to keep lid sleep disarmed and uses the existing
 kernel maximum-duration wake timer. Real cover acceptance is attended; it first observes a valid physical close/open,
 then arms the same image while open. Lid reporting keeps a single owner throughout.
+
+## 12. Energy Mode: the AppleSMC stand-in (step E1, 2026-11-22)
+
+Status 2026-11-22: **built, host-tested (`smc_host: 127 checks, 0 failures`); not run on the tablet.** The first of the Energy Mode
+steps (Automatic / Low Power / High Power in System Settings > Battery). This step only makes macOS offer the three options; it
+changes no clock (the mode's mapping onto PianoThermal and PianoA830 is a later step).
+
+### 12.1 Why an AppleSMC
+
+| Fact | State | Source |
+|---|---|---|
+| The Battery settings extension shows the Energy Mode picker when Low Power Mode and High Power Mode are both supported on AC and on battery, i.e. `IOPMFeatureIsAvailable("LowPowerMode", source)` and `("HighPowerMode", source)` | verified (27.3 binary); the picker's view placement inferred from the type and string names | `PowerPreferences.appex`, SystemAdministration's `ADMPowerActivityManager supportsEcoModeFor:` / `supportsProModeFor:` |
+| `"HighPowerMode"`: false on `UPS Power`; true if `smcSupportsHPM()`; else only for a short list of models (Mac17,11 is not on it). The kernel's Supported Features are not consulted | verified (27.3) | IOKit.framework `IOPMFeatureIsAvailableWithSupportedTable` |
+| `smcSupportsHPM()` reads the SMC key `MSHP` once per process through `_smcReadKey`: true if the read succeeds and the byte is 1; later calls in the same process repeat only "the first read succeeded" | verified (27.3) | IOKit.framework `smcSupportsHPM`, `_smcReadKey` |
+| `_smcReadKey` -> `callSMCFunction`: `IOServiceMatching("AppleSMC")`, `IOServiceOpen` type 1, selector 0, selector 2 with an 80-byte structure (command 9 key info, then command 5 read of that size), selector 1, close | verified (27.3) | IOKit.framework `callSMCFunction` |
+| The sandboxed settings extension may open the user client class `AppleSMCClient` (its entitlements' `iokit-user-client-class`) | verified (entitlements); that the sandbox checks this class name: inferred | the extension's entitlements |
+| The selected mode never reaches the kernel: powerd keeps it per power source (PM preference `LowPowerMode` 0 Automatic, 1 Low Power, 2 High Power) and posts `com.apple.system.lowpowermode` / `com.apple.system.highpowermode` | verified (27.3) | powerd `PMPowerModeHandler`, `PowerModeState` |
+
+### 12.2 What the stand-in is
+
+`package/PianoPolicy/AppleSmc.cpp` (in PianoPolicy's kext, its own personality `AppleSMC` on IOResources, inert without
+`piano-smc`): a service of class `AppleSMC` (an IOService, deliberately not an `AppleSMCFamily`) with `IOUserClientClass =
+AppleSMCClient`. The client answers selectors 0 and 1 with success and selector 2 per `Smc.h`: `MSHP` with key info (size 1, `ui8 `)
+and the byte 1; every other key, every write, key-by-index and every other command "not found" (0x84), in the 80-byte and the
+168-byte form of the structure. Nothing is stored. Client types: level 1 lets only type 1 open (IOKit.framework, powerd); libSMC's
+type 0 (CoreBrightness, thermalmonitord's sensor exchange) is refused, so those processes stay on their "no SMC" path exactly as
+without the stand-in; level 2 also opens type 0. Every process is logged once by name (`PianoSmc: open: ...`, its first
+`'MSHP' = 1 ... to NAME`, its first refusal), every key once with the first process that asked; `sysctl machdep.piano_smc` has the
+counters.
+
+### 12.3 What else sees an AppleSMC (each read before the image)
+
+| Client | What it does with an AppleSMC that knows only `MSHP` | State |
+|---|---|---|
+| IOUSBHostFamily `AppleUSBHostResourcesTypeC` | Its probe needs the device tree's `product` node to carry `usb-c-smc-pwr`; only then, for a port with `usb-c-port-number` or `smc-port-number`, it waits for an AppleSMC without a timeout, casts it to `AppleSMCFamily` and calls it without a null check. piano's ADT has none of these properties, so the class never probes; the stand-in also refuses to publish itself when the property is there (`PianoSmc: start: NOT published`) | verified (27.3 KC disassembly, ADT string count 0) |
+| powerd, at the AppleSMC first match | reads `ShutdownCause` (absent: skipped), resets its dark-wake statistics (a 4 h log timer), arms an `AppleRTC` first match (no such class on piano: never fires) | verified (27.3) |
+| powerd, sleep and wake | at sleep a 2-byte write of `CLWK` after a key-info probe; at wake a read of `CLKU`/`CLWK` (the SMC wake time); its Silent Running type from `WKTP` and `zEPD` (168 bytes): all "not found", so no write happens and the type is "None", the same outcome as without an SMC | verified (27.3) |
+| powerd, battery statistics | a per-pack key write after key info: "not found", logged | verified (27.3) |
+| IOKit.framework `smcSupportsSilentRunning` | reads `WKTP`: not found -> false (as now) | verified (27.3) |
+| CoreBrightness, thermalmonitord, other libSMC users | open type 0: refused at level 1 (unchanged behaviour). At level 2: CoreBrightness's thermal brightness cap reads fail -> "no cap" (-1); thermalmonitord's sensor exchange writes fail and are logged | verified (27.3) |
+| other processes | whatever opens it is in the log and in `machdep.piano_smc` | needs-boot |
+
+### 12.4 Checks on the tablet (energy-e1)
+
+`pmset -g` lists `powermode` (not `lowpowermode`) and `pmset -g cap` the High Power Mode capability, on AC and battery; the console
+shows `PianoSmc: start: AppleSMC stand-in published`, `'MSHP' = 1 ... to powerd` and to the settings extension when System Settings >
+Battery opens; the picker with three options (a camera shot); `pmset -a powermode 0/1/2` flips the two notify states (Low Power still
+reaches PianoPolicy as before); a timer sleep/wake cycle with the stand-in present; the USB console and the charger lines unchanged;
+no `AppleUSBHostResourcesTypeC` in the registry; no panic.
+
+### 12.5 High Power reaches the clocks (steps E2 and E3, 2026-11-22)
+
+Status 2026-11-22: E1 ran on the tablet (energy-e1: `pmset -g custom` lists `powermode` for AC and battery, powerd and the Battery
+settings extension read `MSHP` = 1, `pmset -a powermode 2/1/0` flips `com.apple.system.highpowermode` / `lowpowermode`, Low Power
+reached PianoThermal as before, a timer sleep/wake cycle with the stand-in). E2/E3: **built, host-tested; not run on the tablet.**
+- E2 (the signal): `piano-policy-agent` also waits on `com.apple.system.highpowermode` and writes `sysctl machdep.piano_policy_hpm`
+  (0/1). PianoPolicy (`Policy.h`): Low Power Mode -> Power Saver (PianoThermal 1, the GPU ceiling); else High Power Mode -> High Power
+  (PianoThermal 3, no GPU ceiling) whatever the power source and the profile rule, sent only when PianoThermal publishes
+  `piano-thermal-profiles` >= 3 (else Balanced, said in the decision line); else the rule's own choice (Automatic: with
+  `piano-policy-profile=2` Balanced, with 1 by the power source). Low Power wins when both read 1 (a transient while powerd switches).
+  The GPU keeps PianoA830's own maximum (342 MHz on the daily line) and its input floor; High Power sends no GPU ceiling.
+- E3 (the clocks): PianoThermal's profile 3 (`docs/drivers/thermal.md` §14): the top levels 3532.8 / 4320 MHz as the cap (over
+  sustained unless refused), no skin table, the thermal limit on top.
+- Risks: heat and draw by the nature of the mode (the thermal limit is the guard); on the Mac's 5 V input High Power can draw more
+  than the input gives (the pack then discharges while "on power"); the mode must survive a sleep (PianoThermal keeps its profile
+  across the parked thread, PianoPolicy its inputs).

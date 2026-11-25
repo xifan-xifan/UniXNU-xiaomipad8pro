@@ -6,14 +6,21 @@ set -eu
 # clipped at 1024 bytes and can omit the ADT tail the driver actually parsed.
 # -N checks the name without invoking the pending boot-result handler.
 /usr/sbin/sysctl -N machdep.piano_bt_boot >/dev/null 2>&1 || exit 0
-printf '%s\n' 'piano-bt-path3 runtime: kernel level5 endpoint present'
+runtime_note() {
+    if uptime=$(/usr/sbin/sysctl -n machdep.piano_bt_uptime_ms 2>/dev/null); then
+        printf '%s [uptime_ms=%s]\n' "$*" "$uptime"
+    else
+        printf '%s\n' "$*"
+    fi
+}
+runtime_note 'piano-bt-path3 runtime: kernel level5 endpoint present'
 # A stock process may already have mapped the lower executable while firmware was
 # loading. Stop just these jobs before making the new views visible: otherwise
 # the old daemon can issue Broadcom commands in the worker's ready/start interval.
 for service in com.apple.bluetoothd com.apple.BlueTool; do
     if /bin/launchctl print "system/$service" >/dev/null 2>&1; then
         /bin/launchctl bootout "system/$service" || {
-            printf 'piano-bt-path1 runtime: service=%s bootout_failed=1\n' "$service"
+            runtime_note "piano-bt-path1 runtime: service=$service bootout_failed=1"
             exit 1
         }
     fi
@@ -30,20 +37,20 @@ while [ "$i" -lt 4 ]; do
     i=$((i + 1))
     /bin/sleep 1
 done
-[ "$ready" = 1 ] || { printf '%s\n' 'piano-bt-path1 runtime: transport_not_ready=1'; exit 1; }
+[ "$ready" = 1 ] || { runtime_note 'piano-bt-path1 runtime: transport_not_ready=1'; exit 1; }
 # The stock job definitions retain Apple's mach services and sandbox policy.
 for service in com.apple.BlueTool com.apple.bluetoothd; do
     /bin/launchctl bootstrap system "/System/Library/LaunchDaemons/$service.plist" || {
-        printf 'piano-bt-path1 runtime: service=%s bootstrap_failed=1\n' "$service"
+        runtime_note "piano-bt-path1 runtime: service=$service bootstrap_failed=1"
         exit 1
     }
 done
 if ! /bin/launchctl kickstart -k system/com.apple.BlueTool; then
-    printf '%s\n' 'piano-bt-path1 runtime: service=BlueTool kickstart_failed=1'
+    runtime_note 'piano-bt-path1 runtime: service=BlueTool kickstart_failed=1'
     exit 1
 fi
 if ! /bin/launchctl kickstart -k system/com.apple.bluetoothd; then
-    printf '%s\n' 'piano-bt-path1 runtime: service=bluetoothd kickstart_failed=1'
+    runtime_note 'piano-bt-path1 runtime: service=bluetoothd kickstart_failed=1'
     exit 1
 fi
-printf '%s\n' 'piano-bt-path1 runtime: stock services restarted on verified views'
+runtime_note 'piano-bt-path1 runtime: stock services restarted on verified views'

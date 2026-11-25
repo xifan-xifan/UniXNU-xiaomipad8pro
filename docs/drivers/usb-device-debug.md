@@ -174,6 +174,7 @@ IOPlatformExpertDevice ── PianoDwc3 (start, matching thread)   read-only pro
 | `piano-usb-handoff=1` | 0 | PianoUsbHost (levels 3/4 with `piano-usbhost-handoff=5\|6`) may borrow the controller for host mode: on its ask the USB thread stops the device controller, masks its event interrupt and parks; on its reclaim the clocks are re-read and the whole takeover runs again (`UsbHandoff.h`, `usb-host.md` §6.6). The service is registered for it. 0: the controller is PianoDwc3's for the whole boot |
 | `piano-wake-log=S` | 60 | the `idle: N wakeups in S s` line every S seconds (0 none; shared with PianoInput and PianoTouch) |
 | `piano-sleep-usb=0` | 1 | a system sleep disconnects the gadget even with the Mac attached (§16); 1: a configured host keeps it (the console survives) |
+| `piano-usb-wedge-sim=N` | 0 | test hook of the controller recovery (§16.1): 5 s after wake N the gadget is marked wedged as a timed-out endpoint command would mark it; never in daily arguments |
 | `piano-usb-cold=0\|1\|auto` | auto | the cold start (§17): `0` the inherited state only (the takeover of before, no cold start, no link watch; the inherited state is still read and reported), `1` always, `auto` when the inherited state is not a running device controller, plus the link watch |
 | `piano-usb-cold-steps=MASK` | 0x17 | the cold start's optional parts: 0x1 the rails, 0x2 the repeater, 0x4 the M31 PHY, 0x8 the controller's block reset (opt-in), 0x10 the RCG rates, 0x20 the repeater's DT tuning even when it was on (opt-in) |
 | `piano-usb-cold-wait=S` | 15 | the link watch: no bus reset from a host S s after RUN_STOP: a cold start (the wait doubles; 3 cold starts a boot at most); 0 no watch |
@@ -285,7 +286,8 @@ The next run therefore traces (`piano-usb-trace`, default on): every controller 
 `ev <raw> ep <n> <type> … | phase <EP0 phase> busy <out>/<in> | trb <size> <ctrl> (posted <bytes>)`; a snapshot of EP0 (phase,
 both EP0 TRBs, DEPCMD0/1, DSTS, DCFG, DALEPENA, GEVNTCOUNT, the last 6 events) every 2 s while a host is attached and the
 device is not configured; and two recoveries that also act as experiments, each logged with a snapshot:
-- **EP0 watchdog**: a control transfer with no progress for 1 s is ended and SETUP armed again (`EP0 stuck 1 s`);
+- **EP0 watchdog**: a control transfer with no progress for 1 s is ended the controller's way: its TRB ended, SET STALL on EP0, SETUP
+  armed again (`EP0 stuck 1 s: stall and SETUP again`; §16.1: arming SETUP alone left the core owing that stage);
 - **re-enumeration**: not configured and no request for 10 s → soft disconnect / connect (RUN_STOP off, endpoints set up
   again, the event buffer kept), at most 3 times, to see whether the Mac stops at the same request each time.
 Also new: a failed START on EP0 stalls and re-arms instead of leaving EP0 waiting; a data-stage not-ready event in the other
@@ -742,6 +744,28 @@ glue clocked; kept: the console goes on` or `wake N: the glue clocked: connected
 Failure lines: `sleep: the USB thread did not answer within 500 ms`, `wake N: the glue is NOT clocked (GDSC ..., master ..., ...)`,
 `QSCRATCH 0x10 = ... not written now (...): recorded for the wake`. The cable to a host keeps the HS PHY out of its low-power state
 (power.md §4): a suspend measurement is made without it (`piano-sleep-usb` then decides nothing: no host is configured).
+
+### 16.1 EP0 after a kept sleep and the controller recovery (2026-11-22, usb/wedge1)
+
+energy-e4 lost the USB link after its third wake (`private/host-checks/20261122-energy/USB-WEDGE.md`). The Mac had sent requests to
+the frozen device during sleeps 1 and 2; they were answered after the thaw, and the 1 s watchdog abandoned the last of each by arming
+SETUP again. Without SET STALL (or the transfer's status stage) the core's own control state machine still owes that stage, and in
+that state no SETUP from the host completes (chg-fix1's three failed enumerations show it with the event trace: a bus reset ended
+and re-armed an armed SETUP TRB that already held the Mac's SET_ADDRESS); END TRANSFER commands issued with a SETUP waiting for a TRB
+never complete, and nothing soft-reset the core afterwards. Now, as the reference driver (Linux `dwc3_ep0_reset_state`,
+`dwc3_ep0_stall_and_restart`, `dwc3_gadget_reset_interrupt`, `dwc3_err_recovery_work`):
+- the watchdog, a request we refuse and a bus reset in the middle of a transfer leave EP0 with its TRB ended, SET STALL, SETUP armed;
+  a data stage completed with SETUP_PENDING waits for its status not-ready event and is stalled and restarted there;
+- a bus reset keeps an armed SETUP TRB and takes EP0 first, then the other endpoints' END TRANSFER;
+- a not-ready event for a data or status stage while the gadget is in its SETUP phase with the SETUP TRB armed (`EP0: the core waits
+  for the ... stage of a request not seen here`) gets SET STALL on EP0 only (the armed TRB stays);
+- an endpoint command whose CMDACT does not clear, or four EP0 recoveries with no completed control transfer in between, mark the
+  gadget wedged (`wedge N: ...`): no further endpoint command; the USB thread runs the controller recovery (`wedge recovery N`):
+  lines dropped and the link down without a command, RUN_STOP off with the events taken while it halts, DCTL.CSFTRST, the event
+  buffer and the device side again, RUN_STOP on: the Mac sees a detach and enumerates afresh. At most 3 in a row (the count starts
+  over once the Mac has configured the device again); then the core is left alone, as before. `piano-usb-wedge-sim=N` is its test
+  hook; the monitor's `usb` prints `wedge: ...` with the counters.
+- after each kept wake the event trace and the SETUP notes get a fresh budget (32 events, 16 SETUPs).
 
 ## 17. The cold start (`piano-usb-cold`, 2026-11-12)
 

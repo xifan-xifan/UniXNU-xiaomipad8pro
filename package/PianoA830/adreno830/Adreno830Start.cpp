@@ -8,6 +8,7 @@
 #include "Adreno830Status.h"
 #include "A830Profile.h"
 #include "A830Regs.h"
+#include "A830CxGate.h"
 #include "A830Votes.h"
 #include "A830Smmu.h"
 #include "A830GmuFirmware.h"
@@ -21,6 +22,10 @@
 #include "A830PowerState.h"
 #include "A830Recovery.h"
 #include "A830Dcvs.h"
+#include "A830QualificationExitTest.h"
+#include "A830QualificationTop.h"
+#include "../../include/PianoGpuQualificationDisplay.h"
+#include <stdarg.h>
 #ifdef ADRENO830_MACOS
 #include "A830Idle.h"
 #include "A830Suspend.h"
@@ -42,7 +47,16 @@
 #include <string.h>
 #ifdef ADRENO830_HOST_TEST
 #include <new>
+#else
+A830ExitTrace a830ExitTrace;
 #endif
+
+extern "C" __attribute__((weak)) void adreno830_qualification_note(const char *) {}
+extern "C" bool adreno830_qualification_log_ready();
+extern "C" __attribute__((weak)) bool adreno830_qualification_board(piano_gpu_temps *) {return false;}
+/* gpu/fullopp1: the virtual skin sensor's inputs (PianoThermal "piano-thermal-skin-temps"); the board defines it. */
+extern "C" __attribute__((weak)) bool adreno830_qualification_skin(piano_skin_temps *) {return false;}
+extern "C" __attribute__((weak)) void adreno830_qualification_unsafe(A830ExitOrigin,uint64_t,bool,bool) {}
 
 #ifndef ADRENO830_HOST_TEST
 #include <IOKit/IOLib.h>
@@ -65,6 +79,8 @@
 /* UniXNU-piano (macOS 27): the publish shell's definition (NativeAdrenoPublish.cpp) replaces this weak default, which the host tests
  * that link the orchestrator without the shell take: no snapshot line. */
 extern "C" __attribute__((weak)) void native_adreno_note_hang_snapshot(const A830HangSnapshot *) {}
+/* The same for a CB0 fault's detail lines (2026-11-21, NativeAdrenoStatus.h). */
+extern "C" __attribute__((weak)) void native_adreno_note_fault_detail(const NativeAdrenoFaultDetail *) {}
 /* The idle policy's board hooks (A830Idle.h): mode 0 and no line without the board (the host tests). */
 extern "C" __attribute__((weak)) void adreno830_board_idle(A830IdleConfig *) {}
 extern "C" __attribute__((weak)) void adreno830_board_idle_event(const A830IdleEvent *) {}
@@ -178,6 +194,32 @@ struct Adreno830Device {
 extern "C" {__attribute__((weak)) volatile uint32_t sm8750_aoss_qmp_owner;}
 namespace {
 Adreno830Device g830;
+/* UniXNU-piano (2026-11-23, GPU-PAGED P1, NativeAdrenoVm.h): the GPU VM's mode and limits, set by the board before S3. */
+extern "C" {volatile uint32_t native_adreno_gpu_mem_paged,native_adreno_gpu_mem_cap_mib,native_adreno_gpu_mem_reserve_mib,
+    native_adreno_gpu_pt_audit_s;}
+A830Qualification gQualification;
+bool gQualificationEnabled=false;
+uint64_t gQualificationInjectAt=0;
+bool gQualificationInjectionScheduled=false;
+uint32_t gQualificationExitTest=0;
+/* The qualified ceiling (gpu/daily4: 607 / 660 / 734; gpu/fullopp1: bin 2's 7..14) and bin 2's MHz: A830QualificationTop.h, the rule the
+ * board also uses to allocate the qualification log S10 requires (gpu/fullopp1b). 0 when the knobs name none of them. */
+constexpr const auto &FulloppMhz=Adreno830FulloppMhz;
+uint8_t qualificationTop(const Adreno830Board *b) {return adreno830_qualification_top(b);}
+bool qualificationMode(const Adreno830Board *b) {return qualificationTop(b)!=0;}
+bool qualificationResidency(const Adreno830Board *b) {
+    return b->qualification_r3b==1 && !b->qualification_exit_test && b->knobs.dcvs_min_mhz==607;
+}
+void qualLog(const char *format,...) __attribute__((format(printf,1,2)));
+void qualLog(const char *format,...) {
+    char line[960];va_list ap;va_start(ap,format);const int n=vsnprintf(line,sizeof line,format,ap);va_end(ap);
+    if(n<0 || unsigned(n)>=sizeof line)line[0]=0; // the export counts a rejected record; never certify a truncated tail
+    adreno830_qualification_note(line);
+}
+void qualificationUnsafe(void *,A830ExitOrigin origin) {
+    adreno830_qualification_unsafe(origin,g830.recovery.protectionAt(),
+                                    g830.recovery.qualificationSafeLow(),g830.recovery.safeOff());
+} // no logger, allocation, power or HFI lock on the emergency path
 /* The cmd-db snapshot: 128 KiB, static storage (never a stack object: XNU kernel stacks are 16 KiB, ARCHITECTURE 4.1.1). */
 #if defined(ADRENO830_MACOS) && !defined(ADRENO830_HOST_TEST)
 /* UniXNU-piano (k27 native kext): a one-time heap allocation instead (Sm8750Rpmh.h allows either). The k27 kernel collection places a
@@ -910,10 +952,46 @@ void smmuFences(void *,uint32_t *completed,uint32_t *issued)
 /* The SMMU fault bottom half (ARCHITECTURE 4.12.3): CB0 faults go to the publish shell, which charges the connection whose window
  * holds FAR and counts how the jobs in flight at the fault (the fences the top half read) compare with it; CB2 faults and
  * unattributed ones are only counted (smmu_faults, by A830Smmu). */
+#ifdef ADRENO830_MACOS
+/* UniXNU-piano (2026-11-21, 20261121-ws-crash CROSS-WINDOW.txt 4(a) D2): the hardware half of a CB0 fault's detail, taken by the bottom
+ * half that found it: the fences now and, while GX is up (accessBegin: never wakes the GPU, never blocks), BR's and BV's IB1/IB2
+ * through the hang snapshot's reads (A830Recovery::readIbs) and the BR ring read pointer. The publish shell adds the owners and the
+ * command words (native_adreno_note_fault_detail). */
+void noteFaultDetail(const A830SmmuFault &fault,uint32_t index)
+{
+    NativeAdrenoFaultDetail d{};
+    d.far=fault.far;d.index=index;d.lines=A830SmmuFaultLines;
+    d.completed=g830.fence.completed();d.issued=g830.ring.lastSubmitted();
+    A830PowerState *power=adreno830_power_state();
+    if(power && power->accessBegin(true)) {
+        for(unsigned pipe=0;pipe<2;++pipe) {
+            A830IbState ibs{};
+            g830.recovery.readIbs(uint8_t(A8XX_PIPE_BR+pipe),&ibs);
+            d.ib1[pipe]=ibs.ib1Base;d.ib1_rem[pipe]=ibs.ib1Rem;d.ib2[pipe]=ibs.ib2Base;d.ib2_rem[pipe]=ibs.ib2Rem;
+        }
+        uint32_t rptr=0;
+        if(readDword(A8XX_CP_RB_RPTR,&rptr))d.rptr=rptr;
+        power->accessEnd(true);
+        d.ibs=true;
+    }
+    native_adreno_note_fault_detail(&d);
+}
+#endif
 void smmuFaultSink(void *,const A830SmmuFault &fault)
 {
     const bool gpu=fault.cb==g830.board->cb_gpu;
     if(gpu)native_adreno_note_page_fault(fault.far,fault.completed,fault.issued,fault.sampled!=0);
+#ifdef ADRENO830_MACOS
+    /* UniXNU-piano (2026-11-21): the GPU bank's first A830SmmuFaultLines faults of a boot on the console whatever the diagnostic mode
+     * (FSYNR0/1 say read or write and which GPU client, the SID which stream), each followed by its detail lines. */
+    if(gpu && g830.fault_lines[1]<A830SmmuFaultLines) {
+        char line[A830SmmuFaultLineBytes];
+        A830SmmuFaultLine(line,fault);
+        boot_progress_gpu_event(line+4);   /* "gpu fault cb0 ...": the event line brings its own "gpu " */
+        noteFaultDetail(fault,++g830.fault_lines[1]);
+        return;
+    }
+#endif
     if(g830.fault_lines[gpu]<A830SmmuFaultLines && adreno830_status_diag_lines()) {
         char line[A830SmmuFaultLineBytes];
         A830SmmuFaultLine(line,fault);
@@ -1087,7 +1165,8 @@ IOReturn validateBoard(const Adreno830Board *board,Adreno830Failure *failure)
     /* pagani-gpu-perf indexes the level table: 1..Adreno830LevelMax (0 is off); S0 narrows it to the selected table. */
     if(knobs.perf<1 || knobs.perf>Adreno830LevelMax)
         return refuse(failure,A830S0StepKnobs,A830ReasonArgument,Adreno830KnobPerf,knobs.perf,Adreno830LevelMax);
-    if(knobs.va!=2 && knobs.va!=4 && knobs.va!=16)return refuse(failure,A830S0StepKnobs,A830ReasonArgument,Adreno830KnobVa,knobs.va,4);
+    if(knobs.va!=2 && knobs.va!=4 && knobs.va!=16 && knobs.va!=64)   /* UniXNU-piano: 64 (GPU-SLOTS) */
+        return refuse(failure,A830S0StepKnobs,A830ReasonArgument,Adreno830KnobVa,knobs.va,4);
     if(knobs.dcvs_min_mhz>knobs.dcvs_max_mhz)
         return refuse(failure,A830S0StepKnobs,A830ReasonArgument,Adreno830KnobDcvsMin,knobs.dcvs_min_mhz,knobs.dcvs_max_mhz);
     if(!knobs.actlr)return refuse(failure,A830S0StepKnobs,A830ReasonArgument,Adreno830KnobActlr,knobs.actlr,1);
@@ -1170,6 +1249,47 @@ IOReturn stageInputs(Adreno830Device *d,Adreno830Failure *f)
     if((r=A830Votes::build(d->rpmh,*b,d->levels,options,&d->votes))!=kIOReturnSuccess)
         return refuse(f,A830S0StepVotes,A830ReasonCmdDb,d->votes.error_resource,
                       uint64_t(d->votes.error_step)<<16|(d->votes.error_value&0xffff),0,r);
+    /* gpu/fullopp1 (private/host-checks/20261122-gpu-fullopp/ANALYSIS.md 3.1, 3.5 item 3): Android's whole curve, bin 2 of the fuse
+     * 0xe8 with its 14 levels (GX 15, 58 perf dwords), ACD allowed (required above 734 MHz), floor 160 or 222; every level checked
+     * against bin 2's MHz. Anything else refuses the boot, as the 607 check does. */
+    const bool fullopp=qualificationMode(b) && b->qualification_fullopp==1;
+    if(fullopp) {
+        const uint8_t top=qualificationTop(b);
+        bool table=d->votes.levels==14 && d->votes.gx_count==15 && d->votes.cx_count==3 && d->votes.perf_dwords==58 &&
+                   d->votes.initial==1 && d->votes.bw[A830BwLevelNum]==12;
+        for(unsigned i=0;table && i<14;++i)table=d->votes.level[i].khz==uint32_t(FulloppMhz[i+1])*1000u;
+        if(b->knobs.profile!=1 || b->knobs.speedbin!=1 || d->speed_bin!=0xe8 || b->knobs.acd>1 || (top>=10 && !b->knobs.acd) ||
+           b->knobs.hfi || b->knobs.rails!=1 || b->knobs.ddr_boot!=11 || b->knobs.ddr_floor!=11 || !b->knobs.dcvs ||
+           (b->knobs.dcvs_min_mhz!=160 && b->knobs.dcvs_min_mhz!=222) || !table)
+            return refuse(f,A830S0StepVotes,A830ReasonArgument,1,d->votes.levels,14,kIOReturnBadArgument);
+    } else if(qualificationMode(b)) {
+        if(b->knobs.profile!=1 || b->knobs.speedbin || b->knobs.acd || b->knobs.hfi || b->knobs.rails!=1 ||
+           b->knobs.ddr_boot!=11 || b->knobs.ddr_floor!=11 || !b->knobs.dcvs ||
+           (b->knobs.dcvs_min_mhz!=160 && !qualificationResidency(b)) ||
+           d->votes.levels!=11 || d->votes.gx_count!=12 || d->votes.cx_count!=3 || d->votes.perf_dwords!=49 ||
+           d->votes.initial!=1 || d->votes.level[6].khz!=607000 || d->votes.bw[A830BwLevelNum]!=12)
+            return refuse(f,A830S0StepVotes,A830ReasonArgument,0,d->votes.levels,11,kIOReturnBadArgument);
+    }
+    if(qualificationMode(b)) {
+        const Sm8750RpmhArc *arcs[5]={&d->rpmh.gfx,&d->rpmh.mx,&d->rpmh.cx,&d->rpmh.gmxc,&d->rpmh.gbx};
+        const char *names[5]={"gfx","mx","cx","gmxc","gbx"};
+        for(unsigned a=0;a<5;++a) {
+            const auto &arc=*arcs[a];qualLog("R3a ARC %s present=%u count=%u",names[a],arc.present,arc.count);
+            for(unsigned i=0;i<arc.count;++i)qualLog("R3a ARC %s index=%u vlvl=%x",names[a],i,arc.vlvl[i]);
+        }
+        for(unsigned g=0;g<d->votes.gx_count;++g)qualLog("R3a GX %u khz=%u gx=%08x dep=%08x",g,
+            d->votes.gx[g].khz,d->votes.gx[g].vote,d->votes.gx[g].dep);
+        for(unsigned c=0;c<3;++c)qualLog("R3a CX %u khz=%u vote=%08x",c,d->votes.cx[c].khz,d->votes.cx[c].vote);
+        const Sm8750RpmhBcm *bcms[4]={&d->rpmh.sh0,&d->rpmh.mc0,&d->rpmh.acv,&d->rpmh.cn0};
+        for(unsigned i=0;i<4;++i)qualLog("R3a BCM %u addr=%x unit=%u width=%u vcd=%u",i,bcms[i]->addr,bcms[i]->unit,bcms[i]->width,bcms[i]->vcd);
+        for(unsigned i=0;i<12;++i)qualLog("R3a DDR %u kbps=%u wait=%x words=%08x,%08x,%08x",i,d->votes.ddr_kbps[i],
+            d->votes.bw_wait_mask,d->votes.bw[A830BwDdrData+i*8],d->votes.bw[A830BwDdrData+i*8+1],d->votes.bw[A830BwDdrData+i*8+2]);
+        if(fullopp) {
+            qualLog("R3a C5-FULL-v1 full-table verified M1=58 GX15 CX3 M2=160 profile1 speedbin1 bin=0x%x levels=14 top=%u ACD%s "
+                    "acd-levels=%u host-rails1 DDR11",unsigned(d->speed_bin),unsigned(FulloppMhz[qualificationTop(b)])*1000u,
+                    b->knobs.acd?"on":"off",unsigned(d->votes.acd_levels));
+        } else qualLog("R3a C5-607-v1 full-table verified M1=49 GX12 CX3 M2=160 profile1 speedbin0 ACDoff host-rails1 DDR11");
+    }
     if(!A830Votes::levelAtOrAbove(d->votes,b->knobs.dcvs_min_mhz) || !A830Votes::levelAtOrBelow(d->votes,b->knobs.dcvs_max_mhz))
         return refuse(f,A830S0StepLevelTable,A830ReasonArgument,Adreno830KnobDcvsMax,b->knobs.dcvs_max_mhz,b->knobs.dcvs_min_mhz);
     /* gen80000_gmu.bin blocks (4.7.1): the PREALLOC requests size the GMU memory of S3. */
@@ -1409,7 +1529,10 @@ IOReturn stageSmmu(Adreno830Device *d,Adreno830Failure *f)
     adreno830_status_step(A830S3StepPool);
     const unsigned oas=survey.output_bits>40?40:survey.output_bits;
     uint32_t reserved=0;
-    if((r=NativeAdrenoMemory::reservePoolBestEffort(oas?oas:40,b->pool_mib,64,true,&reserved))!=kIOReturnSuccess)
+    /* UniXNU-piano (2026-11-23, GPU-PAGED P1, private P1-GATE.md): piano-gpu-mem=paged reserves no pool (every user BO is its own
+     * pageable named entry; the VM's tables come on demand). */
+    const bool paged=__atomic_load_n(&native_adreno_gpu_mem_paged,__ATOMIC_ACQUIRE)!=0;
+    if(!paged && (r=NativeAdrenoMemory::reservePoolBestEffort(oas?oas:40,b->pool_mib,64,true,&reserved))!=kIOReturnSuccess)
         return refuse(f,A830S3StepPool,A830ReasonNoMemory,0,b->pool_mib,reserved,r);
     /* The GMU context (CB2, slot 1, SID 5, ASID 3) with every region of the firmware's PREALLOC plan mapped: the GMU fetches
      * its code from DDR through it (4.7.1-4.7.2). */
@@ -1429,7 +1552,10 @@ IOReturn stageSmmu(Adreno830Device *d,Adreno830Failure *f)
     NativeAdrenoGpuContextConfig gpu={};
     gpu.programmer=d->smmu.programmer();gpu.bank=b->cb_gpu;gpu.asid=unsigned(b->cb_gpu)+1u;
     gpu.slot=survey.slot_gpu;gpu.lpac_slot=survey.slot_lpac;gpu.sid=b->sid_gpu;gpu.lpac_sid=b->sid_lpac;gpu.output_bits=0;
-    gpu.aperture_gib=b->knobs.va;gpu.pool_mib=b->pool_mib;gpu.write_combined_pool=true;
+    gpu.aperture_gib=b->knobs.va;gpu.pool_mib=paged?0:b->pool_mib;gpu.write_combined_pool=true;
+    gpu.paged=paged;
+    gpu.cap_bytes=uint64_t(__atomic_load_n(&native_adreno_gpu_mem_cap_mib,__ATOMIC_ACQUIRE))<<20;
+    gpu.reserve_bytes=uint64_t(__atomic_load_n(&native_adreno_gpu_mem_reserve_mib,__ATOMIC_ACQUIRE))<<20;
     if((r=d->gpu_context.bringUp(gpu,nullptr,&d->gpu_report))!=kIOReturnSuccess) {
         const uint16_t bank=d->gpu_report.step==NativeAdrenoGpuContext::Lpac?A830S3Lpac:A830S3Cb0;
         return contextFailure(f,d->gpu_report,bank,r,NativeAdrenoGpuContext::Program,NativeAdrenoGpuContext::Lpac);
@@ -1662,6 +1788,24 @@ IOReturn gmuStartOnce(Adreno830Device *d,uint8_t level,uint8_t bus,bool ifpc,Adr
     }
     return kIOReturnSuccess;
 }
+/* gpu/fullopp1: tell the AOP the ACD state again (val 0 once the GMU refused the ACD table), with S1's lock protocol. */
+int resendAcdState(Adreno830Device *d,int value)
+{
+    if(!mapped(A830WinAossMsgram) || !mapped(A830WinIpcc))return -1;
+    bool locked=false;
+    for(unsigned waited=0;waited<3000 && !locked;++waited) {
+        uint32_t expected=0;
+        locked=__atomic_compare_exchange_n(&sm8750_aoss_qmp_owner,&expected,uint32_t(Sm8750RpmhLockOwnerGpu),false,__ATOMIC_ACQUIRE,
+                                           __ATOMIC_RELAXED);
+        if(!locked)qmpDelay(nullptr,1000);
+    }
+    const int rc=Sm8750AossQmpSendAcdState(&d->qmp,value);
+    if(locked) {
+        uint32_t expected=uint32_t(Sm8750RpmhLockOwnerGpu);
+        __atomic_compare_exchange_n(&sm8750_aoss_qmp_owner,&expected,0u,false,__ATOMIC_RELEASE,__ATOMIC_RELAXED);
+    }
+    return rc;
+}
 IOReturn stageGmu(Adreno830Device *d,Adreno830Failure *f)
 {
     Adreno830Status &s=adreno830_status;
@@ -1689,6 +1833,14 @@ IOReturn stageGmu(Adreno830Device *d,Adreno830Failure *f)
         r=gmuStartOnce(d,d->level,d->bus,false,f,&fatal);
         recordGmu();
         if(r==kIOReturnSuccess)return kIOReturnSuccess;
+        /* gpu/fullopp1: the ACD feature or table refused (HFI M3, step 0x13): the next attempt starts without ACD, so the GPU runs
+         * under the DCVS's ACD-off 734 MHz cap instead of not at all (ANALYSIS.md 3.6 R1). */
+        if(!fatal && d->acd_ready && d->board->qualification_fullopp==1 && d->hfi.failure().step==A830S5StepM1+2) {
+            d->acd_ready=false;
+            const int rc=resendAcdState(d,0);
+            qualLog("R3b ACD refused at HFI M3 (attempt %u, value %#x): AOP told val 0 (rc %d), the next GMU start runs without ACD "
+                    "(cap 734 MHz)",unsigned(attempt),unsigned(d->hfi.failure().value),rc);
+        }
         if(fatal || attempt>=3)return r;
         /* Not one acknowledgement with the Linux queue layout: the KGSL layout on the next attempt (4.7.5). */
         const bool kgsl=layout==A830HfiLayoutLinux && f->step>=A830S5StepM1 && f->step<=A830S5StepM9 && !d->hfi.firstAckSeen();
@@ -1981,6 +2133,7 @@ IOReturn stageFence(Adreno830Device *d,Adreno830Failure *f)
     /* annibale with pagani-gpu-irq=1: its hw_init masks every RBBM interrupt; A830Irq unmasks the fence one itself while 332
      * is attached (after the attach below, again after every re-initialization of the device side). */
     irq.own_mask=adreno830_annibale() && b->knobs.irq?uint32_t(A830_INT_MASK_FENCE_ONLY):0u;
+    irq.softwareFaultSnapshot=b->qualification_r3b==1;
     IOReturn r=d->irq.start(irq);
     if(r!=kIOReturnSuccess)return refuse(f,A830S8StepStart,A830ReasonNoMemory,0,r,0,r);
 #ifdef ADRENO830_MACOS
@@ -2039,8 +2192,9 @@ IOReturn stageMetal(Adreno830Device *d,Adreno830Failure *f)
     /* The aperture the GPU context actually built (pagani-gpu-va=16 falls back to 4 GiB without a 34-bit UBS or its 32 MiB of tables):
      * the publish shell picks its client windows from this VA (NativeAdrenoClientWindowsFor). */
     const uint64_t aperture=d->gpu_context.apertureBytes();
-    info.va_size=(aperture>A830_GPU_VA_CLIENT_END_4G?A830_GPU_VA_CLIENT_END_16G:b->knobs.va==2?A830_GPU_VA_CLIENT_END_2G:
-        A830_GPU_VA_CLIENT_END_4G)-A830_GPU_VA_CLIENT_BASE;
+    /* UniXNU-piano (GPU-SLOTS): above 16 GiB the 64 GiB aperture's end (pagani-gpu-va=64), whose table the shell then picks. */
+    info.va_size=(aperture>A830_GPU_VA_CLIENT_END_16G?A830_GPU_VA_CLIENT_END_64G:aperture>A830_GPU_VA_CLIENT_END_4G?A830_GPU_VA_CLIENT_END_16G:
+        b->knobs.va==2?A830_GPU_VA_CLIENT_END_2G:A830_GPU_VA_CLIENT_END_4G)-A830_GPU_VA_CLIENT_BASE;
     info.highest_bank_bit=b->highest_bank_bit;info.ubwc_swizzle=A830_UBWC_SWIZZLE;info.macrotile_mode=A830_UBWC_MACROTILE_MODE;
     info.ubwc_version=b->ubwc_mode;
     info.flags=NativeAdrenoDeviceClientIova|(d->selftest.coherence.level>=A830CoherenceFull?NativeAdrenoDeviceCachedCoherent:0u);
@@ -2137,22 +2291,83 @@ IOReturn opGmuStart(void *,const A830GmuStartArgs *args,uint16_t *step)
         g830.failure=f;g830.failure.stage=A830SGmu;
         return scope.end(r);
     }
-    g830.level=args->level;g830.bus=args->bus;
+    const uint8_t ackLevel=gQualification.r3b()?g830.hfi.currentLevel():args->level;
+    const uint8_t ackBus=gQualification.r3b()?g830.hfi.currentBus():args->bus;
+    if(args->ackLevel)*args->ackLevel=ackLevel;
+    if(args->ackBus)*args->ackBus=ackBus;
+    g830.level=ackLevel;g830.bus=ackBus;
+    if(gQualificationEnabled) {
+        uint64_t highAcks=0;
+        for(unsigned i=4;i<=Adreno830LevelMax;++i)highAcks+=g830.hfi.stats().level_acks[i];
+        qualLog("R3a fresh-M9 ACK level=%u bus=%u header=%08x at-us=%llu elapsed-us=%llu high-acks=%llu",ackLevel,ackBus,
+            g830.hfi.header(A830HfiM9Vote),nowUs(),nowUs()-gQualification.failedAt()/1000,highAcks);
+    }
     /* P2: with IFPC on (FEATURE_CTRL{IFPC,1,0x1680}) the GPU top half keeps GX up and polls the AHB fence (4.12.1, 4.17). */
     g830.irq.setIfpc(args->ifpc);
     return scope.end(kIOReturnSuccess);
 }
+/* The last CX gate check's words, for the low-failed console line (the exit journal holds them too, but it dies with a reset;
+ * gpu-r3d-c's console delivered lines at +1.9 and +2.8 ms after the expiry). flags (A830CxGate.h): bit0 cxOn, bit1 the three
+ * windows mapped, bit2/3/4 the GDSC/AHB/CX_GMU read answered, bit5 AHB on only by its running clock (ENABLE clear, CLK_OFF clear),
+ * bit8 accessible; seq counts the checks, at-us is when the last one ran. */
+static uint32_t gCxLastGdsc,gCxLastAhb,gCxLastClock,gCxLastFlags,gCxLastSeq;
+static uint64_t gCxLastAtUs;
+bool qualificationCxAccessible()
+{
+    uint32_t gdsc=0,ahb=0,clock=0;
+    a830ExitTrace.stage(A830ExitStage::CxBegin);
+    const bool cxOn=g830.power_state.cxOn(),
+        windows=mapped(A830WinGmu) && mapped(A830WinGpu) && mapped(A830WinRscc);
+    uint32_t flags=(cxOn?1u:0u)|(windows?2u:0u);
+    /* In order, short-circuit (a word not reached stays 0 and its read bit clear). AHB_CBCR counts as on when its clock runs, by
+     * our enable or another voter's (A830CxGate.h: gpu-607d1 read 08000000 at the expiry, ENABLE clear with the clock running,
+     * and the ENABLE-only test sent the exit strict and then unsafe). */
+    bool accessible=cxOn && windows;
+    if(accessible) {
+        const bool read=!powerRead(nullptr,Sm8750GpuGpuCc,SM8750_GPUCC_CX_GDS_HW_CTRL,&gdsc) && gdsc!=UINT32_MAX;
+        flags|=read?A830CxFlagReadGdsc:0u;
+        accessible=read && (gdsc&SM8750_GDSC_PWR_ON);
+    }
+    if(accessible) {
+        const bool read=!powerRead(nullptr,Sm8750GpuGpuCc,SM8750_GPUCC_AHB_CBCR,&ahb) && ahb!=UINT32_MAX;
+        flags|=read?A830CxFlagReadAhb:0u;
+        accessible=read && a830CxAhbOn(ahb);
+        flags|=accessible && a830CxAhbByRunningClock(ahb)?A830CxFlagAhbRunning:0u;
+    }
+    if(accessible) {
+        const bool read=!powerRead(nullptr,Sm8750GpuGpuCc,SM8750_GPUCC_CX_GMU_CBCR,&clock) && clock!=UINT32_MAX;
+        flags|=read?A830CxFlagReadCxGmu:0u;
+        accessible=read && a830CxGmuOn(clock);
+    }
+    flags|=accessible?A830CxFlagAccessible:0u;
+    gCxLastGdsc=gdsc;gCxLastAhb=ahb;gCxLastClock=clock;gCxLastFlags=flags;gCxLastAtUs=nowUs();++gCxLastSeq;
+    a830ExitTrace.stage(A830ExitStage::CxEnd,accessible?0u:uint32_t(kIOReturnNotReady),gdsc,ahb,clock);
+    return accessible;
+}
+
 IOReturn opGmuForceOff(void *)
 {
     TraceScope scope("gmuForceOff");
-    const IOReturn r=g830.gmu.forceOff();
-    g830.hfi.stop();
+    IOReturn r;
+    if(gQualification.r3b() && !gQualification.isDaily()) {
+        r=qualificationCxAccessible()?g830.gmu.forceOffStrict(A830GmuGxVoteStrict,&g830.gx_voter):kIOReturnNotReady;
+        const auto &f=g830.gmu.failure();
+        if(r!=kIOReturnSuccess && r!=kIOReturnNotReady)
+            a830ExitTrace.stage(A830ExitStage::StrictHwError,uint32_t(r),f.step,f.reg,f.value,f.expect);
+        qualLog("R3b3 strict result=%x step=%u reg=%llx value=%llx want=%llx at-us=%llu",
+            unsigned(r),r==kIOReturnSuccess?0:f.step,f.reg,f.value,f.expect,nowUs());
+    } else {
+        r=g830.gmu.forceOff(gQualificationEnabled);
+        g830.hfi.stop();
+    }
+    if(gQualificationEnabled)qualLog("R3a strict-off result=%x at-us=%llu elapsed-us=%llu",unsigned(r),nowUs(),
+        nowUs()-gQualification.failedAt()/1000);
     return scope.end(r);
 }
 IOReturn opRsccSleep(void *)
 {
     TraceScope scope("rsccSleep");
-    return scope.end(g830.gmu.rsccSleep());
+    return scope.end(g830.gmu.rsccSleep(gQualification.r3b()));
 }
 IOReturn opOobSet(void *) {uint32_t ack=0;return g830.gmu.oobSet(&ack);}
 void opOobClear(void *) {g830.gmu.oobClear();}
@@ -2167,10 +2382,11 @@ IOReturn opCpStart(void *,uint32_t fence,uint16_t *step)
     Adreno830Failure f={};
     uint32_t last=0;
     /* The fence is about to be forced (ring.recover, then fence below) over the jobs the recovery failed: the queue meter
-     * skips them (4.13.5). */
-    const uint32_t issued=g830.ring.lastSubmitted();
-    g830.fence.queueSkip(static_cast<int32_t>(fence-issued)>0?fence:issued);
-    g830.ring.recover(&last);
+     * skips them (4.13.5). UniXNU-piano (2026-11-22, replay): fence is the recovery's restart fence, at or before the last issued
+     * one; the jobs after it are replayed and measured again, so only the seqnos up to it are skipped (without a replay fence is
+     * the last issued one, as before). */
+    g830.fence.queueSkip(fence);
+    g830.ring.recover(&last,&fence);
     IOReturn r=cpStartOnce(&g830,&f);
     if(r!=kIOReturnSuccess) {
         if(step)*step=f.step;
@@ -2215,13 +2431,29 @@ uint32_t opRetired(void *) {return g830.fence.completed();}
 /* A830RecoveryOps: the publish shell's gate and fault accounting, the fence, the interrupt lines, the CP pipe registers. */
 uint32_t ropFailInflight(void *) {return g830.ring.outstanding();}
 /* The publish shell halts the ring and faults the connections with work in flight whatever the cause; only a hang a client's job can
- * produce (A830FaultBlamesClient) is also charged to the process whose job the CP stood in. */
+ * produce (A830FaultBlamesClient) is also charged to the process whose job the CP stood in. UniXNU-piano (2026-11-22): a replaying
+ * recovery only halts the shell here; the plan charges and faults the culprit alone. */
 void ropGate(void *,uint8_t gate,uint8_t cause)
 {
-    if(gate==A830GateRecovering) {traceRecoveryGate(gate);native_adreno_recovery_begin(A830FaultBlamesClient(cause));}
+    if(gate==A830GateRecovering) {
+        traceRecoveryGate(gate);
+        if(g830.recovery.replaying())native_adreno_recovery_begin_replay();
+        else native_adreno_recovery_begin(A830FaultBlamesClient(cause));
+    }
     else if(gate==A830GateOpen) {native_adreno_recovery_end(true);traceRecoveryGate(gate);}
     else {native_adreno_recovery_end(false);traceRecoveryGate(gate);}
+    if(gQualificationEnabled)qualLog("R3a gate=%u cause=%u ACK-level=%u bus=%u at-us=%llu elapsed-us=%llu sticky=%u",gate,cause,
+        g830.power_state.votedLevel(),g830.power_state.votedBus(),nowUs(),nowUs()-gQualification.failedAt()/1000,
+        g830.power_state.qualificationLatched());
 }
+/* The replay ops (A830RecoveryOps::plan/replay): the shell's plan over the submit object; before the shell is published (no client
+ * job exists) the restart is the last issued fence and nothing is replayed. */
+uint32_t ropPlan(void *,uint8_t cause,uint32_t *restart)
+{
+    *restart=g830.ring.lastSubmitted();
+    return native_adreno_recovery_plan(A830FaultBlamesClient(cause),restart);
+}
+IOReturn ropReplay(void *,uint32_t *replayed) {return native_adreno_recovery_replay(replayed);}
 void ropFenceSignal(void *) {g830.fence.wakeAll();}
 void ropIrqRestore(void *)
 {
@@ -2247,10 +2479,56 @@ void ropSnapshot(void *,A830HangSnapshot *snapshot)
         snapshot->smmuFsr[i]=smmuRead(uint32_t(cb+A830_SMMU_CB_FSR));
         snapshot->smmuFar[i]=smmuFar(cb);
     }
-    if(snapshot->cxOn)drainHfiLate();
+    /* UniXNU-piano (2026-11-22, gpu-recover2 RECOVER2-CLASSIFY.md): the GMU's late report only for a fault the GMU or HFI can explain.
+     * drainLate polls the HFI queues for 3 s (annibale); a client's hang (hang detect, CP_HW_ERROR, the software watchdog) leaves the
+     * GMU healthy, and those 3 s were 3.025 of gpu-recover2's 3.046 s recoveries, with the gate closed and every client stalled
+     * (gpu/daily3c's line skipped the drain under its qualification: 22 ms). */
+    /* lead/v131y7: and, as gpu/daily3c, never under the qualification (the R3b line: 22 ms recoveries). */
+    if(snapshot->cxOn && !gQualificationEnabled && !A830FaultBlamesClient(snapshot->cause))drainHfiLate();
 #ifdef ADRENO830_MACOS
     native_adreno_note_hang_snapshot(snapshot);   /* UniXNU-piano: the snapshot on the console (NativeAdrenoPublish.cpp) */
 #endif
+}
+IOReturn ropQualificationLow(void *,bool drop)
+{
+    if(!qualificationCxAccessible())return kIOReturnNotReady;
+    const IOReturn result=g830.hfi.confirmThermalExit(drop);
+    const auto &h=g830.hfi.stats();
+    qualLog("R3b3 low vote result=%x level=%u bus=%u request=%08x ack=%08x drop=%08x dropped=%u at-us=%llu",
+        unsigned(result),h.last_level,h.last_bw,h.last_request,h.last_ack,h.drop_header,h.dropped_acks,nowUs());
+    return result;
+}
+IOReturn ropQualificationQuiesce(void *)
+{
+    // Qualification selects annibale: GMU AO and HFI device IRQs are masked, with no host handlers.
+    if(!adreno830_annibale())return kIOReturnUnsupported;
+    g830.hfi.stop();
+    const IOReturn irq=g830.irq.quiesceForRecovery();
+    if(irq!=kIOReturnSuccess)return irq;
+    for(unsigned waited=0;!g830.irq.recoveryUsersDrained();waited+=50) {
+        if(waited>=100000)return kIOReturnTimeout;
+        os().sleep_us(50);
+    }
+    return kIOReturnSuccess;
+}
+bool ropQualificationGxOff(void *)
+{
+    return qualificationCxAccessible() && g830.gmu.gxOffProven();
+}
+void ropQualificationStage(void *,const char *stage,IOReturn result)
+{
+    /* low-failed (the vote ran) and low-failed-phase (not Active or no vote callback: no CX check this time): the last CX gate words
+     * on the same console line, with their age; a fresh check (cx-seq moved, cx-age small) and accessible=0 names the predicate. */
+    if(!strncmp(stage,"low-failed",10)) {
+        const uint64_t now=nowUs();
+        qualLog("R3b3 exit %s result=%x at-us=%llu sticky=%u voted=%u/%u phase=%u cx gdsc=%08x ahb=%08x clock=%08x flags=%03x seq=%u "
+            "age-us=%llu",stage,unsigned(result),now,g830.power_state.qualificationLatched(),g830.power_state.votedLevel(),
+            g830.power_state.votedBus(),unsigned(g830.power_state.phase()),gCxLastGdsc,gCxLastAhb,gCxLastClock,gCxLastFlags,
+            gCxLastSeq,gCxLastSeq?now-gCxLastAtUs:0ull);
+        return;
+    }
+    qualLog("R3b3 exit %s result=%x at-us=%llu sticky=%u voted=%u/%u",stage,unsigned(result),
+        nowUs(),g830.power_state.qualificationLatched(),g830.power_state.votedLevel(),g830.power_state.votedBus());
 }
 void powerFaultSink(void *,uint8_t cause,uint64_t detail) {g830.recovery.report(cause,detail);}
 /* The power state machine and the recovery, bound once (S8; started in S10). */
@@ -2266,7 +2544,8 @@ void bindPower(Adreno830Device *d)
     d->power_env={nullptr,envNowNs,envSleepUs,envDelayUs,envLock,envUnlock,envWait,envWake,envStartThread};
     d->power_ops={nullptr,opCxPowerOn,opCxPowerOff,opSmmuRestore,opCxTimerSeed,opGmuStart,opGmuForceOff,opRsccSleep,opOobSet,
                   opOobClear,opHfiSend,opCpStart,opSecureResume,opIrqEnable,opLastSubmitted,opRetired};
-    d->recovery_ops={nullptr,ropFailInflight,ropGate,ropFenceSignal,ropIrqRestore,ropReadPipe,ropSnapshot};
+    d->recovery_ops={nullptr,ropFailInflight,ropGate,ropFenceSignal,ropIrqRestore,ropReadPipe,ropSnapshot,ropPlan,ropReplay,
+                     ropQualificationLow,ropQualificationQuiesce,ropQualificationGxOff,ropQualificationStage};
     /* P0 by default (ARCHITECTURE 4.17): no slumber, no IFPC; the machine still owns the transitions the recovery runs.
      * pagani-gpu-slumber selects P1 (1: full collapse, 2: keeping CX), pagani-gpu-ifpc P2 and pagani-gpu-ahbto the CX_AHB
      * timeout detection of each GMU start (IMPLEMENTATION_PLAN M13 c, e, f). */
@@ -2476,16 +2755,167 @@ void dcvsQueueRow(void *)
     g830.fence.takeQueue(&queue);
     adreno830_status_queue(&queue);
     adreno830_status_meter();
+    if(gQualificationEnabled) {
+        const auto &s=g830.dcvs.stats();const auto &h=g830.hfi.stats();const auto &r=g830.recovery.stats();
+        qualLog("R3a COUNTERS at-us=%llu vote=%u failures=%u sent=%u ack=%u timeout=%u errors=%u stale=%u malformed=%u queuefull=%u dropped=%u drop=%08x req=%08x requested=%u/%u forceoff=%u recover=%u recoverfail=%u gbif=%u level=%u bus=%u sticky=%u reason=%u ready=%u high=%u",
+            nowUs(),s.votes,s.voteFailures,h.sent,h.acks,h.timeouts,h.errors,h.stale_acks,h.malformed,h.queue_full,h.dropped_acks,h.drop_header,
+            h.last_request,h.last_level,h.last_bw,g830.gmu.report().force_offs,r.recoveries,r.failures,r.gbifTimeouts,
+            g830.power_state.votedLevel(),g830.power_state.votedBus(),g830.power_state.qualificationLatched(),
+            gQualification.reason(),gQualification.ready(),gQualification.high());
+        qualLog("R3a RES at-us=%llu windows=%u busy=%u ceiling=%u l1=%u l2=%u l3=%u l4=%u l5=%u l6=%u l7=%u l8=%u l9=%u l10=%u l11=%u",
+            nowUs(),s.windows,s.busyPermille,s.ceiling,s.residency[1],s.residency[2],s.residency[3],s.residency[4],s.residency[5],
+            s.residency[6],s.residency[7],s.residency[8],s.residency[9],s.residency[10],s.residency[11]);
+        if(gQualification.r3b())qualLog("R3b LIVE at-us=%llu l0=%llu l1=%llu l2=%llu l3=%llu l4=%llu l5=%llu l6=%llu l7=%llu l8=%llu l9=%llu l10=%llu l11=%llu high-long-us=%llu l7-long-us=%llu",
+            nowUs(),s.residencyTotalNs[0]/1000,s.residencyTotalNs[1]/1000,s.residencyTotalNs[2]/1000,s.residencyTotalNs[3]/1000,
+            s.residencyTotalNs[4]/1000,s.residencyTotalNs[5]/1000,s.residencyTotalNs[6]/1000,s.residencyTotalNs[7]/1000,
+            s.residencyTotalNs[8]/1000,s.residencyTotalNs[9]/1000,s.residencyTotalNs[10]/1000,s.residencyTotalNs[11]/1000,s.residencyHighLongestNs/1000,s.residency607LongestNs/1000);
+        if(gQualification.r3b())qualLog("R3b WORK at-us=%llu submitted=%u completed=%u missed=%u q-us=%u q-max=%u depth=%u polled=%u rs-jobs=%u rs-us=%u ext-jobs=%u ext-busy-us=%u ext-max-us=%u",
+            nowUs(),queue.submitted,queue.completed,queue.missed,queue.avg_us,queue.max_us,queue.depth,queue.polled,
+            queue.rs_jobs,queue.rs_avg_us,queue.ext_jobs,queue.ext_busy_us,queue.ext_max_us);
+        qualLog("R3a ACK at-us=%llu l1=%u l2=%u l3=%u l4=%u l5=%u l6=%u l7=%u l8=%u l9=%u l10=%u l11=%u last=%08x hfi-vote-fail=%u host-sent=%u host-fail=%u host-held=%x mx=%u cx=%u ddr=%u gpu-peak=%d",
+            nowUs(),h.level_acks[1],h.level_acks[2],h.level_acks[3],h.level_acks[4],h.level_acks[5],h.level_acks[6],h.level_acks[7],h.level_acks[8],
+            h.level_acks[9],h.level_acks[10],h.level_acks[11],h.last_ack,h.vote_failures,g830.host.sent,g830.host.failures,g830.host.held,
+            g830.host.mx_hlvl,g830.host.cx_hlvl,g830.host.ddr_kbps,g830.dcvs.thermal().peak_deci);
+    }
 }
+void qualificationVoteFault(void *,uint8_t requested,uint8_t bus,IOReturn error)
+{
+    const auto &h=g830.hfi.failure();
+    // A last-moment R3b cap may have lowered the caller's cached target before enqueue.
+    if(gQualification.r3b()) {requested=uint8_t(g830.hfi.stats().last_level);bus=uint8_t(g830.hfi.stats().last_bw);}
+    qualLog("R3a vote-unknown request=%08x seq=%u requested=%u/%u oldACK=%u/%u error=%x reason=%u at-us=%llu",
+        h.hdr,A830_HFI_HDR_SEQ(h.hdr),requested,bus,g830.power_state.votedLevel(),g830.power_state.votedBus(),unsigned(error),h.reason,nowUs());
+    gQualification.fault(A830QualVote,nowUs()*1000,A830ExitContext::Dcvs);
+    if(gQualification.isDaily())g830.recovery.report(A830FaultHfi,uint32_t(error));   // daily: fault() does not report a vote
+}
+void qualificationThread(void *)
+{
+    uint64_t logAt=0;uint32_t lastReason=0;
+    for(;;) {
+        const uint64_t now=nowUs()*1000;
+        if(g830.power_state.qualificationLatched() && !gQualification.reason())gQualification.fault(A830QualVote,now);
+        Sm8750TsensSample gpu={};Sm8750TsensReadGpu(&g830.tsens_io,&gpu);
+        if(gQualification.r3b())gQualification.sample(now,gpu,A830ExitContext::Guard); // raw exit before board lookup, filtering, logging or HFI
+        piano_gpu_temps board={};board.version=PIANO_GPU_TEMPS_VERSION;
+        const bool ok=adreno830_qualification_board(&board);
+        const auto test=__atomic_load_n(&gQualificationExitTest,__ATOMIC_ACQUIRE);
+        bool injectTrip=false;
+        if(test==3 || test==4) {
+            const bool accepted=a830ExitTestAllowed(test,gpu,board,ok,gQualification,g830.power_state,g830.recovery);
+            injectTrip=accepted && test==3;
+            qualLog("R3b4 inject command=%u accepted=%u raw=%d msm=%d quiet=%d period=%u age-ms=%u,%u phase=%u level=%u at-us=%llu",
+                test,accepted,gpu.max_deci,board.milli_c[0],board.milli_c[1],board.period_ms,board.age_ms[0],board.age_ms[1],
+                unsigned(g830.power_state.phase()),g830.power_state.votedLevel(),now/1000);
+            if(accepted && test==4)g830.recovery.requestQualificationLow(A830QualBoardHot,now,true);
+            __atomic_store_n(&gQualificationExitTest,test-2,__ATOMIC_RELEASE);
+        }
+        /* gpu/fullopp1: the virtual skin sensor (PianoThermal's round is 5 s: read it once a second) */
+        static piano_skin_temps skin;static bool skinOk;static unsigned skinTicks;
+        if(gQualification.isFullopp() && (skinTicks++%10)==0) {
+            skin={};skin.version=PIANO_SKIN_TEMPS_VERSION;skinOk=adreno830_qualification_skin(&skin);
+        }
+        gQualification.tick(now,gpu,board,ok,injectTrip,gQualification.isFullopp() && skinOk?&skin:nullptr);
+        static bool dailyOpenLogged;
+        if(gQualification.isDaily() && !dailyOpenLogged && gQualification.openedAt()) {
+            dailyOpenLogged=true;qualLog("R3b DAILY open at-us=%llu",gQualification.openedAt()/1000);
+        }
+        if(gQualification.deadlineMissed(now))qualificationUnsafe(nullptr,A830ExitOrigin::ProtectionDeadline);
+        const bool event=gQualification.r3b() && (gQualification.thermal().events || gQualification.reason()!=lastReason);
+        if(event) {
+            const auto &t=gQualification.thermal();
+            qualLog("R3b EVENT at-us=%llu event=%u step=%u board-cap=%u effective=%u raw=%d filtered=%d reason=%u failed-us=%llu",
+                now/1000,t.events,t.step,t.boardCap,g830.power_state.qualificationEffectiveCap(A830ExitContext::Guard),t.raw,t.filter16/16,gQualification.reason(),gQualification.failedAt()/1000);
+        }
+        lastReason=gQualification.reason();
+        if(!gQualification.r3b() || now>=logAt || event) {
+            const uint64_t age0=board.age_ms[0],age1=board.age_ms[1];
+            qualLog("R3a TEMP at-us=%llu gpu-valid=%02x gpu-max=%d gpu-raw=%x,%x,%x,%x,%x,%x,%x,%x board-ok=%u state=%u valid=%x disabled=%x rounds=%u period=%u msm=%d quiet=%d age-ms=%llu,%llu sample-us=%llu,%llu ready=%u high=%u sticky=%u reason=%u opened-us=%llu failed-us=%llu inhibit=%u",
+                now/1000,gpu.valid,gpu.max_deci,gpu.raw[0],gpu.raw[1],gpu.raw[2],gpu.raw[3],gpu.raw[4],gpu.raw[5],gpu.raw[6],gpu.raw[7],
+                ok,board.state,board.valid,board.disabled,board.rounds,board.period_ms,board.milli_c[0],board.milli_c[1],age0,age1,
+                board.sample_us[0],board.sample_us[1],gQualification.ready(),gQualification.high(),g830.power_state.qualificationLatched(),
+                gQualification.reason(),gQualification.openedAt()/1000,gQualification.failedAt()/1000,gQualification.inhibit());
+            if(gQualification.r3b()) {
+                auto &t=gQualification.thermal();
+                qualLog("R3b THERM at-us=%llu seq=%llu reads=%u min-valid=%x gap-us=%llu peaks=%d,%d,%d,%d,%d,%d,%d,%d raw=%d filtered=%d trend=%d step=%u board-cap=%u effective=%u downs=%u ups=%u healthy=%u",
+                    now/1000,t.sequence,t.reads,t.minValid,t.maxGap/1000,t.peaks[0],t.peaks[1],t.peaks[2],t.peaks[3],t.peaks[4],t.peaks[5],t.peaks[6],t.peaks[7],
+                    t.raw,t.filter16/16,t.trend,t.step,t.boardCap,g830.power_state.qualificationEffectiveCap(A830ExitContext::Guard),t.downs,t.ups,t.healthy);
+                t.resetPeaks();
+            }
+            if(gQualification.isFullopp()) {
+                /* gpu/fullopp1: one short line a second (the console keeps ~255 bytes of a line): the voted level and its MHz, the
+                 * guard's cap and why, the silicon and skin readings, ACD; then the residency above 607 and the HFI ACKs per level. */
+                const auto &t=gQualification.thermal();
+                const uint8_t lv=g830.power_state.votedLevel();
+                const uint8_t cap=g830.power_state.qualificationEffectiveCap(A830ExitContext::Guard);
+                static const char *const causes[]={"none","ladder","skin25","skin45","xo","skin-unknown","hard"};
+                qualLog("R3b LV at-us=%llu lvl=%u mhz=%u cap=%u cause=%s raw=%d filt=%d skin=%d skin-ok=%u xo=%d acd=%u",now/1000,
+                    unsigned(lv),unsigned(lv<=14?FulloppMhz[lv]:0),unsigned(cap),causes[t.cause<=6?t.cause:0],t.raw,t.filter16/16,
+                    t.skinMilli/100,unsigned(t.skinValid),t.xoMilli/100,unsigned(g830.acd_running));
+                const A830DcvsStats &ds=g830.dcvs.stats();
+                qualLog("R3b RESF at-us=%llu ms l7=%llu l8=%llu l9=%llu l10=%llu l11=%llu l12=%llu l13=%llu l14=%llu",now/1000,
+                    ds.residencyTotalNs[7]/1000000,ds.residencyTotalNs[8]/1000000,ds.residencyTotalNs[9]/1000000,
+                    ds.residencyTotalNs[10]/1000000,ds.residencyTotalNs[11]/1000000,ds.residencyTotalNs[12]/1000000,
+                    ds.residencyTotalNs[13]/1000000,ds.residencyTotalNs[14]/1000000);
+                const A830HfiStats &hs=g830.hfi.stats();
+                qualLog("R3b ACKS at-us=%llu a1=%u a2=%u a3=%u a4=%u a5=%u a6=%u a7=%u a8=%u a9=%u a10=%u a11=%u a12=%u a13=%u a14=%u fail=%u",
+                    now/1000,hs.level_acks[1],hs.level_acks[2],hs.level_acks[3],hs.level_acks[4],hs.level_acks[5],hs.level_acks[6],
+                    hs.level_acks[7],hs.level_acks[8],hs.level_acks[9],hs.level_acks[10],hs.level_acks[11],hs.level_acks[12],
+                    hs.level_acks[13],hs.level_acks[14],hs.vote_failures);
+            }
+        logAt=now+1000000000ull;
+        }
+        os().sleep_us(gQualification.r3b()?100000:1000000);
+    }
+}
+void qualificationService(void *,uint64_t now) {
+    gQualification.checkLease(now,A830ExitContext::Dcvs);
+    const uint64_t at=__atomic_load_n(&gQualificationInjectAt,__ATOMIC_ACQUIRE);
+    if(at && now>=at && __atomic_exchange_n(&gQualificationInjectAt,0ull,__ATOMIC_ACQ_REL)) {
+        if(gQualification.high() && g830.power_state.votedLevel()>3 &&
+           (!gQualification.r3b() || g830.power_state.qualificationEffectiveCap(A830ExitContext::Dcvs)>3) && g830.hfi.armDropAck()) {
+            qualLog("R3a injection armed from ACK level=%u at-us=%llu",g830.power_state.votedLevel(),nowUs());
+            g830.dcvs.forceQualificationVote();
+        } else qualLog("R3a injection refused: high ACK/permit missing at deadline");
+    }
+}
+void qualificationSample(void *,uint64_t now,const Sm8750TsensSample *gpu) {gQualification.sample(now,*gpu);}
 IOReturn stageDcvs(Adreno830Device *d,Adreno830Failure *f)
 {
     const Adreno830Board *b=d->board;
     adreno830_status_step(A830S10StepPower);
     bindPower(d);
+#ifdef ADRENO830_MACOS
+    if(qualificationMode(b) && gIdle.mode!=1)return refuse(f,A830S10StepPower,A830ReasonArgument,0,gIdle.mode,1,kIOReturnBadArgument);
+#endif
     adreno830_status_step(A830S10StepDcvs);
     A830DcvsConfig config;
+    config.qualification607=qualificationMode(b);
+    config.qualificationR3b=b->qualification_r3b==1;
+    if(b->qualification_exit_test && (!config.qualificationR3b || b->qualification_exit_test!=1))
+        return refuse(f,A830S10StepDcvs,A830ReasonArgument,0,b->qualification_exit_test,1,kIOReturnBadArgument);
+    if(b->qualification_r3b && (!config.qualification607 || b->qualification_r3b!=1))
+        return refuse(f,A830S10StepDcvs,A830ReasonArgument,0,b->qualification_r3b,1,kIOReturnBadArgument);
+    /* pagani-gpu-daily=1 only on the R3b line with the governor's own floor (160 MHz): not with the exit test or the 607 residency */
+    /* gpu/fullopp1: with pagani-gpu-fullopp=1 the floor may also be Android's 222 MHz (min_pwrlevel 12). */
+    const bool fullopp=b->qualification_fullopp==1;
+    if(b->qualification_daily && (b->qualification_daily!=1 || !config.qualificationR3b || b->qualification_exit_test ||
+       qualificationResidency(b) || (b->knobs.dcvs_min_mhz!=160 && !(fullopp && b->knobs.dcvs_min_mhz==222))))
+        return refuse(f,A830S10StepDcvs,A830ReasonArgument,0,b->qualification_daily,1,kIOReturnBadArgument);
+    if(b->qualification_fullopp && (!fullopp || !config.qualificationR3b))
+        return refuse(f,A830S10StepDcvs,A830ReasonArgument,0,b->qualification_fullopp,1,kIOReturnBadArgument);
     config.governor=b->knobs.dcvs!=0;
-    config.minMhz=b->knobs.dcvs_min_mhz;config.maxMhz=b->knobs.dcvs_max_mhz;
+    /* gpu/fullopp1 (ANALYSIS.md 3.2): pagani-gpu-governor=2, KGSL's open constants: 10 ms windows on the timer (no TE windows), the idle
+     * rule at 80 ms (the idle timer), no 734 MHz sustain limit, the race to the top without needing the input floor. */
+    if(b->dcvs_governor) {
+        if(b->dcvs_governor!=2)return refuse(f,A830S10StepDcvs,A830ReasonArgument,0,b->dcvs_governor,2,kIOReturnBadArgument);
+        config.kgsl=true;config.windowMs=10;config.idleMs=80;config.sustainKhz=0;
+    }
+    if(b->input_floor_mhz && (b->input_floor_mhz<160 || b->input_floor_mhz>1100))
+        return refuse(f,A830S10StepDcvs,A830ReasonArgument,0,b->input_floor_mhz,1100,kIOReturnBadArgument);
+    config.inputFloorKhz=b->input_floor_mhz*1000u;
+    // Use the 342 MHz control without a load generator; thermal and sticky limits still apply.
+    config.minMhz=b->qualification_exit_test?342:b->knobs.dcvs_min_mhz;
+    config.maxMhz=b->knobs.dcvs_max_mhz;
     config.maxGiven=(b->flags&(1u<<Adreno830KnobDcvsMax))!=0;
     config.maxLevel=uint8_t(b->knobs.maxlevel);   /* pagani-gpu-maxlevel: the ceiling level (S0 checked <= 16) */
     config.thermalTargetDeci=int32_t(b->knobs.ttarget)*10;   /* pagani-gpu-ttarget (S0 checked 50..100 C) */
@@ -2514,12 +2944,54 @@ IOReturn stageDcvs(Adreno830Device *d,Adreno830Failure *f)
             idleEvent(e);
         }
     }
-    const A830DcvsOps ops={nullptr,dcvsPerfVote,dcvsHostDdr,dcvsPollFaults,dcvsMemoryRow,dcvsQueueRow,
+    A830DcvsOps ops={nullptr,dcvsPerfVote,dcvsHostDdr,dcvsPollFaults,dcvsMemoryRow,dcvsQueueRow,
                            gIdle.mode>=2?dcvsIdleTick:nullptr};
 #else
-    const A830DcvsOps ops={nullptr,dcvsPerfVote,dcvsHostDdr,dcvsPollFaults,dcvsMemoryRow,dcvsQueueRow};
+    A830DcvsOps ops={nullptr,dcvsPerfVote,dcvsHostDdr,dcvsPollFaults,dcvsMemoryRow,dcvsQueueRow};
 #endif
     d->tsens_io={nullptr,tsensRead};
+    if(config.qualification607) {
+#if defined(ADRENO830_MACOS) && !defined(ADRENO830_HOST_TEST)
+        /* the board allocated it under the same rule (A830QualificationTop.h, board/PianoA830.cpp PianoA830::start) */
+        if(!adreno830_qualification_log_ready())return refuse(f,A830S10StepDcvs,A830ReasonNoMemory,0,0,0,kIOReturnNoMemory);
+#endif
+        gQualificationEnabled=true;
+        d->recovery.qualification(qualificationUnsafe,nullptr);
+        const bool residency607=qualificationResidency(b);
+        gQualification.init(&d->power_state,&d->recovery,config.qualificationR3b,qualificationUnsafe,residency607);
+        if(fullopp)gQualification.fullopp();   /* Android's thermal table, tops to 14 (before setTop) */
+        if(!gQualification.setTop(qualificationTop(b)))return refuse(f,A830S10StepDcvs,A830ReasonArgument,0,b->knobs.maxlevel,9,kIOReturnBadArgument);
+        qualLog("R3b TOP v1 level=%u mhz=%u bus=%u",unsigned(gQualification.top()),unsigned(b->knobs.dcvs_max_mhz),
+                unsigned(A830Qualification::defaultBus(gQualification.top())));
+        if(config.qualificationR3b)a830ExitTrace.start(d->power_env.nowNs,d->power_env.context);
+        if(residency607)qualLog("R3b residency qualification window-s=625 floor-mhz=607");
+        if(b->qualification_daily) {
+            gQualification.daily();
+            qualLog("R3b DAILY v1 auto-arm=1 window=none floor-mhz=%u max-mhz=%u",unsigned(config.minMhz),unsigned(config.maxMhz));
+        }
+        if(config.qualificationR3b)qualLog("R3b CONFIG R3b-607-v1 soft=800 cool=750 hard=850 halt=1050 floor=3 guard-ms=100 lease-ms=250 down-ms=500 up-ms=2000 board-hold=62000,37000 board-release=60000,35000 board-hard=65000,40000");
+        if(config.qualificationR3b)qualLog("R3b CXGATE v2 ahb=enable-or-running gmu=clk-or-noc gdsc=pwr-on");
+        if(fullopp) {
+            const auto &t=gQualification.thermal();
+            qualLog("R3b FULL v1 top=%u mhz=%u acd=%s soft=%d cool=%d hard=%d halt=1050 skin25=%u,%d,%d skin45=%u,%d,%d xo=%u,%d,%d "
+                    "xo-hard=%d governor=%s floor-mhz=%u",unsigned(gQualification.top()),unsigned(b->knobs.dcvs_max_mhz),
+                    d->acd_running?"on":b->knobs.acd?"refused":"off",int(t.softDeci),int(t.coolDeci),int(t.hardDeci),
+                    unsigned(t.Skin25Level),int(t.Skin25On),int(t.Skin25Off),unsigned(t.Skin45Level),int(t.Skin45On),int(t.Skin45Off),
+                    unsigned(t.Skin45Level),int(t.XoOn),int(t.XoOff),int(t.XoHard),
+                    config.kgsl?"kgsl":"r3b",unsigned(config.minMhz));
+        }
+        d->hfi.qualification(true);ops.qualificationFault=qualificationVoteFault;
+        if(config.qualificationR3b) {
+            d->hfi.qualificationLimiter([](void *p,uint8_t &level,uint8_t &bus) {
+                static_cast<A830PowerState *>(p)->limitQualification(level,bus,A830ExitContext::Hfi);
+            },&d->power_state);
+            ops.qualificationAck=[](void *,uint8_t &level,uint8_t &bus) {level=g830.hfi.currentLevel();bus=g830.hfi.currentBus();};
+        }
+        ops.qualificationThermal=[](void *) {return gQualification.thermalSnapshot();};
+        ops.qualificationService=qualificationService;ops.qualificationSample=qualificationSample;
+        if(!os().thread_start || os().thread_start(qualificationThread,nullptr)!=kIOReturnSuccess)
+            return refuse(f,A830S10StepDcvs,A830ReasonNoMemory,0,0,0,kIOReturnNoMemory);
+    }
     IOReturn r=d->dcvs.init(config,table,d->power_win,d->power_env,ops,&d->power_state,&d->recovery,
                             mapped(A830WinTsensTm)?&d->tsens_io:nullptr);
     if(r!=kIOReturnSuccess)return refuse(f,A830S10StepDcvs,A830ReasonArgument,0,r,0,r);
@@ -2769,12 +3241,43 @@ extern "C" void adreno830_start_reset(void)
 {
     g830.~Adreno830Device();
     new (&g830) Adreno830Device();
+    gQualification=A830Qualification{};gQualificationEnabled=false;
+    gQualificationInjectAt=0;gQualificationInjectionScheduled=false;gQualificationExitTest=0;
 #ifdef ADRENO830_MACOS
     gSaved=SuspendSaved{};   /* UniXNU-piano */
 #endif
+
     memset(&cmdDbSnapshot,0,sizeof cmdDbSnapshot);
     traceReset();
 }
 void adreno830_set_os(const Adreno830Os *table) {osTable=table;}
 Adreno830Device *adreno830_device_for_test(void) {return &g830;}
 #endif
+
+// Flags: enabled/ready/high/sticky, then reason in bits 8+. Commands 3/4 need the R3b exit-test boot arg.
+extern "C" int adreno830_qual607_control(int command)
+{
+    if(!gQualificationEnabled)return -1;
+    if((command==1 || command==2) && g830.board->qualification_exit_test)return -2;
+    if(command==1) {if(!gQualification.arm())return -2;qualLog("R3a permit requested");}
+    else if(command==2) {
+        if(!gQualification.high() || g830.power_state.votedLevel()<=3 ||
+           __atomic_exchange_n(&gQualificationInjectionScheduled,true,__ATOMIC_ACQ_REL))return -2;
+        // Schedule on the device clock. SSH latency cannot shorten the600-second normal soak or consume its2-second tail.
+        const uint64_t at=gQualification.openedAt()+600000000000ull;
+        __atomic_store_n(&gQualificationInjectAt,at,__ATOMIC_RELEASE);
+        qualLog("R3a injection scheduled for-us=%llu",at/1000);
+    } else if(command==3 || command==4) {
+        if(!g830.board->qualification_exit_test)return -2;
+        uint32_t expected=uint32_t(command-3);
+        if(!__atomic_compare_exchange_n(&gQualificationExitTest,&expected,uint32_t(command),false,
+                                       __ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return -2;
+    } else if(command!=0)return -2;
+    return 1|(gQualification.ready()?2:0)|(gQualification.high()?4:0)|(g830.power_state.qualificationLatched()?8:0)|int(gQualification.reason()<<8);
+}
+
+extern "C" void adreno830_qualification_display(const PianoGpuQualificationDisplay *d) {
+    if(!d || !gQualificationEnabled || !gQualification.r3b())return;
+    qualLog("R3b DISPLAY at-us=%llu period-us=%llu submitted=%llu shown=%llu dropped=%llu copies=%llu mean-us=%llu max-us=%llu prepare-us=%llu read-us=%llu convert-us=%llu write-us=%llu",
+        d->atUs,d->periodUs,d->submitted,d->shown,d->dropped,d->copies,d->meanUs,d->maxUs,d->prepareUs,d->readUs,d->convertUs,d->writeUs);
+}

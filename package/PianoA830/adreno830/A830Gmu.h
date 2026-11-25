@@ -205,6 +205,7 @@ struct A830GmuGxVoter {
     int status,held;
 };
 int A830GmuGxVote(void *voter,int on);
+int A830GmuGxVoteStrict(void *voter,int on);
 
 class A830Gmu final {
     A830GmuIo io_{};
@@ -229,12 +230,12 @@ class A830Gmu final {
     bool wr(unsigned window,uint32_t offset,uint32_t value);
     void barrier();
     int pollMask(unsigned window,uint32_t offset,uint32_t mask,uint32_t want,uint32_t timeout_us,uint32_t step_us,
-                 bool sleep,uint32_t *value,uint32_t *elapsed_us);   /* 0 matched, 1 timeout, 2 access failed */
+                 bool sleep,uint32_t *value,uint32_t *elapsed_us,bool strict=false);   /* 0 matched, 1 timeout, 2 access failed */
     bool checkFatal(uint32_t *info,uint32_t *ao,uint16_t *reason);
     void recordInterrupts(uint32_t info,uint32_t ao);
     void stormOff(unsigned which);
     void kick();
-    IOReturn waitRsccTcs(uint32_t timeout_us);
+    IOReturn waitRsccTcs(uint32_t timeout_us,bool strict=false);
     IOReturn haltGbif(uint32_t mask,bool release);
     IOReturn wakeRscc();   /* the B3 handshake, whatever made the RSC sleep */
 public:
@@ -279,10 +280,13 @@ public:
      * RSCC TCSes (1 ms each, record only); clear the AHB fence; CM3 reset; GBIF arbiter halt (100 ms, record only); GX GDSC
      * collapse with a temporary host GX vote when GX is still on; RSCC sleep (record only); GBIF halt released. Always
      * completes; warnings say what did not. The GMU is then off and the OOB references are dropped. */
-    IOReturn forceOff();
+    IOReturn forceOff(bool strict=false);
+    /* CX power and clocks, IRQ and HFI quiescence are proved by the caller. Uses CX registers only. */
+    bool gxOffProven();
+    IOReturn forceOffStrict(int (*gxVote)(void *,int),void *cookie);
     /* 4.7.4: CM3 reset, GENERAL_9 saved, RSCC_CONTROL_REQ BIT0, RSC_STATUS0_DRV0 bit16 within 100 ms, request cleared.
      * Skipped before the first successful boot and when already asleep. Step 0x30, reason 5. */
-    IOReturn rsccSleep();
+    IOReturn rsccSleep(bool strict=false);
     /* B3: RSCC_CONTROL_REQ BIT1, ACK bit1 and SEQ_BUSY_DRV0 == 0 within 100 ms each, request cleared. Only after a sleep.
      * Step 0x31, reason 5. annibale profile (K/adreno8_gmu.c:582-597): the request is read first and BIT1 ORed into it,
      * and afterwards the request is written back to what it was only when this driver set BIT1 (with nothing else

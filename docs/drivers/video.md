@@ -1,14 +1,25 @@
 # Video: the Iris video core natively (PianoVideo) and VideoToolbox through the VM-era paravirtual decoder
 
-Status, 2026-11-17: V2 power/PAS and V3 INIT/version/lifecycle are tablet-confirmed. V4 (`vid-v4a`) decoded
+Status, 2026-11-18: V2 power/PAS and V3 INIT/version/lifecycle are tablet-confirmed. V4 (`vid-v4a`) decoded
 our real 320×240 AVC AU and matched the exact active NV12 golden hash, with safe DMA teardown (§13).
 V5c is tablet-confirmed: real caller input traverses VT and Iris into an IOSurface-backed callback with the original golden
-hash and safe teardown. V6 implements bounded persistent Baseline/Main AVC streaming; its continuous hardware qualification is pending (§15).
+hash and safe teardown. V6p completed one 60-frame Main AVC stream with matching pixels and balanced surface references.
+Stock QuickTime displays the first hardware frame, but V7d drops the following 59 frames: the bridge drains during preroll
+and subsequently exhausts its admission credits. V7e keeps the eight-credit limit, defers successful replies beyond four
+published frames without blocking the receive path, and makes finish a completion barrier for this decode-order endpoint.
+Rejected requests use Apple's error completion once. V7e2 and V8a subsequently qualified stock QuickTime playback of the
+owned320×240 Main and1920×1080 High AVC fixtures:60 native/client frames,0 dropped and optically confirmed motion.
+V9 implements bounded HEVC Main/Main10/P010 for qualification; no HEVC tablet result is claimed.
+V9c contains failed native sessions for the rest of a boot: a firmware/session or STOP/CLOSE error retains
+the existing DMA, firmware and power dependencies and blocks another core bootstrap. DMA release alone
+does not establish hardware health. Owning-task PID/name and lifecycle reason logs support qualification;
+this containment does not establish the electrical cause of a reset or safe repeated cold initialization.
 The earlier ladder and historical test recipes below do not establish macOS app playback. Backlog item B10.
 
 ## 1. Purpose and gate
 
-Normal apps still use VideoToolbox software decoding; the native Iris bridge is an opt-in qualification endpoint. The SoC's video core decodes H.264, HEVC and VP9 at its lowest clock for every common stream (§4.5), and encodes H.264
+The native Iris bridge is an opt-in qualification endpoint; stock QuickTime continuous playback is confirmed for the two
+owned AVC fixtures. Throughput for other streams needs measurement. The SoC's video core decodes H.264, HEVC and VP9 (§4.5), and encodes H.264
 and HEVC. Gate: battery life (owner priority) and daily use (QuickTime, Safari, wallpapers, thumbnails);
 not a login gate. Ubuntu uses it: H.264/HEVC/VP9 decode and H.264/H.265 encode verified at 1080p and 4K, AV1 in software
 (`xiaomipad-8pro-mainline/docs/STATUS.md`, `README.en.md`; the core lists AV1, but a third-party piano report has AV1 decode failing
@@ -800,3 +811,82 @@ with interrupt side effects are excluded. The snapshot changes no waits, timeout
 service preserves the same text independently of owner teardown; `V6f snapshot exported IORegistry 1` confirms publication.
 Absent domains are marked unreadable rather than read speculatively. The unchanged V6 tool and fixtures reproduce the
 original phase order. This is diagnostic instrumentation, not a firmware-stall fix or a continuous-decoding qualification.
+
+
+## 16. Stock playback qualification and bounded High AVC (V8)
+
+The V7e2 RAM test qualified the owned 320×240 Main AVC fixture in unmodified QuickTime: 60 native frames, client lifetime
+60 decoded/0 dropped, rate1 and optically confirmed fixture motion. The asynchronous reply window stays four with eight
+credits and two input slots; VT finish preserves decode-order references instead of issuing HFI EOS. Exhaustive exclusion
+of all software-factory attempts is still unknown. This result does not qualify other resolutions, codecs or clients.
+
+The V8 implementation admits progressive limited-range 8-bit420 Baseline/Main/High AVC through active1920×1080,
+POC0/2, references≤4, reorder≤4, one SPS/PPS, four-byte NAL lengths and one complete AU≤1MiB per sample. It validates
+High syntax, scaling lists/8×8 transforms, avcC extensions, coded/active dimensions, crop and level mappings through4.2.
+Field coding, POC1, FMO, transform bypass, high bit depths, other chroma formats, full range, protected samples and DRC
+remain rejected. Exact same-configuration dcan is unchanged.
+
+The native path derives FIRST_IPSC geometry and pixel crop from the stream, checks active dimensions against the SPS,
+and adopts bounded firmware-returned coded geometry. Initial COMV usesN4; PSC's realN controls COMV count and split
+DPB/RAW supply. General AVC uses at most16 pictures and four scratch types (AV1-only PARTIAL is omitted), with two
+disjoint scratch generations. At coded1920×1088 it reserves186,449,920 bytes including guards within a256MiB aperture;
+132 SMMU table pages cover that aperture. Legacy self-tests retain their prior layout. RAW uses linearNV12, references
+useQC08C, and only crop-adjusted active rows reach a checked420v IOSurface. Pool size remains bounded to4MiB.
+
+The owned High1080 and Main720 clips, compressed identities, PTS/DTS and independent software NV12 hashes are in
+`package/PianoVideo/tests/fixtures/v8`. `tooling/native/build-video-avc-audit.sh` checks actual CoreMedia formats and all
+compressed packets without creating a VT session. The next image must prove native/client counts, returned geometry,
+safe close and optical motion in stock QuickTime. V8a subsequently passed these checks. HEVC/P010,
+aerial playback, Safari/MSE and concurrent sessions remain separate gates; cinematic boot is a frozen-surface/Metal
+handoff, with no established HEVC movie dependency.
+
+## 17. Bounded HEVC implementation (V9; tablet qualification pending)
+
+The first visible HEVC target is Aerial wallpaper: the27.3 default asset is Main10,3840×2160, High tier6.1 with temporal
+layers, WPP and B pictures. Its consumer can submit synchronous flags0/2. Official cinematic boot instead hands RGB
+surfaces to WindowServer/Metal; no HEVC movie dependency has been established there.
+
+V9 adds hvc1 inventory and capability queries, immutable hvcC/VPS/SPS/PPS admission, Main/Main10 progressive limited-range
+420, four-byte NAL lengths, one complete AU≤1MiB and an IDR session start. Protected streams, other profiles/chroma,
+parameter-set changes and concurrent native owners fail closed. Codec3 uses HEVC PSC fields including tier, requires
+returned resolution/crop/depth/minimum/profile/level/tier and sizes COMV, split references and RAW from the returned N.
+The HEVC aperture has a768MiB ceiling and N≤10. V9e backs the complete guarded layout rounded to2MiB:
+1080p Main10 uses188MiB and Main8 uses148MiB; tables and page metadata follow that span. AVC retains256MiB/N16.
+Two disjoint scratch generations and16KiB invalid guards remain mandatory. Allocation failure frees partial preparation;
+unconfirmed DMA teardown retains backing and poisons subsequent opens.
+
+Main8 uses linearNV12/420v and QC08C references. Main10 uses linearP010/x420 and QC10C references; HFI stride is in
+pixels while CPU copy stride is in bytes. Each active plane is checked independently against its own IOSurface offsets
+and row bytes, with a64MiB surface bound. Synchronous admission returns selector3 immediately, progresses one request
+without waiting for a future admission, and answers the original request only after Demt acknowledgement. Cancellation,
+send failure and the eight-second request deadline have one completion owner. Async AVC retains its four published/eight
+credit window and completion-barrier finish.
+
+The V9i presentation candidate brackets each CPU destination write with the native IOSurface writable lock/unlock
+protocol, validates the lock's current layout, and cleans the written plane extents to PoC before unlocking and emitting
+Demt. A DSB and temporary memory-descriptor completion alone do not publish dirty CPU cache lines to a retained
+noncoherent GPU import. The same transaction covers NV12 and P010, preserving the guest pool's display lifetime.
+Host gradient/reuse checks cover byte visibility and padding; zero flicker or transparent frames in a valid continuous
+camera recording remains a separate tablet acceptance gate. Decode completion alone does not qualify presentation.
+
+V9d limits native HEVC admission to1920×1080, coded height≤1088 and Apple level≤120 (Level4), consistently in inventory,
+dcap, dsta/dcan and the native-submit boundary. The wider parser and bounded4K/N10 layout remain available for analysis;
+4K/Level6.1 is declined with UnsupportedDataFormat before a native reservation, PAS or HFI. This is a conservative
+experimental envelope, not1080p HEVC tablet qualification. The single V9 RAM
+qualification measures stock QuickTime AVC, Main8 and then Main10 with native/client identities, geometry, teardown
+and optical motion, stopping on quarantine or unsafe handoff. Aerial selection, TSA/retiming, sustained cadence,
+colour and looping remain separate runtime acceptance checks; the installed static wallpaper stays in place.
+
+In the saved V9c firmware-addon run, WallpaperAerialsExtension's first4K Main10 session delivered one native frame and
+closed successfully. Its next session returned the same valid PSC (depth10/profile2/level11/tier1/N8), then stopped
+consuming commands before OPB_ENABLE. The Output-stage RAW START wait returned host timeout−20; no firmware error packet
+or code was returned. N8 and the actual buffer sizes fit the768MiB/N10 layout. The physical cause of the firmware stall
+remains unknown. V9c quarantine retained dependencies and prevented another bootstrap without a tablet reset; V9d keeps
+that containment. Its early decline is intended to leave ordinary VT fallback available. Wallpaper motion and the actual
+fallback factory must be measured separately; a zero native frame count does not qualify aerial playback.
+
+V9d's1080p Main10 attempt failed earlier: host stage41 returned no-memory−15 while requesting the fixed768MiB backing.
+No HFI packet was sent and ETB/EBD/PSC/decoded were all zero. The aggregate refusal did not identify which descriptor
+failed. Its wallpaper capture showed no resolved motion across26.45seconds; the actual fallback factory was not recorded.
+V9e removes the unnecessary maximum-size reservation while preserving every buffer capacity, both scratch generations,
+Ncap10, invalid guards and quarantine. This allocation correction is host-checked;1080p HEVC remains tablet-unqualified.

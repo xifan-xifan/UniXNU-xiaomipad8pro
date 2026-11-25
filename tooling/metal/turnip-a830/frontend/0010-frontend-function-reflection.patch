@@ -1,0 +1,351 @@
+SPDX-License-Identifier: MIT
+Copyright (c) 2026, Leo Zhang.
+
+_MTLFunction's returnType and arguments for visible (stitchable) functions, from the function's own AIR (AirSignature.h, ours, MIT:
+the signature the compiler wrote as !air.visible / air.stitching_info metadata into the function's bitcode in its library's metallib).
+Core Image's modern CIKL path reflects every kernel of a library it compiled from source; without the answers it made no kernel
+(host replay, private/host-checks/20261116-ahead/b11-cameras/APPS.md). Objects as Apple's Metal answers the same compiled function,
+qualified field by field on a Mac (private/host-checks/20261122-preview/QUAL.md); nil with one log line otherwise, never a guess.
+Context: UniXNU-turnip 527b8b7a31192df14b96d10a70c339845ed2cd12, native frontend after the earlier piano patches (0001-0009).
+
+--- a/frontend.mm
++++ b/frontend.mm
+@@ -1856,6 +1856,9 @@
+ @property(nonatomic,strong) NBLibrary *library;      // where it came from (stitching reads its bitcode), and the values it was
+ @property(nonatomic,strong) NSData *bitCodeHashData;
+ @property(nonatomic,strong) MTLFunctionConstantValues *constantValues;   // specialized with (nil: none), for the zero-rest rebuild of a refused pipeline
++@property(nonatomic,strong) id nbReturnType;          // its reflection (frontend 0010): made once, the same objects after
++@property(nonatomic,strong) NSArray *nbArguments;
++@property(nonatomic) BOOL nbReflected;
+ @end
+ // MTLDynamicLibrary: iPadOS 27's Core Image keeps its kernel language's standard library as one (CoreImage.framework/CoreImage.metallib,
+ // every function exported) and its kernels import from it by install name; the runtime loads it (newDynamicLibraryWithURL:error:) and a
+@@ -1870,8 +1873,328 @@
+  nmb_dynamic_library_install_name(_handle,name.data(),name.size());name.resize(n);return @(name.c_str());
+ }
+ - (BOOL)serializeToURL:(NSURL *)url error:(NSError **)error {if(error)*error=nbError(@"serializing a dynamic library is not implemented");return NO;}
++@end
++// ---- function reflection (UniXNU-piano tooling/metal/turnip-a830/frontend 0010, 2026-11-22, MIT as the file) ----
++// _MTLFunction's returnType and arguments for a visible (stitchable) function: Core Image's modern CIKL path reflects every kernel of a
++// library it compiled from source (reflect(CIKernelLibrary): returnType's dataType, each argument's type, name and dataTypeDescription,
++// a struct's typeName and members) and without the answers its kernels could not be made (host replay, APPS.md). The answers are the
++// function's own: the signature the compiler wrote into its AIR (AirSignature.h reads it from the function's bitcode in its library's
++// metallib), turned into objects as Apple's Metal answers the same compiled function (qualified field by field against Apple's Metal
++// on a Mac: private/host-checks/20261122-preview/QUAL.md). A function whose AIR says nothing of the kind, or holds a type outside that
++// qualified set, answers nil with one line in the log, never a guessed signature.
++#include "AirSignature.h"
++static NSData *functionBitcode(NBFunction *function);
++// A selector these lack is answered nil/0 and noted once, as NBObject's (they derive from Metal's own classes: Core Image tells a
++// struct type from a plain one by its class).
++#define NB_REFLECTION_ANSWERS_MISSING \
++ - (NSMethodSignature *)methodSignatureForSelector:(SEL)selector { \
++  NSMethodSignature *signature=[super methodSignatureForSelector:selector];return signature?signature:missingSignature(self,selector); \
++ } \
++ - (void)forwardInvocation:(NSInvocation *)invocation {answerMissing(invocation);}
++@interface NBFunctionType : MTLType
++@property(nonatomic) MTLDataType nbDataType;
++@end
++@implementation NBFunctionType
++NB_REFLECTION_ANSWERS_MISSING
++- (MTLDataType)dataType {return _nbDataType;}
++- (NSString *)description {return [NSString stringWithFormat:@"<NBFunctionType %lu>",(unsigned long)_nbDataType];}
++@end
++@interface NBFunctionStructType : MTLStructType
++@property(nonatomic,copy) NSString *nbTypeName;
++@property(nonatomic,copy) NSArray *nbMembers;
++@end
++@implementation NBFunctionStructType
++NB_REFLECTION_ANSWERS_MISSING
++- (MTLDataType)dataType {return MTLDataTypeStruct;}
++- (NSString *)typeName {return _nbTypeName;}
++- (NSArray<MTLStructMember *> *)members {return _nbMembers;}
++- (BOOL)isIndirectArgumentBuffer {return NO;}
++- (MTLStructMember *)memberByName:(NSString *)name {
++ for(MTLStructMember *member in _nbMembers)if([member.name isEqualToString:name])return member;
++ return nil;
++}
++- (NSString *)description {return [NSString stringWithFormat:@"<NBFunctionStructType %@ %lu members>",_nbTypeName,(unsigned long)_nbMembers.count];}
+ @end
++@interface NBFunctionTextureType : MTLTextureReferenceType
++@property(nonatomic) MTLDataType nbTexelType;
++@property(nonatomic) MTLTextureType nbTextureType;
++@property(nonatomic) MTLBindingAccess nbAccess;
++@property(nonatomic) BOOL nbDepth;
++@end
++@implementation NBFunctionTextureType
++NB_REFLECTION_ANSWERS_MISSING
++- (MTLDataType)dataType {return MTLDataTypeTexture;}
++- (MTLDataType)textureDataType {return _nbTexelType;}
++- (MTLTextureType)textureType {return _nbTextureType;}
++- (MTLBindingAccess)access {return _nbAccess;}
++- (BOOL)isDepthTexture {return _nbDepth;}
++@end
++@interface NBFunctionPointerType : MTLPointerType
++@property(nonatomic) MTLDataType nbElementType;
++@property(nonatomic) NSUInteger nbAlignment,nbDataSize;
++@property(nonatomic,strong) NBFunctionType *nbElementDescription;
++@end
++@implementation NBFunctionPointerType
++NB_REFLECTION_ANSWERS_MISSING
++- (MTLDataType)dataType {return MTLDataTypePointer;}
++- (MTLDataType)elementType {return _nbElementType;}
++- (MTLBindingAccess)access {return MTLBindingAccessReadOnly;}
++- (NSUInteger)alignment {return _nbAlignment;}
++- (NSUInteger)dataSize {return _nbDataSize;}
++- (BOOL)elementIsArgumentBuffer {return NO;}
++- (BOOL)elementIsIndirectArgumentBuffer {return NO;}
++- (BOOL)isConstantBuffer {return NO;}
++- (id)elementTypeDescription {return _nbElementDescription;}
++- (MTLStructType *)elementStructType {return nil;}
++- (MTLArrayType *)elementArrayType {return nil;}
++- (id)structType {return nil;}
++@end
++@interface NBFunctionArrayType : MTLArrayType
++@property(nonatomic) MTLDataType nbElementType;
++@property(nonatomic) NSUInteger nbLength,nbStride;
++@property(nonatomic,strong) NBFunctionType *nbElementDescription;
++@end
++@implementation NBFunctionArrayType
++NB_REFLECTION_ANSWERS_MISSING
++- (MTLDataType)dataType {return MTLDataTypeArray;}
++- (MTLDataType)elementType {return _nbElementType;}
++- (NSUInteger)arrayLength {return _nbLength;}
++- (NSUInteger)stride {return _nbStride;}
++- (id)elementTypeDescription {return _nbElementDescription;}
++- (NSUInteger)aluType {return 0;}
++- (NSUInteger)argumentIndexStride {return 0;}
++- (NSUInteger)indirectArgumentIndexStride {return 0;}
++- (BOOL)isIndirectArgumentBuffer {return NO;}
++- (NSUInteger)pixelFormat {return 0;}
++- (MTLStructType *)elementStructType {return nil;}
++- (MTLArrayType *)elementArrayType {return nil;}
++- (MTLPointerType *)elementPointerType {return nil;}
++- (MTLTextureReferenceType *)elementTextureReferenceType {return nil;}
++- (id)elementTensorReferenceType {return nil;}
++@end
++@interface NBFunctionStructMember : MTLStructMember
++@property(nonatomic,copy) NSString *nbName;
++@property(nonatomic) NSUInteger nbOffset;
++@property(nonatomic) MTLDataType nbDataType;
++@property(nonatomic,strong) id nbDescription;   // a struct, array, pointer or texture member's type (nil for a value or a sampler)
++@end
++@implementation NBFunctionStructMember
++NB_REFLECTION_ANSWERS_MISSING
++- (NSString *)name {return _nbName;}
++- (NSUInteger)offset {return _nbOffset;}
++- (MTLDataType)dataType {return _nbDataType;}
++- (id)dataTypeDescription {return _nbDescription;}
++- (MTLStructType *)structType {return [_nbDescription isKindOfClass:[NBFunctionStructType class]]?_nbDescription:nil;}
++- (MTLArrayType *)arrayType {return [_nbDescription isKindOfClass:[NBFunctionArrayType class]]?_nbDescription:nil;}
++- (MTLPointerType *)pointerType {return [_nbDescription isKindOfClass:[NBFunctionPointerType class]]?_nbDescription:nil;}
++- (MTLTextureReferenceType *)textureReferenceType {return [_nbDescription isKindOfClass:[NBFunctionTextureType class]]?_nbDescription:nil;}
++- (id)tensorReferenceType {return nil;}
++- (id)indirectArgumentType {return nil;}
++- (NSUInteger)argumentIndex {return 0;}
++- (NSUInteger)indirectArgumentIndex {return 0;}
++- (NSUInteger)aluType {return 0;}
++- (NSUInteger)pixelFormat {return 0;}
++- (NSUInteger)raster_order_group {return 0;}
++- (NSUInteger)render_target {return 0xffffffffu;}
++- (NSUInteger)renderTargetIndex {return 0xffffffffu;}
++@end
++// One argument as MTLBindingInternal answers it for a visible function: its name, its kind (`type`) and its type (dataTypeDescription);
++// everything a pipeline binding has (index, usage, buffer and threadgroup layouts) is zero, as there.
++@interface NBFunctionArgument : MTLArgument
++@property(nonatomic,copy) NSString *nbName;
++@property(nonatomic) NSInteger nbType;
++@property(nonatomic,strong) id nbDescription;
++@property(nonatomic) MTLDataType nbTextureDataType;
++@property(nonatomic) MTLTextureType nbTextureType;
++@property(nonatomic) BOOL nbDepth;
++@end
++@implementation NBFunctionArgument
++NB_REFLECTION_ANSWERS_MISSING
++- (NSString *)name {return _nbName;}
++- (MTLArgumentType)type {return (MTLArgumentType)_nbType;}
++- (id)dataTypeDescription {return _nbDescription;}
++- (MTLBindingAccess)access {return MTLBindingAccessReadOnly;}
++- (BOOL)aliasImplicitImageBlock {return NO;}
++- (NSUInteger)aliasImplicitImageBlockRenderTarget {return 0;}
++- (NSUInteger)arrayLength {return 0;}
++- (MTLPointerType *)bufferPointerType {return nil;}
++- (NSUInteger)builtInDataType {return 0;}
++- (NSUInteger)builtInType {return 0;}
++- (NSUInteger)imageBlockDataSize {return 0;}
++- (NSUInteger)imageBlockKind {return 0;}
++- (id)imageBlockMasterStructMembers {return nil;}
++- (NSUInteger)index {return 0;}
++- (BOOL)isActive {return NO;}
++- (BOOL)isArgument {return NO;}
++- (BOOL)isUsed {return NO;}
++- (BOOL)isVertexDescriptorBuffer {return NO;}
++- (id)structType {return nil;}
++- (MTLDataType)textureDataType {return _nbTextureDataType;}
++- (MTLTextureType)textureType {return _nbTextureType;}
++- (BOOL)isDepthTexture {return _nbDepth;}
++- (MTLDataType)threadgroupMemoryDataType {return MTLDataTypeNone;}
++- (MTLStructType *)threadgroupMemoryStructType {return nil;}
++- (NSString *)description {return [NSString stringWithFormat:@"<NBFunctionArgument %@ kind %ld>",_nbName,(long)_nbType];}
++@end
++// Apple's Metal for the qualified set (Metal 4.0 visible functions on macOS 27.2.1, QUAL.md): a value argument is binding kind 18 with
++// its MTLType, a struct 29, a texture 2 (its texel type and texture type on the binding too), a sampler 3 with no type, a pointer or
++// reference 28 with an MTLPointerType; a void result is data type 61. Members: a value or a sampler has no type object; a struct
++// member's struct has an empty typeName (the argument's struct names its own); a pointer member's element type object is data type 0
++// (an argument's is the element's).
++static MTLDataType reflectedScalar(const std::string &s) {
++ static const std::pair<const char *,MTLDataType> table[]={{"float",MTLDataTypeFloat},{"half",MTLDataTypeHalf},{"int",MTLDataTypeInt},
++  {"uint",MTLDataTypeUInt},{"short",MTLDataTypeShort},{"ushort",MTLDataTypeUShort},{"char",MTLDataTypeChar},{"uchar",MTLDataTypeUChar},
++  {"bool",MTLDataTypeBool},{"long",MTLDataTypeLong},{"ulong",MTLDataTypeULong}};
++ for(auto &entry:table)if(s==entry.first)return entry.second;
++ return MTLDataTypeNone;
++}
++// The data type of a scalar, vector or matrix (MTLDataTypeNone for anything else): a vector is its scalar's type plus lanes - 1, a
++// float or half matrix of C columns and R rows the 2x2 type plus 3 (C - 2) + (R - 2).
++static MTLDataType reflectedValueType(const air_signature::Type &t) {
++ using K=air_signature::Type;
++ if(t.kind==K::Scalar)return reflectedScalar(t.scalar);
++ if(t.kind==K::Vector && t.element) {
++  const MTLDataType base=reflectedScalar(t.element->scalar);
++  return base==MTLDataTypeNone?MTLDataTypeNone:(MTLDataType)(base+t.count-1);
++ }
++ if(t.kind==K::Matrix && t.element) {
++  const MTLDataType base=t.element->scalar=="float"?MTLDataTypeFloat2x2:t.element->scalar=="half"?MTLDataTypeHalf2x2:MTLDataTypeNone;
++  return base==MTLDataTypeNone?MTLDataTypeNone:(MTLDataType)(base+3*(t.columns-2)+(t.rows-2));
++ }
++ return MTLDataTypeNone;
++}
++static NBFunctionType *reflectedPlainType(MTLDataType type) {NBFunctionType *t=[NBFunctionType new];t.nbDataType=type;return t;}
++static NBFunctionTextureType *reflectedTexture(const air_signature::Type &t,std::string &why) {
++ static const std::pair<const char *,MTLTextureType> kinds[]={{"texture_1d",MTLTextureType1D},{"texture_2d",MTLTextureType2D},
++  {"texture_2d_array",MTLTextureType2DArray},{"texture_2d_ms",MTLTextureType2DMultisample},{"texture_cube",MTLTextureTypeCube},
++  {"texture_3d",MTLTextureType3D},{"depth_2d",MTLTextureType2D}};
++ static const std::pair<const char *,MTLBindingAccess> accesses[]={{"sample",MTLBindingAccessReadOnly},{"read",MTLBindingAccessReadOnly},
++  {"write",MTLBindingAccessWriteOnly},{"read_write",MTLBindingAccessReadWrite}};
++ NBFunctionTextureType *texture=[NBFunctionTextureType new];
++ bool kind=false,access=false;
++ for(auto &k:kinds)if(t.texture==k.first){texture.nbTextureType=k.second;kind=true;}
++ for(auto &a:accesses)if(t.access==a.first){texture.nbAccess=a.second;access=true;}
++ const MTLDataType texel=t.element?reflectedScalar(t.element->scalar):MTLDataTypeNone;
++ if(!kind || !access || texel==MTLDataTypeNone){why="a texture outside the qualified set: "+t.texture+"/"+t.access;return nil;}
++ texture.nbTexelType=texel;texture.nbDepth=!t.texture.compare(0,6,"depth_");
++ return texture;
++}
++static NBFunctionPointerType *reflectedPointer(const air_signature::Type &t,bool member,std::string &why) {
++ const MTLDataType element=t.element?reflectedValueType(*t.element):MTLDataTypeNone;
++ if(element==MTLDataTypeNone || t.element->addressSpace<0 || t.element->addressSpace>2) {
++  why="a pointer or reference outside the qualified set (a value in the thread, device or constant space)";return nil;
++ }
++ NBFunctionPointerType *pointer=[NBFunctionPointerType new];
++ pointer.nbElementType=element;pointer.nbAlignment=(NSUInteger)t.element->align;pointer.nbDataSize=(NSUInteger)t.element->size;
++ pointer.nbElementDescription=reflectedPlainType(member?MTLDataTypeNone:element);
++ return pointer;
++}
++static NBFunctionStructType *reflectedStruct(const air_signature::Type &t,bool member,std::string &why,int depth=0);
++static NBFunctionStructMember *reflectedMember(const air_signature::Field &f,std::string &why,int depth) {
++ using K=air_signature::Type;
++ const air_signature::Type &t=*f.type;
++ NBFunctionStructMember *m=[NBFunctionStructMember new];m.nbName=@(f.name.c_str());m.nbOffset=(NSUInteger)f.offset;
++ if(!m.nbName){why="a member name that is not UTF-8";return nil;}
++ switch(t.kind) {
++  case K::Scalar:case K::Vector:case K::Matrix:
++   m.nbDataType=reflectedValueType(t);
++   if(m.nbDataType==MTLDataTypeNone){why="a member value type outside the qualified set";return nil;}
++   return m;
++  case K::Sampler:m.nbDataType=MTLDataTypeSampler;return m;
++  case K::Texture:m.nbDataType=MTLDataTypeTexture;m.nbDescription=reflectedTexture(t,why);return m.nbDescription?m:nil;
++  case K::Pointer:case K::Reference:m.nbDataType=MTLDataTypePointer;m.nbDescription=reflectedPointer(t,true,why);return m.nbDescription?m:nil;
++  case K::Struct:m.nbDataType=MTLDataTypeStruct;m.nbDescription=reflectedStruct(t,true,why,depth+1);return m.nbDescription?m:nil;
++  case K::Array: {
++   if(!t.element || t.element->kind!=K::Scalar || !t.count){why="an array member outside the qualified set (of scalars)";return nil;}
++   NBFunctionArrayType *array=[NBFunctionArrayType new];
++   array.nbElementType=reflectedScalar(t.element->scalar);array.nbLength=(NSUInteger)t.count;array.nbStride=(NSUInteger)(t.size/t.count);
++   array.nbElementDescription=reflectedPlainType(array.nbElementType);
++   if(array.nbElementType==MTLDataTypeNone){why="an array of an unknown scalar";return nil;}
++   m.nbDataType=MTLDataTypeArray;m.nbDescription=array;return m;
++  }
++  default:why="a member of an unqualified kind";return nil;
++ }
++}
++static NBFunctionStructType *reflectedStruct(const air_signature::Type &t,bool member,std::string &why,int depth) {
++ if(depth>8){why="structs nested too deep";return nil;}
++ NBFunctionStructType *type=[NBFunctionStructType new];
++ type.nbTypeName=member?@"":@(t.name.c_str());
++ if(!type.nbTypeName){why="a struct name that is not UTF-8";return nil;}
++ NSMutableArray *members=[NSMutableArray array];
++ for(const air_signature::Field &f:t.fields) {
++  NBFunctionStructMember *m=reflectedMember(f,why,depth);
++  if(!m)return nil;
++  [members addObject:m];
++ }
++ type.nbMembers=members;
++ return type;
++}
++static id reflectedResult(const air_signature::Type &t,std::string &why) {
++ using K=air_signature::Type;
++ if(t.kind==K::Void)return reflectedPlainType((MTLDataType)61);
++ if(t.kind==K::Struct)return reflectedStruct(t,false,why);
++ const MTLDataType type=reflectedValueType(t);
++ if(type==MTLDataTypeNone){why="a result type outside the qualified set";return nil;}
++ return reflectedPlainType(type);
++}
++static NBFunctionArgument *reflectedArgument(const air_signature::Argument &a,std::string &why) {
++ using K=air_signature::Type;
++ const air_signature::Type &t=*a.type;
++ NBFunctionArgument *argument=[NBFunctionArgument new];argument.nbName=@(a.name.c_str());
++ if(!argument.nbName){why="an argument name that is not UTF-8";return nil;}
++ switch(t.kind) {
++  case K::Scalar:case K::Vector:case K::Matrix: {
++   const MTLDataType type=reflectedValueType(t);
++   if(type==MTLDataTypeNone){why="an argument value type outside the qualified set";return nil;}
++   argument.nbType=18;argument.nbDescription=reflectedPlainType(type);return argument;
++  }
++  case K::Struct:argument.nbType=29;argument.nbDescription=reflectedStruct(t,false,why);return argument.nbDescription?argument:nil;
++  case K::Sampler:argument.nbType=MTLBindingTypeSampler;return argument;
++  case K::Texture: {
++   if(t.access!="sample" && t.access!="read"){why="a texture argument written by the function (not qualified)";return nil;}
++   NBFunctionTextureType *texture=reflectedTexture(t,why);
++   if(!texture)return nil;
++   argument.nbType=MTLBindingTypeTexture;argument.nbDescription=texture;
++   argument.nbTextureDataType=texture.nbTexelType;argument.nbTextureType=texture.nbTextureType;argument.nbDepth=texture.nbDepth;
++   return argument;
++  }
++  case K::Pointer:case K::Reference:
++   argument.nbType=28;argument.nbDescription=reflectedPointer(t,false,why);return argument.nbDescription?argument:nil;
++  default:why="an argument of an unqualified kind";return nil;
++ }
++}
++// The signature of `function` (its own bitcode in its library's metallib) as Metal's objects, or false with the reason.
++static bool reflectFunction(NBFunction *function,id *result,NSArray **arguments,std::string &why) {
++ NSData *bitcode=function.library?functionBitcode(function):nil;
++ if(!bitcode){why=function.library?"its library has no bitcode under its name":"no library of its own (made without one)";return false;}
++ air_signature::Signature signature;
++ if(!air_signature::read((const uint8_t *)bitcode.bytes,bitcode.length,function.name.UTF8String?:"",signature,why))return false;
++ id made=reflectedResult(*signature.result,why);
++ if(!made)return false;
++ NSMutableArray *list=[NSMutableArray array];
++ for(const air_signature::Argument &a:signature.arguments) {
++  NBFunctionArgument *argument=reflectedArgument(a,why);
++  if(!argument)return false;
++  [list addObject:argument];
++ }
++ *result=made;*arguments=list;
++ return true;
++}
+ @implementation NBFunction
++// _MTLFunction's returnType and arguments (function reflection above): read once from the function's AIR; nil with one log line
++// when it states no visible signature or one outside the qualified set.
++- (void)nb_reflect {
++ @synchronized(self) {
++  if(_nbReflected)return;
++  _nbReflected=YES;
++  id result=nil;NSArray *arguments=nil;std::string why;
++  if(reflectFunction(self,&result,&arguments,why)){_nbReturnType=result;_nbArguments=arguments;return;}
++  static std::atomic<int> told{0};
++  if(told.fetch_add(1)<64)NBLOG(@"native-metal: function reflection: %@: %s (returnType and arguments answered nil)",_name?:@"?",why.c_str());
++ }
++}
++- (id)returnType {[self nb_reflect];return _nbReturnType;}
++- (NSArray *)arguments {[self nb_reflect];return _nbArguments;}
+ - (NSString *)formattedDescription:(NSUInteger)indent {
+  NSString *padding=[@"" stringByPaddingToLength:MIN(indent,(NSUInteger)128) withString:@" " startingAtIndex:0];
+  return [NSString stringWithFormat:@"%@<NBFunction: %@>",padding,_name ?: @"unnamed"];

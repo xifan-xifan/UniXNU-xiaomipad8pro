@@ -23,7 +23,7 @@
 //   piano-audio=8  levels 4-6 (and 7 with piano-audio-tone=1), then for the rest of the boot the macOS Speaker on the DSP (AudioLive.h:
 //                  the dsp transport; the speaker plan comes up with the first sound and goes down after piano-audio-idle ms without
 //                  one): at this level gain 160 and full scale at -20 dBFS. Sound comes out of the speakers.
-//   piano-audio=9  also the daily level: piano-audio-gain=G (default 231, never above 231), piano-audio-ceiling=DB (full scale at -DB
+//   piano-audio=9  also the daily level: piano-audio-gain=G (default 231; 243 is applied only while speaker protection runs, else 231), piano-audio-ceiling=DB (full scale at -DB
 //                  dBFS, 1..40, default 6), piano-audio-volume=P (the kernel's master volume, percent, default 100) and the Speaker
 //                  device's properties piano-audio-volume / piano-audio-mute.
 //   piano-audio=10 also the Mic: the capture plan with the VA macro's DMIC path (piano-audio-mic-gain=G, 0..124, default 124 = +40 dB).
@@ -47,8 +47,10 @@
 #include <stdarg.h>
 #include "AudioSurvey.h"
 #include "AudioLog.h"
+#include "AudioVa.h"
 #include "AudioPcm.h"
 #include "AudioPower.h"
+#include "AudioSpkProt.h"
 #include <PianoPowerContract.h>
 
 using namespace pianoaudio;
@@ -113,6 +115,23 @@ void readArgs()
   l.liveCeilingDb = bootArg("piano-audio-ceiling", 0); // 1..40 dB below full scale, level 9 and up; 0: the level's own
   l.liveIdleMs = bootArg("piano-audio-idle", 0);
   l.micGain = bootArg("piano-audio-mic-gain", 0);
+  l.spk = bootArg("piano-audio-spk", 0);   // 0, or 1 + the round-2 variant bits (AudioSpkProt.h SPK_VAR_*)
+  if (!spk_request_valid(int(l.spk))) l.spk = 0;   // speaker protection (levels 8-10; machdep.piano_audio_spk at run time)
+  l.ageOld = bootArg("piano-audio-age", 1) == 0 ? 1 : 0;   // duplex-age1: 1 (default) the signed sound age, 0 the old test (A/B)
+  l.miplay = bootArg("piano-audio-miplay", 0);   // 0 off; 1/2 MIPLAY (Dolby) at perf 1/2, +4 pregain tracked, +16(r+1) rotation r
+  if (!spk_miplay_valid(int(l.miplay))) l.miplay = 0;   // inside the protection plan only (machdep.piano_audio_miplay at run time)
+  l.duplexHold = bootArg("piano-audio-duplex-hold", 0);   // duplex-hold1 A/B: 0 off, 1 the two LPASS votes, 3 also the VA mclk
+  if (!ar_hold_valid(int(l.duplexHold))) l.duplexHold = 0;   // level 10 (machdep.piano_audio_duplex_hold at run time)
+  l.tap = bootArg("piano-audio-tap", 1) ? 1 : 0;   // level 10: the microphone tap of "Mic (noise reduced)" (AudioTap.h); 0 none
+  l.micRoute = AUDIO_MIC_ROUTE_LEGACY;
+  l.micRouteDiag = 0;
+  char routeArg[32], diagArg[32];
+  if (PE_parse_boot_arg_str("piano-audio-mic-route", routeArg, sizeof routeArg) && !audio_mic_route_parse(routeArg, &l.micRoute))
+    piano_audio_log("mic-route1: invalid boot route; using legacy -1");
+  if (PE_parse_boot_arg_str("piano-audio-mic-route-diag", diagArg, sizeof diagArg)) {
+    if (diagArg[0] == '1' && !diagArg[1]) l.micRouteDiag = 1;
+    else if (diagArg[0] != '0' || diagArg[1]) piano_audio_log("mic-route1: invalid boot diag; using 0");
+  }
   gArgs.volume = bootArg("piano-audio-volume", 100);
 }
 

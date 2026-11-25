@@ -13,6 +13,10 @@
 //   piano-dpu-flush=MASK  the CTL_FLUSH bits of a flip (default 0: the pipes' own bits)
 //   piano-dpu-underrun=0  an underrun does not revert (default 1)
 //   piano-dpu-latch=MS    the latch timeout (default 50, 10..500)
+//   piano-dpu-clean-threads=N  the clean of a flip (the same DC CVAC over the same lines, then DSB) split over N threads, 1..8
+//                         (default 1: the flip's thread alone, as before); a band whose thread does not start is cleaned by the flip's;
+//                         at piano-dpu-flip=4 also machdep.piano_dpu_clean_threads (root writes 1..8 at run time: one boot compares)
+//   piano-dpu-cadence=S   a "cadence N:" line every S s of flips: latched-flip intervals, the clean, the latch wait (default 0: off)
 //   piano-dpu-watch=S     the fault/underrun check while a surface is on the panel (default 10, 0 off; nothing wakes while the boot
 //                         framebuffer is)
 #include <IOKit/IOService.h>
@@ -27,6 +31,7 @@
 #include <kern/thread.h>
 #include <pexpert/pexpert.h>
 #include <stdarg.h>
+#include <sys/sysctl.h>
 #include "DpuFlip.h"
 #include "DpuFlipKernel.h"
 #include "../common/PianoIrq.h"
@@ -67,6 +72,105 @@ void cleanRange(const void *p, size_t n)
   const uintptr_t line = uintptr_t(4) << ((ctr >> 16) & 15), end = reinterpret_cast<uintptr_t>(p) + n;
   for (uintptr_t a = reinterpret_cast<uintptr_t>(p) & ~(line - 1); a < end; a += line) __asm__ volatile("dc cvac, %0" ::"r"(a) : "memory");
   dsb();
+}
+
+// piano-dpu-clean-threads: band i (1..n-1) of a clean on its own kernel thread; the flip's thread cleans band 0 and waits for the
+// others (DpuCadence.h cleanBand). Each band ends with its own DSB on its own CPU (cleanRange), before its completion is counted under
+// gCleanLock; the flip's thread takes the lock after the count reached 0 and issues one more DSB before it programs the DPU. The bands
+// cover every line of the range exactly once, so the result is the single thread's: every line of the range at the point of coherency.
+constexpr unsigned kMaxCleanThreads = 8;
+IOLock *gCleanLock = nullptr;
+struct CleanBandWork {
+  const uint8_t *p;
+  size_t n;
+  unsigned *pending;   // under gCleanLock
+};
+void cleanBandMain(void *arg, wait_result_t)
+{
+  CleanBandWork *w = static_cast<CleanBandWork *>(arg);
+  cleanRange(w->p, w->n);
+  unsigned *pending = w->pending;   // w lives on the waiting thread's stack: not touched after the count
+  IOLockLock(gCleanLock);
+  --*pending;
+  IOLockWakeup(gCleanLock, (event_t)pending, false);
+  IOLockUnlock(gCleanLock);
+  thread_terminate(current_thread());
+}
+uint64_t gCleanSplits = 0, gCleanInline = 0;
+uint32_t *gCleanThreadsLive[2] = {};   // the Hw's and the flipper's copies (the summary prints the flipper's)
+int cleanThreadsSysctl(struct sysctl_oid *oidp, void *, int, struct sysctl_req *req)
+{
+  int value = gCleanThreadsLive[0] ? int(__atomic_load_n(gCleanThreadsLive[0], __ATOMIC_ACQUIRE)) : 1;
+  const int err = sysctl_handle_int(oidp, &value, 0, req);
+  if (err || !req->newptr) return err;
+  if (value < 1) value = 1;
+  if (value > int(kMaxCleanThreads)) value = int(kMaxCleanThreads);
+  if (!gCleanLock) value = 1;
+  for (uint32_t *p : gCleanThreadsLive)
+    if (p) __atomic_store_n(p, uint32_t(value), __ATOMIC_RELEASE);
+  note("clean threads now %d (machdep.piano_dpu_clean_threads)", value);
+  return 0;
+}
+struct sysctl_oid gCleanThreadsOid;
+bool gCleanThreadsRegistered = false;
+// Registered once at piano-dpu-flip=4 for the boot (a kext of the collection is never unloaded).
+void registerCleanThreadsSysctl(uint32_t *hw, uint32_t *cfg)
+{
+  gCleanThreadsLive[0] = hw;
+  gCleanThreadsLive[1] = cfg;
+  if (gCleanThreadsRegistered) return;
+  bzero(&gCleanThreadsOid, sizeof gCleanThreadsOid);
+  gCleanThreadsOid.oid_parent = &sysctl__machdep_children;
+  gCleanThreadsOid.oid_number = OID_AUTO;
+  gCleanThreadsOid.oid_kind = int(CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_OID2);
+  gCleanThreadsOid.oid_name = "piano_dpu_clean_threads";
+  gCleanThreadsOid.oid_handler = cleanThreadsSysctl;
+  gCleanThreadsOid.oid_fmt = "I";
+  gCleanThreadsOid.oid_descr = "PianoDpu flip clean threads (1..8)";
+  gCleanThreadsOid.oid_version = SYSCTL_OID_VERSION;
+  sysctl_register_oid(&gCleanThreadsOid);
+  gCleanThreadsRegistered = true;
+}
+void cleanSplit(const uint8_t *p, size_t n, unsigned threads)
+{
+  if (threads > kMaxCleanThreads) threads = kMaxCleanThreads;
+  if (threads < 2 || !gCleanLock || n < (size_t(1) << 20)) {
+    cleanRange(p, n);
+    return;
+  }
+  uint64_t ctr;
+  __asm__ volatile("mrs %0, ctr_el0" : "=r"(ctr));
+  const uint64_t line = uint64_t(4) << ((ctr >> 16) & 15);
+  // Bands of whole lines from the aligned start (the same lines cleanRange's loop visits).
+  const uintptr_t start = reinterpret_cast<uintptr_t>(p) & ~(uintptr_t(line) - 1);
+  const uint64_t bytes = reinterpret_cast<uintptr_t>(p) + n - start;
+  CleanBandWork work[kMaxCleanThreads];
+  unsigned pending = 0;   // under gCleanLock
+  for (unsigned i = 1; i < threads; ++i) {
+    const Band b = cleanBand(bytes, i, threads, line);
+    work[i] = CleanBandWork{reinterpret_cast<const uint8_t *>(start + b.begin), size_t(b.end - b.begin), &pending};
+    if (!work[i].n) continue;
+    IOLockLock(gCleanLock);
+    ++pending;
+    IOLockUnlock(gCleanLock);
+    thread_t t = nullptr;
+    if (kernel_thread_start(cleanBandMain, &work[i], &t) == KERN_SUCCESS) {
+      thread_deallocate(t);
+    } else {
+      IOLockLock(gCleanLock);
+      --pending;
+      IOLockUnlock(gCleanLock);
+      ++gCleanInline;
+      cleanRange(work[i].p, work[i].n);
+    }
+  }
+  const Band b0 = cleanBand(bytes, 0, threads, line);
+  cleanRange(reinterpret_cast<const uint8_t *>(start + b0.begin), size_t(b0.end - b0.begin));
+  IOLockLock(gCleanLock);
+  while (pending) IOLockSleep(gCleanLock, (event_t)&pending, THREAD_UNINT);
+  IOLockUnlock(gCleanLock);
+  dsb();
+  ++gCleanSplits;
 }
 
 IOMemoryMap *mapIo(uint64_t pa, uint64_t bytes)
@@ -132,6 +236,7 @@ class KernelHw {
   uint32_t bankOff = 0;
   uint64_t stores = 0, smmuStores = 0, refusedStores = 0;
   uint32_t cleanPolicy = 1;   // piano-dpu-clean
+  uint32_t cleanThreads = 1;  // piano-dpu-clean-threads
   uint64_t readOnlyPrepares = 0;   // surfaces prepared kIODirectionOut because their own direction was refused
   // The vsync interrupt.
   pianoirq::SpiLine line{};
@@ -308,7 +413,8 @@ class KernelHw {
   {
     Cookie *c = static_cast<Cookie *>(cookie);
     if (!c->alias || offset + bytes > c->alias->getLength()) return false;
-    cleanRange(reinterpret_cast<const void *>(c->alias->getVirtualAddress() + offset), size_t(bytes));
+    cleanSplit(reinterpret_cast<const uint8_t *>(c->alias->getVirtualAddress() + offset), size_t(bytes),
+               __atomic_load_n(&cleanThreads, __ATOMIC_ACQUIRE));
     return true;
   }
   void surfaceRelease(void *cookie)
@@ -458,10 +564,19 @@ void flipRun(IOService *owner, const Survey &s, const SmmuSurvey &m, uint32_t sm
   if (cfg.latchMs > 500) cfg.latchMs = 500;
   cfg.watchS = bootArg("piano-dpu-watch", 10);
   if (cfg.watchS > 3600) cfg.watchS = 3600;
+  cfg.cleanThreads = bootArg("piano-dpu-clean-threads", 1);
+  if (cfg.cleanThreads < 1) cfg.cleanThreads = 1;
+  if (cfg.cleanThreads > kMaxCleanThreads) cfg.cleanThreads = kMaxCleanThreads;
+  if ((cfg.cleanThreads > 1 || cfg.level == 4) && !gCleanLock) gCleanLock = IOLockAlloc();   // level 4: the sysctl may raise it
+  if (!gCleanLock) cfg.cleanThreads = 1;
+  cfg.cadenceS = bootArg("piano-dpu-cadence", 0);
+  if (cfg.cadenceS > 3600) cfg.cadenceS = 3600;
   gHw.cleanPolicy = cfg.clean;
+  gHw.cleanThreads = cfg.cleanThreads;
+  if (cfg.level == 4) registerCleanThreadsSysctl(&gHw.cleanThreads, &cfg.cleanThreads);
   stage(6, "B1b: zero-copy flips (docs/drivers/dpu.md section 8)");
-  note("B1b: piano-dpu-flip=%u irq=%u clean=%u flush=%#x underrun=%u latch=%u ms watch=%u s smmu=%u", cfg.level, cfg.irq, cfg.clean, cfg.flush,
-       cfg.underrun, cfg.latchMs, cfg.watchS, smmuLevel);
+  note("B1b: piano-dpu-flip=%u irq=%u clean=%u flush=%#x underrun=%u latch=%u ms watch=%u s smmu=%u clean-threads=%u cadence=%u s", cfg.level,
+       cfg.irq, cfg.clean, cfg.flush, cfg.underrun, cfg.latchMs, cfg.watchS, smmuLevel, cfg.cleanThreads, cfg.cadenceS);
   IOMemoryMap *mdss = mapIo(kMdss, kMdp + kMdpBytes - kMdss);
   if (!mdss) {
     stage(-6, "B1b: the MDSS/DPU block does not map");

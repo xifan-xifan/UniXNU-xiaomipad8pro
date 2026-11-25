@@ -254,7 +254,8 @@ static IOReturn opReadPipe(void *,uint8_t pipe,uint32_t reg,uint32_t *value)
     return kIOReturnSuccess;
 }
 static void opSnapshot(void *,A830HangSnapshot *s) {gOps.hit("snapshot");s->smmuFsr[0]=0x2;s->smmuFar[0]=0x20001000;}
-static const A830RecoveryOps gRecoveryOps={nullptr,opFailInflight,opGate,opFenceSignal,opIrqRestore,opReadPipe,opSnapshot};
+static const A830RecoveryOps gRecoveryOps={nullptr,opFailInflight,opGate,opFenceSignal,opIrqRestore,opReadPipe,opSnapshot,
+                                           nullptr,nullptr};   /* no replay ops: every job in flight fails (test_replay has them) */
 
 /* DCVS */
 static IOReturn opVote(void *,uint8_t level,uint32_t bw)

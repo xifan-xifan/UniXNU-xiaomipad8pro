@@ -19,10 +19,12 @@ Now there is one manifest, one staging tool, and one installer on the tablet.
 | `piano-rotated` | `/usr/local/libexec/piano-rotated` 0755, `/Library/LaunchAgents/com.unixnu.piano-rotated.plist` 0644 | on | `piano-rotate=N` (exits 0 without it; `KeepAlive SuccessfulExit false`) | its CDHash |
 | `piano-torch` | `/usr/local/bin/piano-torch` 0755 | installed (a command) | PianoTorch at `piano-torch=2` | its CDHash |
 | `piano-pmset-defaults` | `/usr/local/libexec/piano-pmset-defaults` 0755, `/Library/LaunchDaemons/com.unixnu.piano-pmset-defaults.plist` 0644 (one-shot) | on | sets each power source's timers once, unless the owner set them first (section 6) | none |
+| `piano-keyboard-type` | `/usr/local/libexec/piano-keyboard-type` 0755, `/Library/LaunchDaemons/com.unixnu.piano-keyboard-type.plist` 0644 (one-shot) | on | nothing: once a boot it adds the missing keys of loginwindow's `/Library/Preferences/com.apple.keyboardtype.plist` for the keyboard cover (20555), the touch screen (20564), the USB debug keyboard (20565) and 4178 (VendorID 6900, CountryCode 0) as 40 (ANSI), with `defaults`; an existing key keeps its value. Without them a fresh Data store (a RAM image, a reinstall from the seed) opened Keyboard Setup Assistant when the cover was attached (2026-11-21) | none (a script) |
 | `piano-still-wallpaper` | `/usr/local/libexec/piano-still-wallpaper` 0755 (`tooling/k27/still-wallpaper.sh`), its three files in `/usr/local/share/piano/wallpaper/` 0644 (`still.png`, `Metadata.plist`, `Index.plist`: `tooling/k27/still-wallpaper.py`), `/Library/LaunchDaemons/com.unixnu.piano-still-wallpaper.plist` 0644 (one run a boot) | on | nothing: once a boot it converts the system volume's stock `DefaultDesktop.heic` (one-colour fallback) for the login window and desktop; it writes absent choices and replaces only our earlier `UniXNU Still` or generated choices, never the user's (`drivers/gpu-userspace.md`, the test images' still wallpaper; added 2026-11-12 for the installed system, whose seed is never restaged) | none (a script and data) |
 | `piano-usbnet-address` | `/usr/local/libexec/piano-usbnet-address` 0755 (shell script), `/Library/LaunchDaemons/com.unixnu.piano-usbnet-address.plist` 0644 (once per boot) | on | `piano-usb-net=N` (exits 0 without; with it: the USB network's 169.254.80.2 set as the interface's SystemConfiguration service, Manual, and re-checked for 600 s: [drivers/usb-device-debug.md](drivers/usb-device-debug.md) §14.9) | — |
 | `piano-wifi` | `/usr/local/bin/piano-wifi` | planned | the CLI of `drivers/wifi.md` §13.1 (not written: `status = "planned"`, listed and skipped) | — |
 | `piano-passd-policy` | `/usr/local/libexec/piano-passd-policy` 0755, `/Library/LaunchAgents/com.unixnu.piano-passd-policy.plist` 0644 | on, UID 501 only | disables and unloads `com.apple.passd`; restores the original effective override on removal (below) | none (shell) |
+| `piano-brightness-sync` | `/usr/local/libexec/piano-brightness-sync` 0755, `/Library/LaunchDaemons/com.unixnu.piano-brightness-sync.plist` 0644 | on | `piano-backlight-native=1` and `piano-backlight-auto=1` (exits 0 without them): CoreBrightness and PianoBacklight's automatic mode agree: the Control Center slider shows the panel's real brightness, and only CoreBrightness's own level changes (the user's) end automatic mode ([drivers/backlight.md](drivers/backlight.md), "CoreBrightness follows the automatic level"); `--check` reads both levels | its CDHash |
 
 Two changes to existing pieces came with this. `pianousb-shell` now exits at once (status 0) on `/dev/pianousb` when the kernel
 argument `piano-usb-shell` is missing, and its job is `KeepAlive SuccessfulExit false`. Before, it retried the open every 2 s
@@ -368,6 +370,8 @@ The parts:
    - the battery appearing later;
    - the owner's timers first;
    - the owner's change after a partial run.
+   `piano-keyboard-type.sh` with the real `defaults` (under `/tmp`): the four keys into an absent file, nothing on a second run,
+   the owner's other keyboards and an owner's own type for the cover kept, a non-dictionary `keyboardtype` refused.
 4. `add_trust`.
 5. `cdhash` against codesign's CDHash.
 6. The seed, on a 64 MiB bare APFS container image made with `hdiutil create -layout NONE -fs APFS -volname Data`, converted to
@@ -454,7 +458,8 @@ Then the owner's system: section 7.5, with the owner present.
 ## 11. Files
 
 - `configs/userland.toml`;
-- `tooling/userland/stage.py`, `install.sh`, `piano-pmset-defaults.sh`, `com.unixnu.piano-pmset-defaults.plist`, `test-stage.py`;
+- `tooling/userland/stage.py`, `install.sh`, `piano-pmset-defaults.sh`, `com.unixnu.piano-pmset-defaults.plist`,
+  `piano-keyboard-type.sh`, `com.unixnu.piano-keyboard-type.plist`, `test-stage.py`;
 - `tooling/native/piano-policy-agent/com.unixnu.piano-policy-agent.plist`;
 - `tooling/native/pianousb-shell/pianousb-shell.c` (the boot-argument check), `com.unixnu.pianousb-shell.plist`;
 - for test seeds, outside the manifest: `tooling/k27/stage-boot-run.py` (a copy of a staged seed with `--file`, `--boot-run` and
@@ -462,3 +467,27 @@ Then the owner's system: section 7.5, with the owner present.
   processes to the console, `power.md` §6.5).
 
 The outputs are `out/userland/{build,stage,live}` (ignored).
+
+### Camera approval in volatile test seeds
+
+With `PAD_USERLAND=1` and `PIANO_CAMERA_PACKAGE` selecting a final verified package
+from the current worktree, `PIANO_CAMERA_APPROVAL` can select a private directory
+captured immediately after genuine system-extension approval. This opt-in needs
+`sysext-db.xml`, `sysext-staged-tree.txt`, `sysext-changed-files.txt`,
+`sysext-marker.txt` and `sysext-before.txt`; incomplete or unfamiliar state is
+refused. The complete database and signed staged bundle are seeded together,
+with hash/version/UUID fields derived from the final signed package. The origin
+apps are also present before daemon startup. Host staging persists and reads
+back root:wheel ownership on the copied APFS seed using noninteractive sudo.
+
+The database is not managed by the live userland installer; this option is
+refused for `--live`. It preserves B-TC signing and the existing CSR policy.
+Camera TCC consent remains a separate interactive step. A successful host audit
+is not evidence that the provider started on a tablet boot.
+
+Run `python3 tooling/camera/extension/test-bake-sysext.py` for synthetic contract
+checks. With `--capture CAPTURE --package PACKAGE --record AUDIT`, the same check
+verifies the genuine capture against the final signatures and records every
+preserved and derived field. `piano-camera-runtime PID EXPECTED_CDHASH` reads
+`CS_OPS_CDHASH` from the live extension process, independently of disk codesign
+metadata.

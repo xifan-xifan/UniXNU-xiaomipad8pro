@@ -1,14 +1,8 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause-Patent
-# piano-airportd-kick: airportd restarted once PianoWifi80211's interface exists (docs/drivers/wifi-menu.md section 5).
-# Boot wm3c (2026-11-14): the first airportd, started by launchd before our interface registered, logged only "Did NOT find
-# matching WiFi interface" and never adopted it; the airportd that `launchctl kickstart -k` started after the interface existed
-# logged "Successfully created CWFApple80211" and "WiFi network interface added". So this job waits for PianoWifi80211 to answer
-# the apple80211 requests and for its interface to have a BSD name, then restarts airportd once (kickstart -k, whether or not it
-# runs), and says what airportd is before and after, each line with the time.
-# The gate: the kernel argument piano-wifi-apple80211 as PianoWifi read it (its sysctl machdep.piano_wifi_apple80211: boot 10q
-# showed that an argument of the ADT's tail is not in kern.bootargs). Without it the job ends at once; when Wi-Fi does not come
-# up within 600 s it ends having done nothing. Its lines go to the console and the system log; nothing else is written.
+# Normal launchd/IOKit discovery gets the first opportunity to adopt the
+# interface. Start a missing daemon or restart one that failed to adopt it.
+# The CoreWLAN job starts only after the current PID has read the driver.
 say() {
   /usr/bin/logger -t piano-airportd-kick "$*"
   echo "piano-airportd-kick: $(/bin/date +%T) $*" > /dev/console 2> /dev/null
@@ -18,6 +12,11 @@ case "$(/usr/sbin/sysctl -n machdep.piano_wifi_apple80211 2> /dev/null)" in
 [1-9]*) ;;
 *) exit 0 ;;
 esac
+[ "$(/usr/sbin/sysctl -n machdep.piano_wifi_native_boot 2>/dev/null)" = 1 ] || exit 0
+boot=$(/usr/sbin/sysctl -n kern.bootsessionuuid) || exit 1
+[ -n "$boot" ] || exit 1
+marker=/var/run/piano-airportd-kick
+[ "$(/bin/cat "$marker" 2>/dev/null)" != "$boot" ] || exit 0
 # the controller answers and its interface has a name (the BSD name on PianoWifi80211's interface child)
 bsd=""
 i=0
@@ -31,12 +30,58 @@ while [ $i -lt 600 ]; do
   i=$((i + 1))
 done
 [ -n "$bsd" ] || exit 0
-state() { /bin/launchctl print system/com.apple.airportd 2> /dev/null | /usr/bin/grep -E '^[[:space:]]*(state|pid) = ' | /usr/bin/tr -s ' \t' ' ' | /usr/bin/tr '\n' ' '; }
-say "PianoWifi80211 answers and its interface is $bsd (after ${i} s); airportd before:$(state)"
-sleep 3
-say "launchctl kickstart -k system/com.apple.airportd (the first airportd started before the interface existed)"
-/bin/launchctl kickstart -k system/com.apple.airportd > /dev/null 2>&1
-rc=$?
-sleep 10
-say "kickstart -k returned $rc; airportd now:$(state)"
-exit 0
+airportd_pid() {
+  /bin/launchctl print system/com.apple.airportd 2>/dev/null |
+    /usr/bin/awk '$1 == "pid" && $2 == "=" && $3 ~ /^[1-9][0-9]*$/ { print $3; exit }'
+}
+wait_for_adoption() {
+  n=0
+  while [ "$n" -lt "$1" ]; do
+    pid=$(airportd_pid)
+    adopted=$(/usr/sbin/ioreg -l -r -c PianoWifi80211 -d 1 2>/dev/null |
+      /usr/bin/awk '$1 == "\"piano-wifi-airportd-adopted\"" && $2 == "=" { print $3; exit }')
+    if [ -n "$pid" ] && [ "$pid" = "$adopted" ]; then
+      return 0
+    fi
+    sleep 1
+    n=$((n + 1))
+  done
+  return 1
+}
+say "PianoWifi80211 answers and its interface is $bsd (after ${i} s)"
+mode=observed
+if ! wait_for_adoption 10; then
+  pid=$(airportd_pid)
+  if [ -n "$pid" ]; then
+    mode=restarted
+    say "PianoWifiAirportdKickV1 restart-needed pid=$pid"
+    /bin/launchctl kickstart -k system/com.apple.airportd >/dev/null 2>&1 || exit 1
+  else
+    mode=started
+    say "PianoWifiAirportdKickV1 start-needed"
+    /bin/launchctl kickstart system/com.apple.airportd >/dev/null 2>&1 || exit 1
+  fi
+  if ! wait_for_adoption 30; then
+    say "PianoWifiAirportdKickV1 adoption-timeout mode=$mode"
+    exit 1
+  fi
+fi
+receipt=$(/usr/bin/mktemp /var/run/piano-airportd-kick.XXXXXXXX) || exit 1
+if ! printf '%s\n' "$boot" > "$receipt" || ! /bin/mv -f "$receipt" "$marker"; then
+  /bin/rm -f "$receipt"
+  exit 1
+fi
+say "PianoWifiAirportdKickV1 complete mode=$mode pid=$pid"
+# On first provisioning, the staged job may still be getting registered.
+# kickstart without -k will never interrupt an already running fallback.
+i=0
+while [ "$i" -lt 30 ]; do
+  if /bin/launchctl kickstart system/com.unixnu.piano-wifi-join >/dev/null 2>&1; then
+    say "PianoWifiAirportdKickV1 helper=started"
+    exit 0
+  fi
+  sleep 1
+  i=$((i + 1))
+done
+say "PianoWifiAirportdKickV1 helper=unavailable"
+exit 1

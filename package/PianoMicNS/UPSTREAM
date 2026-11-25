@@ -1,0 +1,19 @@
+PianoMicNS ("Mic (noise reduced)") is code for UniXNU-piano (BSD-2-Clause-Patent, ../PianoAudio/LICENSE) but for two parts:
+
+UniXNU-sheng (unixnu-research/UniXNU-sheng, main 00ba90984e831e4c6ce30ec3d8a56e6434e9f1af), BSD-2-Clause-Patent (owner decision
+2026-11-17 [COPY0123]: UniXNU repository code may be copied with its licence header and a NOTICE entry):
+  hal/ShengAudioPlugIn.c: the AudioServerPlugIn skeleton PianoMicNS.c is built on: the IUnknown and driver interface table, the
+    factory, the property answers for the plug-in, device and stream objects (including the private 'accs'/'auto' device properties
+    and the empty 'cust'/box/clock/'taps' lists the audio server asks every device for), the once-per-property log of unanswered
+    properties, the start-anchored zero time stamps and the host clock's ticks per frame. Taken and changed: one input-only device
+    (Float32 mono 48 kHz, virtual transport, no volume control), the kernel service replaced by PianoAudio's tap
+    (../PianoAudio/AudioTap.h), the IO replaced (MicNsCore.c, the output ring by sample time). Not taken: the output path, the
+    VirtualAudio import rebinding, the iOS host-clock patch, the diagnostics page.
+
+RNNoise (third_party/rnnoise), BSD-3-Clause, unmodified: github.com/xiph/rnnoise v0.1.1, 6cbfd53eb348a8d394e0757b4025c6ded34eb2b6
+  (third_party/rnnoise/UPSTREAM lists the files and their sha256; COPYING is its licence).
+
+New here: MicNsCore.{h,c} (the tap reader, the slip controller, the RNNoise blocks, the FIFO), tests/micns_host.c, Info.plist, and the
+kernel side in package/PianoAudio (AudioTap.h, PianoAudioTap.cpp). Not read or used: any Apple source or binary beyond the public SDK
+headers (CoreAudio/AudioServerPlugIn.h); the 27.3 driver service's strings and entitlements were read only for the analysis
+(private/host-checks MIC-NS.md section 9).

@@ -151,15 +151,24 @@ Plan plan(Read rd)
 // --------------------------------------------------------------------------------------------------------------- the table
 // Four 4 KiB pages, physically contiguous: L1, L2, then two L3 tables covering [kIovaBase, kIovaBase + 4 MiB).
 constexpr unsigned kTablePages = 4, kWindowPages = kUcRegionBytes / 4096, kUcPages = kUcBytes / 4096;
-constexpr unsigned kSessionTablePages = 36;
+constexpr unsigned kSessionTablePages = 132;
+constexpr unsigned kMaxSessionTablePages = 388;
+// The session aperture starts after the two UC L3 tables and must stay in
+// their L2. Zero rejects unsupported sizes before any table is allocated.
+constexpr unsigned sessionTablePages(uint32_t arenaBytes)
+{
+  return !arenaBytes || (arenaBytes & ((2 * 1024 * 1024) - 1)) ||
+    arenaBytes > (kMaxSessionTablePages - kTablePages) * (2 * 1024 * 1024) ? 0 :
+    kTablePages + arenaBytes / (2 * 1024 * 1024);
+}
 static_assert(kWindowPages == 2 * 512, "two level-3 tables");
 constexpr uint64_t kOutMask = 0x0000fffffffff000ull;
 constexpr uint64_t kDescTable = 3, kDescPage = 3, kAf = 1ull << 10, kShOuter = 2ull << 8, kApRw = 1ull << 6;
 constexpr uint64_t tableDesc(uint64_t pa) { return (pa & kOutMask) | kDescTable; }
 constexpr uint64_t pageDesc(uint64_t pa) { return (pa & kOutMask) | kAf | kShOuter | kApRw | kDescPage; }   // AttrIndx 0
 struct Tables {
-  uint64_t *cpu = nullptr;   // 4 x 512 descriptors (written through a cacheable mapping, cleaned before the SMMU walks)
-  uint64_t pa = 0;           // of page 0; 4 KiB aligned, the four pages contiguous
+  uint64_t *cpu = nullptr;   // pageCount x 512 descriptors, cleaned before the SMMU walks
+  uint64_t pa = 0;           // of page 0; 4 KiB aligned, all table pages contiguous
   unsigned pageCount = kTablePages;
 };
 // pages: the UC region's kUcPages physical 4 KiB pages; scratch: a zeroed 4 KiB page for the rest of the window. False when a page
@@ -170,7 +179,7 @@ inline bool build(Tables &t, const uint64_t *pages, unsigned count, uint64_t scr
   for (unsigned i = 0; i < count; ++i)
     if ((pages[i] & 0xfff) || pages[i] < kXnuDramBase || pages[i] >= kXnuDramEnd) return false;
   if ((scratch & 0xfff) || scratch < kXnuDramBase || scratch >= kXnuDramEnd) return false;
-  if (t.pageCount < kTablePages || t.pageCount > kSessionTablePages) return false;
+  if (t.pageCount < kTablePages || t.pageCount > kMaxSessionTablePages) return false;
   for (unsigned i = 0; i < t.pageCount * 512; ++i) t.cpu[i] = 0;
   uint64_t *l1 = t.cpu, *l2 = t.cpu + 512, *l3 = t.cpu + 1024;
   l1[kIovaBase >> 30] = tableDesc(t.pa + 4096);

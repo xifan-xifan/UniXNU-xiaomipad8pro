@@ -500,7 +500,7 @@ must log what actually arrives and tolerate harmless reordering. The sequence to
 | Security compatibility | SET 2 AUTH_TYPE, SET 46 RSN_IE | accept and record them per generation; **never require them as a separate preamble** — the association buffer already carries security and authentication parameters | requests confirmed; separate-call order inferred |
 | Join | **SET 20 ASSOCIATE** (§8.2) | validate, clear stale visible state, allocate a generation, start the join asynchronously, return success only for acceptance | request and length confirmed |
 | Progress | GET 13 STATE (0 INIT, 1 SCAN, 2 AUTH, 3 ASSOC, 4 RUN), GET 21 ASSOCIATE_RESULT (0 pending, 1 success, 2 failure, 9 timeout, 21 bad key; the numbers are prior art) | keep the 802.11 association and the port authorization distinct: ASSOC with a pending result while the WPA handshake runs, RUN only once authorized | state values prior art; polling order inferred |
-| 802.11 association ends | **event 9 ASSOC_DONE** (§8.3) | where Apple's supplicant runs WPA, post after the 802.11 result while STATE is still ASSOC so the handshake can start; where ours runs WPA, hold the public completion until it authorizes | event code confirmed; payload and timing inferred |
+| 802.11 association ends | **event 9 ASSOC_DONE** (§8.3) | the BSD notice can precede WPA authorization. GET 21 stays pending through the private handshake and returns success after authorization | BSD layout and GET 21 waiter checked on 27.3 |
 | WPA2 handshake | EAPOL through enX, then **SET 3 CIPHER_KEY** (§8.2) | route EAPOL before authorization, translate and install the keys, keep ordinary data blocked | mechanism confirmed on 27.3; the exact call interleaving inferred |
 | Security complete | **event 20 RSN_HANDSHAKE_DONE** | first try: once, after both keys and port authorization | code confirmed; payload and cardinality inferred |
 | Connected | **2 SSID_CHANGED, 3 BSSID_CHANGED, 4 LINK_CHANGED up**, STATE=RUN | publish the snapshot before posting; requests 1/9/4/16/103 agree with it; then allow DHCP and data | consumers confirmed; the final order inferred |
@@ -541,25 +541,20 @@ are credential forms, not key algorithms. PTK before GTK is the normal handshake
 it, not request timing; a group key that arrives first waits for pairwise completion. The peer address is a consistency check.
 Ignore the WoW fields for now; wipe the whole request and every temporary key copy after use.
 
-### 8.3 Events and their first payload candidates
+### 8.3 BSD event layouts
 
-- **ASSOC_DONE (9)** — code confirmed. First candidate: the 540-byte form our sheng binding uses for a 656-byte association
-  (ten 52-byte attempt records from `0x000`, reason at `0x210`, result at `0x214`, result-valid at `0x218`): zero it, put the
-  attempted BSSID in the first attempt record, set the result with valid=1, fill the reason when known. **Inferred from 24A446**,
-  not a recovered 27.3 layout; keep request 21 correct even if the daemon ignores the event's payload.
-- **LINK_CHANGED (4)** — our 32-byte inline candidate (down byte at `0`, RSSI at `4`, SNR at `8`, noise at `0xa`, reason at
-  `0x14`) is the size M1 already posts; its 27.3 semantics are **inferred** — leave reason and the disconnect flags zero unless
-  known. GET 156 is implemented only as a companion: the two prior-art models disagree about the disconnect flag's meaning, so
-  neither is proof.
+- **ASSOC_DONE (9)** carries an empty payload on the BSD socket. The 27.3 airportd callback has no dispatch case for code 9.
+  Its join waiter polls GET 21 for the result. The 540-byte candidate from the 24A446 sheng port exceeded the 248 bytes available
+  after the pinned kernel's 24-byte BSD event header and 16-byte interface name.
+- **LINK_CHANGED (4)** carries 32 bytes and GET 156 returns the same record. The 27.3 callback requires exactly 32 bytes and
+  reads down at `0`, involuntary at `0x10`, reason at `0x14` and subreason at `0x18`.
 - **RSN_HANDSHAKE_DONE (20)** — code confirmed; an empty payload is the first candidate; post once after the group key plus peer
   authorization and instrument whether airportd/CoreWLAN act on it (the historical driver sometimes emitted one per key and
   sometimes none, which cannot settle our cardinality).
 - **SSID_CHANGED (2) / BSSID_CHANGED (3)** — empty payload; the values are read through requests 1 and 9.
-- For every transition update the driver's snapshot and the BSD link state **before** posting: up = SSID, BSSID, LINK up; down =
-  LINK down, SSID, BSSID, and the getters then answer no network. Signal-quality updates while up may reuse LINK_CHANGED without
-  flapping the link. Which single event repaints the menu is **inferred** — the plan satisfies the whole coherent set (a
-  successful join result, RSN completion for PSK, an active link, RUN, agreeing current-network getters) rather than one guessed
-  event.
+- **POWER_CHANGED (1)** carries an empty payload, as in the 27.3 family's successful SET 19 path. airportd reads back GET 19.
+- Publish the driver snapshot and BSD link state before the notifications. On authorization the driver sends 9, 4, 2, 3.
+  On leave it sends 4, 2, 3 and the getters answer no network. An initial WPA2 association may emit 9 before authorization.
 
 ### 8.4 Two ways WPA2 can run
 
@@ -589,7 +584,7 @@ A stays as the fallback and the A/B control.
 
 **Entry gate:** the adoption question is settled on the tablet first (wm2's mode sweep, §6.2–§6.3): until CoreWiFi reports our
 interface in `wdutil` and CoreWLAN scans through, M2 cannot be validated. The gate also requires the logging of §7, host
-fixtures for the exact 656/148/16/264/540/32-byte candidates and for malformed lengths/IEs (each inferred fixture marked with its
+fixtures for the exact 656/148/16/264/32-byte records and for malformed lengths/IEs (each inferred fixture marked with its
 provenance so a tablet observation replaces it without rewriting the state machine), and the Ethernet path kept as a run-time
 A/B control (`piano-wifi-apple80211`, §5); Apple-directed auto-join and our profile auto-join are mutually exclusive per
 generation.
@@ -605,7 +600,7 @@ generation.
   stale SSID/BSSID; anything airportd initiates by itself (a DISASSOCIATE, its own association) is logged and handled
   deliberately, not hidden as a display success.
 - **M2b-A — menu-directed open, then PSK, with our supplicant.** Open first: DISASSOCIATE and ASSOCIATE with no credential,
-  asynchronous join, the pending/success/failure result through request 21, the ASSOC_DONE candidate, immediate peer
+  asynchronous join, the pending/success/failure result through request 21, the ASSOC_DONE notice, immediate peer
   authorization, connected getters and events — this validates the whole public join state machine without EAPOL or keys. Then
   WPA2-PSK: the credential handoff of §8.4A, public success delayed until AUTHORIZE, passphrase and PMK forms only with anything
   else rejected; switching, cancellation, timeout, wrong-key failure, duplicate completion and stale-generation callbacks are
@@ -628,11 +623,11 @@ These share one image/boot once M2b-A reaches the tablet (this section was writt
 
 1. Did the menu use the 656-byte ASSOCIATE directly, call `Apple80211Associate2`, or send a different length?
 2. Did AUTH_TYPE and RSN_IE arrive as separate sets, inline only, or both?
-3. Was ASSOC_DONE consumed with the 540-byte payload, and was request 21 polled before or after it?
+3. Did the empty BSD ASSOC_DONE notice post successfully before the link/SSID/BSSID events, and did GET 21 report the terminal result?
 4. Did airportd start eapolclient for PSK right after the 802.11 association, only after LINK_CHANGED, or not at all?
 5. For the PTK and GTK CIPHER_KEY, what were flags, index, cipher and RSC length (metadata only)?
 6. Was RSN_HANDSHAKE_DONE required once, after each key, or ignored in favour of EAP status plus link and state?
-7. Did LINK_CHANGED need the 32-byte inline payload, an empty event plus GET 156, or either?
+7. Did the 32-byte LINK_CHANGED payload and GET 156 agree on link up and link down?
 
 ### 7.8 wm3c: the override in its production form
 
@@ -681,17 +676,19 @@ grant, clears the request-kind table so every kind is logged again). Host tests:
 
 ## 10. User disconnect and radio power (2026-11-17, tablet qualification pending)
 
-The native binding now connects power (IOC19), disassociate (IOC22), and deauth (IOC29) to the radio worker. A user leave
-suppresses retries until another SET20; power-off cancels scans, drains station teardown, disables DMA and parks WLAN_EN.
-Power-on reloads the firmware through the existing restart path and permits the retained profile to reconnect. A stop serial
-keeps quick off/on and leave/join requests from skipping teardown. Existing saved profiles are retained.
+The native binding connects power (IOC19), disassociate (IOC22), and deauth (IOC29) to the radio worker. Power OFF cancels
+scans, drains station teardown and waits for the worker to verify the WLAN_EN and PERST# output states. Power ON reloads
+the firmware. A stop serial keeps quick off/on and leave/join requests from skipping teardown. Each native station attempt
+requires a fresh SET20, including after wake or link loss.
 
-`piano-wifi-boot-on=1` is the safe default: an unarmed SET19 OFF is acknowledged with the owner still ON, no stop serial and
-no physical power change. Startup ON requests, automatic joins and daemon restarts do not release this guard. For explicit
-OFF, root first writes `sysctl machdep.piano_wifi_power_explicit=1`, then uses the normal menu or command-line power control;
-the arm is one-way for this boot. Before that arm, the menu's OFF is acknowledged while the radio remains ON.
-`piano-wifi-boot-on=0` enables unrestricted SET19 behavior, including saved startup OFF. Neither SET19 nor SET20 carries
-a user-origin bit, so a join cannot safely substitute for that explicit arm. This fallback is pending tablet qualification.
+The daily ESP sets `piano-wifi-native-boot=1`. With this mode, SET19 OFF uses the physical stop path and airportd owns
+association. After airportd adopts the interface, the userland helper checks or adds the native saved profile, then gives
+airportd time to auto-join. If the radio is on and no association has been requested, the helper can ask CoreWLAN to join once.
+The startup job kicks airportd only when the running PID fails to adopt the registered interface, or starts it if it is absent.
+
+RAM diagnostics default to `piano-wifi-boot-on=1`. An unarmed SET19 OFF returns `EBUSY`, leaving GET19 ON without a
+stop serial or accepted POWER_CHANGED event. To test physical OFF, use `piano-wifi-boot-on=0` or write
+`sysctl machdep.piano_wifi_power_explicit=1` as root before using the menu. This arm lasts for the boot.
 
 The 27.3 `networksetup` text `Off (forced)` is a separate SystemConfiguration existence check: zero matching AirPort service
 or interface dictionaries returns that text before CoreWLAN power is read. It is not a GET19 or hardware-switch value.
@@ -704,13 +701,31 @@ POWER_CHANGED1 follows every accepted SET19, including an already-on request, af
 station mode remains1 while off. This preserves airportd's power initialization and client notification even when the
 requested value did not change. The BSD cache-update notification is15: 27.3 airportd interprets11 as a country change,
 clears its scan cache and starts autojoin. These BSD numbers must not be inferred from the framework's internal event list.
-AppleAssociate2 polls GET21 rather than waiting for
-event9: a canceled join returns terminal2, and a new accepted profile generation returns pending0 before the worker consumes
-it. This prevents the previous station's retained success/failure from completing the new request. Current GET state and last-notified state are
-separate, so a poll cannot consume an event before it is posted. Association-event storage is separate from request scratch.
+Driver availability is BSD event55 and carries the adapter's availability record. The driver sends it after registration and
+again when a new airportd PID first reads GET19. Each SET20 generation starts at GET21 result0. Authorization gives result1,
+cancellation or a failed station gives result2, and the 9.5 s deadline gives result9. A poll advances the getter state while
+the event baseline remains at the last notification. Association-event storage is separate from request scratch.
 
 Host coverage includes three station teardown cycles in firmware order, power/leave intent races, ABI validation and
 GET-before-notification ordering. This is source/model validation; real disconnect, physical off/on and automatic
 reconnection with DHCP/gateway/DNS still require the unattended wifi-power3 three-cycle RAM qualification. The two earlier
 power runs stopped before association; they did not qualify disconnect cycles. No result is
 claimed for the installed system by this change.
+
+### Desktop power handoff
+
+The boot-ON guard keeps startup policy OFF requests from parking the radio before
+login. The root `piano-wifi-controls` job hands the radio to normal desktop power
+policy after a stable console login, a published AirPort dictionary, and raw
+power ON. It arms the existing one-way control once; the menu then uses the
+ordinary POWER19 path. It does not set power or grant location authorization.
+
+COUNTRY_CODE GET51 reports the firmware country. SET51 is a versioned eight-byte
+record: the current country is idempotent; a different country is unsupported
+until firmware regulatory changes and channel updates are implemented. A public
+CoreWLAN nil can still mean location privacy filtering.
+
+The root diagnostic `machdep.piano_wifi_link_drop=1` requests one simulated link
+loss while authorized. The radio worker consumes it using the existing station
+teardown and retry path, preserving user intent. Writing zero cancels a pending
+request. This is a probe, not an AP-loss or installed-system qualification result.

@@ -45,13 +45,16 @@ constexpr uint32_t cba2rOffset(unsigned n) { return 0x1800 + 4 * n; }
 constexpr uint32_t kCbSctlr = 0x000, kCbTcr2 = 0x010, kCbTtbr0Lo = 0x020, kCbTtbr0Hi = 0x024, kCbTtbr1Lo = 0x028, kCbTcr = 0x030,
                    kCbContextIdr = 0x034, kCbMair0 = 0x038, kCbMair1 = 0x03c, kCbFsr = 0x058, kCbTlbiAll = 0x618,
                    kCbTlbSync = 0x7f0, kCbTlbStatus = 0x7f4;
-// SCTLR: M translation on, TRE, AFE, CFRE (a fault aborts the transaction rather than stalling it), ASIDPNE. piano's SMMU keeps
+// SCTLR: M translation on, TRE, AFE, CFRE to record context faults, CFCFG clear to terminate them. With faults polled, keep CFIE
+// and HUPCF clear. piano's SMMU keeps
 // ASIDPNE at 0 (wifi-l5ib, 2026-11-12: wrote 0x1027, read 0x27): the ASID namespace is then shared between banks, so the window's
-// ASID is its own bank number (as Linux's arm-smmu gives each stage-1 bank), and only the other four bits must read back.
+// ASID is its own bank number (as Linux's arm-smmu gives each stage-1 bank), and ASIDPNE is optional on readback.
 constexpr uint32_t kSctlrM = 1u << 0;
+constexpr uint32_t kSctlrCfre = 1u << 5, kSctlrCfie = 1u << 6, kSctlrCfcfg = 1u << 7, kSctlrHupcf = 1u << 8;
 constexpr uint32_t kSctlrAsidpne = 1u << 12;
-constexpr uint32_t kSctlrWindow = 1u << 0 | 1u << 1 | 1u << 2 | 1u << 5 | kSctlrAsidpne;
+constexpr uint32_t kSctlrWindow = kSctlrM | 1u << 1 | 1u << 2 | kSctlrCfre | kSctlrAsidpne;
 constexpr uint32_t kSctlrRequired = kSctlrWindow & ~kSctlrAsidpne;
+constexpr uint32_t kSctlrMustClear = kSctlrCfie | kSctlrCfcfg | kSctlrHupcf;
 constexpr uint32_t ttbr0Hi(uint64_t tablePa, unsigned bank) { return uint32_t(tablePa >> 32) | (bank & 0xffu) << 16; }   // ASID 55:48
 constexpr uint32_t kCbarStage1 = 1u << 16 | 0xfu << 12 | 3u << 8;   // stage 1 with stage 2 bypass; MemAttr, BPSHCFG
 constexpr uint32_t kFsrFaults = 0xc00001feu;
@@ -235,7 +238,9 @@ inline const char *apply(const Plan &p, uint16_t stream, uint64_t tablePa, Read 
   const uint32_t fsr = rd(cb + kCbFsr);
   if (fsr & kFsrFaults) wr(cb + kCbFsr, fsr & kFsrFaults);   // stale faults cleared (write one to clear)
   wr(cb + kCbSctlr, kSctlrWindow);
-  if ((rd(cb + kCbSctlr) & kSctlrRequired) != kSctlrRequired || rd(cba2rOffset(p.bank)) != 1 ||
+  const uint32_t sctlr = rd(cb + kCbSctlr);
+  if ((sctlr & (kSctlrRequired | kSctlrMustClear)) != kSctlrRequired) return "context bank terminate/report readback";
+  if (rd(cba2rOffset(p.bank)) != 1 ||
       rd(cbarOffset(p.bank)) != kCbarStage1 || rd(cb + kCbTtbr0Lo) != uint32_t(tablePa) ||
       rd(cb + kCbTtbr0Hi) != ttbr0Hi(tablePa, p.bank) || rd(cb + kCbTcr) != kTcrWindow)
     return "context bank readback";

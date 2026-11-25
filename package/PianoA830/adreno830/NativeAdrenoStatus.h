@@ -16,6 +16,13 @@ static_assert(NativeAdrenoReturnNotResponding==kIOReturnNotResponding && NativeA
 #if defined(kIOReturnNotPermitted)
 static_assert(NativeAdrenoReturnNotPermitted==kIOReturnNotPermitted,"NativeAdreno status codes are IOReturn.h's");
 #endif
+/* The client ranges a recovery or a fault names, bit r for range r (NativeAdrenoSubmit.h's NativeAdrenoSubmitRanges, the publish shell's
+ * connection slots). UniXNU-piano (2026-11-22, GPU-SLOTS): 64 bits on macOS (64 slots), 32 upstream. */
+#ifdef ADRENO830_MACOS
+typedef uint64_t NativeAdrenoRangeMask;
+#else
+typedef uint32_t NativeAdrenoRangeMask;
+#endif
 
 /* Monotonic fault and suspend counters of ONE connection, for Turnip's device_check_status and device_get_suspend_count (GetStatus).
  * Turnip compares the fault count with the value it saw last: a change means its context is lost (vk_device_set_lost). Counts are
@@ -52,6 +59,22 @@ extern "C" {
  * found): the jobs in flight between them are compared with the FAR window and counted (M14 P0, NativeAdrenoFaultVerdictFor,
  * native_adreno_fault_attribution), never charged. */
 bool native_adreno_note_page_fault(uint64_t far,uint32_t completed,uint32_t issued,bool sampled);
+#ifdef ADRENO830_MACOS
+/* UniXNU-piano (2026-11-21, 20261121-ws-crash CROSS-WINDOW.txt 4(a) D2): the state at the bottom half that found a CB0 fault (the poll:
+ * up to a tick after the fault, FAR is sticky and the GPU kept running), for its "gpu fault detail" lines: the fences now and, when GX
+ * was up (ibs), BR's [0] and BV's [1] IB1/IB2 base and dwords left and the BR ring read pointer. index: the fault's line number this
+ * boot (1..lines). native_adreno_note_fault_detail adds whose jobs are in flight, what is mapped at FAR and FAR - 4 GiB and what the
+ * command words at the IBs hold; it prints only, after native_adreno_note_page_fault, in the same thread context. */
+struct NativeAdrenoFaultDetail {
+    uint64_t far;
+    uint32_t index,lines,completed,issued;
+    bool ibs;
+    uint32_t rptr;
+    uint64_t ib1[2],ib2[2];
+    uint32_t ib1_rem[2],ib2_rem[2];
+};
+void native_adreno_note_fault_detail(const NativeAdrenoFaultDetail *detail);
+#endif
 /* Global device loss, hang class only (RBBM HANG_DETECT, CP_HW_ERROR, the 2 s software watchdog, GMU CM3 fault / watchdog bite,
  * the WPTR fenced write failing 200 times; ARCHITECTURE 4.13.4): every connection's faults += 1, every later submission fails with
  * kIOReturnNotResponding, waiters return it, and newUserClient refuses new GPU connections. reason is an A830Reason (recorded).
@@ -69,6 +92,25 @@ void native_adreno_device_lost(uint32_t reason);
  *        (native_adreno_device_lost semantics). */
 void native_adreno_recovery_begin(bool charge_culprit);
 void native_adreno_recovery_end(bool recovered);
+/* UniXNU-piano (2026-11-22, private 20261122-render/ANALYSIS.md "ONE change"; Linux msm recover_worker is the behaviour reference): the
+ * replaying recovery (A830RecoveryOps::plan/replay) in place of begin's faulting:
+ * begin_replay: begin without faulting or charging anybody (the halt and the gate only).
+ * plan: once the GPU stopped (NativeAdrenoSubmit::plan): for charge_culprit, the process whose job the CP stood in is charged one hang
+ *        (never the render server) and its connection alone gets faults += 1 (Turnip: that process's device is lost); *restart gets
+ *        the fence S6 restarts at (untouched before the shell is published). Every other job in flight is kept for the replay; when it
+ *        cannot be (a poisoned submit object, a kernel fence among them, no room) every connection with a job in flight is faulted as
+ *        begin does. Returns the jobs that will not run again. One console line names the culprit, the faulted and the replayed.
+ * replay: after S7 and the interrupt restore (NativeAdrenoSubmit::replay): the kept jobs go into the ring again with their own fences;
+ *        *replayed gets how many. end(true) after a replaying begin releases nothing (replay did) and resumes as before. */
+void native_adreno_recovery_begin_replay(void);
+uint32_t native_adreno_recovery_plan(bool charge_culprit,uint32_t *restart);
+IOReturn native_adreno_recovery_replay(uint32_t *replayed);
+#ifdef ADRENO830_MACOS
+/* UniXNU-piano (2026-11-22, test only: piano-gpu-fault-test=1, machdep.piano_gpu_fault_hold): the next submission of any live connection
+ * of process pid starts with the hold (NativeAdrenoSubmit::armHold): the CP stops in that job, a real hang whose culprit is known.
+ * Returns the connections armed (0: none of that process; nothing armed); name (optional, 20 bytes) gets the process's name. */
+unsigned native_adreno_fault_hold(int pid,char *name);
+#endif
 /* retire_call of the GPU interrupt (fence interrupt, ARCHITECTURE 4.12.3 step 3 and 5.4 "回收"): releases the BO references of every
  * job the CP has passed, so completed work never pins buffers or job slots. Cheap when nothing completed. */
 void native_adreno_retire_completed(void);

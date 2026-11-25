@@ -88,6 +88,7 @@ extern "C" {
 #define PIANO_MCA_VERIFY 0x21002u         /* non-zero while a charger authentication runs */
 #define PIANO_MCA_LPD_STATUS 0x2000au /* read-only u32: zero dry, nonzero wet */
 #define PIANO_MCA_PDOS 0x21011u           /* up to 7 x {min mV, max mV, max mA} */
+#define PIANO_MCA_QC_PULSE 0x201du       /* QC3 pulse: 0x20 up, 0x10 down (the charge-pump session only) */
 #define PIANO_MCA_PPS 0x21017u            /* ask a PPS source for an APDO voltage: (mV / 20) << 16 | mA / 50 (external policy, hv 2) */
 #define PIANO_MCA_PD_FIXED 0x21018u       /* ask the source for a fixed PDO, mV */
 #define PIANO_MCA_QC_VOLT 0x2011u         /* HVDCP/QC voltage request, mV (external policy, b4pd) */
@@ -121,7 +122,7 @@ enum {
  * McaWritten); the request in flight, if any, is still awaited. McaIgnored on a 0x800a answer that matches nothing: ignored_* say
  * what it was. */
 enum {McaIgnored = 0, McaAnswer = 1, McaCycleDone = 2, McaNotified = 3, McaWritten = 4, McaPanNotified = 5, McaPanDone = 6,
-      McaUcsiDone = 7, McaUcsiNotified = 8, McaLateWritten = 9};
+      McaUcsiDone = 7, McaUcsiNotified = 8, McaLateWritten = 9, McaAuxDone = 10};
 /* events for the owner's log (piano_mca_take_events) */
 enum {
     McaEvAttach = 1u << 0, McaEvDetach = 1u << 1, McaEvWrite = 1u << 2, McaEvHvOn = 1u << 3, McaEvHvBlocked = 1u << 4,
@@ -156,8 +157,12 @@ typedef struct {
     /* the last 0x800a answer that matched nothing (McaIgnored): opcode, property, sequence, and the sequence then in flight */
     uint32_t ignored_answers, ignored_opcode, ignored_property, ignored_seq, ignored_retcode, ignored_in_flight;
     uint8_t unsuspend_allowed, unsuspend_tries;
+    uint8_t pdo_clamp;               /* piano-power-pdo-mca: a source object above 5 A (within its PD field) reads as 5 A */
     uint8_t board_allowed, board_done, board_tries;   /* the board configuration: bit 0 CP state, 1 OTG, 2 CID */
     uint8_t icl_tries, fcc_tries, enable_tries;
+    /* external, charge/pd1: fcc_fast admits the charge current up to 3500 mA (piano-power-hv-caps: the stock 9 V rows), fv_hot the
+     * float voltage 0x2007 = 4400 or 4060 mV (piano-power-fv-hot: the warm row); both 0 by default */
+    uint8_t fcc_fast, fv_hot;
     uint32_t icl_want, fcc_want;     /* what the last cycle wanted (tries restart when it changes) */
     uint32_t icl_set, fcc_set;       /* what the firmware took since its start (0: nothing yet) */
     int32_t ext_tbat_c;              /* the gauges' temperature, from the owner */
@@ -175,6 +180,9 @@ typedef struct {
     int32_t last_result;
     uint32_t last_property, last_value;
     uint32_t events;
+    /* MiPPS (ChargeMipps.h): the auxiliary request channel, owned by the caller (piano_mca_allow_mipps); NULL: none. One request at
+     * a time, sent before the cycle's next read, only to the properties piano_mca_aux_allowed names. A pointer: PianoPower's size cap. */
+    struct PianoMcaAux *aux;
 } PianoMca;
 
 void piano_mca_init(PianoMca *m, unsigned policy, int hv_allowed);
@@ -190,6 +198,15 @@ uint32_t piano_mca_pan_next(PianoMca *m, uint8_t out[PIANO_MCA_PAN_REQUEST_BYTES
 uint32_t piano_mca_ucsi_next(PianoMca *m, uint8_t out[PIANO_MCA_UCSI_REQUEST_BYTES]);
 void piano_mca_ucsi_timeout(PianoMca *m);
 void piano_mca_allow_ucsi(PianoMca *m, int allow);
+/* The source list (0x21011) as the PD source contract's firmware list (piano-power-pdo-mca): an object's current above 5 A but
+ * within its PD field (fixed 10.23 A, PPS 6.35 A) is taken as 5 A instead of discarding the whole list; nothing else changes. */
+void piano_mca_clamp_pdos(PianoMca *m, int on);
+/* External policy (charge/pd1): the charge current up to PIANO_MCA_FCC_FAST (fcc_fast) and the float voltage 4400 / 4060 mV
+ * (fv_hot); both refused otherwise, as before. */
+#define PIANO_MCA_FCC_FAST 3500u
+#define PIANO_MCA_FV_DEFAULT 4400u
+#define PIANO_MCA_FV_HOT 4060u
+void piano_mca_allow_fast(PianoMca *m, int fcc_fast, int fv_hot);
 /* A message from the channel (any of the three owners); returns a Mca* result. */
 int piano_mca_receive(PianoMca *m, const uint8_t *data, uint32_t length);
 /* The owner's timer gave up on the request (or the port request) in flight. */
@@ -209,6 +226,9 @@ void piano_mca_battery_temperature(PianoMca *m, int valid, int32_t celsius);
 void piano_mca_use_external_policy(PianoMca *m, int stop, int pps, int qc3);
 /* With the external policy: the input limit admitted up to max_ma (1600..3000; the stepped Type-C current, ChargePolicy's
  * cfg.rp_cap_ma); 0 or less keeps the 1600 mA bound. */
+/* charge/cp-sess: the SC8541 pump session's own requests, for every codec of this boot: a PPS word 5000-11000 mV at 1000-6000 mA
+ * (pps), one QC3 pulse 0x20/0x10 (qc); only with the external policy. Off unless PianoPower's pump session is allocated. */
+void piano_mca_allow_cp(int pps, int qc);
 void piano_mca_allow_icl(PianoMca *m, uint32_t max_ma);
 #define PIANO_MCA_ICL_MAX_RP 3000u    /* the Type-C current's 3.0 A at 5 V */
 /* A write the external policy wants, queued for the gap after this cycle (one per property: a later value replaces a queued one).
@@ -231,6 +251,20 @@ const char *piano_mca_status_name(int32_t status);
 static inline int piano_mca_has(const PianoMca *m, int field) {return (int)((m->valid >> field) & 1u);}
 
 /* The policy's pieces, exposed for the host tests. */
+typedef struct PianoMcaAux {
+    uint8_t wanted, in_flight, done, write, len, reply_len;
+    uint32_t property;
+    int32_t result;
+    uint8_t data[16], reply[16];
+    uint32_t sent, refused;
+} PianoMcaAux;
+/* MiPPS's transport (ChargeMipps.h): the VDM/verify properties only (never command 8's 0x2100a), 4 or 16 bytes as each takes.
+ * piano_mca_aux_request queues one request (0) or refuses it (-1: not allowed, busy, or not on the list); piano_mca_aux_take gives
+ * its result once (1): retcode 0 = done, else the firmware's code or -60 on the owner's timeout; data/len for a read. */
+void piano_mca_allow_mipps(PianoMca *m, PianoMcaAux *aux);   /* aux NULL: withdrawn */
+int piano_mca_aux_allowed(int write, uint32_t property, const uint8_t *data, uint32_t len);
+int piano_mca_aux_request(PianoMca *m, int write, uint32_t property, const uint8_t *data, uint32_t len);
+int piano_mca_aux_take(PianoMca *m, int32_t *retcode, uint8_t *data, uint32_t *len);
 uint32_t piano_mca_icl_for(int type, uint32_t pdo5v_ma);
 uint32_t piano_mca_fcc_for(int tbat_valid, int32_t tbat_c, int hv);
 int piano_mca_write_allowed(uint32_t property, uint32_t value, uint8_t bytes);

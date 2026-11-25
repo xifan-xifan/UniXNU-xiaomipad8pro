@@ -1,17 +1,10 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Native sheng SM8550 UFS bring-up. Default-off: no MMIO is touched unless
 // native-ufs-probe=1 is present. This is a register probe, not a storage driver.
-#if defined(NATIVE_VERIFIED_BLOCK) && NATIVE_VERIFIED_BLOCK && \
-    defined(NATIVE_UFS_UNVERIFIED_ROOT) && NATIVE_UFS_UNVERIFIED_ROOT
-#error "Verified NativeUfs root windows cannot enable development writes"
-#endif
-
 #include <IOKit/IOService.h>
-#include <IOKit/IORegistryEntry.h>
 #include <IOKit/IOKitKeys.h>
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/storage/IOBlockStorageDevice.h>
-#include <IOKit/storage/IOMedia.h>
 #include <libkern/crypto/sha2.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_map.h>
@@ -46,6 +39,8 @@ extern const uint8_t verified_root_key[];
 #include <libkern/libkern.h>
 #include <pexpert/pexpert.h>
 #include <kern/debug.h>
+#include <sys/kauth.h>
+#include <sys/sysctl.h>
 #include <stdarg.h>
 #include <PianoPowerContract.h>   // UniXNU-piano: native-ufs-suspend=1 (RootPower.h)
 #include <PianoDiskIdentity.h>    // UniXNU-piano: the windows as internal UFS disks to diskutil (piano-disk-identity)
@@ -54,21 +49,9 @@ extern const uint8_t verified_root_key[];
 #include "TransferPoll.h"
 #include "SmmuTakeover.h"
 
+SYSCTL_DECL (_machdep);
+
 static UfsRootDiagnostics gRootDiagnostic;
-// Pre-interrupt busy wait: the k27 kernel's timer callouts do not fire before interrupts are
-// enabled (docs/results-2026-11-23-paclr53-watchdog-return.md), so IOSleep never returns there.
-// IODelay spins on the architected counter, which does advance.
-static void hostSpinMs (uint32_t ms)
-{
-  uint64_t start = 0, now = 0;
-  __asm__ volatile ("mrs %0, cntvct_el0" : "=r" (start));
-  const uint64_t ticks = uint64_t (ms) * 24000U;
-  for (uint32_t guard = 0; guard < 50000000U; guard++) {
-    __asm__ volatile ("mrs %0, cntvct_el0" : "=r" (now));
-    if (now - start >= ticks) break;
-  }
-  (void) now; (void) start;   // quiet: 100 ms polling flooded the console ring in ufs36/ufs38
-}
 // UniXNU-piano: every bring-up stage also goes to the console (the native-run log mailbox), so a stall shows where it is.
 static inline void rootStage (const char *stage)
 {
@@ -229,8 +212,7 @@ void NativeUfs::inspect (void)
   uintptr_t gcc = mapPhys (GCC_BASE + 0x77000, 0x1000, gccMap);
   uintptr_t memPhy = mapPhys (GCC_BASE + 0x9e000, 0x1000, memPhyMap);
   if (!gcc || !memPhy) {
-    IOLog ("NativeUfs: inspect GCC map failed gcc=%p memphy=%p\n", (void *) gcc, (void *) memPhy);
-    return;
+    panic ("NATIVE_UFS inspect: GCC map failed gcc=%p memphy=%p", (void *) gcc, (void *) memPhy);
   }
   uint32_t gdsc = read32 (gcc, GCC_UFS_PHY_GDSCR - 0x77000);
   uint32_t axi = read32 (gcc, GCC_UFS_PHY_AXI_ENABLE - 0x77000);
@@ -259,8 +241,12 @@ void NativeUfs::inspect (void)
       readHc = 1;
     }
   }
-  IOLog ("NativeUfs: inspect gdsc=%08x memphygdsc=%08x axi=%08x ahb=%08x unipro=%08x "
-         "txsym=%08x rxsym=%08x aux=%08x hc_read=%u cap=%08x ver=%08x is=%08x hcs=%08x hce=%08x utrlba=%08x\n",
+  panic ("NATIVE_UFS inspect\n"
+         "gdsc=%08x memphygdsc=%08x\n"
+         "axi=%08x ahb=%08x unipro=%08x\n"
+         "txsym=%08x rxsym=%08x aux=%08x\n"
+         "hc_read=%u cap=%08x ver=%08x\n"
+         "is=%08x hcs=%08x hce=%08x utrlba=%08x",
          gdsc, memGdsc, axi, ahb, unipro, txs, rxs, aux, readHc, cap, ver, is, hcs, hce, utrlba);
 }
 
@@ -1329,14 +1315,9 @@ static IOBufferMemoryDescriptor *hostContiguous (uint32_t bytes, IOOptionBits ca
   cacheCivac (*virt, bytes);
   return dma;
 }
-// When the allocator cannot return a region above 128 KiB, the slots' descriptors live in one small region and every slot's data area
-// is a separate 128 KiB buffer named by its own PRDT. The request list stays in the descriptor region (entry 2s).
-static bool gSplitDma = false;
-static unsigned gSplitSlots = 0;
-static IOBufferMemoryDescriptor *gSplitData[kRegionSlots] = {};
 static void hostSlotsUpgrade (unsigned regionSlots, unsigned entries, bool wide)
 {
-  if (gListDma || gSplitDma || regionSlots < 2 || entries < regionSlots) return;
+  if (gListDma || regionSlots < 2 || entries < regionSlots) return;
   uint8_t *cached = nullptr; uint64_t listPhys = 0;
   IOBufferMemoryDescriptor *list = hostContiguous (4096, kIOMapWriteCombineCache, wide, &cached, &listPhys);
   if (!list) return;
@@ -1417,71 +1398,37 @@ static bool hostBringUp (const char **why)
   const unsigned entries = (read32 (gHost.hc, 0) & 0x1f) + 1;
   unsigned slots = (entries + 1) / 2 < kRegionSlots ? (entries + 1) / 2 : kRegionSlots;
   gHost.lock = IOLockAlloc ();
-  if (!gHost.virt && gHost.lock) {
-    // Split fallback: the kernel's physically contiguous allocator stalls above 128 KiB and runs dry after a few 64 KiB
-    // requests, so one slot owns a single 64 KiB data area and the descriptors live in one 6 KiB region. Commands through
-    // the pool then serialise; larger reads still go through zero-copy PRDTs where the buffer qualifies.
-    const unsigned splitSlots = 1;
-    const uint32_t descBytes = 4096 + splitSlots * kUcdStride;
-    const uint32_t slotDataBytes = 65536;
-    IOLog ("NativeUfs: split descriptors entering %u bytes\n", descBytes);
-    IOBufferMemoryDescriptor *desc = IOBufferMemoryDescriptor::inTaskWithOptions (
+  // Smaller regions keep the same layout for their first slots: 16, then 8, then 1.
+  const uint32_t sizes[3] = { uint32_t (kDmaBytes), uint32_t (kDmaBytesEightSlots), uint32_t (kDmaBytesOneSlot) };
+  const unsigned counts[3] = { kRegionSlots, 8, 1 };
+  for (unsigned attempt = 0; attempt < 3 && !gHost.virt; ++attempt) {
+    const uint32_t bytes = sizes[attempt];
+    if (counts[attempt] > slots && counts[attempt] > 1) continue;
+    IOLog ("NativeUfs: DMA attempt %u: %u bytes (slots %u, wide %d)\n", attempt, bytes, slots, wide);
+    IOBufferMemoryDescriptor *dma = IOBufferMemoryDescriptor::inTaskWithOptions (
       kernel_task, static_cast<IOOptionBits> (kIODirectionInOut) | static_cast<IOOptionBits> (kIOMemoryPhysicallyContiguous) |
-      static_cast<IOOptionBits> (kIOMemoryMapperNone), descBytes, 4096);
-    IOByteCount descContiguous = 0;
-    uint8_t *descVirt = desc ? static_cast<uint8_t *> (desc->getBytesNoCopy ()) : nullptr;
-    uint64_t descPhys = desc ? desc->getPhysicalSegment (0, &descContiguous, kIOMemoryMapperNone) : 0;
-    IOLog ("NativeUfs: split descriptors %u bytes: virt=%p phys=%llx contiguous=%llx\n", descBytes, descVirt,
-           (unsigned long long) descPhys, (unsigned long long) descContiguous);
-    const bool descGood = descVirt && descPhys && !(descPhys & 4095) && descContiguous >= descBytes &&
-                          (wide || descPhys + descBytes <= 0x100000000ULL);
-    if (descGood) {
-      unsigned ready = 0;
-      for (unsigned s = 0; s < splitSlots; ++s) {
-        IOLog ("NativeUfs: split data slot %u entering %u bytes\n", s, slotDataBytes);
-        IOBufferMemoryDescriptor *d = IOBufferMemoryDescriptor::inTaskWithOptions (
-          kernel_task, static_cast<IOOptionBits> (kIODirectionInOut) | static_cast<IOOptionBits> (kIOMemoryPhysicallyContiguous) |
-          static_cast<IOOptionBits> (kIOMemoryMapperNone), slotDataBytes, 4096);
-        IOByteCount c = 0;
-        uint8_t *v = d ? static_cast<uint8_t *> (d->getBytesNoCopy ()) : nullptr;
-        uint64_t pa = d ? d->getPhysicalSegment (0, &c, kIOMemoryMapperNone) : 0;
-        IOLog ("NativeUfs: split data slot %u <- virt=%p phys=%llx contiguous=%llx\n", s, v, (unsigned long long) pa,
-               (unsigned long long) c);
-        // Reachability is verified once the SMMU bank exists (hostReachable needs it); only the 32-bit bound is checked here.
-        if (!v || !pa || (pa & 4095) || c < slotDataBytes || (!wide && pa + slotDataBytes > 0x100000000ULL)) {
-          IOLog ("NativeUfs: split data slot %u failed: virt=%p phys=%llx contiguous=%llx\n", s, v, (unsigned long long) pa,
-                 (unsigned long long) c);
-          if (d) d->release ();
-          break;
-        }
-        bzero (v, slotDataBytes);
-        cacheCivac (v, slotDataBytes);
-        gSplitData[s] = d;
-        hostSlotGeometry (s, descVirt + 64 * s, 2 * s, descVirt + 4096 + s * kUcdStride, descPhys + 4096 + s * kUcdStride, v, pa);
-        ++ready;
-      }
-      IOLog ("NativeUfs: split data buffers ready=%u of %u (%u bytes each)\n", ready, splitSlots, slotDataBytes);
-      if (ready == splitSlots) {
-        gSplitDma = true;
-        gSplitSlots = splitSlots;
-        gSlotDataBytes = slotDataBytes;
-        gHost.dma = desc; gHost.virt = descVirt; gHost.phys = descPhys; gHost.dmaBytes = descBytes;
-      } else {
-        for (unsigned s = 0; s < ready; ++s) { gSplitData[s]->release (); gSplitData[s] = nullptr; }
-        desc->release ();
-      }
-    } else if (desc) {
-      desc->release ();
+      static_cast<IOOptionBits> (kIOMemoryMapperNone),
+      bytes, 4096);
+    if (!dma) continue;
+    uint8_t *virt = static_cast<uint8_t *> (dma->getBytesNoCopy ());
+    IOByteCount contiguous = 0;
+    uint64_t phys = dma->getPhysicalSegment (0, &contiguous, kIOMemoryMapperNone);
+    IOLog ("NativeUfs: DMA virt=%p phys=%llx contiguous=%llx\n", virt, (unsigned long long) phys, (unsigned long long) contiguous);
+    gRootDiagnostic.dma = phys;
+    gRootDiagnostic.contiguous = contiguous;
+    if (!virt || !phys || (phys & 4095) || contiguous < bytes || (!wide && phys + bytes > 0x100000000ULL)) {
+      dma->release ();
+      continue;
     }
+    gHost.dma = dma; gHost.virt = virt; gHost.phys = phys; gHost.dmaBytes = bytes;
   }
   if (!gHost.virt || !gHost.lock) {
     *why = !gHost.lock ? "dma buffer" : "DMA address/contiguity";
     return false;
   }
-  const unsigned regionSlots = gSplitDma ? gSplitSlots :
-    gHost.dmaBytes == kDmaBytes ? slots : gHost.dmaBytes == kDmaBytesEightSlots ? (slots < 8 ? slots : 8) : 1;
+  const unsigned regionSlots = gHost.dmaBytes == kDmaBytes ? slots : gHost.dmaBytes == kDmaBytesEightSlots ? (slots < 8 ? slots : 8) : 1;
   IOLog ("NativeUfs: DMA region %u bytes, %u slots\n", gHost.dmaBytes, regionSlots);
-  if (!gSplitDma) hostSlotGeometryRegionA (regionSlots);
+  hostSlotGeometryRegionA (regionSlots);
   hostSlotsInit (regionSlots, gHost.lock);
   native_ufs_slots = gSlotCount;
   IOLog ("NativeUfs: slots initialised (%u)\n", gSlotCount);
@@ -1494,16 +1441,6 @@ static bool hostBringUp (const char **why)
   if (!hostStopQueue (why)) return false;
   smmuBypassStream (0x60, gHost.smmuMap, report, gHost.phys, gHost.dmaBytes);
   gHost.smmu = gHost.smmuMap->getVirtualAddress ();
-  if (gSplitDma) {
-    unsigned reachable = 0;
-    for (unsigned s = 0; s < gSplitSlots; ++s)
-      if (hostReachable (gSlotGeom[s].dataPhys, gSlotDataBytes, wide)) ++reachable;
-    IOLog ("NativeUfs: split data reachable %u of %u\n", reachable, gSplitSlots);
-    if (reachable != gSplitSlots) {
-      *why = "split DMA unreachable";
-      return false;
-    }
-  }
   // The board's WiFi endpoint (wifi=2 or more) needs a pass-through stream of its own, set up here with the same code and at the same moment as the
   // storage stream: the registers of the stream matching group are not safe to touch from another thread later (a read of the first one never returned).
   uint32_t wifi = 0;
@@ -1675,15 +1612,12 @@ static bool hostBringUp (const char **why)
       *why = "wake (START STOP UNIT)";
       return false;
     }
-    IOLog ("NativeUfs: wake sleep\n");
-    hostSpinMs (50);
-    IOLog ("NativeUfs: wake slept\n");
+    IOSleep (50);
   }
   rootStage ("LUN ready");
   for (unsigned attempt = 0; attempt < 20; attempt++) {
     uint8_t tur[6] = { 0, 0, 0, 0, 0, 0 };
     uint32_t scsi = 0;
-    IOLog ("NativeUfs: tur try %u\n", attempt);
     if (hostScsi (0, tur, 6, false, 0, 200000, &scsi) == kIOReturnSuccess) {
       gHost.ready = true;
       hostEnableInterrupt ();
@@ -1695,7 +1629,7 @@ static bool hostBringUp (const char **why)
       return true;
     }
     if (gHost.poisoned) break;
-    hostSpinMs (10);
+    IOSleep (10);
   }
   gHost.ready = false;
   *why = "LUN 0 not ready";
@@ -1710,6 +1644,7 @@ static uint32_t be32w (const uint8_t *at)
 }
 
 #include "RootLayout.h"
+#include "XblLogSnapshot.h"
 #include "RootWindowRead.h"
 #include "RootPublication.h"
 
@@ -1848,18 +1783,20 @@ static void storeAccount (volatile uint64_t *ops, volatile uint64_t *ticks, uint
   const uint64_t spent = mach_absolute_time () - t0;
   __atomic_fetch_add (ops, 1, __ATOMIC_RELAXED);
   __atomic_fetch_add (ticks, spent, __ATOMIC_RELAXED);
-  uint64_t seen = native_ufs_store_max_ticks;
+  uint64_t seen = __atomic_load_n (&native_ufs_store_max_ticks, __ATOMIC_RELAXED);
   while (spent > seen && !__atomic_compare_exchange_n (&native_ufs_store_max_ticks, &seen, spent, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) { }
 }
 
-extern "C" int native_ufs_store_read (uint64_t rel, uint32_t blocks, void *dst)
+// Tracked calls let direct Data quarantine exactly those buffers that can still DMA after a timeout.
+extern "C" int native_ufs_store_read_tracked (uint64_t rel, uint32_t blocks, void *dst, bool *live)
 {
+  if (live) *live = false;
   if (!gStoreRegionBlocks || !dst || !blocks || rel >= gStoreRegionBlocks || blocks > gStoreRegionBlocks - rel) return 0;
   const uint64_t t0 = mach_absolute_time ();
   int ok = 1;
   while (blocks) {
     uint32_t chunk = blocks > kXferMax / 4096 ? static_cast<uint32_t> (kXferMax / 4096) : blocks;
-    if (hostRead4k (0, gStoreRegionFirst + rel, chunk, dst) != kIOReturnSuccess) { ok = 0; break; }
+    if (hostRead4k (0, gStoreRegionFirst + rel, chunk, dst, live) != kIOReturnSuccess) { ok = 0; break; }
     dst = static_cast<uint8_t *> (dst) + chunk * 4096ULL;
     rel += chunk;
     blocks -= chunk;
@@ -1868,15 +1805,21 @@ extern "C" int native_ufs_store_read (uint64_t rel, uint32_t blocks, void *dst)
   return ok;
 }
 
-static int storeWrite (uint64_t rel, uint32_t blocks, const void *src, bool fua)
+extern "C" int native_ufs_store_read (uint64_t rel, uint32_t blocks, void *dst)
 {
+  return native_ufs_store_read_tracked (rel, blocks, dst, nullptr);
+}
+
+static int storeWrite (uint64_t rel, uint32_t blocks, const void *src, bool fua, bool *live = nullptr)
+{
+  if (live) *live = false;
   if (storeMode () != 2 || !gStoreRegionBlocks || !src || !blocks || rel >= gStoreRegionBlocks ||
       blocks > gStoreRegionBlocks - rel) return 0;
   const uint64_t t0 = mach_absolute_time ();
   int ok = 1;
   while (blocks) {
     uint32_t chunk = blocks > kXferMax / 4096 ? static_cast<uint32_t> (kXferMax / 4096) : blocks;
-    if (hostWrite4k (0, gStoreRegionFirst + rel, chunk, src, fua) != kIOReturnSuccess) { ok = 0; break; }
+    if (hostWrite4k (0, gStoreRegionFirst + rel, chunk, src, fua, live) != kIOReturnSuccess) { ok = 0; break; }
     src = static_cast<const uint8_t *> (src) + chunk * 4096ULL;
     rel += chunk;
     blocks -= chunk;
@@ -1889,6 +1832,11 @@ static int storeWrite (uint64_t rel, uint32_t blocks, const void *src, bool fua)
 extern "C" int native_ufs_store_write (uint64_t rel, uint32_t blocks, const void *src)
 {
   return storeWrite (rel, blocks, src, true);
+}
+
+extern "C" int native_ufs_store_write_tracked (uint64_t rel, uint32_t blocks, const void *src, bool *live)
+{
+  return storeWrite (rel, blocks, src, true, live);
 }
 
 // No forced unit access: the device may keep the blocks in its volatile write cache until native_ufs_store_sync. For a
@@ -2151,8 +2099,6 @@ extern "C" unsigned native_ufs_store_gpt_check (void)
 // One read-only window of the root image as a block device: 512-byte sectors on top of 4096-byte
 // UFS blocks, so the unchanged dmg disk images (GPT with 512-byte sectors) parse as they do on
 // the virtio path.
-static void watchdogPing (const char *where);
-
 class NativeUfsBlock : public IOBlockStorageDevice {
   OSDeclareDefaultStructors (NativeUfsBlock)
   uint64_t absolute = 0;      // byte offset of the window on LUN 0
@@ -2207,11 +2153,6 @@ public:
   bool signedVolumeUuid (char out[37]) const;
 #endif
   const char *windowLabel () const { return label; }
-  IOService *publishedMedia = nullptr;
-  bool publishMatch ();
-  IOService *publishMedia (const char *uuid);
-  IOService *publishedMediaNode () const { return publishedMedia; }
-  bool readContainerUuid (char out[37]);
   bool configure (const char *name, uint64_t absoluteOffset, uint64_t size);
   bool start (IOService *provider) override;
   void free () override;
@@ -2222,21 +2163,14 @@ public:
   char *getProductString () override { return product[0] ? product : label; }
   char *getRevisionString () override { return const_cast<char *> ("1.0"); }
   char *getAdditionalDeviceInfoString () override { return const_cast<char *> ("UFS LUN 0 userdata window, read-only"); }
-  IOReturn reportBlockSize (UInt64 *value) override { watchdogPing ("cb"); IOLog ("NativeUfs: %s reportBlockSize\n", label); *value = 512; return kIOReturnSuccess; }
-  IOReturn reportEjectability (bool *value) override { watchdogPing ("cb"); *value = false; return kIOReturnSuccess; }
-  IOReturn reportMaxValidBlock (UInt64 *value) override { watchdogPing ("cb"); IOLog ("NativeUfs: %s reportMaxValidBlock\n", label); *value = bytes / 512 - 1; return kIOReturnSuccess; }
+  IOReturn reportBlockSize (UInt64 *value) override { *value = 512; return kIOReturnSuccess; }
+  IOReturn reportEjectability (bool *value) override { *value = false; return kIOReturnSuccess; }
+  IOReturn reportMaxValidBlock (UInt64 *value) override { *value = bytes / 512 - 1; return kIOReturnSuccess; }
   IOReturn reportMediaState (bool *present, bool *changed) override {
-    watchdogPing ("cb");
     *present = online; if (changed) *changed = false; return kIOReturnSuccess;
   }
-  IOReturn reportRemovability (bool *value) override { watchdogPing ("cb"); IOLog ("NativeUfs: %s reportRemovability\n", label); *value = false; return kIOReturnSuccess; }
-  IOReturn reportWriteProtection (bool *value) override { watchdogPing ("cb"); IOLog ("NativeUfs: %s reportWriteProtection\n", label); *value = !writable; return kIOReturnSuccess; }
-  bool open (IOService *forClient, IOOptionBits options, void *arg) override {
-    watchdogPing ("cb");
-    bool ok = IOBlockStorageDevice::open (forClient, options, arg);
-    IOLog ("NativeUfs: %s open returned %d\n", label, ok);
-    return ok;
-  }
+  IOReturn reportRemovability (bool *value) override { *value = false; return kIOReturnSuccess; }
+  IOReturn reportWriteProtection (bool *value) override { *value = !writable; return kIOReturnSuccess; }
   IOReturn doSynchronizeCache () override {
     if (!online) return kIOReturnNotReady;
     return writable ? hostSyncCache () : kIOReturnSuccess;
@@ -2329,7 +2263,7 @@ bool NativeUfsBlock::configure (const char *name, uint64_t absoluteOffset, uint6
   // policy; without a matching policy the device is never published.
   return configureVerification ();
 #else
-#if defined(NATIVE_UFS_UNVERIFIED_ROOT) && NATIVE_UFS_UNVERIFIED_ROOT && !defined(NATIVE_UFS_READ_ONLY_ROOT)
+#if defined(NATIVE_UFS_UNVERIFIED_ROOT) && NATIVE_UFS_UNVERIFIED_ROOT
   // Development build: the windows are writable in place (the OS volume is the live root, as on the VM's virtio disk).
   writable = !(absolute % 4096) && !(bytes % 4096) && hostDevWritableOpen (absolute / 4096, bytes / 4096);
   IOLog ("NativeUfs: %s window %s\n", label, writable ? "writable (development build)" : "read-only");
@@ -2640,161 +2574,10 @@ bool NativeUfsBlock::start (IOService *provider)
     setProperty (kIOMaximumByteCountReadKey, gMaxIoBytes, 64);
     setProperty (kIOMaximumBlockCountReadKey, gMaxIoBytes / 512, 64);
   }
-  // UniXNU-piano (2026-11-24): no device-type=Generic, so the collection's IOBlockStorageDriver
-  // personality does not match this window. That match never completes under this boot (ufs159:
-  // busy 1 for 30 s, no child). publishMedia() attaches the IOMedia that APFS and the BSD client
-  // match instead; the window only needs to be a registered registry node for that.
-  setProperty ("Content", "Apple_APFS");
-  setProperty ("Content Hint", "EF57347C-0000-11AA-AA11-00306543ECAC");
-  // ufs177: ufs176 showed this window's first block is the APFS container superblock itself, not a
-  // GPT: IOBlockStorageDriver published a whole media with no content hint, the partition schemes
-  // probed it and never produced an APFS child. Keep IOBlockStorageDriver from matching and let
-  // publishMedia() present the window as an Apple_APFS media that AppleAPFSContainer matches.
-  IOLog ("NativeUfs: %s media content Apple_APFS hint EF57347C\n", label);
-  // ufs167: register only after start() has returned (publishMatch() spawns a thread that waits a
-  // moment). Registering inside start() let the match run while this service was still starting and
-  // left the arbitration lock held when the second window tried to register.
+  registerService ();
   return true;
 }
 
-static void matchThread (void *self, wait_result_t)
-{
-  NativeUfsBlock *device = static_cast<NativeUfsBlock *> (self);
-  IOLog ("NativeUfs: %s match thread alive\n", device->windowLabel ());
-  IOSleep (20);
-  IOLog ("NativeUfs: %s synchronous match entering\n", device->windowLabel ());
-  device->registerService (kIOServiceSynchronous);
-  IOLog ("NativeUfs: %s synchronous match returned\n", device->windowLabel ());
-  device->release ();
-}
-
-bool NativeUfsBlock::publishMatch ()
-{
-  thread_t thread = nullptr;
-  retain ();
-  IOLog ("NativeUfs: %s match thread start entering\n", windowLabel ());
-  kern_return_t kr = kernel_thread_start (matchThread, this, &thread);
-  IOLog ("NativeUfs: %s match thread start returned %d\n", windowLabel (), kr);
-  if (kr != KERN_SUCCESS) {
-    release ();
-    return false;
-  }
-  thread_deallocate (thread);
-  return true;
-}
-
-// UniXNU-piano (2026-11-24): publish the window's IOMedia directly. The collection's
-// IOBlockStorageDriver personality never finishes matching under this boot (ufs158/159: busy 1,
-// no child, no media), so create the media node here; APFS matches IOMedia by Content Hint and
-// reads through IOStorage to this device. The media carries the signed volume's UUID.
-IOService *NativeUfsBlock::publishMedia (const char *uuid)
-{
-  IOMedia *media = new IOMedia;
-  IOLog ("NativeUfs: %s media alloc %p\n", label, media);
-  if (!media) return nullptr;
-  if (!media->init (0, bytes, 512, true, false, "Apple_APFS", nullptr)) {
-    IOLog ("NativeUfs: %s media init failed\n", label);
-    media->release ();
-    return nullptr;
-  }
-  IOLog ("NativeUfs: %s media init ok bytes %llu\n", label, bytes);
-  if (uuid && uuid[0]) media->setProperty ("UUID", uuid);
-  media->setProperty ("Content Hint", "EF57347C-0000-11AA-AA11-00306543ECAC");
-  if (!media->attach (this)) {
-    IOLog ("NativeUfs: %s media attach failed\n", label);
-    media->release ();
-    return nullptr;
-  }
-  IOLog ("NativeUfs: %s media attach ok\n", label);
-  {
-    IORegistryEntry *walk = media;
-    for (unsigned depth = 0; walk && depth < 8; ++depth) {
-      IORegistryEntry *next = walk->getParentEntry (gIOServicePlane);
-      IOLog ("NativeUfs: media chain %u %s -> %s\n", depth, walk->getName (),
-             next ? next->getName () : "(none)");
-      walk = next;
-    }
-  }
-  IOLog ("NativeUfs: %s media register entering\n", label);
-  media->registerService ();
-  IOLog ("NativeUfs: %s media register returned\n", label);
-  // ufs181: ufs180 showed kernel threads created this early get no CPU at all (thread started, no
-  // entry log for 85 s), while ufs177 showed a synchronous match on the publisher thread drives APFS
-  // to open the media. Keep the node here; the publisher thread drives the match once both windows
-  // are published, so a block there cannot keep the second window from appearing.
-  publishedMedia = media;
-  media->retain ();
-  IOLog ("NativeUfs: %s media node published for %s\n", label, uuid && uuid[0] ? uuid : "(no uuid)");
-  return media;
-}
-
-// The APFS container superblock (nx_superblock) is the first block of the window: nx_magic at 0x20,
-// nx_uuid at 0x48. Read it once for the IOMedia identity; a window without it publishes without a UUID.
-bool NativeUfsBlock::readContainerUuid (char out[37])
-{
-  uint8_t block[4096];
-  if (absolute % 4096 || hostRead4k (0, absolute / 4096, 1, block) != kIOReturnSuccess) {
-    IOLog ("NativeUfs: %s container UUID read failed\n", label);
-    return false;
-  }
-  if (memcmp (block + 0x20, "NXSB", 4)) {
-    IOLog ("NativeUfs: %s container UUID no NXSB (magic %.4s)\n", label, block + 0x20);
-    return false;
-  }
-  const uint8_t *u = block + 0x48;
-  snprintf (out, 37, "%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
-            u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7],
-            u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]);
-  IOLog ("NativeUfs: %s container UUID %.36s\n", label, out);
-  return true;
-}
-
-// ufs175: the KC ticker cannot create its thread this early and a separate ping thread starves
-// the cooperative scheduler (ufs174 froze the whole boot for 240 s), so feed the Gunyah watchdog
-// from the storage path itself: every callback and every media read is a scheduling point where
-// the boot is provably alive.
-static void watchdogPing (const char *where)
-{
-  register uint64_t x0 __asm__ ("x0") = 0x86000007ULL;   // GH_WDT_PING
-  __asm__ volatile ("smc #0" : "+r" (x0) : : "x1", "x2", "x3", "memory");
-  static unsigned pings = 0;
-  if ((pings++ % 64) == 0) IOLog ("NativeUfs: wdt ping %u (%s) rc=%lld\n", pings, where, (long long)x0);
-}
-// ufs172: APFS opens the published media from a different thread; walk the service plane from
-// inside that read to see whether IOMedia exists and which UUIDs the registry carries.
-static void dumpServiceMedia (const char *label, unsigned readIndex)
-{
-  IORegistryIterator *it = IORegistryIterator::iterateOver (gIOServicePlane, kIORegistryIterateRecursively);
-  if (!it) {
-    IOLog ("NativeUfs: %s svc[%u] walk unavailable\n", label, readIndex);
-    return;
-  }
-  unsigned visited = 0, media = 0, uuidEntries = 0;
-  while (IORegistryEntry *e = it->getNextObject ()) {
-    visited++;
-    const bool isMedia = OSDynamicCast (IOMedia, e) != NULL;
-    OSString *uuid = OSDynamicCast (OSString, e->getProperty ("UUID"));
-    if (isMedia) media++;
-    if (uuid) uuidEntries++;
-    if (isMedia || uuid) {
-      OSString *content = OSDynamicCast (OSString, e->getProperty ("Content"));
-      OSNumber *whole = OSDynamicCast (OSNumber, e->getProperty ("Whole"));
-      OSNumber *blockSize = OSDynamicCast (OSNumber, e->getProperty ("Preferred Block Size"));
-      OSNumber *size = OSDynamicCast (OSNumber, e->getProperty ("Size"));
-      OSBoolean *formatted = OSDynamicCast (OSBoolean, e->getProperty ("Formatted"));
-      OSBoolean *leaf = OSDynamicCast (OSBoolean, e->getProperty ("Leaf"));
-      IOLog ("NativeUfs: %s svc[%u] %s uuid=%s content=%s whole=%u\n", label, readIndex,
-             e->getMetaClass ()->getClassName (), uuid ? uuid->getCStringNoCopy () : "-",
-             content ? content->getCStringNoCopy () : "-", whole ? (unsigned)whole->unsigned32BitValue () : 99u);
-      IOLog ("NativeUfs: %s svc[%u] block %u size %llu formatted %d leaf %d\n", label, readIndex,
-             blockSize ? (unsigned)blockSize->unsigned32BitValue () : 0,
-             size ? (unsigned long long)size->unsigned64BitValue () : 0ull,
-             formatted ? (int)formatted->getValue () : -1, leaf ? (int)leaf->getValue () : -1);
-    }
-  }
-  it->release ();
-  IOLog ("NativeUfs: %s svc[%u] visited=%u media=%u uuid=%u\n", label, readIndex, visited, media, uuidEntries);
-}
 IOReturn NativeUfsBlock::doAsyncReadWrite (IOMemoryDescriptor *buffer, UInt64 block, UInt64 count,
                                            IOStorageAttributes *, IOStorageCompletion *completion)
 {
@@ -2818,15 +2601,6 @@ IOReturn NativeUfsBlock::doAsyncReadWrite (IOMemoryDescriptor *buffer, UInt64 bl
   if (buffer->getDirection () != kIODirectionIn) {
     return kIOReturnNotWritable;
   }
-  {
-    watchdogPing ("read");
-    static unsigned debugReads = 0;
-    if (debugReads < 24) {
-      IOLog ("NativeUfs: %s read block %llu count %llu thread=%p\n", label, block, count, current_thread ());
-      if (debugReads == 1 || debugReads == 3 || debugReads == 6) dumpServiceMedia (label, debugReads);
-      debugReads++;
-    }
-  }
   // native-ufs-perf: the request's size and alignment on the 4 KiB device blocks, and its time from here to its completion.
   const uint64_t requestStart = hostPerfNow ();
   if (requestStart) {
@@ -2847,7 +2621,6 @@ void NativeUfsBlock::serveRead (IOMemoryDescriptor *buffer, UInt64 block, UInt64
 {
   struct Operations {
     IOMemoryDescriptor *buffer;
-    const char *name;
 #if defined(NATIVE_VERIFIED_BLOCK) && NATIVE_VERIFIED_BLOCK
     const vr_view *view;
 #endif
@@ -2882,14 +2655,6 @@ void NativeUfsBlock::serveRead (IOMemoryDescriptor *buffer, UInt64 block, UInt64
       return kIOReturnSuccess;
     }
     uint64_t copy (uint64_t offset, const void *data, uint64_t length) {
-      static unsigned copyLog = 0;
-      if (copyLog < 12 && (offset == 0 || offset == 512) && length >= 32) {
-        const uint8_t *bytes = static_cast<const uint8_t *> (data);
-        IOLog ("NativeUfs: %s media bytes %llu: %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
-               name, offset, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-               bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]);
-        copyLog++;
-      }
       const uint64_t copyStart = hostPerfNow ();
       uint64_t copied = buffer->writeBytes (offset, data, length);
       hostPerfSpan (kUfsPerfCopy, copyStart, length);
@@ -2899,7 +2664,7 @@ void NativeUfsBlock::serveRead (IOMemoryDescriptor *buffer, UInt64 block, UInt64
       }
       return copied;
     }
-  } operations = { buffer, label
+  } operations = { buffer
 #if defined(NATIVE_VERIFIED_BLOCK) && NATIVE_VERIFIED_BLOCK
     , &verified
 #endif
@@ -3068,51 +2833,33 @@ static char gPendingUuid[4][37];
 static UfsRootPlan gPublicationPlan;
 static NativeUfs *gPendingProvider;
 
-// A window's IOMedia is created by IOStorageFamily while the window's own matching runs. Asking
-// the matching machinery for IOMedia from the publisher thread parks behind that same pass
-// (ufs36: no return from IOService::getMatchingServices while the root stayed unpublished), so
-// walk the service-plane children through the registry instead. "seen" says how much of the
-// subtree was reachable: 0 means IOStorageFamily has not attached its driver to the window yet.
-static bool childWithUuid (IORegistryEntry *entry, const char *uuid, unsigned depth, unsigned *seen)
+static bool mediaWithUuidExists (const char *uuid, NativeUfsBlock *window)
 {
-  if (!entry || depth > 4) return false;
-  OSIterator *children = entry->getChildIterator (gIOServicePlane);
-  if (!children) return false;
+  OSDictionary *matching = IOService::serviceMatching ("IOMedia");
+  OSDictionary *properties = OSDictionary::withCapacity (1);
+  OSString *wanted = OSString::withCString (uuid);
   bool found = false;
-  for (unsigned steps = 0; steps < 16 && !found; ++steps) {
-    IORegistryEntry *child = OSDynamicCast (IORegistryEntry, children->getNextObject ());
-    if (!child) break;
-    ++*seen;
-    OSString *id = OSDynamicCast (OSString, child->getProperty ("UUID"));
-    if (id && id->getCStringNoCopy () && !strcmp (id->getCStringNoCopy (), uuid)) {
-      found = true;
-      break;
+  if (matching && properties && wanted && properties->setObject ("UUID", wanted) &&
+      matching->setObject ("IOPropertyMatch", properties)) {
+    OSIterator *iterator = IOService::getMatchingServices (matching);
+    if (iterator) {
+      for (unsigned matches = 0; matches < 64 && !found; ++matches) {
+        IORegistryEntry *media = OSDynamicCast (IORegistryEntry, iterator->getNextObject ());
+        if (!media) break;
+        IORegistryIterator *parents = IORegistryIterator::iterateOver (
+          media, gIOServicePlane, kIORegistryIterateRecursively | kIORegistryIterateParents);
+        if (parents) {
+          found = ufsMediaHasAncestor (*parents, window);
+          parents->release ();
+        }
+      }
+      iterator->release ();
     }
-    found = childWithUuid (child, uuid, depth + 1, seen);
   }
-  children->release ();
+  OSSafeReleaseNULL (wanted);
+  OSSafeReleaseNULL (properties);
+  OSSafeReleaseNULL (matching);
   return found;
-}
-
-static bool mediaWithUuidExists (const char *uuid, NativeUfsBlock *window, unsigned *seen)
-{
-  *seen = 0;
-  return window && childWithUuid (window, uuid, 0, seen);
-}
-
-// Diagnostic only: how many services of a class have finished matching right now.
-static unsigned countMatchedServices (const char *className)
-{
-  OSDictionary *matching = IOService::serviceMatching (className);
-  if (!matching) return 0;
-  unsigned count = 0;
-  OSIterator *services = IOService::getMatchingServices (matching);
-  if (services) {
-    while (services->getNextObject ()) ++count;
-    services->release ();
-  }
-  matching->release ();
-  return count;
 }
 
 // What sits below the window in the service plane, matched or not (getMatchingServices lists only services whose matching has
@@ -3120,8 +2867,7 @@ static unsigned countMatchedServices (const char *className)
 static void captureMissingMedia (const char *uuid, IOService *window)
 {
   int used = snprintf (gRootMediaText, sizeof (gRootMediaText), "Waiting for signed UUID %s\n", uuid);
-  if (!window) return;
-  OSIterator *children = window->getChildIterator (gIOServicePlane);
+  IORegistryIterator *children = window ? IORegistryIterator::iterateOver (window, gIOServicePlane, kIORegistryIterateRecursively) : nullptr;
   unsigned count = 0;
   while (children && used < int (sizeof (gRootMediaText)) - 160 && count++ < 8) {
     IOService *entry = OSDynamicCast (IOService, children->getNextObject ());
@@ -3158,21 +2904,9 @@ static void publishThread (void *, wait_result_t)
   if (OSDictionary *matching = IOService::serviceMatching ("IOResources")) {
     if (const OSSymbol *bsd = OSSymbol::withCString (kIOBSDKey)) { matching->setObject ("IOResourceMatched", bsd); bsd->release (); }
     rootStage ("waiting for IOBSD");
-    // UniXNU-piano (2026-11-23): IOKitBSDInit has already published the IOBSD resource in
-  // bsd_autoconf, long before kext load runs this code. Matching IOResources instead waits for
-  // every client of IOResources to finish starting, which never happens before mountroot (ufs36:
-  // "IOResources busy 5" until the timeout every run). Test the published resource property.
-  IOService *resources = IOService::getResourceService ();
-  bool bsd = false;
-  for (unsigned tick = 0; tick < 600 && !bsd; tick++) {
-    bsd = resources && resources->getProperty (kIOBSDKey);
-    if (!bsd) {
-      if (tick && tick % 50 == 0) IOLog ("NativeUfs: IOBSD still absent after %u s\n", tick / 10);
-      hostSpinMs (100);
-    }
-  }
-  IOLog ("NativeUfs: IOBSD resource %s; publishing\n", bsd ? "present" : "still absent after 60 s");
-  if (matching) matching->release ();
+    if (IOService *resources = IOService::waitForMatchingService (matching, 60ULL * kSecondScale)) resources->release ();
+    else IOLog ("NativeUfs: IOBSD not matched after 60 s; publishing anyway\n");
+    matching->release ();
   }
   struct Operations {
     bool start (unsigned index) {
@@ -3181,21 +2915,6 @@ static void publishThread (void *, wait_result_t)
       gRootDiagnostic.publicationPhase = static_cast<unsigned> (UfsRootPhase::Start);
       gRootDiagnostic.publicationWindow = index;
       if (!device->start (gPendingProvider)) return false;
-      IOLog ("NativeUfs: %s start returned\n", device->windowLabel ());
-      // ufs169: only the OS window is registered for now; SystemOS's match is what kept the
-      // arbitration lock and blocked this window in ufs166. Match the OS window on IOKit's own
-      // config queue after start() has returned.
-      // ufs178: the synchronous match made IOBlockStorageDriver attach to the window and blocked here
-      // for the whole boot (ufs175-177), so publishMedia() below never ran for OS even though the same
-      // call attached APFS to the SystemOS window. Register the media and let IOKit match it
-      // asynchronously; the wait() probe below watches for the container UUID it carries.
-      rootStage ("media publication");
-      gRootDiagnostic.publicationPhase = static_cast<unsigned> (UfsRootPhase::Media);
-      gRootDiagnostic.publicationWindow = index;
-      if (!device->publishMedia (gPendingUuid[index])) {
-        IOLog ("NativeUfs: %s media publication failed\n", device->windowLabel ());
-        return false;
-      }
       native_ufs_blocks_published = native_ufs_blocks_published + 1;
       IOLog ("NativeUfs: published %s\n", device->windowLabel ());
       return true;
@@ -3208,46 +2927,24 @@ static void publishThread (void *, wait_result_t)
       gRootDiagnostic.publicationWindow = index;
       bool ready = false;
 #if defined(NATIVE_UFS_UNVERIFIED_ROOT) && NATIVE_UFS_UNVERIFIED_ROOT && !(defined(NATIVE_VERIFIED_BLOCK) && NATIVE_VERIFIED_BLOCK)
-      (void) uuid;
-      {
-        // ufs40: the window stayed at busy 1, which is IOBlockStorageDriver holding its device open
-        // after start, so busy is not a readiness signal. The registry probe never returned either.
-        // IOFindBSDRoot already blocks on the IOMedia UUID match, so publishing is enough: give the
-        // driver a short settle window, then let the blocking root match decide.
-        const unsigned settleTicks = strcmp (device->windowLabel (), "OS") ? 4 : 300;
-        for (unsigned tick = 0; tick < settleTicks; ++tick) {
-          if (tick == 5 || tick == 15 || tick == 35 || tick == 79 || tick == 149 || tick == 299) {
-            captureMissingMedia ("(unverified)", device);
-            IOLog ("NativeUfs: %s child probe at %u ms (busy %u, unverified)\n%s",
-                   device->windowLabel (), tick * 100, device->getBusyState (), gRootMediaText);
-            IOLog ("NativeUfs: %s diagnostic state %x content %s matched drivers %u media %u\n",
-                   device->windowLabel (), device->getState (),
-                   device->getProperty ("Content") ? "set" : "absent",
-                   countMatchedServices ("IOBlockStorageDriver"), countMatchedServices ("IOMedia"));
-          }
-          IOSleep (100);
-        }
-        IOLog ("NativeUfs: %s published; not waiting for media (busy %u, unverified)\n", device->windowLabel (), device->getBusyState ());
+      if (!uuid[0]) {
+        unsigned tick = 0;
+        for (; tick < 300 && (tick < 5 || device->getBusyState ()); ++tick) IOSleep (100);
+        IOLog ("NativeUfs: %s matched after %u ms (busy %u, unverified)\n", device->windowLabel (), tick * 100, device->getBusyState ());
         return true;
       }
 #endif
       // Diagnostic mode affects reporting only, never the dependency gate.
       for (unsigned tick = 0; tick <= 300; ++tick) {
-        unsigned seen = 0;
-        ready = mediaWithUuidExists (uuid, device, &seen);
+        ready = mediaWithUuidExists (uuid, device);
         if (ready || tick == 300) break;
-        if (tick && (tick <= 10 || tick % 50 == 0)) {
-          captureMissingMedia (uuid, device);
-          IOLog ("NativeUfs: %s probe tick %u seen %u window busy %u\n%s", device->windowLabel (), tick, seen,
-                 device->getBusyState (), gRootMediaText);
-        }
         if (tick && tick % 50 == 0) {
           // Every 5 s: what the IOKit side has published so far, and whether the window's own matching is still busy.
           captureMissingMedia (uuid, device);
           IOLog ("NativeUfs: %s volume %s still missing after %u s, window busy %u\n%s", device->windowLabel (), uuid,
                  tick / 10, device->getBusyState (), gRootMediaText);
         }
-        hostSpinMs (100);
+        IOSleep (100);
       }
       IOLog ("NativeUfs: %s volume %s %s\n", device->windowLabel (), uuid, ready ? "ready" : "not ready");
       if (!ready) {
@@ -3259,24 +2956,6 @@ static void publishThread (void *, wait_result_t)
     void discard (unsigned index) { discardPendingWindow (index); }
   } operations;
   UfsRootPublicationResult result = ufsPublishRootWindows (operations, gPublicationPlan);
-  // UniXNU-piano (2026-11-24) diagnostic: the match threads run after both windows publish; watch
-  // whether IOMedia appears and whether a window keeps a busy count (a blocked synchronous match).
-  for (unsigned tick = 0; tick < 8; ++tick) {
-    IOSleep (1000);
-    IOLog ("NativeUfs: monitor %u media %u drivers %u busy %u/%u\n", tick,
-           countMatchedServices ("IOMedia"), countMatchedServices ("IOBlockStorageDriver"),
-           gPendingDevice[0] ? gPendingDevice[0]->getBusyState () : 0,
-           gPendingDevice[1] ? gPendingDevice[1]->getBusyState () : 0);
-  }
-  // ufs181: drive each published media's matching from this thread, after both windows exist, so a
-  // blocked match cannot keep the second window out of the registry (ufs177 lost the OS window that way).
-  for (unsigned i = 0; i < gPending; ++i) {
-    IOService *media = gPendingDevice[i] ? gPendingDevice[i]->publishedMediaNode () : nullptr;
-    if (!media) continue;
-    IOLog ("NativeUfs: %s media match entering\n", gPendingDevice[i]->windowLabel ());
-    media->startMatching (kIOServiceSynchronous);
-    IOLog ("NativeUfs: %s media match returned\n", gPendingDevice[i]->windowLabel ());
-  }
   if (result.phase != UfsRootPhase::Complete) {
     gRootDiagnostic.result = result.phase == UfsRootPhase::Start ? kIOReturnIOError : kIOReturnTimeout;
     const char *reason = result.phase == UfsRootPhase::Start ? "root window service start failed" :
@@ -3651,10 +3330,6 @@ bool NativeUfs::start (IOService *provider)
   if ((!probe && !rootMode) || !OSDynamicCast (IOPlatformExpertDevice, provider)) {
     return false;
   }
-  if (probe == 2) {
-    inspect ();
-    return false;
-  }
   if (!gScratch) {
     gScratch = static_cast<uint8_t *> (IOMallocAligned (kDataMax, 4096));
     if (!gScratch) {
@@ -3709,6 +3384,9 @@ bool NativeUfs::start (IOService *provider)
   unsigned diagnostic = 0;
   PE_parse_boot_argn ("native-ufs-diagnostics", &diagnostic, sizeof (diagnostic));
   gRootDiagnosticEnabled = diagnostic == 1;
+  if (probe == 2) {
+    inspect ();
+  }
   if (probe == 8) {
     inspectContextBanks ();
   }
@@ -3825,6 +3503,7 @@ bool NativeUfs::startRoot (IOService *provider)
     return false;
   }
   native_ufs_root_step = 2;
+  captureXblLog ();
   if (gPerf) perfLinkLine ();
   RootLayout *layout = static_cast<RootLayout *> (IOMalloc (sizeof (RootLayout)));
   if (!layout || !findRootLayout (layout, &why)) {
@@ -3895,16 +3574,7 @@ bool NativeUfs::startRoot (IOService *provider)
       return true;
 #elif defined(NATIVE_UFS_UNVERIFIED_ROOT) && NATIVE_UFS_UNVERIFIED_ROOT
       // UniXNU-piano development build: the windows are published unverified, as k27's NativeVirtioBlock disks are in the VM.
-      // No identity check; the APFS container UUID is read from the window's own superblock so the published
-      // IOMedia carries the UUID that IOFindBSDRoot and APFS look for. Owner-signed policies replace this before release.
-      for (unsigned i = 0; i < gPending; ++i) {
-        if (!gPendingDevice[i]->readContainerUuid (gPendingUuid[i])) {
-          IOLog ("NativeUfs: %s has no APFS container superblock at its first block\n", gPendingDevice[i]->windowLabel ());
-          gPendingUuid[i][0] = 0;
-        }
-        for (unsigned j = 0; j < i; ++j)
-          if (gPendingUuid[i][0] && !strcmp (gPendingUuid[i], gPendingUuid[j])) return false;
-      }
+      // No identity: wait() takes the window's own matching as its readiness. Owner-signed policies replace this before release.
       IOLog ("NativeUfs: UNVERIFIED development root: %u windows published without owner policies\n", gPending);
       return true;
 #else
@@ -3946,6 +3616,7 @@ bool NativeUfs::startRoot (IOService *provider)
 
 void NativeUfs::stop (IOService *provider)
 {
+  releaseXblLog ();
   if (fPowerJoined) {
     PMstop ();
     fPowerJoined = false;

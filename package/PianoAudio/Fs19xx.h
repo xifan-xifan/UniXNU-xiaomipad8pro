@@ -56,13 +56,17 @@ extern "C" {
 
 /* Gain: VOLCTRL bits 15:8, 0.375 dB per step, 255 = 0 dB. Third-party upstream xiaomipad-8pro-mainline a43f79c's UCM
  * and its linux-sm8750-piano kernel pin 1c21cb9895d69c1c5e83ceae68952fedf522644a use 231 (-9 dB), encoded 0xe7c0
- * for family 0x29. This is a policy limit, not a proven protection threshold: no VI speaker protection runs here.
- * Unattended diagnostic tests retain 160 (-35.6 dB). Never permit a request above the pinned reference's 231. */
+ * for family 0x29: the policy limit WITHOUT VI speaker protection (passthrough graph), and the only value preset writes may take.
+ * 2026-11-21: FS19XX_GAIN_CAP_PROTECTED 243 (-4.5 dB) is Android's FSM_Volume with the stock FourSemi FSADSP protection running
+ * (AudioSpkProt.h; on the tablet: spk-prot2, spk-duplex1). It is allowed only while that protection pair is the speaker's graph:
+ * levels 8-10 cap each start at 231 otherwise (AudioLive.c live_gain_cap), so a fallback to passthrough re-caps at 231. The core
+ * clamps every start and gain write at the hard limit 243. Unattended diagnostic tests retain 160 (-35.6 dB). */
 #define FS19XX_GAIN_CAP 231u
+#define FS19XX_GAIN_CAP_PROTECTED 243u
 #define FS19XX_GAIN_TEST 160u
-#define FS19XX_GAIN_HARD_LIMIT 231u
-#if FS19XX_GAIN_HARD_LIMIT > 231u || FS19XX_GAIN_CAP > FS19XX_GAIN_HARD_LIMIT
-#error "FS19XX gain above 231: no speaker protection runs on piano"
+#define FS19XX_GAIN_HARD_LIMIT 243u
+#if FS19XX_GAIN_HARD_LIMIT > 243u || FS19XX_GAIN_CAP > 231u || FS19XX_GAIN_CAP_PROTECTED > FS19XX_GAIN_HARD_LIMIT
+#error "FS19XX gain above 243, or above 231 without speaker protection"
 #endif
 unsigned fs19xx_gain_clamp(unsigned requested);
 /* The gain in tenths of a dB (192: -236). */

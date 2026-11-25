@@ -30,13 +30,6 @@ ESP_BLOCKS = 262144                              # 1 GiB
 ESP_FIRST = ROOTFS_LAST + 1 - ESP_BLOCKS         # 71527424 = bs=1M seek=279404
 ROOTFS_NEW_LAST = ESP_FIRST - 1                  # 71527423
 ESP_TYPE = 'C12A7328-F81F-11D2-BA4B-00A0C93EC93B'
-# The candidate GPT already on this tablet (docs/results-2026-11-21-candidate-gpt-tablet.md): a second layout whose root, Data
-# and ESP windows differ from the historical whole-disk one. The GPT hashes are the ones piano-309-root preflights.
-CANDIDATE_GPT_PRIMARY_SHA256 = '12710135635beee2a5de1dd910924a3d2d26e09a6f368c191b879fd6b41a499b'
-CANDIDATE_GPT_BACKUP_SHA256 = '9acf222558a6766c4f1fcd09509a41cfd5be10d53f34a2a0f84a8cfe0a18c2f5'
-CANDIDATE_ROOTFS_FIRST, CANDIDATE_ROOTFS_LAST = 102269696, 107512575
-CANDIDATE_DATA_FIRST, CANDIDATE_DATA_LAST = 107512576, 124289791
-CANDIDATE_ESP_FIRST, CANDIDATE_ESP_LAST = 124289792, 124551935
 ESP_NAME = 'esp'
 # NativeUfs's reserve at the end of linux_rootfs (log-reserve, default 1024 MiB; unused while log=1 is never set) and the Data store
 # just below it: first LBA = partition last + 1 - reserve - W (native_ufs_store_open).
@@ -45,14 +38,31 @@ RESERVE_BLOCKS = 1024 * 256
 STORE_SCRATCH_FIRST = 64711424
 # The boot triplet on LUN 4 (CRITICAL-BACKUP/boot-partitions.json; backups in partition_backup()'s sde/).
 BOOT_A_SHA256 = '389d4271743bb4c69664bdb31c34440589978c8add3af0ce9190c46045259a87'      # 13-boot_a (Ubuntu, key f5151930)
-# The stock 3.0.309 triplet the tablet has after restore (maintenance RAM read, 2026-11-21 and 2026-11-24). It replaced the Ubuntu
-# set when the tablet was restored to factory HyperOS; both are recognized so a session never mistakes a stock image for a change.
-STOCK_BOOT_A_SHA256 = '7c444a2d6aa930cd79e2d48c569f6c891fbaff054c63fc85c3a57fb61c660ac2'
-STOCK_VENDOR_BOOT_A_SHA256 = '7f766f1d728c39d779a3fb7cf0ac1310dac4306cd3b37a98a0143dd4fca5bd23'
-STOCK_INIT_BOOT_A_SHA256 = '56197797f2ec99870a4e42b7a24bbf88407e4409615aba61f401182f13ea5cdc'
 VENDOR_BOOT_A_SHA256 = '50f70e361b927945afa4adb5ddc9947e39a136cd2cd2e28a311a4c3d2163829a'  # 23-vendor_boot_a (Ubuntu)
 INIT_BOOT_A_SHA256 = 'bbebc3d156fa4bffbdf2fdf83940a71a1ec6d64dcddc60977ece057eb1147061'    # 28-init_boot_a (Ubuntu)
 BOOT_PARTITION_BYTES = 100663296
+# T-16 switcher (private/host-checks/20261123-switcher/DESIGN.md): stock Android's boot triplet (CRITICAL-BACKUP/android-set, THE
+# rollback set; boot = boot_b's backup) and the Magisk init_boot (CRITICAL-BACKUP/android-set-root). With the switcher's resting
+# state, vendor_boot_a/init_boot_a stay Android's and a switch writes boot_a only.
+ANDROID_BOOT_A_SHA256 = '17e890568cecb350a63429f3456ffe12fd15ac142178182e361a32054b282d75'         # android-set boot.img
+ANDROID_VENDOR_BOOT_SHA256 = '99ef425b51e64dfdebf45a6797e75acc3a57e97f562c66994f0d9621626c6f2d'    # android-set vendor_boot.img
+ANDROID_INIT_BOOT_SHA256 = 'ae0b5153ab4231a10148d460659b9e2609d5326f34fb0df20fb41f88029f6e7f'      # android-set init_boot.img (stock)
+ANDROID_INIT_BOOT_MAGISK_SHA256 = 'dce4a7520bf51e84506a4ff06a87afa6090747b0c69b9b22b40f4d9232f72573'  # android-set-root (Magisk v31.1)
+
+
+def slot_a_pairs():
+    """The known slot-A (vendor_boot_a, init_boot_a) pairs ABL loads with boot_a -> their name. A function, so a test that patches
+    VENDOR_BOOT_A_SHA256 / INIT_BOOT_A_SHA256 (the Ubuntu-era pair of macos-set-v5) sees its own values."""
+    return {(VENDOR_BOOT_A_SHA256, INIT_BOOT_A_SHA256): 'the Ubuntu-era pair (macos-set-v5)',
+            (ANDROID_VENDOR_BOOT_SHA256, ANDROID_INIT_BOOT_MAGISK_SHA256): 'Android\'s pair with the Magisk init_boot (macos-set-v5a)',
+            (ANDROID_VENDOR_BOOT_SHA256, ANDROID_INIT_BOOT_SHA256): 'Android\'s stock pair (android-set)'}
+
+
+def slot_a_pair_name(vendor_boot, init_boot):
+    """The name of a known slot-A pair, else None."""
+    return slot_a_pairs().get((vendor_boot, init_boot))
+
+
 BOOT_A_START_512, BOOT_A_SIZE_512 = 618800, 196608   # /sys/class/block/<boot_a>/{start,size}
 
 
@@ -297,24 +307,14 @@ def entry_uses_rootfs(entry):
     return None
 
 
-def data_store_lba(seed, extent):
-    """Compute the bound window in an inclusive 4 KiB LBA extent."""
-    first, last = extent
-    window = store_first(last, seed['store_blocks'])
-    if not 0 <= first <= window <= last < LUN0_BLOCKS:
-        raise SystemExit('Data store and reserved tail do not fit the supplied LUN 0 extent')
-    return window
-
-
-def check_store_size(seed, args=(), *, data_extent=None):
-    """Require a store binding derived from the selected linux_data extent, or the pinned default extent."""
+def check_store_size(seed, args=()):
+    """SystemExit when SEED (seed_info) would put its store window somewhere else than the installed store's. A store on linux_data
+    (ARGS: native-ufs-root-part=linux_data, the 27.3 line) is not the installed one: any size, but only bound to its window
+    (data-store-lba = k273_store_first(seed)), so it can never open another place."""
     part, lba = store_args_of(args)
-    if data_extent is not None and part != 'linux_data':
-        raise SystemExit('explicit Data extent requires the store on linux_data')
     if part == 'linux_data':
-        expected = k273_store_first(seed) if data_extent is None else data_store_lba(seed, data_extent)
-        if lba != expected:
-            raise SystemExit(f'a Data store on linux_data needs data-store-lba={expected} (its window for this '
+        if lba != k273_store_first(seed):
+            raise SystemExit(f'a Data store on linux_data needs data-store-lba={k273_store_first(seed)} (its window for this '
                              f'{seed["logical_bytes"]}-byte seed), not {lba}: the binding keeps it from opening any other place')
         return
     if part != 'linux_rootfs':

@@ -583,22 +583,28 @@ IOReturn NativeAdrenoGmuContext::bringUp(const NativeAdrenoGmuContextConfig &con
     return config.map(config.map_cookie,&vm_);
 }
 static uint8_t buffers[GpuBufferCount][0x1c000];
-/* pagani-gpu-va=16 as the real context answers on an SMMU without a 34-bit IAS or the 32 MiB of tables: the 4 GiB aperture. */
+/* pagani-gpu-va=16 as the real context answers on an SMMU without a 34-bit IAS or the 32 MiB of tables: the 4 GiB aperture.
+ * UniXNU-piano (GPU-SLOTS): the macOS default is pagani-gpu-va=64 (DeviceInfo 0x20000000 + 0xFE0000000, a 36-bit input). */
 static bool wideFallback;
+#ifdef ADRENO830_MACOS
+static constexpr uint32_t kDefaultVa=64;static constexpr uint64_t kDefaultVaSize=0xFE0000000ull;static constexpr uint32_t kDefaultInputBits=36;
+#else
+static constexpr uint32_t kDefaultVa=16;static constexpr uint64_t kDefaultVaSize=0x3E0000000ull;static constexpr uint32_t kDefaultInputBits=34;
+#endif
 IOReturn NativeAdrenoGpuContext::bringUp(const NativeAdrenoGpuContextConfig &config,void (*)(uint32_t),
                                          NativeAdrenoGmuContextReport *report)
 {
     CHECK(config.bank==0 && config.asid==1 && config.slot==0 && config.lpac_slot==3 && config.sid==0 && config.lpac_sid==1);
-    CHECK((config.aperture_gib==4 || config.aperture_gib==2 || config.aperture_gib==16) && config.pool_mib==512 &&
-          config.write_combined_pool);
+    CHECK((config.aperture_gib==4 || config.aperture_gib==2 || config.aperture_gib==16 || config.aperture_gib==64) &&
+          config.pool_mib==512 && config.write_combined_pool);
     if(ioScript.smmu)ioScript.smmu(smmuIoSeen,"context",config.bank);
     *report={};report->step=Ready;
     uint16_t step=0,reason=0;
     if(IOReturn r=hit("NativeAdrenoGpuContext::bringUp",&step,&reason)) {report->step=step;return r;}
     ready_=true;used_=true;output_bits_=36;pool_mib_=config.pool_mib;
-    aperture_=uint64_t(config.aperture_gib==16 && wideFallback?4:config.aperture_gib)<<30;
-    report->table_pages=aperture_>GpuApertureBytes?uint32_t(TablePages16G):aperture_<GpuApertureBytes?uint32_t(TablePages2G):
-        uint32_t(TablePages);
+    aperture_=uint64_t(config.aperture_gib>=16 && wideFallback?4:config.aperture_gib)<<30;
+    report->table_pages=aperture_>GpuApertureBytes16G?uint32_t(TablePages64G):aperture_>GpuApertureBytes?uint32_t(TablePages16G):
+        aperture_<GpuApertureBytes?uint32_t(TablePages2G):uint32_t(TablePages);
     return kIOReturnSuccess;
 }
 IOReturn NativeAdrenoGpuContext::buffers(NativeAdrenoGpuBuffer out[GpuBufferCount]) const
@@ -675,7 +681,7 @@ IOReturn A830Gmu::coldBoot(uint32_t *init_result)
     if(gmuFatalAfterBoot)__atomic_store_n(&fatal_,1u,__ATOMIC_RELEASE);   /* a top half or a poll took a fatal bit since */
     return kIOReturnSuccess;
 }
-IOReturn A830Gmu::forceOff() {hit("A830Gmu::forceOff");booted_=false;return kIOReturnSuccess;}
+IOReturn A830Gmu::forceOff(bool) {hit("A830Gmu::forceOff");booted_=false;return kIOReturnSuccess;}
 IOReturn A830Gmu::oobSet(uint32_t *ack_us,uint32_t)
 {
     IOReturn r;gmuStep("A830Gmu::oobSet",failure_,&r);
@@ -697,7 +703,10 @@ IOReturn A830Gmu::attachInterrupts(const A830GmuIrqOps &ops)
     return hit("A830Gmu::attachInterrupts");
 }
 IOReturn A830Gmu::reenableInterrupts() {return hit("A830Gmu::reenableInterrupts");}
-IOReturn A830Gmu::rsccSleep() {return hit("A830Gmu::rsccSleep");}
+bool A830Gmu::gxOffProven() {return true;}
+int A830GmuGxVoteStrict(void *,int) {return 0;}
+IOReturn A830Gmu::forceOffStrict(int (*)(void *,int),void *) {return hit("A830Gmu::forceOffStrict");}
+IOReturn A830Gmu::rsccSleep(bool) {return hit("A830Gmu::rsccSleep");}
 IOReturn A830Gmu::pollFatal() {return hit("A830Gmu::pollFatal");}
 void A830Gmu::gmuWork() {}
 void A830Hfi::setIo(const A830HfiIo &io) {CHECK(io.read && io.write && io.sleep && io.now && io.lock && io.unlock);io_=io;}
@@ -735,6 +744,7 @@ IOReturn A830Hfi::start(const A830VoteTables &tables,const A830HfiStartOptions &
 }
 IOReturn A830Hfi::sendStart() {status_[A830HfiM8Start]=0;return hit("A830Hfi::sendStart");}
 IOReturn A830Hfi::send(uint8_t,const uint32_t *,uint8_t,A830HfiAck *) {return hit("A830Hfi::send");}
+IOReturn A830Hfi::confirmThermalExit(bool) {return hit("A830Hfi::confirmThermalExit");}
 IOReturn A830Hfi::perfVote(uint8_t level,uint8_t bus) {level_=level;bus_=bus;return hit("A830Hfi::perfVote");}
 IOReturn A830Hfi::perfVote(uint8_t level,uint8_t bus,uint32_t) {level_=level;bus_=bus;return hit("A830Hfi::perfVote(ab)");}
 IOReturn A830Hfi::drainDebug() {return hit("A830Hfi::drainDebug");}
@@ -763,7 +773,7 @@ void NativeAdrenoRing::setWaiter(const NativeAdrenoRingWaiter *waiter)
     CHECK(waiter && waiter->wait && waiter->stamp==A830Fence::ringStamp);   /* the queue meter stamps every fenced submission */
     hit("NativeAdrenoRing::setWaiter");
 }
-IOReturn NativeAdrenoRing::recover(uint32_t *last) {hit("NativeAdrenoRing::recover");*last=seqno_;return kIOReturnSuccess;}
+IOReturn NativeAdrenoRing::recover(uint32_t *last,const uint32_t *) {hit("NativeAdrenoRing::recover");*last=seqno_;return kIOReturnSuccess;}
 IOReturn NativeAdrenoRing::submit(const uint32_t *,size_t,uint32_t *fence) {*fence=++seqno_;return kIOReturnSuccess;}
 A830HwInitConfig A830HwInitDefaults() {A830HwInitConfig c={};c.ubwc_mode=5;c.highest_bank_bit=16;c.min_access_length=32;return c;}
 static A830HwInitConfig lastHwInit;
@@ -873,6 +883,7 @@ IOReturn A830Irq::start(const A830IrqConfig &config)
     return hit("A830Irq::start");
 }
 IOReturn A830Irq::attachCxHost(uint32_t intid) {CHECK(intid==112);hit("A830Irq::attachCxHost");return kIOReturnSuccess;}
+IOReturn A830Irq::quiesceForRecovery() {return hit("A830Irq::quiesceForRecovery");}
 IOReturn A830Irq::quiesce(bool) {return hit("A830Irq::quiesce");}
 IOReturn A830Irq::restore() {return hit("A830Irq::restore");}
 IOReturn A830IrqGuard::resume() {return kIOReturnSuccess;}
@@ -969,15 +980,19 @@ extern "C" IOReturn native_adreno_publish(NativeAdrenoVm *vm,NativeAdrenoSubmit 
     const NativeAdrenoRingClock *clock,const NativeAdrenoTimer *timer,const NativeAdrenoAbiDeviceInfo *info,uint32_t input_bits,
     uint32_t output_bits)
 {
-    /* The input size follows the aperture the context built: 34 bits for the 16 GiB one, else 32. */
+    /* The input size follows the aperture the context built: 34 bits for the 16 GiB one, else 32 (UniXNU-piano: 36 for 64 GiB). */
     CHECK(vm && submit && ring && clock && clock->now_us && timer && info &&
-          input_bits==(info->va_start+info->va_size>0x100000000ull?34u:32u));
+          input_bits==(info->va_start+info->va_size>0x400000000ull?36u:info->va_start+info->va_size>0x100000000ull?34u:32u));
     publishedInfo=*info;publishedOutputBits=output_bits;publishedInputBits=input_bits;
     return hit("native_adreno_publish");
 }
 extern "C" void native_adreno_device_lost(uint32_t reason) {CHECK(reason==A830ReasonPublish);hit("native_adreno_device_lost");}
 extern "C" void native_adreno_recovery_begin(bool charge) {hit(charge?"native_adreno_recovery_begin(charge)":"native_adreno_recovery_begin");}
 extern "C" void native_adreno_recovery_end(bool recovered) {hit(recovered?"native_adreno_recovery_end(ok)":"native_adreno_recovery_end(lost)");}
+/* UniXNU-piano (2026-11-22): the replaying recovery's shell calls (A830RecoveryOps::plan/replay); this recovery double never replays. */
+extern "C" void native_adreno_recovery_begin_replay(void) {hit("native_adreno_recovery_begin_replay");}
+extern "C" uint32_t native_adreno_recovery_plan(bool,uint32_t *) {hit("native_adreno_recovery_plan");return 0;}
+extern "C" IOReturn native_adreno_recovery_replay(uint32_t *replayed) {*replayed=0;return hit("native_adreno_recovery_replay");}
 extern "C" void native_adreno_retire_completed(void) {hit("native_adreno_retire_completed");}
 /* The CB0 faults the publish shell got: far, completed, issued and sampled as passed. */
 static std::vector<A830SmmuFault> faultsNoted;
@@ -996,6 +1011,14 @@ extern "C" bool native_adreno_note_page_fault(uint64_t far,uint32_t completed,ui
     return true;
 }
 extern "C" uint32_t native_adreno_coherent_imports(void) {return 1;}
+#ifdef ADRENO830_MACOS
+/* UniXNU-piano (2026-11-21): the GPU bank's fault lines go to the event lines (boot_progress_gpu_event) whatever the diagnostic mode, each
+ * with its detail (native_adreno_note_fault_detail, the publish shell's). */
+static std::vector<std::string> eventLines;
+static std::vector<NativeAdrenoFaultDetail> detailsNoted;
+extern "C" void boot_progress_gpu_event(const char *text) {eventLines.push_back(text);}
+extern "C" void native_adreno_note_fault_detail(const NativeAdrenoFaultDetail *detail) {detailsNoted.push_back(*detail);}
+#endif
 IOReturn A830PowerState::init(const A830PowerConfig &config,const A830PowerIo &io,const A830PowerEnv &env,const A830PowerOps &ops)
 {
 #ifdef ADRENO830_MACOS
@@ -1050,6 +1073,9 @@ IOReturn A830Recovery::init(const A830RecoveryConfig &config,const A830PowerIo &
     recoveryOps=ops;
     return hit("A830Recovery::init");
 }
+void A830Recovery::closeQualification(uint8_t) {}
+void A830Recovery::requestQualificationLow(uint32_t,uint64_t,bool) {}
+int Sm8750TsensReadGpu(const Sm8750TsensIo *,Sm8750TsensSample *out) {*out={};return Sm8750TsensNoData;}
 static bool reportPends;   /* UniXNU-piano: a report leaves the recovery pending (A830Recovery::pending), as the real one does */
 void A830Recovery::report(uint8_t cause,uint64_t)
 {
@@ -1057,6 +1083,7 @@ void A830Recovery::report(uint8_t cause,uint64_t)
     if(reportPends)__atomic_store_n(&pendingCause_,cause,__ATOMIC_RELEASE);
 }
 IOReturn A830Recovery::recover(uint8_t cause,uint64_t) {recoveredCause=cause;return hit("A830Recovery::recover");}
+void A830Recovery::readIbs(uint8_t,A830IbState *out) const {if(out)*out={};hit("A830Recovery::readIbs");}
 IOReturn A830Dcvs::init(const A830DcvsConfig &config,const A830DcvsTable &table,const A830PowerIo &,const A830PowerEnv &,
                         const A830DcvsOps &ops,A830PowerState *power,A830Recovery *recovery,const Sm8750TsensIo *)
 {
@@ -1226,7 +1253,7 @@ int main()
           !called("A830SelfTest::run(cohtest)") && !lastEnv.cohtest && called("coherence-1")==1);
     CHECK(publishedInfo.chip_id==0x44050001 && publishedInfo.gmem_bytes==0xc00000 && publishedInfo.gmem_base==0x4000000 &&
           publishedInfo.uche_trap_base==0x1fffffffff000ull && publishedInfo.va_start==0x20000000 &&
-          publishedInfo.va_size==0x3e0000000ull && publishedInfo.highest_bank_bit==16 && publishedInfo.ubwc_swizzle==6 &&
+          publishedInfo.va_size==kDefaultVaSize && publishedInfo.highest_bank_bit==16 && publishedInfo.ubwc_swizzle==6 &&
           publishedInfo.macrotile_mode==1 && publishedInfo.ubwc_version==5 && publishedInfo.flags==NativeAdrenoDeviceClientIova &&
           publishedOutputBits==36);
     CHECK(lastDcvs.governor && lastDcvs.minMhz==160 && lastDcvs.maxMhz==734 && lastDcvs.fixedLevel==2 && lastDcvs.initialLevel==2 &&
@@ -1291,6 +1318,19 @@ int main()
             for(const std::string &line:logLines)lines+=line.rfind("gpu fault cb",0)==0;
             return lines;
         };
+#ifdef ADRENO830_MACOS
+        /* UniXNU-piano (2026-11-21): the GPU bank's first A830SmmuFaultLines faults of the boot are event lines without pagani-diag or
+         * the log (the two above among them), each with its detail (fences now; no power state in these doubles: no IBs read); the
+         * other banks' keep the diagnostic rule. */
+        const auto faultEvents=[] {
+            unsigned lines=0;
+            for(const std::string &line:eventLines)lines+=line.rfind("fault cb0 far 0x2000",0)==0;
+            return lines;
+        };
+        CHECK(faultEvents()==2 && detailsNoted.size()==2 && detailsNoted[0].far==0x20001000 && detailsNoted[0].index==1 &&
+              detailsNoted[1].far==0x20002000 && detailsNoted[1].index==2 && detailsNoted[1].lines==A830SmmuFaultLines &&
+              !detailsNoted[1].ibs && !called("A830Recovery::readIbs"));
+#endif
         logOn=1;adreno830_status_mode(2);logLines.clear();
         faultsToDrain={cb0};
         smmuConfigSeen.platform.fault_notify(smmuConfigSeen.platform.cookie);
@@ -1300,15 +1340,29 @@ int main()
         faultsToDrain={cb0,cb2,polled};
         smmuConfigSeen.platform.fault_notify(smmuConfigSeen.platform.cookie);
         hostEntered->function(hostEntered->argument);
+#ifdef ADRENO830_MACOS
+        CHECK(faultLines()==1 && faultEvents()==5 && detailsNoted.size()==5);
+#else
         CHECK(faultLines()==3);
+#endif
         faultsToDrain.assign(A830SmmuFaultLines,polled);
         smmuConfigSeen.platform.fault_notify(smmuConfigSeen.platform.cookie);
         hostEntered->function(hostEntered->argument);
+#ifdef ADRENO830_MACOS
+        CHECK(faultLines()==1 && faultEvents()==A830SmmuFaultLines && detailsNoted.size()==A830SmmuFaultLines &&
+              detailsNoted.back().index==A830SmmuFaultLines && faultsNoted.size()==1+2+A830SmmuFaultLines);
+#else
         CHECK(faultLines()==A830SmmuFaultLines+1);
+#endif
         faultsToDrain.assign(A830SmmuFaultLines,cb2);
         smmuConfigSeen.platform.fault_notify(smmuConfigSeen.platform.cookie);
         hostEntered->function(hostEntered->argument);
+#ifdef ADRENO830_MACOS
+        CHECK(faultLines()==A830SmmuFaultLines && faultEvents()==A830SmmuFaultLines);
+        eventLines.clear();detailsNoted.clear();
+#else
         CHECK(faultLines()==2*A830SmmuFaultLines);
+#endif
         adreno830_status_diag(false);adreno830_status_mode(0);logOn=0;logLines.clear();faultsNoted.clear();
     }
     /* A second start in the same boot is refused and changes nothing. */
@@ -1584,8 +1638,12 @@ int main()
     /* The default, pagani-gpu-va=16: the DeviceInfo and the publish shell's input size follow the aperture the GPU context built, 16 GiB
      * with a 34-bit input, or the 4 GiB it fell back to; pagani-gpu-va=4 asks for the 4 GiB one. */
     b=board13t();
-    CHECK(run(&b)==kIOReturnSuccess && publishedInfo.va_start==0x20000000 && publishedInfo.va_size==0x3E0000000ull &&
-          publishedInputBits==34);
+    CHECK(run(&b)==kIOReturnSuccess && publishedInfo.va_start==0x20000000 && publishedInfo.va_size==kDefaultVaSize &&
+          publishedInputBits==kDefaultInputBits);
+    b=board13t();b.knobs.va=16;   /* UniXNU-piano: pagani-gpu-va=16 asks for the 16 GiB one */
+    CHECK(run(&b)==kIOReturnSuccess && publishedInfo.va_size==0x3E0000000ull && publishedInputBits==34);
+    b=board13t();b.knobs.va=64;   /* and 64 for the 64 GiB one */
+    CHECK(run(&b)==kIOReturnSuccess && publishedInfo.va_size==0xFE0000000ull && publishedInputBits==36);
     b=board13t();wideFallback=true;
     CHECK(run(&b)==kIOReturnSuccess && publishedInfo.va_size==0xE0000000ull && publishedInputBits==32);
     wideFallback=false;
@@ -1709,7 +1767,7 @@ int main()
     Adreno830ParseKnobs(&b,getter,&none);
     CHECK(b.flags==(~0u&~((1u<<Adreno830KnobCount)-1u|Adreno830BoardFlagPool)) && b.knobs.stop==Adreno830StopNever &&
           b.knobs.status==1 && b.knobs.rails==1 && b.knobs.ddr_boot==11 && b.knobs.ddr_floor==11 && b.knobs.actlr==0x303 &&
-          b.knobs.dcvs==1 && b.knobs.dcvs_min_mhz==160 && b.knobs.dcvs_max_mhz==734 && b.knobs.perf==2 && b.knobs.va==16 &&
+          b.knobs.dcvs==1 && b.knobs.dcvs_min_mhz==160 && b.knobs.dcvs_max_mhz==734 && b.knobs.perf==2 && b.knobs.va==kDefaultVa &&
           b.knobs.async==0 && b.knobs.coherent==0 && b.knobs.qmp==0 && b.knobs.cohtest==0 && b.knobs.llcc==0 &&
           b.knobs.speedbin==0 && b.knobs.acd==0 && b.knobs.hfi==0 && b.knobs.diag==0 && b.pool_mib==512 &&
           b.knobs.profile==A830ProfileAnnibale && b.knobs.hwsched==0 && b.knobs.trace==1);
@@ -1847,9 +1905,20 @@ int main()
     hang.cxOn=true;
     recoveryOps.snapshot(recoveryOps.context,&hang);
     CHECK(called("A830Hfi::drainLate")==1 && adreno830_status.hfi_late==A830StatusLate(1,2,1,1));
+    /* UniXNU-piano (2026-11-22, gpu-recover2): a client's hang leaves the GMU healthy: no 3 s late drain (it was the whole of a 3 s
+     * recovery); a GMU watchdog bite is the GMU's own fault: drained. */
+    for(const uint8_t client:{uint8_t(A830FaultHang),uint8_t(A830FaultCpHwError),uint8_t(A830FaultWatchdog)}) {
+        hang.cause=client;
+        recoveryOps.snapshot(recoveryOps.context,&hang);
+    }
+    CHECK(called("A830Hfi::drainLate")==1);
+    hang.cause=A830FaultGmuWatchdog;
+    recoveryOps.snapshot(recoveryOps.context,&hang);
+    CHECK(called("A830Hfi::drainLate")==2);
+    hang.cause=A830FaultNone;
     CHECK(powerOps.gmuForceOff(powerOps.context)==kIOReturnSuccess);
     recoveryOps.snapshot(recoveryOps.context,&hang);   /* a GMU forced off sends nothing */
-    CHECK(called("A830Hfi::drainLate")==1);
+    CHECK(called("A830Hfi::drainLate")==2);
     wiringDrains+=3;
     lateFound={};
     /* The S5 page of an S5 stop: the annibale cold boot's TCM words, GENERAL_11 and RSC status; the design reads none. */

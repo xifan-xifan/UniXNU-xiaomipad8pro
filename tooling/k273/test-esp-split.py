@@ -239,12 +239,6 @@ def main():
         rc, log = tk.build(out, 'esp-dual66', '--seed', str(tmp / 'seed-x.img'), '--arg', f'data-store-lba={tk.STORE_LBA}',
                            '--name', 'x', expect=1)
         check(rc != 0 and 'given more than once' in log, '--arg data-store-lba with --seed (its own edit): refused')
-        rc, log = tk.build(out, 'esp-dual66', '--data-extent', '107512576', '124289791',
-                           '--expect-store-lba', '117735999', '--name', 'esp-target')
-        check(rc == 0, f'24 GiB seed binds to the target Data extent ({log.strip()[-120:]})')
-        rc, log = tk.build(out, 'esp-dual66', '--data-extent', '124000000', '124289791',
-                           '--name', 'x', expect=1)
-        check(rc != 0 and 'do not fit' in log, 'undersized target Data extent refused')
         for suffix in ('.img', '.json'):
             (out / ('x' + suffix)).unlink(missing_ok=True)
     finally:

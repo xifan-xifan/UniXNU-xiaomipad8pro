@@ -101,3 +101,31 @@ a new stop vote. SOA nonzero remains an alarm, including an all-ones byte.
 A confirmed alarm survives unreadable samples until that field reads clear;
 another missing field cannot hide it. `SafetyValid`, raw `Pack0/1ISC` and
 `Pack0/1SOA`, `DTPT` and `SafetyAlarmMask` distinguish these states.
+
+## The source list from the charger firmware (`piano-power-pdo-mca=1`, default 0)
+
+This tablet's PPM is UCSI 1.1 with `bmOptionalFeatures` 0 (`UCSIFeatures` 0 in the
+saved chg-buck4 and installed-v12 snapshots): it offers no PDO details, so the
+observer never sends GET_PDOS and a PD sink status has an RDO but no source
+list. Without a list no PD contract is ever valid: the strict policy holds a PD
+charger's input at the firmware's 100 mA and never asks for 9 V, whatever
+`piano-power-hv` says. With `piano-power-pdo-mca=1` the owner offers, after each
+charger-firmware cycle whose PD state (0x2100d) reads SNK_Ready, that cycle's
+decoded source list (0x21011 {min mV, max mV, max mA}). A PD sink status then
+gets a second, agreeing status read and the list is re-encoded as standard
+source PDO words in object order (fixed: 50 mV / 10 mA; PPS: 100 mV / 50 mA,
+rounded inward). The list must start with vSafe5V, keep fixed objects strictly
+ascending and before any APDO, and stay within 5 A / 21 V; anything else is
+rejected. With the option the codec also keeps a list whose object exceeds 5 A within its PD
+field (a 67 W 3.3-11 V 6.1 A APDO) and reads that object as 5 A; today one such object
+discards the whole list. RDO, PD opmode, sink and connection still come from UCSI alone, and
+the RDO must fit its object. A connection or opmode change drops the offer;
+two cycles without a ready list withdraw it. A PPM that does offer PDO details
+keeps its own list. All later gates (transition barrier, 15 s wait, VBUS
+8.0–9.6 V, HV ICL 1600 / FCC 1500, 80/75, CP off) are unchanged.
+`SourcePDOOrigin` (1 UCSI, 2 firmware), `FirmwarePDO1..7`, `FirmwarePDOOffer`,
+`FirmwarePDORejects` and `FirmwarePDOWithdrawals` in `PianoCharge`, the
+`ucsi: firmware source list offered` / `ucsi: PD contract from the ...` lines and
+the `PianoPdoFirmwareV1` marker identify it. Host replay:
+`tests/pdo_firmware_host.cpp` (part of `run-charge-host.sh`). Not run on the
+tablet yet.

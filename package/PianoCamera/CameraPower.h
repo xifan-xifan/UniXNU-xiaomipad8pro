@@ -272,13 +272,67 @@ class Session {
     if (!r_.failedStep) {
       r_.failedStep = -step;
       r_.failure = f;
+      ops.note("sensor failed step=%d reason=%s last=%08x", step, failureName(f), r_.lastValue);
     }
     return false;
   }
   bool stopHere(int step)
   {
+    checkpoint(step);
     if (opt.stopAt && step >= opt.stopAt) return !fail(step, Failure::stopped);
     return false;
+  }
+
+  // Completion evidence, only from registers whose clocks this step has made
+  // available. PMIC values are the actual railOn() readbacks, not vote requests.
+  void checkpoint(int step)
+  {
+    const unsigned sensor = rear_ ? 1 : 2;
+    const unsigned reset = kPins[rear_ ? kPinRearReset : kPinFrontReset].gpio;
+    const unsigned avdd = kPins[rear_ ? kPinRearAvdd : kPinFrontAvdd].gpio;
+    switch (step) {
+    case kStepGcc:
+    case kStepDown:
+      ops.note("checkpoint step=%d sensor=%u gcc-ahb=%08x xo=%08x mclk-ahb=%08x", step, sensor,
+               ops.rd(kGcc + kGccCameraAhb), ops.rd(kGcc + kGccCameraXo), ops.rd(kGcc + kGccMclkAhb));
+      break;
+    case kStepResurvey:
+    case kStepRefusals:
+      ops.note("checkpoint step=%d sensor=%u surveyed-camcc=%u titan=%08x mclkcc=%u", step, sensor,
+               found_.cc.read, found_.cc.gdsc[0].gdscr, found_.mclk.read);
+      break;
+    case kStepBus:
+      ops.note("checkpoint step=%d sensor=%u titan=%08x cci-version=%08x sda=%08x scl=%08x", step, sensor,
+               ((rear_ && opt.rearCci) || opt.camss) ? ops.rd(kCamCc + kGdscTitanTop) : 0, r_.cciVersion,
+               ops.rd(tlmmCfg(kPins[sdaPin()].gpio)), ops.rd(tlmmCfg(kPins[sclPin()].gpio)));
+      break;
+    case kStepPins:
+    case kStepAvdd:
+    case kStepReset:
+      ops.note("checkpoint step=%d sensor=%u reset-cfg=%08x io=%08x avdd-io=%08x", step, sensor,
+               ops.rd(tlmmCfg(reset)), ops.rd(tlmmIo(reset)), ops.rd(tlmmIo(avdd)));
+      break;
+    case kStepRailFirst:
+      ops.note("checkpoint step=%d sensor=%u rail0-mv=%u en=%02x status=%02x", step, sensor,
+               r_.rails[0].on.mv, r_.rails[0].on.en, r_.rails[0].on.status);
+      break;
+    case kStepRails: {
+      const unsigned a = rear_ ? 1 : 0, b = rear_ ? 2 : 1;
+      ops.note("checkpoint step=%d sensor=%u rail%u=%u/%02x/%02x rail%u=%u/%02x/%02x avdd-io=%08x", step, sensor,
+               a, r_.rails[a].on.mv, r_.rails[a].on.en, r_.rails[a].on.status,
+               b, r_.rails[b].on.mv, r_.rails[b].on.en, r_.rails[b].on.status, ops.rd(tlmmIo(avdd)));
+      break;
+    }
+    case kStepMclk: {
+      const unsigned n = rear_ ? 1 : 4;
+      ops.note("checkpoint step=%d sensor=%u mclk%u-cmd=%08x cfg=%08x cbcr=%08x", step, sensor, n,
+               ops.rd(kMclkCc + mclkRcg(n)), ops.rd(kMclkCc + mclkRcg(n) + kRcgCfg), ops.rd(kMclkCc + mclkBranch(n)));
+      break;
+    }
+    case kStepId:
+      ops.note("checkpoint step=%d sensor=%u id=%04x expected=%04x tries=%u", step, sensor, r_.id, f_->idValue, r_.tries);
+      break;
+    }
   }
 
   // --------------------------------------------------------------------------------------------------------- branches
@@ -675,6 +729,7 @@ class Session {
     survey(loader, pmic, so, s);   // in place (a Survey is 1.8 KiB)
     found_ = s;
     ops.surveyed(s);   // the controllers as step 201 made them readable (logged: c1 could not read them)
+    checkpoint(kStepResurvey);
     ops.step(kStepRefusals, "level 2's checks");
     BusChoice bus;
     bus.rearCci = opt.rearCci;
@@ -764,6 +819,7 @@ class Session {
       fail(kStepId, mismatch ? Failure::idMismatch : Failure::idRead);
       return;
     }
+    checkpoint(kStepId);
     if (opt.holdMs) ops.msleep(opt.holdMs);
   }
 
@@ -801,6 +857,7 @@ class Session {
     for (bool b : u_.rail) clean = clean && !b;
     for (bool b : u_.pin) clean = clean && !b;
     r_.cleanOff = clean && !u_.titan && !u_.mclkBranch && !u_.pll && !u_.cciUp && !u_.votes;
+    checkpoint(kStepDown);
   }
 
   SensorResult r_;

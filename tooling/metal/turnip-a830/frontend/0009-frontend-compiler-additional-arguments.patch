@@ -1,0 +1,29 @@
+SPDX-License-Identifier: MIT
+Copyright (c) 2026, Leo Zhang.
+
+Preserve a caller's additional Metal compiler arguments, including Core Image's runtime-header definitions.
+Context: UniXNU-turnip 527b8b7a31192df14b96d10a70c339845ed2cd12, native frontend after the earlier piano patches (0001-0008).
+The reverted 0006 of 2026-11-18 (3be98315, reverted at afe114a5), renumbered after 0008; it ships with 0010 (function reflection):
+with the arguments alone Core Image's CIKL libraries compile and its reflection of their functions then finds no answer.
+
+--- a/frontend.mm
++++ b/frontend.mm
+@@ -946,6 +946,18 @@
+   [arguments addObject:compileArgument([NSString stringWithFormat:@"-D%@=%@",name,value])];
+  }];
+  [arguments addObject:compileArgument([@"-fmodules-cache-path=" stringByAppendingString:[NSTemporaryDirectory() stringByAppendingPathComponent:@"m2v-msl"]])];
++ // The caller supplies already-tokenized compiler syntax, not one quoted argument.
++ // Core Image's runtime header needs its own macro definitions when it emits MSL.
++ SEL extraSelector=sel_registerName("additionalCompilerArguments");
++ if([options respondsToSelector:extraSelector]) {
++  id extra=((id (*)(id,SEL))objc_msgSend)(options,extraSelector);
++  if([extra isKindOfClass:[NSString class]] && [extra length]) {
++   [arguments addObject:extra];
++   static std::atomic_flag noted=ATOMIC_FLAG_INIT;
++   if(!noted.test_and_set(std::memory_order_relaxed))
++    os_log(OS_LOG_DEFAULT,"native-metal: compiler-extra-args-v1 forwarded");
++  }
++ }
+  return [arguments componentsJoinedByString:@" "];
+ }
+ static NSError *nbError(NSString *why) {

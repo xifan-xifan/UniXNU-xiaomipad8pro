@@ -112,6 +112,7 @@ enum StaReport : uint32_t {
   kStaRepCandidateEnd,     // a: the candidate's number, b: what ended it (the StaError, as a positive number)
   kStaRepFrameCheck,       // a: the frame's descriptor, b: the check's bits (StaFrameCheck)
   kStaRepScanPlan,         // a: the scan's number, b: its kind (1 directed 5 GHz, 2 directed 2.4 GHz, 3 passive) | channels << 8
+  kStaRepKickoutKept,      // a: the firmware's reason, b: how many in this association (options.kickoutEnds off)
 };
 
 enum StaDisconnect : uint32_t { kStaDiscNone = 0, kStaDiscDeauth, kStaDiscDisassoc, kStaDiscKickout, kStaDiscBeaconMiss };
@@ -184,6 +185,10 @@ struct StaOptions {
   uint32_t paceMs = 20;                // between the many small commands of 704 and 707
   int32_t minRssi5 = -82;              // a 5 GHz access point weaker than this loses to a stronger 2.4 GHz one
   uint32_t phy = 0;                    // boot 10r: the most wanted (WifiHtVht.h kPhyLegacy, kPhyHt, kPhyVht)
+  // 2026-11-20 (WIFI-DEAF-REJOIN.md): scanFirst: one scan of our own before the choice (a rejoin after an end that was not
+  // ours: a supplicant scans after such a disconnect); kickoutEnds: the firmware's kickout ends the association (the old
+  // behaviour; by default it is reported and the association kept, as ath12k's low-ack report is)
+  bool scanFirst = false, kickoutEnds = false;
 };
 
 struct StaDma {
@@ -242,6 +247,8 @@ struct Sta {
   uint32_t commands = 0, lastCommandStep = 0;
   // the steps' progress
   uint32_t paramsSent = 0, tidsSent = 0, rescansDone = 0, scanId = 0;
+  bool scanFirstDone = false;           // options.scanFirst's scan asked
+  uint32_t kickouts = 0, lastKickoutReason = 0;   // kickouts kept in this association
   bool routingSent = false, scanAsked = false, scanDone = false;
   bool peerCreated = false, peerMapped = false, vdevStartSent = false, vdevStarted = false, vdevUp = false, authorized = false;
   uint32_t peerId = 0, hwPeerId = 0;
@@ -843,11 +850,12 @@ inline uint32_t staAppleAssociateResult(const Sta &s, bool newRequest = false)
 {
   if (newRequest) return 0;
   if (s.stopAsked) return 2;
-  if (!s.assocAnswered) return 0;
-  if (s.assocStatus != kDot11StatusSuccess)
+  if (s.nextCandidate) return 0;
+  if (s.error && (s.step == kStaTeardown || staFinished(s)))
     return s.error == kStaErrTimeout || s.error == kStaErrNoAnswer ? 9u : 2u;
-  if (s.rsn && !s.authorized) return 0;
-  return s.disconnect || !s.vdevUp ? 2u : 1u;
+  if (!s.assocAnswered) return 0;
+  if (s.assocStatus != kDot11StatusSuccess || s.disconnect) return 2u;
+  return s.vdevUp && s.authorized ? 1u : 0u;
 }
 
 // An event of the firmware's message interface: true when it was the join's (the owner then gives it to nobody else).
@@ -956,6 +964,12 @@ inline bool staOnEvent(Sta &s, uint32_t id, const uint8_t *payload, uint32_t len
     PeerKickout k;
     if (!assocParseKickout(k, payload, length) || !s.choice.found || !sameMac(k.peer, s.bssid)) return false;
     if (!s.disconnect && (s.step == kStaAssociated || s.step == kStaAuthorize || s.step == kStaVdevUp)) {
+      if (!s.options.kickoutEnds) {   // reported, the association kept: a dead link ends by the beacon miss or a deauthentication
+        ++s.kickouts;
+        s.lastKickoutReason = k.reason;
+        say(s, kStaRepKickoutKept, k.reason, s.kickouts);
+        return true;
+      }
       s.disconnect = kStaDiscKickout;
       s.disconnectReason = k.reason;
       s.disconnectMs = s.associatedAt ? uint32_t(nowMs - s.associatedAt) : 0;
@@ -1023,6 +1037,19 @@ inline int staRun(Sta &s, uint64_t nowMs)
     uint32_t total = 0, radar = 0, hidden = 0;
     const uint32_t cap = s.options.maxCandidates && s.options.maxCandidates < kStaCandidatesMax ? s.options.maxCandidates
                                                                                                   : kStaCandidatesMax;
+    if (s.options.scanFirst && !s.scanFirstDone) {   // a rejoin after an end that was not ours: the list is refreshed first
+      s.scanFirstDone = true;
+      WmiScanRequest req;
+      const uint32_t kind = planScan(s, 0, req);
+      s.scanId = req.scanId;
+      s.scanAsked = true;
+      s.scanDone = false;
+      say(s, kStaRepScanPlan, 0, kind | req.channelCount << 8);
+      enter(s, kStaRescan, nowMs, s.options.scanWaitMs);
+      if (!post(s, [&](WmiWriter &w, uint8_t *b, uint32_t c) { return wmiBuildStartScan(w, b, c, req); }))
+        fail(s, kStaErrBuild, nowMs);
+      break;
+    }
     s.candCount = chooseAll(s, s.cand, cap, total, radar, hidden);
     s.hiddenSeen = hidden;
     s.candAt = 0;

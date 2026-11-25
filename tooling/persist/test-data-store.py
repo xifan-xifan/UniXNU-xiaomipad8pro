@@ -271,6 +271,11 @@ def main():
                          boot_guard=None)   # fast_boot None: each profile's own (daily 1: no -v, which its lines need with charging 2)
     daily = esp.PROFILES['daily']
     lines = esp.args_of(ns, daily, 1)
+    wifi_mode = 'piano-wifi-native-boot=1'
+    check(all(wifi_mode in lines[entry].split() for entry in ('macos', 'macos-diag')) and
+          wifi_mode not in lines['fastboot'].split() and
+          wifi_mode not in esp.args_of(ns, profile, 1)['macos'].split(),
+          'native Wi-Fi boot mode applies to the two daily macOS entries')
     check('piano-boot-guard=180' in lines['macos'].split() and 'piano-boot-guard=180' in lines['macos-diag'].split() and
           'piano-boot-guard' not in lines['fastboot'], 'daily: piano-boot-guard=180 on macos and macos-diag, not on fastboot')
     check(not any(x.startswith('piano-boot-guard') for x in esp.args_of(ns, profile, 1)['macos'].split()),

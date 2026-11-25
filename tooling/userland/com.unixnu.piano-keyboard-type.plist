@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- UniXNU-piano: the tablet's own keyboards (cover, touch screen, debug keyboard) known to loginwindow as ANSI, missing keys only
+     (tooling/userland/piano-keyboard-type.sh). Install as /Library/LaunchDaemons/com.unixnu.piano-keyboard-type.plist (root:wheel 644)
+     with the script at /usr/local/libexec/piano-keyboard-type (root:wheel 755): configs/userland.toml, docs/userland.md. One run per
+     boot (LaunchOnlyOnce); it returns at once when all four are known. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.unixnu.piano-keyboard-type</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>/usr/local/libexec/piano-keyboard-type</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>LaunchOnlyOnce</key><true/>
+</dict>
+</plist>

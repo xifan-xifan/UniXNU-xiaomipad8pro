@@ -17,8 +17,18 @@ struct PianoAudioLevelArgs {
   uint32_t lpassRead, presetAny, mic, silenceMs;
   uint32_t tone, toneMask, toneMs, gapMs, toneGain;
   uint32_t i2cSwap, i2cHalfUs, smmu;
+  int micRoute, micRouteDiag;         // signed route and opt-in pre-mix diagnostic
   uint32_t liveGain, liveCeilingDb, liveIdleMs, micGain;   // levels 8-10 (0: the level's default)
+  uint32_t spk;                       // piano-audio-spk: speaker protection from the first start (odd: 1 + SPK_VAR_* bits, AudioSpkProt.h); 0 passthrough
+  uint32_t ageOld;                    // piano-audio-age=0: duplex-age1's A/B control (the old unsigned sound-age test)
+  uint32_t duplexHold;                // piano-audio-duplex-hold: duplex-hold1's mask (AudioLive.h audio_live_hold_select: 0 off, 1, 3)
+  uint32_t miplay;                    // piano-audio-miplay: MIPLAY inside the protection plan (AudioSpkProt.h spk_miplay_valid; 0 off)
+  uint32_t tap;                       // piano-audio-tap: the microphone tap for "Mic (noise reduced)" at level 10 (AudioTap.h; default 1)
 };
+// PianoAudioTap.cpp: the microphone tap (AudioTap.h) on sh: its shared memory and the service "piano-mic-tap" whose user client the
+// "Mic (noise reduced)" plug-in opens (shared: AudioLive.h's AudioLiveShared); wake() runs the live thread at an open or close.
+// 0, or -1 (no memory; no tap this boot).
+extern "C" int piano_audio_tap_publish(void *shared, void (*wake)(void));
 // Runs until the levels are done (levels 4-7 bounded; levels 8-10 for the rest of the boot, until PianoPower's health stops
 // them); the summary for the log and ioreg. 0 when every level that ran passed.
 int piano_audio_levels(const PianoAudioLevelArgs *args, char *summary, size_t size);

@@ -41,7 +41,9 @@ static uint32_t tcrOf(unsigned cb) {return annibale()?0x00803519u:cb==0?0xB5A035
 /* CB0's TCR for an aperture: the design's T0SZ (and the guard's T1SZ) follow the input size, 34 bits for 16 GiB (T0SZ 30). */
 static uint32_t tcrOf0(uint32_t aperture_gib)
 {
-    return annibale() || aperture_gib!=16?tcrOf(0):(0xB5A03520u&~0x003F003Fu)|0x001E001Eu;
+    if(annibale())return tcrOf(0);
+    if(aperture_gib==64)return (0xB5A03520u&~0x003F003Fu)|0x001C001Cu;   /* UniXNU-piano: T0SZ = T1SZ = 28, the 36-bit input */
+    return aperture_gib!=16?tcrOf(0):(0xB5A03520u&~0x003F003Fu)|0x001E001Eu;
 }
 static uint32_t mair0() {return annibale()?0xF404FF44u:0xFF44u;}
 
@@ -288,8 +290,8 @@ static void takeOverCases(uint32_t aperture_gib)
     NativeAdrenoGpuContextConfig gpuConfig{programmer,0,1,smmu.gpuStream().slot,smmu.lpacStream().slot,0,1,0,aperture_gib,0,true};
     const unsigned wcBefore=wcPages;
     CHECK(gpu.bringUp(gpuConfig,nullptr,&gpuReport)==kIOReturnSuccess && gpu.ready());
-    CHECK(gpuReport.streams==2 && gpuReport.table_pages==(aperture_gib==16?8209u:aperture_gib==4?2053u:1027u));
-    CHECK(gpu.apertureBytes()==(uint64_t(aperture_gib)<<30) && gpu.inputBits()==(aperture_gib==16?34u:32u));
+    CHECK(gpuReport.streams==2 && gpuReport.table_pages==(aperture_gib==64?32833u:aperture_gib==16?8209u:aperture_gib==4?2053u:1027u));
+    CHECK(gpu.apertureBytes()==(uint64_t(aperture_gib)<<30) && gpu.inputBits()==(aperture_gib==64?36u:aperture_gib==16?34u:32u));
     CHECK(gpu.smmu().arena()->bytes==gpu.apertureBytes() && gpu.smmu().stateHandle()->tables.table_pages==gpuReport.table_pages);
     CHECK(wcPages-wcBefore==(0x1C000+0x7000+0x8000+3*0x1000)/4096);   /* every kernel buffer write-combined */
     CHECK(model.at(0x800)==0x80000000 && model.at(0xC00)==0x300 && model.at(0x800+12)==0x80000001 && model.at(0xC00+12)==0x300);
@@ -329,8 +331,9 @@ static void takeOverCases(uint32_t aperture_gib)
     CHECK((leafOf(arena,0x302000)&~0x0000fffffffff000ull)==0x0060000000000E03ull);
     CHECK(leafOf(arena,0x300000)==(buffers[GpuBufferMemptrs].physical|0x0060000000000E03ull));
     /* TCR 0x803519 walks the same root page with 512 slots: the ones past the aperture the IOVAs use (4 or 16 GiB) are all invalid. */
-    for(unsigned slot=aperture_gib==16?16u:4u;slot<512;++slot)CHECK(!arena->mapping[slot]);
-    if(aperture_gib==16)for(unsigned slot=0;slot<16;++slot)CHECK(arena->mapping[slot]&1);   /* every 1 GiB slot has its table */
+    const unsigned rootSlots=aperture_gib>=16?aperture_gib:4u;   /* UniXNU-piano: 64 for the 64 GiB aperture */
+    for(unsigned slot=rootSlots;slot<512;++slot)CHECK(!arena->mapping[slot]);
+    if(aperture_gib>=16)for(unsigned slot=0;slot<rootSlots;++slot)CHECK(arena->mapping[slot]&1);   /* every 1 GiB slot has its table */
     NativeAdrenoVm *vm=gpu.vm();
     CHECK(vm && NativeAdrenoGpuContextVm()==vm && vm->bank()==0);
     /* Client mappings: write-combined own BOs non-cacheable outer shareable (0x0060...E43). */
@@ -797,6 +800,35 @@ static void wideFallbackCases()
         CHECK(model.at(A830SmmuModel::cb(0)+0x30)==(c.input_bits==34?tcrOf0(16):tcrOf(0)) && model.aborts==0 && model.violations==0);
         CHECK(smmu.releaseAll()==kIOReturnSuccess);
     }
+#ifdef ADRENO830_MACOS
+    /* UniXNU-piano (GPU-SLOTS): pagani-gpu-va=64 builds the 64 GiB aperture (32833 pages, 36 bits) on SM8750's UBS 48; with a 32-bit
+     * UBS it is 4 GiB; when its 128 MiB of tables cannot be had (a contiguous request above 64 MiB refused) it is the 16 GiB aperture,
+     * and above 16 MiB refused the 4 GiB one. */
+    struct Case64 {uint32_t idr2;size_t limit;uint64_t aperture;uint32_t pages;unsigned input_bits;};
+    const Case64 table64[]={{0x5511,0,0x1000000000ull,32833,36},{0x1011,0,0x100000000ull,2053,32},
+                            {0x5511,size_t(64)<<20,0x400000000ull,8209,34},{0x5511,size_t(16)<<20,0x100000000ull,2053,32}};
+    for(const Case64 &c:table64) {
+        Adreno830Status status{};
+        A830SmmuHostPlatform host;
+        model.boot(78,0x2,!annibale());
+        model.at(0x28)=c.idr2;
+        A830Smmu smmu;
+        CHECK(smmu.init(recordedConfig(host,&status))==kIOReturnSuccess);
+        CHECK(smmu.survey(nullptr)==kIOReturnSuccess && smmu.releaseCacheLock()==kIOReturnSuccess);
+        CHECK(smmu.clearGlobalFault()==kIOReturnSuccess && smmu.resetBank(0)==kIOReturnSuccess);
+        const NativeAdrenoSmmuProgrammer *programmer=smmu.programmer();
+        NativeAdrenoGpuContext gpu;
+        NativeAdrenoGmuContextReport report;
+        NativeAdrenoGpuContextConfig config{programmer,0,1,smmu.gpuStream().slot,smmu.lpacStream().slot,0,1,0,64,0,true};
+        fixture.contiguous_limit=c.limit;
+        CHECK(gpu.bringUp(config,nullptr,&report)==kIOReturnSuccess && gpu.ready());
+        fixture.contiguous_limit=0;
+        CHECK(report.table_pages==c.pages && gpu.apertureBytes()==c.aperture && gpu.inputBits()==c.input_bits);
+        CHECK(model.at(A830SmmuModel::cb(0)+0x30)==(c.input_bits==36?tcrOf0(64):c.input_bits==34?tcrOf0(16):tcrOf(0)) &&
+              model.aborts==0 && model.violations==0);
+        CHECK(smmu.releaseAll()==kIOReturnSuccess);
+    }
+#endif
     ++cases;
 }
 
@@ -812,6 +844,9 @@ int main()
         takeOverCases(4);
         takeOverCases(2);
         takeOverCases(16);
+#ifdef ADRENO830_MACOS
+        takeOverCases(64);   /* UniXNU-piano (GPU-SLOTS): the 64 GiB aperture */
+#endif
         wideFallbackCases();
         vmSyncBudget();
         vmMapSyncCases();

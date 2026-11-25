@@ -2,7 +2,7 @@
 """Which disk is which, for the k273 image tools (never guessed from text output: a wrong disk here is the Mac's own disk).
 
   disk-of.py whole IMAGE      the /dev/diskN hdiutil attached IMAGE as (its whole disk), from `hdiutil info -plist`
-  disk-of.py volume /dev/diskN [UUID]  the sole APFS volume on that store, or the unique volume with UUID
+  disk-of.py volume /dev/diskN  the first APFS volume (diskMs1) of the container whose physical store is diskN
   disk-of.py uuid /dev/diskMsK  that volume's UUID
 
 Exits 1 with a message when there is no single answer.
@@ -32,21 +32,15 @@ def whole(image):
     return found[0]
 
 
-def volume(disk, expected_uuid=None):
+def volume(disk):
     name = disk.removeprefix('/dev/')
-    if not re.fullmatch(r'disk[0-9]+', name):
-        sys.exit(f'{disk}: expected a whole disk')
-    found = []
     for container in run('diskutil', 'apfs', 'list', '-plist').get('Containers', []):
         stores = [s.get('DeviceIdentifier') for s in container.get('PhysicalStores', [])]
         if stores == [name] or stores == [name + 's1']:
-            for entry in container.get('Volumes', []):
-                device = '/dev/' + entry['DeviceIdentifier']
-                if expected_uuid is None or uuid(device).casefold() == expected_uuid.casefold():
-                    found.append(device)
-    if len(found) != 1:
-        sys.exit(f'{disk}: expected one matching APFS volume, found {len(found)} ({found})')
-    return found[0]
+            vols = [v['DeviceIdentifier'] for v in container.get('Volumes', [])]
+            if vols:
+                return '/dev/' + vols[0]
+    sys.exit(f'{disk}: no APFS container on it')
 
 
 def uuid(device):
@@ -54,9 +48,6 @@ def uuid(device):
 
 
 def main():
-    if len(sys.argv) == 4 and sys.argv[1] == 'volume':
-        print(volume(*sys.argv[2:]))
-        return
     if len(sys.argv) != 3 or sys.argv[1] not in ('whole', 'volume', 'uuid'):
         sys.exit(__doc__)
     print({'whole': whole, 'volume': volume, 'uuid': uuid}[sys.argv[1]](sys.argv[2]))

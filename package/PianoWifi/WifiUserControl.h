@@ -7,6 +7,34 @@
 #include <stdint.h>
 
 namespace pianowifi {
+// Serialized with the profile store. Native control is sticky across radio
+// restarts, while every accepted SET20 grants exactly one station attempt.
+struct WifiJoinRequest {
+  static constexpr uint64_t kTimeoutMs = 9500; // before IO80211's ~10 s poll ends
+  bool nativeOwner = false;
+  uint32_t generation = 0;
+  uint64_t deadline = 0;
+  bool consumed = false;
+  uint32_t terminal = 2;
+
+  void accept(uint32_t gen, uint64_t now) {
+    nativeOwner = true;
+    generation = gen;
+    deadline = now + kTimeoutMs;
+    consumed = false;
+    terminal = 0;
+  }
+  void cancel() { nativeOwner = true; terminal = 2; }
+  uint32_t result(uint64_t now) const { return !terminal && now >= deadline ? 9u : terminal; }
+  bool canStart(uint64_t now) const { return !nativeOwner || (!consumed && !result(now)); }
+  void consume() { if (nativeOwner) consumed = true; }
+  bool finish(uint32_t gen, uint32_t status, uint64_t now) {
+    if (!gen || gen != generation || terminal) return false;
+    terminal = now >= deadline ? 9u : status;
+    return terminal != 0;
+  }
+};
+
 struct WifiUserControl;
 // SET19 and SET20 carry no user-origin bit. Keep boot safety until a root-
 // controlled arm explicitly enables physical OFF. Neither startup ON nor
@@ -31,11 +59,17 @@ struct WifiUserControl {
   bool pending(uint32_t w) const { return serial(w) != __atomic_load_n(&applied, __ATOMIC_ACQUIRE); }
   bool allowed(uint32_t w) const { return (w & (kPower | kJoin | kCycle)) == (kPower | kJoin) && !pending(w); }
   bool radioStop() const { const uint32_t w = read(); return !power(w) || (w & kCycle); }
+  bool radioOffConfirmed(uint32_t request) const {
+    const uint32_t current = read();
+    return serial(current) == serial(request) && !(current & kCycle) && !pending(request);
+  }
 
   uint32_t setPower(bool on) {
     uint32_t old = read(), next;
     do {
-      if (power(old) == on) return old;
+      // ON can reopen the station gate after a sleep-preparation SET22.
+      // Native callers still need a fresh association request.
+      if (power(old) == on && (!on || (old & kJoin))) return old;
       next = on ? (old | kPower | kJoin) : ((old + kSerial) & ~(kPower | kJoin)) | kCycle;
     } while (!__atomic_compare_exchange_n(&word, &old, next, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
     return next;

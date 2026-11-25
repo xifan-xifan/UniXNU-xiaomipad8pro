@@ -3,11 +3,10 @@
 hardware from dts/piano.dts (+ UniXNU-sm8750-common's sm8750.dtsi), identity from configs/k27-adt.toml instead of the
 macos-27.3 profile, the rest of board.toml as it is.
 
-  make-piano-adt.py OUTPUT.adt --unique-chip-id HEX [--data] [--trust] [--addon] [--root-policies] [--dtb-out FILE] [--psci-method smc|hvc] [--no-gop-display]
+  make-piano-adt.py OUTPUT.adt --unique-chip-id HEX [--data] [--trust] [--addon] [--dtb-out FILE] [--psci-method smc|hvc] [--no-gop-display]
                     [--bt-address-file FILE | --no-bt-address]
 
 --data / --trust: the payload carries a Data seed / trust cache (their /chosen/memory-map slots).
---root-policies: the payload carries the signed policy bundle as <kernel>.vroot.
 --addon: the payload carries Payloads/kernel.macho.gpuaddon (the /chosen/memory-map GpuAddon slot DarwinBoot fills): a RAM test image
   with the sensor pack (PIANO_SENSOR_PACK, docs/drivers/sensors.md section 5b). DarwinBoot refuses a slot without the file and a file
   without the slot, so an ADT with it is never the installed system's (build-esp.py refuses it).
@@ -75,7 +74,6 @@ def main():
     p.add_argument('--unique-chip-id', required=True)
     p.add_argument('--data', action='store_true')
     p.add_argument('--trust', action='store_true')
-    p.add_argument('--root-policies', action='store_true', help='reserve the RootPolicies slot for a .vroot sidecar')
     p.add_argument('--addon', action='store_true', help='the GpuAddon slot (a RAM test image carrying the sensor pack)')
     p.add_argument('--dtb-out', type=Path)
     p.add_argument('--psci-method', choices=('smc', 'hvc'))
@@ -127,7 +125,7 @@ def main():
                                               ('transport-encoding', struct.pack('<I', 1)),
                                               ('transport-speed', struct.pack('<I', 3200000))]))
     with arm_io_children(extra):
-        tree = generate(dtb, config, unique_chip_id=a.unique_chip_id, data=a.data, trust=a.trust, addon=a.addon, root_policies=a.root_policies)
+        tree = generate(dtb, config, unique_chip_id=a.unique_chip_id, data=a.data, trust=a.trust, addon=a.addon)
     a.output.parent.mkdir(parents=True, exist_ok=True)
     a.output.write_bytes(tree)
     print(f'{a.output}: {len(tree)} bytes (hardware {dtb}, identity {identity.name}){", with /arm-io/gop-display" if a.gop_display else ""}'

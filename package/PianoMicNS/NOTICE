@@ -1,0 +1,7 @@
+PianoMicNS includes third-party code:
+
+- RNNoise v0.1.1 (https://github.com/xiph/rnnoise, commit 6cbfd53eb348a8d394e0757b4025c6ded34eb2b6), BSD-3-Clause:
+  Copyright (c) 2017, Mozilla; Copyright (c) 2007-2017, Jean-Marc Valin; Copyright (c) 2005-2017, Xiph.Org Foundation;
+  Copyright (c) 2003-2004, Mark Borgerding. Licence: third_party/rnnoise/COPYING.
+- UniXNU-sheng hal/ShengAudioPlugIn.c (commit 00ba90984e831e4c6ce30ec3d8a56e6434e9f1af), BSD-2-Clause-Patent, Copyright (c) 2026,
+  UniXNU contributors: the AudioServerPlugIn skeleton of PianoMicNS.c (UPSTREAM).

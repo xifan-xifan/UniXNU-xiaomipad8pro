@@ -1,90 +1,173 @@
 #!/bin/bash
 # SPDX-License-Identifier: BSD-2-Clause-Patent
-# Log the owner in on a desktop image (desk, desk-dev: docs/attended-desktop.md) from this Mac, over PianoDwc3's keyboard
-# (piano-usb=2 piano-usb-hid=1, tooling/native/piano-input.py), with the password he left in the ignored private/login.secret. The
-# password is handed to piano-input.py on stdin (`type --stdin`): never echoed, never in argv or ps, never written anywhere; this
-# script prints only what it waited for and when.
+# Log in to the debug account over PianoDwc3's simulated keyboard. The
+# password goes only to piano-input.py on stdin.
 #
-#   desk-login.sh [--console FILE] [--timeout SECS] [--secret FILE] [--now]
+#   desk-login.sh [--console FILE] [--timeout SECS] [--secret FILE]
+#                 [--webcam-dir DIR] [--uid UID] [--now]
 #
-# It waits (up to --timeout, default 600 s) in the running USB console capture (FILE, default the newest
-# logs/usb-console/*-port0.txt written to in the last 2 minutes) for the login window: SecurityAgent (the login window's UI) opening
-# the accelerator ("PianoA830: SecurityAgent opens the accelerator"), then NativeGopDisplay's next frame line with a lit frame, then
-# 10 s. A "Finder opens the accelerator" first means someone is logged in already: nothing is typed. Then the password and Return
-# (the login window has the account selected and its password field focused, as on the owner's 2026-11-12 17:02 login), and up to
-# 180 s for the Finder to open the accelerator: the desktop (in that login's capture the Finder opened it, the Dock did not).
-# --now types at once (the login window seen on the webcam). DESK_LOGIN_INPUT replaces the piano-input.py command for a dry run.
+# Shift wakes the display. Each submission requires its own fresh, lit C920
+# frame, a short settle, and a cleared password field. A new Finder process
+# owned by the target UID and matching /dev/console ownership prove login.
+# --now skips waiting for the SecurityAgent console line.
+# DESK_LOGIN_INPUT and DESK_LOGIN_PROBE replace transports for offline tests.
 set -euo pipefail
-D=$(cd "$(dirname "$0")/../.." && pwd); cd "$D"
-CONSOLE= TIMEOUT=600 SECRET=private/login.secret NOW=0
+D=$(cd "$(dirname "$0")/../.." && pwd -P); cd "$D"
+MAIN=$(git rev-parse --git-common-dir); MAIN=$(cd "$MAIN/.." && pwd -P)
+CONSOLE= TIMEOUT=600 SECRET=$MAIN/private/login.secret NOW=0 LOGIN_UID=${DESK_LOGIN_UID:-501} WEBCAM_DIR=
 while [ $# -gt 0 ]; do
   case $1 in
     --console) CONSOLE=$2; shift ;;
     --timeout) TIMEOUT=$2; shift ;;
     --secret) SECRET=$2; shift ;;
+    --webcam-dir) WEBCAM_DIR=$2; shift ;;
+    --uid) LOGIN_UID=$2; shift ;;
     --now) NOW=1 ;;
-    *) echo "desk-login: unknown argument $1" >&2; exit 2 ;;
+    *) echo 'desk-login: unknown argument' >&2; exit 2 ;;
   esac
   shift
 done
-[ -s "$SECRET" ] || { echo "desk-login: $SECRET is missing or empty" >&2; exit 2; }
-case $(cd "$(dirname "$SECRET")" && pwd -P)/ in "$(pwd -P)/private/"*|"$(pwd -P)/out/"*) ;; *)
-  echo "desk-login: $SECRET is not under this repository's private/ or out/ (both ignored)" >&2; exit 2 ;; esac
-read -r -a INPUT <<< "${DESK_LOGIN_INPUT:-python3 tooling/native/piano-input.py}"   # (a stand-in for a dry run)
+case $LOGIN_UID in ''|*[!0-9]*|0*) echo 'desk-login: a positive target UID is required' >&2; exit 2;; esac
+case $TIMEOUT in ''|*[!0-9]*|0*) echo 'desk-login: a positive timeout is required' >&2; exit 2;; esac
+[ -s "$SECRET" ] || { echo 'desk-login: secret is missing or empty' >&2; exit 2; }
+secret_dir=$(cd "$(dirname "$SECRET")" && pwd -P)
+case $secret_dir/ in "$D/private/"*|"$D/out/"*|"$MAIN/private/"*) ;; *)
+  echo 'desk-login: secret is not under this repository’s private/ or out/' >&2; exit 2 ;; esac
+SECRET=$secret_dir/${SECRET##*/}
+read -r -a INPUT <<< "${DESK_LOGIN_INPUT:-python3 tooling/native/piano-input.py}"
+for tool in imagesnap ffmpeg; do
+  command -v "$tool" >/dev/null || { echo "desk-login: $tool is required" >&2; exit 2; }
+done
+umask 077
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/desk-login.XXXXXXXX")
+trap 'rm -rf -- "$scratch"' EXIT
+WEBCAM_DIR=${WEBCAM_DIR:-$scratch}
+mkdir -p -- "$WEBCAM_DIR"
+
 start=$(date +%s)
 left() { echo $(( TIMEOUT - ($(date +%s) - start) )); }
 since() { echo $(( $(date +%s) - start )); }
-after() {   # after LINE PATTERN: does a line after line LINE match PATTERN? (grep -c reads to the end: no SIGPIPE for pipefail)
-  tail -n +"$(( $1 + 1 ))" "$CONSOLE" | grep -a -c -E "$2" > /dev/null
-}
-line_of() {   # line_of PATTERN: the number of the last line matching it (0: none)
-  grep -a -n -E "$1" "$CONSOLE" | tail -n 1 | cut -d: -f1 || true
+
+session_state() {
+  local state
+  if [ -n "${DESK_LOGIN_PROBE:-}" ]; then
+    local probe
+    read -r -a probe <<< "$DESK_LOGIN_PROBE"
+    state=$("${probe[@]}" "$LOGIN_UID" </dev/null) || return 1
+  else
+    state=$(/bin/bash /tmp/tmo.sh 12 /bin/bash /tmp/tssh       "/usr/bin/stat -f %u /dev/console && { /usr/bin/pgrep -u $LOGIN_UID -x Finder || [ \$? -eq 1 ]; }"       </dev/null 2>/dev/null) || return 1
+  fi
+  state=${state//$'\n'/ }
+  [[ $state =~ ^[0-9]+(\ [0-9]+)*$ ]] || return 1
+  read -r console_uid finder_pids <<< "$state"
 }
 
-if [ "$NOW" = 0 ] || [ -n "$CONSOLE" ]; then
+prove_desktop() {
+  local pid
+  [ "$console_uid" = "$LOGIN_UID" ] || return 1
+  for pid in $finder_pids; do
+    case " $baseline_finders " in *" $pid "*) continue ;; esac
+    echo "desk-login: the desktop: the Finder opened (new PID and console user confirmed) $(( $(since) - typed ))s after password"
+    return 0
+  done
+  return 1
+}
+
+fresh_panel() {
+  local photo=$1 proof age
+  rm -f -- "$photo" || return 1
+  if [ -n "${DESK_LOGIN_RECORDING_FRAME:-}" ]; then
+    # A recorder owns the C920 (a second camera client reconfigures it and corrupts the recording): take a frame the recorder
+    # wrote after this request, complete (JPEG SOI..EOI), copied atomically.
+    local req n=0 tmp="$photo.part"
+    req=$(date +%s)
+    while [ "$n" -lt 30 ]; do
+      if [ -s "$DESK_LOGIN_RECORDING_FRAME" ] && [ "$(stat -f %m "$DESK_LOGIN_RECORDING_FRAME")" -gt "$req" ] &&
+         cp "$DESK_LOGIN_RECORDING_FRAME" "$tmp" 2>/dev/null &&
+         [ "$(head -c 2 "$tmp" | xxd -p)" = ffd8 ] && [ "$(tail -c 2 "$tmp" | xxd -p)" = ffd9 ]; then
+        mv -f "$tmp" "$photo"; break
+      fi
+      n=$((n + 1)); sleep 0.1
+    done
+    rm -f -- "$tmp"; [ -s "$photo" ] || return 1
+  else
+    /bin/bash /tmp/tmo.sh 8 imagesnap -q -w 1.5 -d 'HD Pro Webcam C920' "$photo" >/dev/null 2>&1 || return 1
+  fi
+  [ -s "$photo" ] && [ "$photo" -nt "$scratch/wake" ] || return 1
+  proof=$(/bin/bash tooling/native/panel-lit.sh --grade "$photo") || return 1
+  age=$(( $(date +%s) - $(stat -f %m "$photo") ))
+  [ "$age" -ge 0 ] && [ "$age" -lt 4 ] || return 1
+  printf '%s\n' "$proof"
+}
+
+if [ "$NOW" = 0 ]; then
   if [ -z "$CONSOLE" ]; then
     while [ "$(left)" -gt 0 ]; do
-      CONSOLE=$(ls -t logs/usb-console/*-port0.txt 2> /dev/null | head -n 1 || true)
+      CONSOLE=$(ls -t logs/usb-console/*-port0.txt 2>/dev/null | head -n 1 || true)
       [ -n "$CONSOLE" ] && [ $(( $(date +%s) - $(stat -f %m "$CONSOLE") )) -lt 120 ] && break
-      CONSOLE=
-      sleep 5
+      CONSOLE=; sleep 3
     done
-    [ -n "$CONSOLE" ] || { echo "desk-login: no running USB console capture (logs/usb-console/*-port0.txt) within ${TIMEOUT}s" >&2; exit 2; }
   fi
+  [ -n "$CONSOLE" ] && [ -f "$CONSOLE" ] || { echo 'desk-login: no live console; nothing typed' >&2; exit 2; }
   echo "desk-login: watching $CONSOLE"
-fi
-if [ "$NOW" = 0 ]; then
-  sa=0
-  while [ "$(left)" -gt 0 ]; do
-    if grep -a -q -E 'PianoA830: Finder opens the accelerator' "$CONSOLE"; then
-      echo "desk-login: the Finder runs already (someone is logged in): nothing typed"; exit 0
-    fi
-    sa=$(line_of 'PianoA830: SecurityAgent opens the accelerator')
-    [ "${sa:-0}" -gt 0 ] && break
+  until grep -aq 'PianoA830: SecurityAgent opens the accelerator' "$CONSOLE"; do
+    [ "$(left)" -gt 0 ] || { echo 'desk-login: no SecurityAgent; nothing typed' >&2; exit 2; }
     sleep 3
   done
-  [ "${sa:-0}" -gt 0 ] || { echo "desk-login: no login window (SecurityAgent) within ${TIMEOUT}s: nothing typed" >&2; exit 2; }
-  echo "desk-login: the login window's SecurityAgent after $(since)s; waiting for a lit frame"
-  until after "$sa" 'NativeGopDisplay: .*last frame ([5-9][0-9]|100)\.[0-9]% non-black'; do
-    [ "$(left)" -gt 0 ] || { echo "desk-login: no lit frame after the login window within ${TIMEOUT}s: nothing typed" >&2; exit 2; }
-    sleep 3
-  done
-  sleep 10
 fi
-until "${INPUT[@]}" status > /dev/null 2>&1; do   # PianoDwc3's input port
-  [ "$(left)" -gt 0 ] || { echo "desk-login: the tablet's input port did not answer within ${TIMEOUT}s" >&2; exit 2; }
-  sleep 5
+until "${INPUT[@]}" status >/dev/null 2>&1 && session_state; do
+  [ "$(left)" -gt 0 ] || { echo 'desk-login: input or session state unavailable; nothing typed' >&2; exit 2; }
+  sleep 2
 done
-typed=$(since)
-"${INPUT[@]}" type --stdin --enter < "$SECRET" > /dev/null
-echo "desk-login: the password (not shown) and Return typed at $(since)s"
-[ -n "$CONSOLE" ] || exit 0
-mark=$(wc -l < "$CONSOLE" | tr -d ' ')
-for i in $(seq 1 60); do
-  if after "$mark" 'PianoA830: Finder opens the accelerator'; then
-    echo "desk-login: the desktop: the Finder opened the accelerator $(( $(since) - typed ))s after the password"; exit 0
+if [ "$console_uid" = "$LOGIN_UID" ] && [ -n "$finder_pids" ]; then
+  echo 'desk-login: Finder runs already and console user confirmed'
+  exit 0
+fi
+baseline_finders=$finder_pids
+
+for attempt in 1 2; do
+  [ "$(left)" -gt 0 ] || break
+  if [ "$attempt" = 2 ]; then
+    # A slow authentication or a lost SSH response must not cause input on a desktop.
+    session_state || { echo 'desk-login: session state unavailable; retry skipped' >&2; exit 1; }
+    if prove_desktop; then exit 0; fi
   fi
-  sleep 3
+  [ "$console_uid" = 0 ] || { echo 'desk-login: console is no longer at the login window' >&2; exit 1; }
+  "${INPUT[@]}" key shift >/dev/null
+  # 11-19: the daily v12 profile has auto-brightness with no RAM floor; at 0 lux the login window sits at 6 % (code 128), too
+  # dark for the C920 lit check. Brightness-up keys are a normal user action and only raise the panel (DESK_LOGIN_BRIGHTEN=0 off).
+  # 11-21 slider3: not "seq 1 N": macOS's BSD seq counts down, so "seq 1 0" is "1 0" and DESK_LOGIN_BRIGHTEN=0 sent two keys.
+  brighten=${DESK_LOGIN_BRIGHTEN:-6}; case $brighten in ''|*[!0-9]*) brighten=6 ;; esac
+  sent=0
+  while [ "$sent" -lt "$brighten" ]; do "${INPUT[@]}" key brightnessup >/dev/null 2>&1 || true; sleep 0.3; sent=$((sent + 1)); done
+  echo "desk-login: $sent brightness-up key(s) sent (DESK_LOGIN_BRIGHTEN=${DESK_LOGIN_BRIGHTEN:-default 6})"
+  touch "$scratch/wake"
+  echo "desk-login: non-text wake sent for attempt $attempt"
+  frame_deadline=$(( $(date +%s) + 20 ))
+  until fresh_panel "$WEBCAM_DIR/after-wake-$attempt.jpg"; do
+    if [ "$(left)" -le 0 ] || [ "$(date +%s)" -ge "$frame_deadline" ]; then
+      echo "desk-login: no fresh lit C920 frame for attempt $attempt; input skipped" >&2
+      exit 2
+    fi
+    sleep 1
+  done
+  sleep 2
+  [ "$(left)" -gt 0 ] || break
+  "${INPUT[@]}" key cmd+a >/dev/null
+  "${INPUT[@]}" key backspace >/dev/null
+  echo "desk-login: fresh lit frame and HID field clear complete for attempt $attempt"
+  typed=$(since)
+  if "${INPUT[@]}" type --stdin --enter < "$SECRET" >/dev/null; then
+    echo "desk-login: password and Return sent for attempt $attempt"
+  else
+    echo "desk-login: HID submission unconfirmed for attempt $attempt; checking desktop" >&2
+  fi
+
+  proof_deadline=$(( $(date +%s) + 90 ))
+  while [ "$(left)" -gt 0 ] && [ "$(date +%s)" -lt "$proof_deadline" ]; do
+    if session_state && prove_desktop; then exit 0; fi
+    sleep 2
+  done
 done
-echo "desk-login: no Finder within 180 s of the password (a wrong field or password? the webcam; --now to type again)" >&2
+echo 'desk-login: no new Finder plus console-user proof within the login window' >&2
 exit 1

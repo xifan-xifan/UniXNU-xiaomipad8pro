@@ -2183,6 +2183,14 @@ the current implementation or a pending checklist.
    `/usr/local/libexec/piano-wifi-join`, run once at boot by `com.unixnu.piano-wifi-join`, which refuses a profile file that is
    not root's with mode 600 in a directory of root's with mode 700, reads it, hands it over and wipes its copy; its log
    (`/private/var/log/piano-wifi-join.log`) and the kernel's line carry lengths only. **The file the owner writes**
+   **Boot transaction update (2026-11-18; host verified, tablet qualification pending):** the daemon now waits until
+   uptime 120 seconds and a successful CoreWLAN scan finds the profile's network, then calls
+   `CWInterface associateToNetwork:password:error:` once. Credentials stay in process memory. Success requires a new
+   profile generation whose read-only receipt says `source apple-set20`, followed by `PianoWifiBootAppleJoinV1` in the
+   daemon log. The sysctl write remains a diagnostic input and cannot release a user leave. SET22 still stops the
+   station and leaves it idle; this one-shot boot job never retries a subsequent manual disconnect. Missing profile
+   is a quiet no-op; unsafe input, unavailable AirPort, failed association or absent fresh receipt cannot report success.
+   The file format is unchanged
    (`/private/var/db/piano-wifi/profile`, `chmod 700` the directory and `600` the file, `chown root:wheel` both):
 
    ```

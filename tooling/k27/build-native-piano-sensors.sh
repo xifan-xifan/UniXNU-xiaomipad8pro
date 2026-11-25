@@ -27,7 +27,7 @@ done
 diff <(tail -n +4 "$P/SmmuStream.h" | sed 's/namespace pianosensors/namespace pianousb/') <(tail -n +2 "$D/package/PianoDwc3/SmmuStream.h") \
   > /dev/null || { echo "Error: package/PianoSensors/SmmuStream.h has drifted from package/PianoDwc3/SmmuStream.h" >&2; exit 1; }
 python3 "$D/tooling/k27/build-native-kext.py" PianoSensors "$P/PianoSensors.cpp" "$D/tooling/k27/NativeKextGlue.cpp" \
-  "$P/SensorsRpc.c" "$P/SensorsPack.c" "$P/SensorsSsc.c" "$P/SensorsPb.c" "$P/SensorsClient.c" "$P/SensorsGuard.c" \
+  "$P/SensorsRpc.c" "$P/SensorsArena.c" "$P/SensorsPack.c" "$P/SensorsSsc.c" "$P/SensorsPb.c" "$P/SensorsClient.c" "$P/SensorsGuard.c" \
   "$P/SensorsPolicy.c" "$P/SensorsFixed.c" "$P/SensorsOrient.c" "$P/SensorsLoad.c" "$P/FatVolume.c" "$P/SensorsStream.c" "$P/SensorsAddon.c" \
   "$D/package/PianoAuto/AutoStream.c" "$D/package/PianoAuto/AutoLight.c" -I "$P" -I "$D/package/PianoAuto" \
   --obj "${K27_OBJ:-k27-native-obj}"

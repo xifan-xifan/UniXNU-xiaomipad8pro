@@ -1,0 +1,81 @@
+--- a/frontend.mm
++++ b/frontend.mm
+@@ -2625,12 +2625,18 @@
+   at=0;count=0;
+  }
+ };
++// UniXNU-piano (2026-11-22, GFX-MEM section 5): the thread signals `idle` only while a drain waits and is woken through `work` only
++// while it sleeps (both under `lock`, so no wake-up is lost): a broadcast after every batch and a signal for every hand-over were
++// 20 of the thread's 89 busy samples in WindowServer (psynch_cvbroad / cvsignal / mutexdrop; perf-lag1 run-003449), and each
++// broadcast to the waiting display thread (priority 79) preempted this one (runnable samples).
+ struct EncodeThread {
+  std::mutex lock;
+  std::condition_variable work,idle;
+  std::deque<EncodeBatch *> batches;
+  std::vector<EncodeBatch *> spare;
+  uint64_t queued=0,done=0;
++ unsigned drains=0;      // threads in encodeDrain's wait
++ bool sleeping=false;    // the thread is in its wait for work
+ };
+ static thread_local bool tOnEncodeThread;
+ static thread_local EncodeBatch *tBatch;
+@@ -2643,9 +2649,13 @@
+ // 3.6 -> 10.8, apps' encode threads above their own main threads -- so by default only the render server's.
+ // /private/var/ngpu/debug/no-encode-priority keeps the QoS everywhere. (Copying the first caller's pthread policy gave 31:
+ // CoreAnimation's threads are not set through it.)
++// UniXNU-piano (2026-11-22, GFX-MEM sections 2 and 5): and in WindowServer, at 79 without a file: its ws_main_thread (79) waits in
++// commitAndWaitUntilSubmitted -> encodeDrain for every batch (piano has no display hold), while the thread ran at the QoS's 37-63.
++// /private/var/ngpu/debug/no-encode-priority keeps the QoS (read when the process starts).
++static bool encodeIsWindowServer() {return strcmp(getprogname(),"WindowServer")==0;}
+ static bool encodePriorityWanted() {
+  if(access("/private/var/ngpu/debug/no-encode-priority",F_OK)==0)return false;
+- return access("/private/var/ngpu/debug/encode-priority",F_OK)==0 || strcmp(getprogname(),"backboardd")==0;
++ return access("/private/var/ngpu/debug/encode-priority",F_OK)==0 || strcmp(getprogname(),"backboardd")==0 || encodeIsWindowServer();
+ }
+ static const bool gEncodePriority=encodePriorityWanted();
+ static int gEncodePolicy=SCHED_RR;static sched_param gEncodeParam={};
+@@ -2655,7 +2665,7 @@
+   EncodeThread *t=new EncodeThread;
+   pthread_t id;pthread_attr_t attr;pthread_attr_init(&attr);
+   if(gEncodePriority) {
+-   gEncodeParam.sched_priority=54;
++   gEncodeParam.sched_priority=encodeIsWindowServer()?79:54;
+    if(FILE *f=fopen("/private/var/ngpu/debug/encode-priority","r")){int p=0;if(fscanf(f,"%d",&p)==1 && p>0 && p<128)gEncodeParam.sched_priority=p;fclose(f);}
+   } else pthread_attr_set_qos_class_np(&attr,QOS_CLASS_USER_INTERACTIVE,0);
+   pthread_create(&id,&attr,[](void *arg)->void * {
+@@ -2664,12 +2674,12 @@
+    if(gEncodePriority)gEncodePriorityStatus=pthread_setschedparam(pthread_self(),gEncodePolicy,&gEncodeParam);
+    std::unique_lock<std::mutex> lock(t.lock);
+    for(;;) {
+-    t.work.wait(lock,[&]{return !t.batches.empty();});
++    t.sleeping=true;t.work.wait(lock,[&]{return !t.batches.empty();});t.sleeping=false;
+     EncodeBatch *batch=t.batches.front();t.batches.pop_front();
+     if(gEncodePriority){static bool said;if(!said){said=true;NBLOG(@"native-metal: encode thread policy %d priority %d: %d",gEncodePolicy,gEncodeParam.sched_priority,gEncodePriorityStatus.load());}}
+     lock.unlock();
+     @autoreleasepool {batch->run();}
+-    lock.lock();t.spare.push_back(batch);t.done++;t.idle.notify_all();
++    lock.lock();t.spare.push_back(batch);t.done++;if(t.drains)t.idle.notify_all();
+    }
+    return nullptr;
+   },t);
+@@ -2682,8 +2692,9 @@
+ static void encodeFlush() {
+  if(!tBatch || !tBatch->count)return;
+  EncodeThread &t=encodeThread();
+- {std::lock_guard<std::mutex> lock(t.lock);t.batches.push_back(tBatch);t.queued++;tBatch=nullptr;}
+- t.work.notify_one();
++ bool wake=false;
++ {std::lock_guard<std::mutex> lock(t.lock);t.batches.push_back(tBatch);t.queued++;tBatch=nullptr;wake=t.sleeping;}
++ if(wake)t.work.notify_one();
+ }
+ // A closure takes what it uses by value (C arrays as std::array) or strongly (the objects whose handles it passes), as the call made it.
+ template<class F> static void encodeLater(F &&work) {
+@@ -2702,7 +2713,7 @@
+  EncodeThread &t=encodeThread();
+  std::unique_lock<std::mutex> lock(t.lock);
+  const uint64_t target=t.queued;
+- t.idle.wait(lock,[&]{return t.done>=target;});
++ t.drains++;t.idle.wait(lock,[&]{return t.done>=target;});t.drains--;
+ }
+ #define ENCODE(...) encodeLater([=]{__VA_ARGS__;})
+ // The display hold of the DroidVM board's virtio GPU (its DroidVMVirtioGpu3D.cpp hold(), an op past DroidVMVirtgpuABI.h's through

@@ -96,6 +96,7 @@
 #include <IOKit/IOService.h>
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/IOLib.h>
+#include <PianoGpuBoost.h>   // boost342: each report handed to macOS asks PianoA830 for its input boost (50 ms apart)
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/hid/IOHIDDevice.h>
@@ -118,6 +119,8 @@
 #include <IOKit/IOMessage.h>
 #include <libkern/c++/OSBoolean.h>
 #include <PianoPowerContract.h>
+#include <PianoPerfInput.h>   // the input boost's event to PianoThermal (2026-11-22)
+namespace { pianoperf::InputNotifier gPerfInput; }   // PianoThermal's input boost (PianoPerfInput.h)
 
 using namespace pianokeyboard;
 
@@ -1109,14 +1112,18 @@ void PianoKeyboard::ledRequest(void *self, uint8_t leds)
   }
 }
 
+static pianogpuboost::InputBoostSender gGpuBoost;   // zero-initialised: PianoA830's piano-gpu-boost (PianoGpuBoost.h)
+
 IOReturn PianoKeyboard::send(Kind kind, const uint8_t *bytes, unsigned length)
 {
   PianoKeyboardHID *hid = fHid[kind == Kind::keyboard ? 0 : 1];
   if (!hid) return kIOReturnNotReady;
+  gPerfInput.notify(kind == Kind::keyboard ? pianoperf::kKeyboard : pianoperf::kPointer);
   IOBufferMemoryDescriptor *report = IOBufferMemoryDescriptor::withBytes(bytes, length, kIODirectionNone);
   const IOReturn rc = report ? hid->handleReport(report) : kIOReturnNoMemory;
   OSSafeReleaseNULL(report);
   ++fSent;
+  if (rc == kIOReturnSuccess) gGpuBoost.note();
   if (rc != kIOReturnSuccess && (++fSendErrors <= 5 || fSendErrors % 1000 == 0))
     note("%s: handleReport %#x (%u failures)", deviceInfo(kind).product, rc, fSendErrors);
   return rc;

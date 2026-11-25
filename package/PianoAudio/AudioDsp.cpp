@@ -21,6 +21,7 @@
 #include "AudioPcm.h"
 #include "AudioPower.h"
 #include <sys/sysctl.h>
+#include <sys/kauth.h>
 SYSCTL_DECL(_machdep);
 #include "AudioSession.h"
 
@@ -292,9 +293,11 @@ const PianoPcmTransport kDsp = {"dsp", nullptr, AUDIO_LIVE_OUTPUT_LATENCY, AUDIO
 void liveSummary(const AudioLive &l, char *line, size_t size)
 {
     snprintf(line, size, "level %u: speaker %s (%u starts, %u periods, %u with sound, %u underruns, %u slips), mic %s (%u starts, %u periods); "
-             "frames offered %llu, taken %llu, dropped %llu", l.cfg.level, audio_live_state(l.spk_state), l.spk_starts, l.periods,
-             l.sound_periods, l.underruns, l.drops + l.repeats, audio_live_state(l.mic_state), l.mic_starts, l.mic_periods,
-             (unsigned long long)l.sh->offered, (unsigned long long)l.sh->taken, (unsigned long long)l.sh->dropped);
+             "frames offered %llu, taken %llu, dropped %llu; speaker protection %s (%u starts, %u fallbacks, %u live reads)", l.cfg.level,
+             audio_live_state(l.spk_state), l.spk_starts, l.periods, l.sound_periods, l.underruns, l.drops + l.repeats,
+             audio_live_state(l.mic_state), l.mic_starts, l.mic_periods, (unsigned long long)l.sh->offered, (unsigned long long)l.sh->taken,
+             (unsigned long long)l.sh->dropped, !l.prot_ready ? "not ready" : l.prot_active ? "active" : l.prot_failed ? "fallen back" :
+             __atomic_load_n(&l.sh->spk_prot, __ATOMIC_ACQUIRE) ? "on" : "off", l.prot_starts, l.prot_fallbacks, l.live_reads);
 }
 
 uint32_t liveWord(const AudioLive &l)
@@ -314,16 +317,213 @@ int gainControl(struct sysctl_oid *oidp, void *, int, struct sysctl_req *req)
     piano_audio_log("aud-gain231-v1: requested gain %d (worker applies; active readback follows)", value);
     return 0;
 }
+// Speaker protection (AudioSpkProt.h): machdep.piano_audio_spk asks for the protection pair (odd: 1, or 1 + the round-2 variant
+// bits SPK_VAR_*) or the passthrough graph (0) from the
+// next start of the speaker path (it is down after idle_ms without sound); a new request also clears a fallback of this boot.
+// machdep.piano_audio_spk_state is the worker's view, one line (read only; plain words and counters, no calibration value).
+struct sysctl_oid gSpkOid, gSpkStateOid;
+int spkControl(struct sysctl_oid *oidp, void *, int, struct sysctl_req *req)
+{
+    if (!gLive || !gShared) return ENXIO;
+    int value = __atomic_load_n(&gShared->spk_prot, __ATOMIC_ACQUIRE);
+    const int err = sysctl_handle_int(oidp, &value, 0, req);
+    if (err || !req->newptr) return err;
+    if ((value & 1) && !gLive->prot_ready) return ENOENT;   // the private files are missing or mismatched (the log says which)
+    if (audio_live_spk_select(gShared, value)) return EINVAL;
+    piano_audio_log("PianoSpeakerProtV1: request %d (taken at the next start of the speaker path)", value);
+    liveWake();
+    return 0;
+}
+int spkState(struct sysctl_oid *, void *, int, struct sysctl_req *req)
+{
+    if (req->newptr) return EPERM;
+    if (!gLive || !gShared) return ENXIO;
+    const AudioLive &l = *gLive;
+    char line[480];
+    const int n = snprintf(line, sizeof line, "request %d ready %d active %d failed %d starts %u fallbacks %u live-reads %u vbat-sends %u "
+                           "vbat-uv %u speaker %s why %s; miplay request %d ready %d active %d failed %d starts %u fallbacks %u "
+                           "preg %d preg-updates %u why %s", __atomic_load_n(&gShared->spk_prot, __ATOMIC_ACQUIRE), l.prot_ready, l.prot_active,
+                           l.prot_failed, l.prot_starts, l.prot_fallbacks, l.live_reads, l.vbat_sends, l.vbat_uv, audio_live_state(l.spk_state),
+                           l.prot_why ? l.prot_why : "-", __atomic_load_n(&gShared->miplay, __ATOMIC_ACQUIRE), l.mip_ready, l.mip_active,
+                           l.mip_failed, l.mip_starts, l.mip_fallbacks, int(l.preg_sent), l.preg_updates, l.mip_why ? l.mip_why : "-");
+    return SYSCTL_OUT(req, line, size_t(n < int(sizeof line) ? n : int(sizeof line) - 1) + 1);
+}
+// MIPLAY (AudioSpkProt.h): machdep.piano_audio_miplay asks for the Dolby/MiSound subgraph inside the protection plan from its next start
+// (0 off; 1 or 2 the perf mode; +4 the DAP's pregain follows the master volume; +16 x (r + 1) the rotation r); a new request also clears a
+// MIPLAY fallback of this boot. Its state is in machdep.piano_audio_spk_state ("miplay ...").
+struct sysctl_oid gMiplayOid;
+int miplayControl(struct sysctl_oid *oidp, void *, int, struct sysctl_req *req)
+{
+    if (!gLive || !gShared) return ENXIO;
+    int value = __atomic_load_n(&gShared->miplay, __ATOMIC_ACQUIRE);
+    const int err = sysctl_handle_int(oidp, &value, 0, req);
+    if (err || !req->newptr) return err;
+    if (value && !gLive->mip_ready) return ENOENT;   // its private file is missing or mismatched (the log says which)
+    if (audio_live_miplay_select(gShared, value)) return EINVAL;
+    piano_audio_log("PianoMiplayV1: request %d (taken at the next start of the protection plan)", value);
+    liveWake();
+    return 0;
+}
+void registerSpk()
+{
+    bzero(&gSpkOid, sizeof gSpkOid);
+    gSpkOid.oid_parent = &sysctl__machdep_children; gSpkOid.oid_number = OID_AUTO;
+    gSpkOid.oid_kind = int(CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_OID2);
+    gSpkOid.oid_name = "piano_audio_spk"; gSpkOid.oid_handler = spkControl;
+    gSpkOid.oid_fmt = "I"; gSpkOid.oid_descr = "Speaker protection from the next speaker start: 1 the FSADSP pair, 0 passthrough";
+    gSpkOid.oid_version = SYSCTL_OID_VERSION;
+    sysctl_register_oid(&gSpkOid);
+    bzero(&gSpkStateOid, sizeof gSpkStateOid);
+    gSpkStateOid.oid_parent = &sysctl__machdep_children; gSpkStateOid.oid_number = OID_AUTO;
+    gSpkStateOid.oid_kind = int(CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_OID2);
+    gSpkStateOid.oid_name = "piano_audio_spk_state"; gSpkStateOid.oid_handler = spkState;
+    gSpkStateOid.oid_fmt = "A"; gSpkStateOid.oid_descr = "PianoSpeakerProtV1: request, readiness, fallbacks, live reads";
+    gSpkStateOid.oid_version = SYSCTL_OID_VERSION;
+    sysctl_register_oid(&gSpkStateOid);
+    bzero(&gMiplayOid, sizeof gMiplayOid);
+    gMiplayOid.oid_parent = &sysctl__machdep_children; gMiplayOid.oid_number = OID_AUTO;
+    gMiplayOid.oid_kind = int(CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_OID2);
+    gMiplayOid.oid_name = "piano_audio_miplay"; gMiplayOid.oid_handler = miplayControl;
+    gMiplayOid.oid_fmt = "I";
+    gMiplayOid.oid_descr = "MIPLAY (Dolby) inside speaker protection from its next start: 0 off, 1/2 perf mode, +4 pregain tracked, +16(r+1) rotation r";
+    gMiplayOid.oid_version = SYSCTL_OID_VERSION;
+    sysctl_register_oid(&gMiplayOid);
+}
+// duplex-hold1 (A/B switch, private DUPLEX-VOTES.txt; AudioLive.h audio_live_hold_select): machdep.piano_audio_duplex_hold 0 off, 1 the
+// LPASS macro and digital codec votes, 3 also the VA (TX core) mclk, held by their own plan from before the first path starts until both
+// are down; taken when both paths are down and one starts. Each speaker start logs "duplex-hold1: speaker start N: hold H ...".
+struct sysctl_oid gHoldOid;
+int holdControl(struct sysctl_oid *oidp, void *, int, struct sysctl_req *req)
+{
+    if (!gLive || !gShared) return ENXIO;
+    int value = __atomic_load_n(&gShared->duplex_hold, __ATOMIC_ACQUIRE);
+    const int err = sysctl_handle_int(oidp, &value, 0, req);
+    if (err || !req->newptr) return err;
+    if (audio_live_hold_select(gShared, value)) return EINVAL;
+    piano_audio_log("duplex-hold1: request %d (taken when both paths are down and one starts; speaker %s, Mic %s)", value,
+                    audio_live_state(gLive->spk_state), audio_live_state(gLive->mic_state));
+    liveWake();
+    return 0;
+}
+void registerHold()
+{
+    bzero(&gHoldOid, sizeof gHoldOid);
+    gHoldOid.oid_parent = &sysctl__machdep_children; gHoldOid.oid_number = OID_AUTO;
+    gHoldOid.oid_kind = int(CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_OID2);
+    gHoldOid.oid_name = "piano_audio_duplex_hold"; gHoldOid.oid_handler = holdControl;
+    gHoldOid.oid_fmt = "I";
+    gHoldOid.oid_descr = "duplex-hold1 A/B: 0 off, 1 hold the LPASS macro+dcodec votes, 3 also the VA mclk, from before the first path to both down";
+    gHoldOid.oid_version = SYSCTL_OID_VERSION;
+    sysctl_register_oid(&gHoldOid);
+}
+// duplex-age1 (A/B switch, private DUPLEX-R3.md): machdep.piano_audio_age 1 the signed sound age (the fix, default), 0 the old unsigned
+// test that faded a playing speaker out and in whenever the engine stamped its sound a millisecond after the worker's tick.
+struct sysctl_oid gAgeOid;
+int ageControl(struct sysctl_oid *oidp, void *, int, struct sysctl_req *req)
+{
+    if (!gLive || !gShared) return ENXIO;
+    int value = __atomic_load_n(&gShared->age_signed, __ATOMIC_ACQUIRE);
+    const int err = sysctl_handle_int(oidp, &value, 0, req);
+    if (err || !req->newptr) return err;
+    if (audio_live_age_select(gShared, value)) return EINVAL;
+    piano_audio_log("duplex-age1: request %d (%s sound age from the next tick)", value, value ? "signed" : "the OLD unsigned");
+    return 0;
+}
+void registerAge()
+{
+    bzero(&gAgeOid, sizeof gAgeOid);
+    gAgeOid.oid_parent = &sysctl__machdep_children; gAgeOid.oid_number = OID_AUTO;
+    gAgeOid.oid_kind = int(CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_OID2);
+    gAgeOid.oid_name = "piano_audio_age"; gAgeOid.oid_handler = ageControl;
+    gAgeOid.oid_fmt = "I";
+    gAgeOid.oid_descr = "duplex-age1 A/B: 1 signed sound age (default), 0 the old unsigned test";
+    gAgeOid.oid_version = SYSCTL_OID_VERSION;
+    sysctl_register_oid(&gAgeOid);
+}
 void registerGain()
 {
     bzero(&gGainOid, sizeof gGainOid);
     gGainOid.oid_parent = &sysctl__machdep_children; gGainOid.oid_number = OID_AUTO;
     gGainOid.oid_kind = int(CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_OID2);
     gGainOid.oid_name = "piano_audio_gain"; gGainOid.oid_handler = gainControl;
-    gGainOid.oid_fmt = "I"; gGainOid.oid_descr = "Daily FS19xx A/B request: 192 or 231; aud-gain231-v1";
+    gGainOid.oid_fmt = "I"; gGainOid.oid_descr = "Daily FS19xx request: 192, 231, or 243 (applied only under speaker protection, else 231); aud-gain231-v1";
     gGainOid.oid_version = SYSCTL_OID_VERSION;
     sysctl_register_oid(&gGainOid);
 }
+// Route writes are requests only. The worker publishes applied settings and
+// the stopped boundary. The raw window's arm and copy share a user-side lock;
+// the worker fills only armed backing and publishes it once, immutably.
+enum MicRouteOid {MicRouteValue, MicRouteDiag, MicRouteRecord, MicRouteState, MicRoutePcm, MicRouteCount};
+struct sysctl_oid gMicRouteOid[MicRouteCount];
+IOLock *gMicRecordLock;
+AudioMicWindow *gMicWindow;
+
+int micRouteControl(struct sysctl_oid *oidp, void *, int selector, struct sysctl_req *req)
+{
+    if (!gLive || !gLive->cfg.mic) return ENXIO;
+    const AudioMicRouteStatus s = audio_live_mic_route_status(gShared);
+    if (selector == MicRouteState) {
+        if (req->newptr) return EPERM;
+        char line[160];
+        const int n = snprintf(line, sizeof line, "request %d applied %d gen %u diag-request %d diag-applied %d stopped %d armed %d recorded %d",
+                               s.requested, s.applied, s.generation, s.diag_requested, s.diag_applied, s.stopped, s.armed, s.recorded);
+        return SYSCTL_OUT(req, line, size_t(n) + 1);
+    }
+    if (selector == MicRoutePcm) {
+        if (req->newptr || !kauth_cred_issuser(kauth_cred_get())) return EPERM;
+        IOLockLock(gMicRecordLock);
+        const AudioMicWindow *w = audio_live_mic_window(gLive);
+        int err = 0;
+        if (w) {
+            err = SYSCTL_OUT(req, w, offsetof(AudioMicWindow, period));
+            if (!err) err = SYSCTL_OUT(req, w->period, w->periods * sizeof w->period[0]);
+            if (!err) err = SYSCTL_OUT(req, w->pcm, w->frames * 2u * sizeof w->pcm[0]);
+        }
+        IOLockUnlock(gMicRecordLock);
+        return err;
+    }
+    if (selector == MicRouteRecord && !kauth_cred_issuser(kauth_cred_get())) return EPERM;
+    int value = selector == MicRouteValue ? s.requested : selector == MicRouteDiag ? s.diag_requested : s.armed;
+    int err = sysctl_handle_int(oidp, &value, 0, req);
+    if (err || !req->newptr) return err;
+    if (selector == MicRouteRecord) {
+        IOLockLock(gMicRecordLock);
+        if (value == 1 && !gMicWindow && s.stopped && s.diag_applied)
+            gMicWindow = static_cast<AudioMicWindow *>(IOMallocData(sizeof(AudioMicWindow)));
+        err = audio_live_mic_record(gLive, value, gMicWindow);
+        IOLockUnlock(gMicRecordLock);
+    } else {
+        err = audio_live_mic_request(gShared, selector == MicRouteDiag, value);
+    }
+    if (!err) liveWake();
+    piano_audio_log("mic-route1: submit %s value %d result %d", oidp->oid_name, value, err);
+    return err;
+}
+
+void registerMicRoute()
+{
+    static const char *const names[] = {
+        "piano_audio_mic_route", "piano_audio_mic_route_diag", "piano_audio_mic_route_record",
+        "piano_audio_mic_route_state", "piano_audio_mic_route_pcm",
+    };
+    gMicRecordLock = IOLockAlloc();
+    if (!gMicRecordLock) piano_audio_log("mic-route1: pre-mix diagnostic lock allocation failed");
+    for (int i = 0; i < MicRouteCount; ++i) {
+        if (!gMicRecordLock && (i == MicRouteRecord || i == MicRoutePcm)) continue;
+        sysctl_oid &oid = gMicRouteOid[i];
+        oid.oid_parent = &sysctl__machdep_children;
+        oid.oid_number = OID_AUTO;
+        const unsigned type = i == MicRouteState ? CTLTYPE_STRING : i == MicRoutePcm ? CTLTYPE_OPAQUE : CTLTYPE_INT;
+        oid.oid_kind = int(type | (i < MicRouteState ? CTLFLAG_RW : CTLFLAG_RD) | CTLFLAG_LOCKED | CTLFLAG_OID2);
+        oid.oid_name = names[i];
+        oid.oid_arg2 = i;
+        oid.oid_handler = micRouteControl;
+        oid.oid_fmt = i == MicRouteState ? "A" : i == MicRoutePcm ? "S,AudioMicWindow" : "I";
+        oid.oid_version = SYSCTL_OID_VERSION;
+        sysctl_register_oid(&oid);
+    }
+}
+
 int ledgerRead(struct sysctl_oid *, void *, int, struct sysctl_req *req)
 {
     if (req->newptr) return EPERM;
@@ -369,6 +569,17 @@ void liveRun(const PianoAudioLevelArgs *a)
     if (a->liveGain) lc.gain = a->liveGain;
     if (a->liveCeilingDb) lc.ceiling = audio_ceiling_db(a->liveCeilingDb);
     if (a->liveIdleMs) lc.idle_ms = a->liveIdleMs;
+    lc.mic_route = a->micRoute;
+    lc.mic_diag = a->micRouteDiag;
+    lc.mic_route_apply = pianoaudio::boardSetMicRoute;
+    lc.spk_prot = int(a->spk);   // 0, or the round-2 mask (AudioSpkProt.h SPK_VAR_*), checked by PianoAudio.cpp and AudioLive
+    lc.age_old = int(a->ageOld);   // duplex-age1 A/B control
+    lc.miplay = int(a->miplay);   // MIPLAY: 0, or AudioSpkProt.h's request (checked by PianoAudio.cpp and AudioLive)
+    lc.duplex_hold = int(a->duplexHold);   // duplex-hold1: 0, 1 or 3 (checked by PianoAudio.cpp and AudioLive)
+    static AudioLiveSpk *spkState;   // kept for the boot, as gLive
+    if (!spkState) spkState = IOMallocType(AudioLiveSpk);
+    if (spkState) bzero(spkState, sizeof *spkState);
+    lc.spk_state = spkState;
     gLive = IOMallocType(AudioLive);
     if (!gLive || audio_live_init(gLive, &lc, &gSession, gShared)) {
         piano_audio_log("live: levels 8-10 not run: %s", gLive ? "the session did not hand the hardware over" : "no memory");
@@ -380,6 +591,17 @@ void liveRun(const PianoAudioLevelArgs *a)
     if (gLive->ledger) {bzero(gLive->ledger,sizeof(AudioLedger)); registerLedger();}
     else {piano_audio_log("sleep-contract1: ledger allocation failed; readiness gate held"); return;}
     if (lc.level >= 9) registerGain();
+    registerSpk();
+    registerAge();
+    if (lc.mic) {registerMicRoute(); registerHold();}
+    // The microphone tap for "Mic (noise reduced)" (AudioTap.h, MIC-NS section 8): published once the capture path can run.
+    if (lc.mic && a->tap) {
+        const int tap = piano_audio_tap_publish(gShared, liveWake);
+        piano_audio_log("tap1: %s (service %s, user client %s, %u frames)", tap ? "NOT published (no memory)" : "published",
+                        PIANO_TAP_SERVICE, PIANO_TAP_USER_CLIENT, PIANO_TAP_FRAMES);
+    } else if (lc.mic) {
+        piano_audio_log("tap1: off (piano-audio-tap=0)");
+    }
     piano_audio_power_ready();
     uint32_t handled=0;
     uint8_t in[AUDIO_INBOX_BYTES];
@@ -516,7 +738,7 @@ int piano_audio_levels(const PianoAudioLevelArgs *a, char *summary, size_t size)
     ops.clock_ms = [](void *) -> uint32_t {return nowMs();};
     ops.log = sessionLog;
     ops.send = sessionSend;
-    const pianoaudio::BoardArgs b = {a->level, a->i2cSwap, a->i2cHalfUs, a->smmu, a->micGain};
+    const pianoaudio::BoardArgs b = {a->level, a->i2cSwap, a->i2cHalfUs, a->smmu, a->micRoute, a->micGain};
     pianoaudio::boardSetup(ops, b);
     audio_session_init(&gSession, &c, &ops, c.dsp ? &gLink.guard : nullptr);
     // A budget well beyond what the levels need (level 6's silence and level 7's walk are seconds; every command is answered or

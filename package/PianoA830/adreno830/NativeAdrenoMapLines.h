@@ -24,6 +24,102 @@
 
 enum : unsigned {NativeAdrenoMapLineBytes=150};
 
+struct NativeAdrenoResidencyRecord {
+    char name[20]{};
+    unsigned connection=0;
+    int pid=0;
+    NativeAdrenoResidencyUsage usage{};
+
+    int line(char *text,size_t size,unsigned slot,const char *state,uint64_t window,uint64_t hole) const
+    {
+        if(!connection)return 0;
+        using U64=unsigned long long;
+        return snprintf(text,size,
+            "residency slot=%u connection=%u pid=%d name=%s state=%s window=%llu resident=%llu peak-resident=%llu "
+            "imports=%llu peak-imports=%llu import-bytes=%llu peak-import-bytes=%llu largest-vm-hole=%llu",
+            slot,connection,pid,name,state,U64(window),U64(usage.resident_bytes),U64(usage.peak_resident_bytes),
+            U64(usage.imports),U64(usage.peak_imports),U64(usage.import_bytes),U64(usage.peak_import_bytes),U64(hole));
+    }
+};
+
+/* Captured by the wrapper under the connection lock. VM fields came from mapClient's locked output;
+ * global backing counters are independent relaxed samples, not a whole-device atomic census. */
+struct NativeAdrenoFailureSnapshot {
+    bool captured=false;uint64_t sequence=0;
+    NativeAdrenoAllocRefusal alloc{};NativeAdrenoMapRefusal map{};NativeAdrenoMapUsage usage{};
+    uint64_t objects=0,capacity=0,pool=0,other=0,imports=0;
+    NativeAdrenoBackingTotals backing{};
+};
+static inline void NativeAdrenoCaptureFailure(NativeAdrenoFailureSnapshot *out,const NativeAdrenoUserClient &core,uint64_t sequence)
+{
+    if(!out)return;
+    *out={};out->captured=true;out->sequence=sequence;
+    out->alloc=core.lastAllocRefusal();out->map=core.lastMapRefusal();core.mapUsage(&out->usage);
+    out->objects=core.liveObjects();out->capacity=core.capacity();core.usage(&out->pool,&out->other,&out->imports);
+    out->backing=NativeAdrenoMemory::backingTotals();
+}
+/* Each row carries its own sequence: different threads can interleave ring writes. No user addresses or PA are printed here. */
+enum : unsigned {NativeAdrenoFailureLines=10};
+static inline int NativeAdrenoFailureLine(char *line,size_t size,unsigned row,const NativeAdrenoFailureSnapshot &s,
+    unsigned slot,int pid,uint32_t method,IOReturn status)
+{
+    if(!line || !size)return 0;
+    typedef unsigned long long u64;
+    const u64 n=s.sequence;
+    switch(row) {
+    case 0:return snprintf(line,size,"refusal n=%llu pid=%d slot=%u method=%u status=%#x",n,pid,slot,method,unsigned(status));
+    case 1:
+        if(method==NativeAdrenoMethodBoMap)
+            return snprintf(line,size,"refusal n=%llu map-why=%u vm-why=%u own=%u map-b=%llu map-c=%llu",n,s.map.why,s.map.vm.why,
+                unsigned(s.map.vm_captured),u64(s.map.b),u64(s.map.c));
+        return snprintf(line,size,"refusal n=%llu alloc-why=%u stage=%s alloc-a=%llu driver-status=%#x",n,s.alloc.why,
+            s.alloc.failure.stage,u64(s.alloc.a),unsigned(s.alloc.failure.status));
+    case 2:
+        if(method==NativeAdrenoMethodBoMap)
+            return snprintf(line,size,"refusal n=%llu vm-a=%llu vm-b=%llu vm-c=%llu",n,u64(s.map.vm.a),u64(s.map.vm.b),u64(s.map.vm.c));
+        if(method==NativeAdrenoMethodBoImport)
+            return snprintf(line,size,"refusal n=%llu import-stage=%llu",n,u64(s.alloc.c));
+        return snprintf(line,size,"refusal n=%llu alloc-c=%llu alloc-d=%llu alloc-e=%llu",n,u64(s.alloc.c),u64(s.alloc.d),u64(s.alloc.e));
+    case 3:return snprintf(line,size,"refusal n=%llu objects=%llu/%llu pool=%llu own=%llu",n,u64(s.objects),u64(s.capacity),u64(s.pool),u64(s.other));
+    case 4:return snprintf(line,size,"refusal n=%llu imports=%llu map-objects=%llu map-spans=%llu",n,u64(s.imports),u64(s.usage.objects),u64(s.usage.spans));
+    case 5:return snprintf(line,size,"refusal n=%llu mapped=%llu window-bytes=%llu",n,u64(s.usage.bytes),u64(s.usage.window_bytes));
+    case 6:
+        if(method!=NativeAdrenoMethodBoMap || s.map.why!=NativeAdrenoMapWhyVm)
+            return snprintf(line,size,"refusal n=%llu vm=not-called",n);
+        return snprintf(line,size,"refusal n=%llu vm-objects=%llu/%u vm-spans=%llu/%llu",n,u64(s.map.vm.objects),unsigned(NativeAdrenoVmMaxObjects),
+        u64(s.map.vm.spans),u64(s.map.vm.capacity));
+    case 7:
+        if(method!=NativeAdrenoMethodBoMap || s.map.why!=NativeAdrenoMapWhyVm)
+            return snprintf(line,size,"refusal n=%llu vm-reserve=not-called",n);
+        return snprintf(line,size,"refusal n=%llu vm-bytes=%llu keep-objects=%llu keep-spans=%llu",n,u64(s.map.vm.bytes),
+        u64(s.map.vm.keep_objects),u64(s.map.vm.keep_spans));
+    case 8:return snprintf(line,size,"refusal n=%llu sample-owned-mapped=%llu sample-unmapped=%llu",n,u64(s.backing.mapped),u64(s.backing.unmapped));
+    case 9:return snprintf(line,size,"refusal n=%llu sample-imports=%llu sample-allocs=%llu sample-frees=%llu",n,u64(s.backing.imports),
+        u64(s.backing.allocs),u64(s.backing.frees));
+    default:line[0]=0;return 0;
+    }
+}
+
+/* Single publication only: a reader observing state=2 sees immutable bytes, even after a connection closes or its slot is reused.
+ * Publish under the connection lock. Never wait for another writer, allocate, call the VM, or run a callback here. */
+struct NativeAdrenoFailureRecord {
+    uint32_t state=0;unsigned slot=0;int pid=0;uint32_t method=0;IOReturn status=0;NativeAdrenoFailureSnapshot snapshot{};
+    bool remember(const NativeAdrenoFailureSnapshot &s,unsigned owner,int process,uint32_t op,IOReturn result)
+    {
+        if(!s.captured || (result!=kIOReturnNoMemory && result!=kIOReturnNoResources))return false;
+        uint32_t empty=0;
+        if(!__atomic_compare_exchange_n(&state,&empty,1u,false,__ATOMIC_RELAXED,__ATOMIC_RELAXED))return false;
+        snapshot=s;slot=owner;pid=process;method=op;status=result;
+        __atomic_store_n(&state,2u,__ATOMIC_RELEASE);return true;
+    }
+    int line(char *text,size_t size,unsigned row) const
+    {
+        if(__atomic_load_n(&state,__ATOMIC_ACQUIRE)!=2u) {if(text && size)text[0]=0;return 0;}
+        return NativeAdrenoFailureLine(text,size,row,snapshot,slot,pid,method,status);
+    }
+};
+static_assert(unsigned(NativeAdrenoFailureLines)==unsigned(NativeAdrenoFailureRows),"refusal export rows");
+
 static inline const char *NativeAdrenoVmWhyText(uint8_t why)
 {
     switch(why) {
@@ -129,6 +225,63 @@ static inline void NativeAdrenoAllocRefusalLine(char *line,size_t size,const Nat
     }
     default: snprintf(line,size,"%s refused: no reason recorded",what);break;
     }
+}
+
+/* The detail of a refused Submit (2026-11-21, 20261121-ws-crash: "WindowServer[102] slot 0 Submit -> BadArgument" named no check;
+ * NativeAdrenoUserClient::lastSubmitRefusal): the check, and for an entry "entry <i>/<n> handle <BO handle> iova <iova> bytes <bytes>
+ * (mapped <iova>+<bytes> | not mapped)" with what that check adds. The boot_progress_gpu_event prefix makes it "gpu submit refused: ...". */
+static inline const char *NativeAdrenoSubmitWhyText(uint8_t why)
+{
+    switch(why) {
+    case NativeAdrenoSubmitWhyNotOpen: return "not open";
+    case NativeAdrenoSubmitWhyCount: return "count";
+    case NativeAdrenoSubmitWhyQueue: return "queue";
+    case NativeAdrenoSubmitWhyWaitFence: return "wait fence";
+    case NativeAdrenoSubmitWhyBytes: return "bytes";
+    case NativeAdrenoSubmitWhyHandle: return "handle unknown";
+    case NativeAdrenoSubmitWhyNotMapped: return "not mapped";
+    case NativeAdrenoSubmitWhyRange: return "range";
+    case NativeAdrenoSubmitWhyQueueFull: return "queue full";
+    case NativeAdrenoSubmitWhyOther: return "other";
+    default: return "no reason recorded";
+    }
+}
+static inline int NativeAdrenoSubmitRefusalLine(char *line,size_t size,const NativeAdrenoSubmitRefusal &r)
+{
+    if(!line || !size)return 0;
+    typedef unsigned long long u64;
+    const char *what=NativeAdrenoSubmitWhyText(r.why),*code=NativeAdrenoReturnName(r.status);
+    char status[40];
+    snprintf(status,sizeof status,"%#x%s%s",unsigned(r.status),code?" ":"",code?code:"");
+    if(r.index==UINT32_MAX) {
+        switch(r.why) {
+        case NativeAdrenoSubmitWhyCount:
+            return snprintf(line,size,"submit refused: count: %u buffers (1..%u), reserved %#llx",r.count,unsigned(NativeAdrenoAbiMaxBuffers),
+                            u64(r.a));
+        case NativeAdrenoSubmitWhyQueue:
+            return snprintf(line,size,"submit refused: queue: %llu is not an open queue of this connection (%u buffers)",u64(r.a),r.count);
+        case NativeAdrenoSubmitWhyWaitFence:
+            return snprintf(line,size,"submit refused: wait fence: %llu was never issued (%s, %u buffers)",u64(r.a),status,r.count);
+        default:
+            return snprintf(line,size,"submit refused: %s: %s (%u buffers)",what,status,r.count);
+        }
+    }
+    char mapping[48],tail[56]="";
+    if(r.why==NativeAdrenoSubmitWhyRange || (r.mapped && r.mapped_bytes))
+        snprintf(mapping,sizeof mapping,"mapped %#llx+%#llx",u64(r.mapped),u64(r.mapped_bytes));
+    else snprintf(mapping,sizeof mapping,"%s",r.why==NativeAdrenoSubmitWhyBytes?"mapping not looked up":"not mapped");
+    switch(r.why) {
+    case NativeAdrenoSubmitWhyHandle: snprintf(tail,sizeof tail,", no live object, next handle %#llx",u64(r.a));break;
+    case NativeAdrenoSubmitWhyNotMapped:
+        if(r.b)snprintf(tail,sizeof tail,", VM mapping %#llx: %s",u64(r.b),status);
+        else snprintf(tail,sizeof tail,", object of %llu KiB",u64(r.mapped_bytes>>10));
+        break;
+    case NativeAdrenoSubmitWhyRange: snprintf(tail,sizeof tail,", permissions %#llx",u64(r.a));break;
+    case NativeAdrenoSubmitWhyBytes: break;
+    default: snprintf(tail,sizeof tail,", %s",status);break;
+    }
+    return snprintf(line,size,"submit refused: %s: entry %u/%u handle %#llx iova %#llx bytes %llu (%s)%s",what,r.index,r.count,u64(r.handle),
+                    u64(r.iova),u64(r.bytes),mapping,tail);
 }
 
 /* The VM's totals: "va/map: VM <records>/<max> records, <ranges>/<capacity> ranges (<permille/10>%), <MiB> MiB mapped; pool <used>/<size>

@@ -350,40 +350,29 @@ def sensor_pack_addon(adt):
     return blob, {'sha256': digest, 'bytes': len(data), 'private': 'this unit only', 'carrier': 'Payloads/kernel.macho.gpuaddon'}
 
 
-def payload(stage, image, label, size_mib, *, fat16=False):
+def payload(stage, image, label, size_mib):
     # mtools stamps the directories it creates with the current time unless SOURCE_DATE_EPOCH is set (mtools 4.0.50):
     # without it two builds a minute apart differ in two bytes of the FAT.
     os.environ['SOURCE_DATE_EPOCH'] = str(EPOCH)
     for path in [stage, *stage.rglob('*')]:
         os.utime(path, (EPOCH, EPOCH))
-    if fat16:
-        with image.open("wb") as volume:
-            volume.truncate(size_mib * MIB)
-        subprocess.run(["mkfs.fat", "--invariant", "-F", "16", "-s", "1", "-n", label, str(image)], check=True)
-        subprocess.run(["mcopy", "-m", "-s", "-i", str(image), str(stage / "EFI"), "::"], check=True,
-                       env=dict(os.environ, TZ="UTC"))
-    else:
-        write_volume(stage, image, label, size_mib)
+    write_volume(stage, image, label, size_mib)
 
 
-def menu_actions(diagnostic=False):
-    restart_title = 'Restart tablet' if diagnostic else 'Restart (back to Ubuntu)'
-    actions = (f'[[entry]]\nid = "reset"\ntitle = "{restart_title}"\ntype = "action"\naction = "reset"\n'
-               '[[entry]]\nid = "shutdown"\ntitle = "Power off"\ntype = "action"\naction = "shutdown"\n')
-    if not diagnostic:
-        actions += '[[entry]]\nid = "tools"\ntitle = "Tools"\ntype = "action"\naction = "tools"\n'
-    return actions
+def menu_actions():
+    return ('[[entry]]\nid = "reset"\ntitle = "Restart (back to Ubuntu)"\ntype = "action"\naction = "reset"\n'
+            '[[entry]]\nid = "shutdown"\ntitle = "Power off"\ntype = "action"\naction = "shutdown"\n'
+            '[[entry]]\nid = "tools"\ntitle = "Tools"\ntype = "action"\naction = "tools"\n')
 
 
-def uefi_payload(work, diagnostic=False):
+def uefi_payload(work):
     stage = work / 'uefi-stage'
     (stage / 'EFI/UniXNU').mkdir(parents=True)
     (stage / 'EFI/UniXNU/unixnu.toml').write_text(
-        '# UniXNU RAM menu. The default action restarts the tablet after 60 seconds.\n'
-        'version = 1\n[boot]\ntimeout = 60\ndefault = "reset"\n[kits]\nautoload = false\n' + menu_actions(diagnostic))
+        '# piano M1: the UniXNU menu from a RAM boot, no OS entry. Untouched for 60 s it restarts (ABL then boots Ubuntu).\n'
+        'version = 1\n[boot]\ntimeout = 60\ndefault = "reset"\n[kits]\nautoload = false\n' + menu_actions())
     image = work / 'payload-uefi.img'
-    # An 8 MiB FAT32 volume cannot reach the firmware's minimum cluster count.
-    payload(stage, image, 'PIANOUEFI', 8, fat16=True)
+    payload(stage, image, 'PIANOUEFI', 8)
     return image
 
 
@@ -507,7 +496,6 @@ def main():
     p.add_argument('--fd-name', required=True, help='A-bundled or B-own303')
     p.add_argument('--dtb', type=Path, default=DEVICE / 'out/inputs/piano-boot.dtb')
     p.add_argument('--out', type=Path, required=True)
-    p.add_argument('--diagnostic-menu', action='store_true', help='Offer only restart and shutdown in the UEFI RAM menu')
     p.add_argument('--kc', type=Path)
     p.add_argument('--trust', type=Path)
     p.add_argument('--seed', type=Path)
@@ -532,7 +520,7 @@ def main():
         report['ram_window'] = {'adt_bytes': window, 'fd_bound': bound}
     with tempfile.TemporaryDirectory(prefix='piano-ram-') as scratch:
         work = Path(scratch)
-        ramdisk = uefi_payload(work, a.diagnostic_menu)
+        ramdisk = uefi_payload(work)
         image, info = pack(a.out, a.fd, a.dtb, ramdisk, work, f'boot-piano-uefi-ram-{a.fd_name}')
         report['images'][image.name] = {**info, 'payload_sha256': sha(ramdisk), 'payload_bytes': ramdisk.stat().st_size,
                                         'sha256': sha(image), 'bytes': image.stat().st_size}

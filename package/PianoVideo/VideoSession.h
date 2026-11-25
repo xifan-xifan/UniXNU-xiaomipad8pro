@@ -20,9 +20,10 @@ constexpr uint32_t Open = 0x01000003, Close = 0x01000004, Start = 0x01000005, St
 constexpr uint32_t kSessionId = 0x56340001, kTimestamp = 1000000;
 constexpr uint32_t kPscIds[10] = {0x0300015b, 0x03000103, 0x03000105, 0x0300010f, 0x03000120,
                                   0x03000124, 0x03000128, 0x03000107, 0x03000108, 0x03000155};
+constexpr uint32_t kHevcTier = 0x03000109;
 struct Psc {
   uint32_t resolution = 0x014000f0, crop[2] = {0, 0}, depth = 0x00080008, coded = 1, n = 4, poc = 0, profile = 4, level = 18,
-           color = 0x14000003;
+           color = 0x14000003, tier = 0;
   uint32_t returned = 0;
   uint32_t value(unsigned i) const
   {
@@ -35,6 +36,7 @@ struct Psc {
            : i == 7 ? profile
            : i == 8 ? level
            : i == 9 ? color
+           : i == 10 ? tier
                     : 0;
   }
   bool supported() const
@@ -110,6 +112,7 @@ public:
   Result r;
   Psc psc;
   bool openSent = false, inputStarted = false, rawStarted = false, drainSent = false, closeSent = false, cleanup = false;
+  bool failClosedCleanup = false;
   uint32_t stopPending = 0, picture = 0, errorSerial = 0;
   bool frameError = false;
   uint64_t deadline = 0;
@@ -119,7 +122,71 @@ public:
   uint32_t accessUnitBytes = sizeof kAccessUnit;
   bool checkGolden = true;
   bool streaming = false;
+  // The original single-picture ladder verifies a sentinel and dumps packets.
+  // Production frames use validated FBD ownership and retained binary history.
+  bool qualificationTrace() const { return !streaming || !layout.general; }
   uint32_t expectedPoc = 2, expectedProfile = 0, expectedLevel = 4;
+  uint32_t expectedDepth = 8, expectedTier = 0;
+  uint32_t activeWidth = 320, activeHeight = 240;
+  Psc initialPsc;
+  unsigned pscCount() const { return layout.hevc ? 11 : 10; }
+  bool pscField(unsigned i) const { return !layout.hevc || (i != 4 && i != 6); }
+  uint32_t pscId(unsigned i) const { return i == 10 ? kHevcTier : kPscIds[i]; }
+  uint32_t rawStride() const { return layout.hevc ? layout.hevcGeometry.stride : layout.general ? layout.geometry.stride : 384; }
+  uint32_t rawScanlines() const { return layout.hevc ? layout.hevcGeometry.scanlines : layout.general ? layout.geometry.scanlines : 256; }
+  uint32_t rawPixelStride() const { return rawStride() / (expectedDepth == 10 ? 2 : 1); }
+  // An alternate firmware coded/crop representation is allowed only when it
+  // describes the same active picture and fits every already reserved buffer.
+  bool pscGeometry() const {
+    const uint32_t w=psc.resolution>>16,h=psc.resolution&65535;
+    const uint32_t left=psc.crop[0]>>16,top=psc.crop[0]&65535,right=psc.crop[1]>>16,bottom=psc.crop[1]&65535;
+    if (!w || !h || ((w|h|left|top|right|bottom)&1) || left+right>=w || top+bottom>=h ||
+        w-left-right!=activeWidth || h-top-bottom!=activeHeight) return false;
+    if (!layout.general) return psc.resolution==0x014000f0 && !psc.crop[0] && !psc.crop[1];
+    if ((psc.returned & 0x2a) != 0x2a) return false; // coded resolution, bit depth and firmware minimum are mandatory
+    if (layout.hevc) {
+      HevcGeometry g;
+      if (!g.configure(w,h,expectedDepth) || w>layout.hevcGeometry.width || h>layout.hevcGeometry.height ||
+          g.raw>layout.rawBytes() || g.dpb>layout.dpbBytes()) return false;
+      for(unsigned i=0;i<layout.scratchCount();++i)if(g.scratchBytes(i,psc.n)>layout.scratchSize(i,psc.n))return false;
+      return true;
+    }
+    AvcGeometry g;
+    if (!g.configure(w,h) || w>layout.geometry.width || h>layout.geometry.height ||
+        g.raw>layout.rawBytes() || g.dpb>layout.dpbBytes()) return false;
+    for(unsigned i=0;i<layout.scratchCount();++i)if(g.scratchBytes(i,psc.n)>layout.scratchSize(i,psc.n))return false;
+    return true;
+  }
+  bool adoptPscGeometry() {
+    if (!layout.general) return true;
+    if (layout.hevc) {
+      HevcGeometry g;if(!g.configure(psc.resolution>>16,psc.resolution&65535,expectedDepth))return false;
+      for(unsigned i=0;i<layout.used;++i) {
+        auto &b=layout.buf[i];const uint32_t size=b.type==Raw?g.raw:b.type==Dpb?g.dpb:b.size;
+        if(size>b.capacity)return false;
+      }
+      layout.hevcGeometry=g;
+      for(unsigned i=0;i<layout.used;++i) {
+        auto &b=layout.buf[i];if(b.type==Raw)b.size=g.raw;else if(b.type==Dpb)b.size=g.dpb;
+      }
+      o.hw.note("V9 HEVC PSC active %ux%u coded %ux%u crop %08x/%08x depth %u byte-stride %u pixel-stride %u scanlines %u UV %u RAW %u DPB %u N %u cap %u returned %08x",
+        activeWidth,activeHeight,g.width,g.height,psc.crop[0],psc.crop[1],expectedDepth,g.stride,rawPixelStride(),g.scanlines,g.uvOffset,g.raw,g.dpb,psc.n,layout.maxN(),psc.returned);
+      return true;
+    }
+    AvcGeometry g;if(!g.configure(psc.resolution>>16,psc.resolution&65535))return false;
+    // Layout offsets/capacities stay unchanged. Only payload sizes may shrink.
+    for(unsigned i=0;i<layout.used;++i) {
+      auto &b=layout.buf[i];uint32_t size=b.type==Raw?g.raw:b.type==Dpb?g.dpb:b.size;
+      if(size>b.capacity)return false;
+    }
+    layout.geometry=g;
+    for(unsigned i=0;i<layout.used;++i) {
+      auto &b=layout.buf[i];if(b.type==Raw)b.size=g.raw;else if(b.type==Dpb)b.size=g.dpb;
+    }
+    o.hw.note("V8 PSC geometry active %ux%u coded %ux%u crop %08x/%08x stride %u scanlines %u UV %u RAW %u DPB %u N %u cap %u",
+      activeWidth,activeHeight,g.width,g.height,psc.crop[0],psc.crop[1],g.stride,g.scanlines,g.uvOffset,g.raw,g.dpb,psc.n,layout.maxN());
+    return true;
+  }
   stream::Ledger ledger;
   struct OutputFrame { uint64_t token = 0; unsigned index = 0; uint32_t bytes = 0; };
   OutputFrame outputs[stream::Credits] = {};
@@ -137,15 +204,24 @@ public:
   }
   bool pscSupported() const {
     if (!streaming) return psc.supported();
-    return psc.resolution == 0x014000f0 && !psc.crop[0] && !psc.crop[1] && psc.depth == 0x00080008 && psc.coded == 1 &&
-      psc.n && psc.n <= kMaxN && (!(psc.returned & (1u << 6)) || psc.poc == expectedPoc) &&
+    if (layout.hevc) {
+      // HEVC has no CODED_FRAMES/AVC POC subscription. Never promote seeded
+      // profile/tier/level or buffer minimum to firmware-confirmed values.
+      constexpr uint32_t required = (1u<<1)|(1u<<2)|(1u<<3)|(1u<<5)|(1u<<7)|(1u<<8)|(1u<<10);
+      return (psc.returned & required) == required && pscGeometry() && psc.n && psc.n <= layout.maxN() &&
+        psc.depth == ((expectedDepth<<16)|expectedDepth) && psc.profile == expectedProfile &&
+        psc.level == expectedLevel && psc.tier == expectedTier;
+    }
+    return pscGeometry() && psc.depth == 0x00080008 && psc.coded == 1 &&
+      psc.n && psc.n <= layout.maxN() && (!(psc.returned & (1u << 6)) || psc.poc == expectedPoc) &&
       (!(psc.returned & (1u << 7)) || (expectedProfile == 0 ? psc.profile <= 1 : psc.profile == expectedProfile)) && (!(psc.returned & (1u << 8)) || psc.level == expectedLevel);
   }
-  // Called only by the exclusive worker, before OPEN. Input validation is also
-  // enforced at the native API boundary before the V3 DMA/power preparation.
+  // The first AU may arrive after metadata-only input preparation. It cannot
+  // change an opened session's identity or replace already submitted input.
   bool nativeInput(uint32_t sid, const uint8_t *bytes, uint32_t size, uint64_t callerToken)
   {
-    if (openSent || !sid || !bytes || !size || size > kInputBytes) return false;
+    if (r.error || cleanup || r.etb || !sid || !bytes || !size || size > kInputBytes ||
+        (openSent && (sid != sessionId || !inputStarted || r.stage != Input))) return false;
     sessionId = sid; token = callerToken; accessUnit = bytes; accessUnitBytes = size; checkGolden = false;
     return true;
   }
@@ -180,7 +256,10 @@ public:
       return fail(kErrHfi);
     hfi::begin(o.tx, systemOpen ? 0 : sessionId, o.ids);
     hfi::add(o.tx, type, flags, payload, data, words, o.ids, port);
-    o.hw.note("V4 TX stage %u session %08x header %u packet %u type %08x port %u flags %08x payload %u words %u", r.stage, o.tx[1], o.tx[2],
+    // Keep the reviewed OPB/output-START proof without formatting every command
+    // twice (property and packet); the complete packet still enters history.
+    if (qualificationTrace() || type == 0x03000184 || (type == Start && port == 2))
+      o.hw.note("V4 TX stage %u session %08x header %u packet %u type %08x port %u flags %08x payload %u words %u", r.stage, o.tx[1], o.tx[2],
               o.tx[13], type, port, flags, payload, words);
     if(streaming&&history)history->commands.add(o.tx,o.tx[0],o.hw.nowUs());
     const int rc = o.send(o.tx[0], "V4-session");
@@ -188,31 +267,31 @@ public:
   }
   int property(uint32_t id, uint32_t value, uint32_t port, uint32_t payload = 1)
   {
-    o.hw.note("V4 property %08x port %u payload %u value %08x", id, port, payload, value);
+    if (qualificationTrace()) o.hw.note("V4 property %08x port %u payload %u value %08x", id, port, payload, value);
     return tx(id, 0, port, payload, &value, 1);
   }
   int pair(uint32_t id, uint32_t a, uint32_t b, uint32_t port)
   {
     const uint32_t v[2] = {a, b};
-    o.hw.note("V4 property %08x port %u payload 13 values %08x/%08x", id, port, a, b);
+    if (qualificationTrace()) o.hw.note("V4 property %08x port %u payload 13 values %08x/%08x", id, port, a, b);
     return tx(id, 0, port, 13, v, 2);
   }
   int subscribe(unsigned port, bool properties)
   {
-    uint32_t v[11] = {properties ? 2u : 1u};
+    uint32_t v[12] = {properties ? 2u : 1u};
     unsigned count = 1;
     if (properties) {
       v[count++] = port == 1 ? 0x0300016a : 0x03000162;
       if (port == 2)
         v[count++] = 0x03000121;
     } else
-      for (unsigned i = 0; i < 10; ++i)
-        v[count++] = kPscIds[i];
+      for (unsigned i = 0; i < pscCount(); ++i)
+        if(pscField(i))v[count++] = pscId(i);
     return tx(Subscribe, 3, port, 11, v, count);
   }
   int buffer(Buffer &b, bool release = false, uint32_t dataSize = 0)
   {
-    if (!b.size || b.size > b.capacity || b.off > kArenaBytes - b.capacity || dataSize > b.size ||
+    if (!b.size || b.size > b.capacity || b.capacity > layout.arenaBytes() || b.off > layout.arenaBytes() - b.capacity || dataSize > b.size ||
         (release ? (!b.queued || b.pendingRelease || b.readonly) : (b.queued || b.pendingRelease || b.readonly)))
       return fail(kErrHfi);
     uint32_t v[16] = {b.type, b.index, b.iova(), 0, 0, b.size, 0, dataSize, dataSize ? uint32_t(token) : 0, dataSize ? uint32_t(token >> 32) : 0, release ? 0x201u : 0x200u,
@@ -313,7 +392,7 @@ public:
     if (hasPsc) {
       if (r.psc || r.stage != FirstPsc)
         return fail(kErrHfi, Settings);
-      psc = Psc{};
+      psc = streaming ? initialPsc : Psc{};
       if(streaming){psc.poc=expectedPoc;psc.profile=expectedProfile;psc.level=expectedLevel;}
     }
     picture = 0;
@@ -338,7 +417,7 @@ public:
                                       : (type > 0x01000000 && type < 0x01ffffff);
         if (!kind)
           continue;
-        o.hw.note("V4 RX pass %u stage %u session %08x header %u packet %u type %08x port %u flags %08x bytes %u", pass, r.stage, b[1],
+        if (qualificationTrace()) o.hw.note("V4 RX pass %u stage %u session %08x header %u packet %u type %08x port %u flags %08x bytes %u", pass, r.stage, b[1],
                   b[2], p[5], type, port, flags, p[0]);
         if (pass == 1) {
           if (type == 0x06000001 || type == 0x06000002 || type == 0x06000004) {
@@ -363,8 +442,8 @@ public:
             continue;
           }
           if (hasPsc && port == 1) {
-            for (unsigned i = 1; i < 10; ++i)
-              if (type == kPscIds[i]) {
+            for (unsigned i = 1; i < pscCount(); ++i)
+              if (pscField(i) && type == pscId(i)) {
                 if (i == 2 && p[0] < 40) {
                   fail(kErrHfi, type);
                   break;
@@ -399,6 +478,9 @@ public:
                 case 9:
                   psc.color = p[8];
                   break;
+                case 10:
+                  psc.tier = p[8];
+                  break;
                 }
               }
           }
@@ -408,14 +490,20 @@ public:
           if (r.error && !cleanup)
             continue;
           if (type == Settings) {
+            // First HEVC qualification must retain the complete firmware
+            // response even when admission rejects it. RX payload0 alone
+            // cannot preserve the second crop word or the returned mask.
+            if(layout.hevc)o.hw.note("V9 HEVC PSC observed port %u returned %08x res %08x crop %08x/%08x depth %08x N %u profile %u level %u tier %u expected %u/%u/%u/%u",
+              port,psc.returned,psc.resolution,psc.crop[0],psc.crop[1],psc.depth,psc.n,psc.profile,psc.level,psc.tier,
+              expectedDepth,expectedProfile,expectedLevel,expectedTier);
             if (port != 1 || r.psc || !pscSupported()) {
               fail(kErrHfi, type, flags, port, p[5], b[2]);
               continue;
             }
             ++r.psc;
             o.hw.note("V4 PSC FIRST_IPSC 1 input-pause 1 returned %08x N %u", psc.returned, psc.n);
-            for (unsigned i = 1; i < 10; ++i)
-              o.hw.note("V4 PSC property %08x value %08x source %s", kPscIds[i], psc.value(i),
+            for (unsigned i = 1; i < pscCount(); ++i)
+              if(pscField(i))o.hw.note("V4 PSC property %08x value %08x source %s", pscId(i), psc.value(i),
                         (psc.returned & (1u << i)) ? "returned" : "seeded");
             o.hw.note("V4 PSC crop %08x/%08x supported 1", psc.crop[0], psc.crop[1]);
           } else if (type == Buffers)
@@ -521,7 +609,8 @@ public:
       r.last = true;
       o.hw.note("V4 drain LAST raw index %u empty %u", b->index, unsigned(!v[7]));
     }
-    if (!v[7]) {
+    const bool noShow = streaming && layout.hevc && (picture & 0x40);
+    if (!v[7] && !noShow) {
       if (!(v[10] & 0x10000000) && !cleanup)
         fail(kErrHfi, Buffers);
       return;
@@ -529,14 +618,14 @@ public:
     if (streaming) {
       if (cleanup) return; // cancellation never delivers a late success
       const uint64_t returnedToken = uint64_t(v[8]) | (uint64_t(v[9]) << 32);
-      // Gen2 picture is a bitmask. Like the pinned Iris/sheng references,
-      // classify known kinds and test NOSHOW explicitly; ancillary bits such
-      // as the firmware's 0x80 do not invalidate an otherwise owned AVC frame.
-      if (!rawStarted || v[6] || v[7] < kRawBytes || b->readonly || frameError || !(picture & 15) || (picture & 0x40) ||
+      // HEVC adds CRA/BLA and explicit non-display pictures. They still own a
+      // token and a RAW return; pass a NULL image disposition to the consumer.
+      const bool kind = (picture & (layout.hevc ? 0x3fu : 15u)) || noShow;
+      if (!rawStarted || v[6] || (!noShow && v[7] < layout.rawBytes()) || b->readonly || frameError || !kind || (!layout.hevc && (picture & 0x40)) ||
           outputCount == stream::Credits || !ledger.picture(returnedToken,b->index)) {
         fail(kErrHfi, Buffers, p[2], p[4], p[5], header); return;
       }
-      outputs[(outputHead+outputCount)%stream::Credits]={returnedToken,b->index,v[7]};++outputCount;++r.decoded;
+      outputs[(outputHead+outputCount)%stream::Credits]={returnedToken,b->index,noShow?0:v[7]};++outputCount;++r.decoded;
       deadline = o.hw.nowUs()+5000000;
       o.hw.note("V6 FBD session %08x token %llu index %u picture %u count %u",sessionId,
                 (unsigned long long)returnedToken,b->index,picture,r.decoded);
@@ -577,15 +666,19 @@ public:
       }
       o.packetTrace("RX", ++o.rxEvents, o.rx, bytes);
       const int got = receive(o.rx, bytes);
-      if (got)
+      if (got) {
         rc = got;
+        if (failClosedCleanup) return rc;
+      }
     }
     o.drainDebug();
     const uint32_t irq = o.ops.rd(kIris + kWrapperIntrStatus);
     ++o.watchdogSamples;
     o.watchdogSeen |= irq & (1u << 3);
-    if (o.watchdogSeen)
+    if (o.watchdogSeen) {
       rc = fail(kErrWatchdog);
+      if (failClosedCleanup) return rc;
+    }
     const vsmmu::Fault fault = vsmmu::fault(o.plan, o.ops);
     o.rep.fsr |= fault.fsr & vsmmu::kFsrFaults;
     if (fault.fsr & vsmmu::kFsrFaults)
@@ -603,8 +696,9 @@ public:
     const uint64_t until = o.hw.nowUs() + uint64_t(ms) * 1000;
     for (;;) {
       const int rc = pump();
-      if (rc && !cleanup)
+      if (rc && (!cleanup || failClosedCleanup))
         return rc;
+      if (failClosedCleanup && r.error) return r.error;
       if (done())
         return 0;
       if (o.hw.nowUs() >= until)
@@ -619,24 +713,25 @@ public:
   }
   int scratch(unsigned set, unsigned n)
   {
-    if (!n || n > kMaxN || property(0x03000193, n, 1))
+    if (!n || n > layout.maxN() || property(0x03000193, n, 1))
       return r.error ? r.error : fail(kErrHfi);
-    for (unsigned i = 0; i < 5; ++i) {
+    for (unsigned i = 0; i < layout.scratchCount(); ++i) {
       Buffer &b = *layout.find(scratchType[i], set);
-      b.size = scratchBytes(i, n);
+      b.size = layout.scratchSize(i, n);
+      if(!b.size || b.size>b.capacity)return fail(kErrHfi);
       if (buffer(b))
         return r.error;
     }
-    o.hw.note("V4 scratch set %u N %u COMV %u PARTIAL 196608 all-five 1", set, n, comvBytes(n));
+    o.hw.note("V8 scratch set %u N %u COMV %u count %u general %u",set,n,layout.scratchSize(1,n),layout.scratchCount(),unsigned(layout.general));
     return 0;
   }
-  int transaction()
+  // Format/layout-only control path. No AU, frame credit or output port is
+  // submitted here; native StartSession waits for this before reporting ready.
+  int prepareInput()
   {
+    if (r.error) return r.error;
+    if (cleanup || openSent || inputStarted || r.etb) return kErrArgument;
     deadline = o.hw.nowUs() + 5000000;
-    if (checkGolden) o.hw.note("V4 evidence contract vid-v4a: bounded one-AU kernel AVC no-consumer");
-    if (checkGolden) o.hw.note("V4 fixture bytes %u SHA256 %s", unsigned(sizeof kAccessUnit), kAuSha);
-    else o.hw.note("V5 transaction caller-input session %08x token %llu bytes %u embedded-fixture 0", sessionId,
-                   (unsigned long long)token, accessUnitBytes);
     stage(Opening);
     const uint32_t sid = sessionId;
     if (tx(Open, 3, 0, 1, &sid, 1, true))
@@ -646,14 +741,15 @@ public:
       return r.error;
     // // acceptance is established by PSC downstream; this is only submission/consumption
     stage(Config);
-    if (property(0x03000100, 1, 0, 9) || property(0x03000168, 0, 1) ||
+    if (property(0x03000100, layout.hevc ? 3 : 1, 0, 9) || property(0x03000168, 0, 1) ||
         (streaming && property(0x0300015b, 1, 1)))
       return r.error;
-    for (unsigned i = 1; i < 10; ++i) {
+    for (unsigned i = 1; i < pscCount(); ++i) {
+      if(!pscField(i))continue;
       if (i == 2) {
-        if (pair(kPscIds[i], 0, 0, 1))
+        if (pair(pscId(i), psc.crop[0], psc.crop[1], 1))
           return r.error;
-      } else if (property(kPscIds[i], psc.value(i), 1, (i == 7 || i == 8) ? 9 : i == 9 ? 10 : 1))
+      } else if (property(pscId(i), psc.value(i), 1, (i == 7 || i == 8 || i == 10) ? 9 : i == 9 ? 10 : 1))
         return r.error;
     }
     if (property(0x03000107, streaming ? expectedProfile : 4, 2, 9) || property(0x03000108, streaming ? expectedLevel : 18, 2, 9) || property(0x03000169, 1, 1) || property(0x03000123, 64, 1) ||
@@ -664,6 +760,21 @@ public:
     inputStarted = true;
     if (tx(Start, 3, 1, 0) || consumed())
       return r.error;
+    deadline = UINT64_MAX; // an idle prepared session is not a missing picture
+    return 0;
+  }
+  int transaction()
+  {
+    if (r.error) return r.error;
+    if (cleanup || r.etb || rawStarted || !accessUnit || !accessUnitBytes) return kErrArgument;
+    if (checkGolden) o.hw.note("V4 evidence contract vid-v4a: bounded one-AU kernel AVC no-consumer");
+    if (checkGolden) o.hw.note("V4 fixture bytes %u SHA256 %s", unsigned(sizeof kAccessUnit), kAuSha);
+    else o.hw.note("V5 transaction caller-input session %08x token %llu bytes %u embedded-fixture 0", sessionId,
+                   (unsigned long long)token, accessUnitBytes);
+    if (!inputStarted) {
+      if (const int rc = prepareInput()) return rc;
+    } else if (!openSent || r.stage != Input) return kErrArgument;
+    deadline = o.hw.nowUs() + 5000000;
     Buffer &input = *layout.find(Bitstream, 0);
     for (unsigned i = 0; i < accessUnitBytes; ++i)
       o.dma.arena[input.off + i] = accessUnit[i];
@@ -675,9 +786,11 @@ public:
       return r.error;
     o.hw.note("V4 acceptance OPEN CONFIG START BITSTREAM downstream-PSC 1");
     stage(Reconfigure);
-    if (property(0x03000184, 1, 2) || property(0x03000101, 1, 2, 9) || pair(0x03000104, 0x01800100, 0x01800080, 2))
+    if (!adoptPscGeometry()) return fail(kErrHfi,Settings);
+    if (property(0x03000184, 1, 2) || property(0x03000101, expectedDepth == 10 ? 3 : 1, 2, 9) ||
+        pair(0x03000104, (rawPixelStride()<<16)|rawScanlines(), (rawPixelStride()<<16)|((rawScanlines()/2+15)&~15u), 2))
       return r.error;
-    for (unsigned i = 0; i < 5; ++i)
+    for (unsigned i = 0; i < layout.scratchCount(); ++i)
       if (buffer(*layout.find(scratchType[i], 0), true))
         return r.error;
     if (scratch(1, psc.n) || property(0x0300010a, 1, 0) || property(0x0300010b, 4, 0))
@@ -685,11 +798,12 @@ public:
     const uint32_t cause = Settings;
     if (tx(Resume, 3, 1, 1, &cause, 1) || subscribe(2, false))
       return r.error;
-    for (unsigned i = 1; i < 10; ++i) {
+    for (unsigned i = 1; i < pscCount(); ++i) {
+      if(!pscField(i))continue;
       if (i == 2) {
-        if (pair(kPscIds[i], psc.crop[0], psc.crop[1], 2))
+        if (pair(pscId(i), psc.crop[0], psc.crop[1], 2))
           return r.error;
-      } else if (property(kPscIds[i], psc.value(i), 2))
+      } else if (property(pscId(i), psc.value(i), 2))
         return r.error;
     }
     if (subscribe(2, true))
@@ -704,9 +818,14 @@ public:
         return r.error;
     for (unsigned i = 0; i < count; ++i) {
       Buffer &b = *layout.find(Raw, i);
-      for (unsigned j = 0; j < kRawBytes; ++j)
+      // General native output never checked the diagnostic sentinel. Firmware
+      // owns and writes RAW after queueing; do not overwrite it just to discard
+      // the check. Preserve the barrier and the exact descriptor/queue order.
+      if (streaming && layout.general) { o.hw.barrier(); if (buffer(b)) return r.error; continue; }
+      for (unsigned j = 0; j < layout.rawBytes(); ++j)
         o.dma.arena[b.off + j] = 0xa5;
       char hash[65];
+      if(layout.general){o.hw.barrier();if(buffer(b))return r.error;continue;}
       o.hw.hashActive(o.dma.arena + b.off, hash);
       if (sameText(hash, kGolden))
         return fail(kErrHfi);
@@ -780,9 +899,17 @@ public:
     if(!ledger.drainReady()||!f||f->phase!=stream::Phase::Submitted)return -22;
     return ledger.retire(t)?0:-22;
   }
-  int shutdown()
+  int shutdown(bool failClosed = false)
   {
     cleanup = true;
+    failClosedCleanup = failClosed;
+    auto abortCleanup = [this](int error) {
+      r.close = error;
+      o.hw.note("V9c session cleanup stopped at first error %d no-further-HFI 1",error);
+      stage(Finished);
+      return error;
+    };
+    if (failClosed && r.error) return abortCleanup(r.error);
     int rc = 0;
     if (rawStarted) {
       stage(StopRaw);
@@ -792,6 +919,7 @@ public:
         got = wait([this] { return r.stopRaw; });
       if (got && !rc)
         rc = got;
+      if (failClosed && (got || r.error)) return abortCleanup(got ? got : r.error);
     }
     if (inputStarted) {
       stage(StopInput);
@@ -801,6 +929,7 @@ public:
         got = wait([this] { return r.stopInput; });
       if (got && !rc)
         rc = got;
+      if (failClosed && (got || r.error)) return abortCleanup(got ? got : r.error);
     }
     if (openSent) {
       stage(Closing);
@@ -810,12 +939,15 @@ public:
         got = wait([this] { return r.closed; });
       if (got && !rc)
         rc = got;
+      if (failClosed && (got || r.error)) return abortCleanup(got ? got : r.error);
     }
-    // A bounded extra pump detects already queued late replies; all backing still belongs to V3 until PAS/detach/TLB.
+    // A bounded extra pump detects already queued late replies while backing
+    // remains owned by the core.
     const int late = pump();
     if (late && !rc)
       rc = late;
     r.close = rc;
+    const bool released = failClosed && !rc && r.closed;
     unsigned queued = 0, refs = 0, pending = 0;
     for (unsigned i = 0; i < layout.used; ++i) {
       Buffer &b = layout.buf[i];
@@ -823,8 +955,10 @@ public:
       refs += b.readonly;
       pending += b.pendingRelease;
       if (b.queued || b.readonly || b.pendingRelease)
-        o.hw.note("V4 ledger type %u index %u iova %08x queued %u readonly %u pending-release %u retained-until-PAS 1", b.type, b.index,
-                  b.iova(), unsigned(b.queued), unsigned(b.readonly), unsigned(b.pendingRelease));
+        o.hw.note("V4 ledger type %u index %u iova %08x queued %u readonly %u pending-release %u %s", b.type, b.index,
+                  b.iova(), unsigned(b.queued), unsigned(b.readonly), unsigned(b.pendingRelease),
+                  released ? "released-on-close 1" : "retained-until-PAS 1");
+      if (released) b.queued = b.readonly = b.pendingRelease = false;
     }
     o.hw.note("V4 session end closed %u close-error %d queued %u readonly %u pending %u arena-retained 1", unsigned(r.closed), r.close,
               queued, refs, pending);

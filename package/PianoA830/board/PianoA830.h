@@ -14,6 +14,8 @@ extern "C" {
 void piano_a830_note(const char *format, ...) __attribute__((format(printf, 1, 2)));
 // Fill the board, parse the boot arguments and run adreno830_start once (level 1: S0 only; 2: S1..S10, piano-gpu-stop honoured).
 IOReturn piano_a830_board_start(unsigned level);
+// The GPU qualification top S10 will take from the boot arguments (0: not a qualification boot), before the bring-up thread runs.
+uint8_t piano_a830_qualification_top(void);
 // The read-only survey of piano-gpu=1 (mask: PianoA830Survey* bits, piano-gpu-survey). Thread context; writes nothing.
 void piano_a830_survey(uint32_t mask);
 // adreno830_start's outcome as console lines (status block, the last failure, stage times).

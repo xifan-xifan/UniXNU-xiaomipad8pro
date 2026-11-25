@@ -168,7 +168,7 @@ BRIDGE=$K/out/metal/bridge/libnative_metal_bridge.a
 FRONTEND_PATCHES=()
 for p in "$P"/frontend/*.patch; do [ -f "$p" ] && FRONTEND_PATCHES+=("$p"); done
 CXX=(xcrun clang++ -target arm64e-apple-macos14.0 -isysroot "$SDK" -fobjc-arc -O2 -std=c++17 -Wno-deprecated-declarations -c
-     -x objective-c++ -I "$U")
+     -x objective-c++ -I "$U" -I "$P/frontend")
 if [ ${#FRONTEND_PATCHES[@]} -gt 0 ] || [ -f "$P/abort_reporter.mm" ]; then CXX+=(-fno-objc-msgsend-selector-stubs); fi
 # A change of the compile flags recompiles both objects.
 printf '%s\n' "${CXX[@]}" > "$O/plugin/flags.new"
@@ -182,7 +182,7 @@ for p in ${FRONTEND_PATCHES[@]+"${FRONTEND_PATCHES[@]}"}; do
   patch -s "$O/plugin/frontend.mm.new" < "$p" || { echo "frontend patch $p does not apply" >&2; exit 1; }
 done
 put "$O/plugin/frontend.mm.new" "$O/plugin/frontend.mm"; rm -f "$O/plugin/frontend.mm.new" "$O/plugin/frontend.mm.new.orig"
-if stale "$O/plugin/frontend.o" "$O/plugin/frontend.mm" "$U/NativeBridgeMetalFrontend.h" "$U/bridge/NativeMetalObjects.h"; then
+if stale "$O/plugin/frontend.o" "$O/plugin/frontend.mm" "$U/NativeBridgeMetalFrontend.h" "$U/bridge/NativeMetalObjects.h" "$P/frontend/SurfaceResidency.h" "$P/frontend/AirSignature.h"; then
   "${CXX[@]}" "$O/plugin/frontend.mm" -o "$O/plugin/frontend.o"
 fi
 # The abort reporter (tooling/metal/turnip-a830/abort_reporter.mm, ours: NativeSoftMetal's in the desktop's Metal clients) as a third

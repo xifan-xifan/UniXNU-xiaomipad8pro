@@ -123,7 +123,8 @@ PROFILES = {
                  # docs/drivers/gpu-userspace.md: a long full-panel pass at the login transition is no hang (2 s was too short)
                  'piano-gpu-hang-ms=10000',
                  # the desk images' input drivers (tooling/k27/build-desktop-images.sh PROFILE), each a level that ran on the tablet
-                 'piano-keyboard=2', 'piano-keyboard-gestures=1', 'piano-backlight=2', 'piano-backlight-keys=1', 'piano-touch=2'],
+                 'piano-keyboard=2', 'piano-keyboard-gestures=1', 'piano-backlight=2', 'piano-backlight-keys=1', 'piano-touch=2',
+                 'piano-wifi-native-boot=1'],
         'vmm_present': 0,
         'kexts': ['com.unixnu.driver.PianoA830', 'com.unixnu.driver.PianoPower', 'com.unixnu.driver.PianoDwc3',
                   'com.unixnu.driver.PianoKeyboard', 'com.unixnu.driver.PianoTouch', 'com.unixnu.driver.PianoBacklight'],
@@ -159,7 +160,7 @@ CHARGING = {
 # Profile arguments the menu's "fastboot" entry (a reset after 1 s) leaves out.
 NOT_IN_FASTBOOT = ('piano-gpu', 'piano-gpu-delay', 'piano-power', 'piano-usb', 'piano-usb-hid', 'piano-power-policy', 'piano-power-rp',
                    'piano-thermal', 'piano-thermal-adc', 'piano-gpu-hang-ms', 'piano-keyboard', 'piano-keyboard-gestures',
-                   'piano-backlight', 'piano-backlight-keys', 'piano-touch')
+                   'piano-backlight', 'piano-backlight-keys', 'piano-touch', 'piano-wifi-native-boot')
 DROPPED = ('piano-reset-after', 'piano-reset-to', 'data-persist', 'droidvm-utc')
 # Set only by their own options (--replace-data, --flatten-data; data-persist is always 2 here), so the intent is explicit and recorded.
 STORE_ARGS = ('data-persist', 'data-store-replace', 'data-store-flatten')
@@ -364,7 +365,7 @@ def charging_of(a, profile):
     return profile.get('charging') if level is None else level
 
 
-def args_of(a, profile, utc, seed=None):
+def args_of(a, profile, utc):
     ram = common.ram_images()
     base = [x for x in ram.K27_ARGS if x.split('=', 1)[0] not in DROPPED + tuple(getattr(a, 'drop_arg', None) or [])]
     if a.rtc_offset is not None and any(x.split('=', 1)[0] in ('piano-rtc', 'piano-rtc-offset') for x in a.arg):
@@ -372,21 +373,10 @@ def args_of(a, profile, utc, seed=None):
     guard = boot_guard(a, profile)
     level = charging_of(a, profile)
     charging = CHARGING[level]['args'] if level else []
-    binding = []
-    if a.data_extent:
-        # A store on linux_data is bound to the window of the target extent (docs/k273-line.md): the root stays on linux_rootfs.
-        if seed is None:
-            raise SystemExit('--data-extent needs the seed\'s store_blocks')
-        bind = {'native-ufs-root-part': 'linux_rootfs', 'data-store-part': 'linux_data',
-                'data-store-lba': str(common.data_store_lba(seed, a.data_extent))}
-        clash = {x.split('=', 1)[0] for x in a.arg} & set(bind)
-        if clash:
-            raise SystemExit(f'--arg {", ".join(sorted(clash))}: the Data store binding comes from --data-extent')
-        binding = [f'{name}={value}' for name, value in bind.items()]
     given = {x.split('=', 1)[0] for x in a.arg}
     charging = [x for x in charging if x.split('=', 1)[0] not in given]   # --arg NAME=VALUE replaces the same NAME
     own = [x for x in profile['args'] if x.split('=', 1)[0] not in given]   # the profile's too (e.g. --arg piano-touch=0)
-    extra = own + charging + a.arg + binding + rtc_args(a.rtc_offset) + ([f'{GUARD_PREFIX}={guard}'] if guard else [])
+    extra = own + charging + a.arg + rtc_args(a.rtc_offset) + ([f'{GUARD_PREFIX}={guard}'] if guard else [])
     names = {x.split('=', 1)[0] for x in extra}
     if names & set(STORE_ARGS):
         raise SystemExit(f'--arg {", ".join(sorted(names & set(STORE_ARGS)))}: the Data store arguments come from --replace-data / '
@@ -402,8 +392,7 @@ def args_of(a, profile, utc, seed=None):
     macos = base + store + ['sheng-smp=1']
     diag = base + store + [f'piano-reset-after={a.diag_reset_after}', 'piano-reset-to=bootloader', 'sheng-smp=1']
     # The way back to ABL fastboot from the menu: no UFS root, no store, no console mirror (the previous run's log stays in cvp).
-    quiet = ('native-ufs-root', 'native-ufs-root-part', 'native-ufs-diagnostics', 'data-store-part', 'data-store-lba',
-             'pstore-console', 'pstore-console-size') + NOT_IN_FASTBOOT
+    quiet = ('native-ufs-root', 'native-ufs-diagnostics', 'pstore-console', 'pstore-console-size') + NOT_IN_FASTBOOT
     fastboot = [x for x in base if x.split('=', 1)[0] not in quiet + ('data-persist',) and not x.startswith(GUARD_PREFIX)] + [
         'data-persist=0', 'piano-reset-after=1', 'piano-reset-to=bootloader', 'sheng-smp=1']
     lines = {'macos': ' '.join(macos), 'macos-diag': ' '.join(diag), 'fastboot': ' '.join(fastboot)}
@@ -525,30 +514,6 @@ def esp_firmware(a, kc, prev_kc, directory):
     return pins, found, problems
 
 
-def esp_geometry(p, first):
-    """The ESP's partition geometry: its first 4 KiB LBA and 1 GiB size, checked against the FAT32 field and LUN 0."""
-    if not 0 < first < 2**32 or first % 256:
-        p.error('--esp-first-lba must fit the FAT32 hidden-sector field and be 1 MiB aligned')
-    if first + common.ESP_BLOCKS > common.LUN0_BLOCKS:
-        p.error(f'--esp-first-lba {first}: the {common.ESP_BLOCKS * common.LBA >> 20} MiB ESP ends past LUN 0')
-    return {'first_lba': first, 'blocks': common.ESP_BLOCKS}
-
-
-def check_esp_layout(p, geometry, data_extent, rootfs_last):
-    """Refuse an ESP that overlaps the target linux_data extent or that contains --rootfs-last."""
-    first, blocks = geometry['first_lba'], geometry['blocks']
-    if data_extent:
-        dfirst, dlast = data_extent
-        if dfirst > dlast:
-            p.error('--data-extent: FIRST is past LAST')
-        if first <= dlast and first + blocks - 1 >= dfirst:
-            p.error('ESP overlaps --data-extent')
-    if rootfs_last is not None and rootfs_last < 0:
-        p.error('--rootfs-last must not be negative')
-    if rootfs_last is not None and first <= rootfs_last < first + blocks:
-        p.error('--rootfs-last lies inside the ESP')
-
-
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--profile', choices=sorted(PROFILES), required=True)
@@ -604,15 +569,7 @@ def main():
                    help='build even when a pinned firmware file is missing or different (its kext then reports it)')
     p.add_argument('--name', help='output base name (default esp-<profile>-<default>)')
     p.add_argument('--out', type=Path, default=common.DEVICE / 'out/persistent')
-    p.add_argument('--esp-first-lba', type=int, default=common.ESP_FIRST,
-                   help='first 4 KiB LUN 0 LBA of the 1 GiB ESP (default: the historical layout; a device layout says its own)')
-    p.add_argument('--rootfs-last', type=int, metavar='LBA',
-                   help='linux_rootfs\' last LBA of the target layout, for the record\'s Data store window (default: the historical one)')
-    p.add_argument('--data-extent', type=int, nargs=2, metavar=('FIRST', 'LAST'),
-                   help='inclusive 4 KiB LUN 0 LBAs of the target linux_data partition: refuse an ESP that overlaps it')
     a = p.parse_args()
-    geometry = esp_geometry(p, a.esp_first_lba)
-    check_esp_layout(p, geometry, a.data_extent, a.rootfs_last)
     profile = PROFILES[a.profile]
     a.fast_boot = fast_boot_of(a, profile)
     inputs, base, layer = resolve_inputs(a, profile)
@@ -684,9 +641,7 @@ def main():
     data_store['base'] = {'identity_sha256': base['record']['identity_sha256'], 'dir': base['dir'].name,
                           'source': base['record']['source']} if base else None
     data_store['layer'] = layer
-    lines = args_of(a, profile, a.utc, seed)
-    if a.data_extent:
-        common.check_store_size(seed, lines['macos'].split(), data_extent=a.data_extent)
+    lines = args_of(a, profile, a.utc)
     config = config_text(a, lines, prev, guard)
     name = a.name or f'esp-{a.profile}-{a.default}'
     a.out.mkdir(parents=True, exist_ok=True)
@@ -718,7 +673,7 @@ def main():
         want = {str(f.relative_to(stage)): common.sha(f) for f in sorted(stage.rglob('*')) if f.is_file()}
         image.unlink(missing_ok=True)
         mtools('mformat', '-C', '-F', '-S', '5', '-M', '4096', '-T', str(common.ESP_BLOCKS), '-h', '1', '-s', '1', '-c', '1',
-               '-H', str(geometry['first_lba']), '-v', LABEL, '-N', SERIAL, '-i', str(image), '::')
+               '-H', str(common.ESP_FIRST), '-v', LABEL, '-N', SERIAL, '-i', str(image), '::')
         mtools('mcopy', '-i', str(image), '-s', '-Q', '-m', str(stage / 'EFI'), '::/')
         # mtools' own view: geometry, and every file copied back out.
         minfo = mtools('minfo', '-i', str(image), '::').stdout
@@ -733,7 +688,7 @@ def main():
     problems = list(fat['problems'])
     if fat['sector_bytes'] != 4096 or fat['sectors_per_cluster'] != 1 or fat['total_sectors'] != common.ESP_BLOCKS:
         problems.append('geometry is not 4096-byte sectors, 1 per cluster, 262144 sectors')
-    if fat['hidden_sectors'] != geometry['first_lba'] or fat['label'] != LABEL or fat['serial'] != SERIAL:
+    if fat['hidden_sectors'] != common.ESP_FIRST or fat['label'] != LABEL or fat['serial'] != SERIAL:
         problems.append('hidden sectors, label or serial')
     if got != want:
         problems.append(f'independent reader: files differ from the stage ({sorted(set(got) ^ set(want)) or "contents"})')
@@ -745,8 +700,8 @@ def main():
         raise SystemExit(f'{image}: ' + '; '.join(problems))
     record = {
         'status': 'OFFLINE_BUILD_NOT_DEVICE_TESTED', 'image': image.name, 'bytes': image.stat().st_size, 'sha256': common.sha(image),
-        'partition': {'lun': 0, 'index': common.ESP_INDEX + 1, 'first_lba': geometry['first_lba'], 'blocks': geometry['blocks'],
-                      'dd': f'bs=1M seek={geometry["first_lba"] * common.LBA >> 20} count={geometry["blocks"] * common.LBA >> 20}'},
+        'partition': {'lun': 0, 'index': common.ESP_INDEX + 1, 'first_lba': common.ESP_FIRST, 'blocks': common.ESP_BLOCKS,
+                      'dd': f'bs=1M seek={common.ESP_FIRST * common.LBA >> 20} count={common.ESP_BLOCKS * common.LBA >> 20}'},
         'profile': a.profile, 'about': profile['about'], 'extra_args': a.arg, 'fast_boot': a.fast_boot, 'deny_exec': a.deny_exec,
         'default': a.default,
         'timeout': a.timeout,
@@ -762,12 +717,9 @@ def main():
                          'vendor_data': 'the owner\'s own copy: never committed'} if preset else None,
         'firmware': {'dir': str(fw_dir), 'files': firmware.record(fw_pins, fw_found, fw_problems)},
         'seed': seed, 'data_store': data_store,
-        'store': ({'partition': 'linux_data', 'extent': a.data_extent,
-                   'first_lba': common.data_store_lba(seed, a.data_extent), 'window_blocks': window,
-                   'reserve_blocks': common.RESERVE_BLOCKS} if a.data_extent else
-                  {'partition': 'linux_rootfs', 'window_blocks': window,
-                   'first_lba_now': common.store_first(a.rootfs_last if a.rootfs_last is not None else common.ROOTFS_LAST, window),
-                   'first_lba_after': common.store_first(a.rootfs_last if a.rootfs_last is not None else common.ROOTFS_NEW_LAST, window)}),
+        'store': {'window_blocks': window,
+                  'first_lba_now': common.store_first(common.ROOTFS_LAST, window),
+                  'first_lba_after': common.store_first(common.ROOTFS_NEW_LAST, window)},
         'fat': {k: v for k, v in fat.items() if k not in ('files', 'problems')},
         'files': {n: ('private' if n in fw_private else h) for n, h in want.items()}, 'unixnu_toml': config,
     }

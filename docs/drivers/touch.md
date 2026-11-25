@@ -131,6 +131,12 @@ rotation is CGDisplayRotation's (degrees clockwise, 90 = the panel's left edge u
 | `piano-wake-log=S` | 60 | the `idle: N wakeups in S s` line every S seconds (0 none; shared) |
 | `piano-touch-trace=1` | 0 | more frame headers; contact positions also at level 2 |
 | `piano-touch-rotate=1` | 0 | follow the display's rotation (§5): `PianoTouchRotation` and `piano-touch-rotation` taken, contacts mapped from their touch-down |
+| `piano-touch-mt=1` | 0 | the multitouch path (§17): two or more fingers to macOS's multitouch stack through a second HID device; one finger unchanged |
+| `piano-touch-mt-scale=PCT` | 100 | the size the multitouch surface declares, percent of the panel's (25..400; 100 = 1:1 in millimetres) |
+| `piano-touch-mt-tap=0` | 1 | no right click from a two-finger tap on the multitouch path |
+| `piano-touch-mt-trace=1` | 0 | every multitouch frame in the log (default: the first 40) |
+| `piano-touch-inject=1` | 0 | TEST ONLY: `machdep.piano_touch_inject` (root writes a keyframe script, §17.4); never in a daily profile |
+| `piano-touch-inject-ms=MS` | 8 | the injected frames' period (4..50) |
 | `piano-touch-noedge=MS` | 0 | A/B only: also read without an announced frame, as before 2026-11-12 (busy MS after the last read, 25..200; at rest the idle period + 50 ms; the display off every 200 ms; never in the 2 s after a start until its first edge). 0: never (§13) |
 | `piano-touch-gestures=0` | 1 | level 2 without the gestures: the first contact is the tip (down presses, moves drag, up releases), as before this change |
 | `piano-touch-hold=MS` | 500 | a finger held this long within the slop: right click (200..3000; 0: never, and a long press is a click) |
@@ -657,3 +663,119 @@ The touch part of the driver contract (`package/include/PianoPowerContract.h`, `
 - Risks: the power tree's `off` also comes at a restart (harmless: the frames stop); a controller that loses its firmware with the
   panel is re-downloaded at each display return (~1 s without touch); NativeGopDisplay publishes the display's state only with
   `piano-backlight=2` (a one-line change in its owner's package would publish it always).
+
+## 17. The multitouch path (`piano-touch-mt=1`, 2026-11-22, host-tested, not run)
+
+Left out of the daily line (lead/v131y8, 2026-11-23): `piano-touch-mt` is refused at start and `PianoTouch.json` carries no
+`PianoTouchMultitouch` personality, so no multitouch device is published; the cover touchpad comes later. The native touch
+screen (section 18) does not use this path; the test-only injection (17.4) stays behind `piano-touch-inject=1`, never in a daily
+profile.
+
+Until now the screen was a HID mouse: macOS made no magnify, rotate or swipe event and no `NSTouch` from it, and a pinch was Command +
+Wheel. With `piano-touch-mt=1` PianoTouch publishes a second HID device, a trackpad of Apple's multitouch family (`MtHid.h`), which
+macOS's own AppleMultitouchDriver (already in the native kext collection) drives with `AppleMultitouchHIDEventDriverV2` through
+PianoTouch.json's personality `PianoTouchMultitouch`; its MultitouchHID plug-in recognises the gestures, and AppKit gets magnify,
+rotate, swipe, phased scrolling with momentum and indirect touches, as from a trackpad. Default off: without the argument nothing is
+published and every report is as before.
+
+### 17.1 What a touch does (`TouchMt.h`)
+- One finger: unchanged (§14.1: tap, hold, drag through the absolute pointer).
+- Two counted fingers while no button is held: the pointer engine lets go (no click), the pointer goes to the fingers' middle (macOS
+  zooms and rotates about the pointer and scrolls the window under it), and every finger goes to the multitouch device at its place: the
+  rotated desktop centred on a square surface of the panel's long side (236.8 mm at 74 um a pixel), 1:1 in millimetres in either
+  orientation; the screen's right edge is the surface's.
+- More fingers join (three- and four-finger swipes); a finger that lifts while two stay is sent lifting once.
+- Fewer than two fingers: the gesture ends (every finger lifting; 10 ms later gone; 20 ms later an empty frame), nothing more until
+  every finger is up. A two-finger tap (both up within 700 ms, middle and spread under the slop) stays our right click.
+- Palms (`TouchTrack.h`): never in a frame; a followed finger that turns palm ends the gesture at once.
+
+### 17.2 The device (`MtHid.h`)
+Identity 0x05AC / 0x0281 / 0x0804, transport "I2C", our location ID 0x50544d00 (the personality also matches it). Descriptor: Generic
+Desktop / Mouse report 0x02, Digitizer / Touch Pad report 0x3F, vendor report 0x44 (1387 bytes). The feature reports the driver asks
+(0x00, 0x01 size requests, 0x02, 0xD1 family, 0xD3 rows and columns, 0xD0 region, 0xA1, 0xD9 surface size, 0x7F, 0xC8, 0xDB all of them)
+are answered with the documented values; every request is counted (`machdep.piano_touch_mt`) and the first 64 logged. Frames: report
+0x02, a 12-byte header and 9 bytes a finger (13-bit X and Y, finger type, state, sizes, pressure, number, angle). Written from documented
+behaviour (Linux hid-magicmouse and acidanthera VoodooInput, both GPL-2.0: facts only, no code text).
+
+### 17.3 The log and the status
+`mt: multitouch device published`, `mt: event service <class> published on the multitouch device`, `mt: AppleMultitouchDevice ...
+published` (family, parser type, surface), `mt: getReport type T id ID -> N bytes`, `mt: gesture N starts with K fingers`, `mt: frame N,
+B bytes, K fingers [...]`, `mt: gesture ends`, `mt: a palm: the gesture ends`, `mt: two-finger tap -> right click`.
+`sysctl machdep.piano_touch_mt`: the device, the driver macOS gave it, the AMD, the requests by report ID, frames, errors, gestures,
+palms, taps, the rotation, the injection.
+
+### 17.4 Test-only injection (`piano-touch-inject=1`, `TouchInject.h`)
+Root writes a keyframe script to `machdep.piano_touch_inject`: segments `MS:x,y[,area];x,y ...` in panel pixels (area in sensor
+nodes; 48 or more is a palm), a segment with as many contacts as the one before moving them in a straight line over MS, `MS:` alone no
+contact. The frame thread plays it as decoded panel frames (every `piano-touch-inject-ms`) through the tracker, the gestures and the
+multitouch path; refused while a finger, a gesture or a muted display is on. Example, a pinch out about the middle:
+`sudo sysctl -w machdep.piano_touch_inject="80:1400,1068;1800,1068 600:900,1068;2300,1068 80:"`.
+
+### 17.5 Host tests (`tests/touch_mt_host.cpp`)
+The descriptor parsed; every feature answer and size answer, the 0xDB bundle; the frame bit packing against an independent decoder;
+pinch, rotation, three-finger swipe, a finger joining and leaving, palms (resting, grown mid-gesture, counted at the start), the
+two-finger tap, one finger untouched, a drag holding its button, disabled, 90-degree rotation, all through the tracker; script parsing,
+interpolation and palm areas.
+
+### 17.6 Not yet
+The run (`touch-mt1`: the AMD built? gestures in AppKit? Preview and Maps?); scroll speed against the trackpad acceleration defaults; the
+cover touchpad through the same device class (all fingers, the clickpad's button); macOS 27's direct-touch path for the screen (the
+touch MacBook Pro's), which needs its gates read first.
+
+## 18. The native touch screen (`piano-touch-native=1|2`, 2026-11-23, host-tested, not run)
+
+macOS 27.3 has a direct-touch stack: the seed's own model, Mac17,11, is the touch-screen MacBook Pro (board K114cAP, "MacBook Pro (14-inch
+PROLED XDR Display)"), whose panel's controller is an MTP function matched by AppleMultitouchDriver's generic touch-screen personality.
+Its display side is generic: IOHIDFamily marks any service with a Digitizer Touch Screen usage DisplayIntegrated, IOKit's user-space HID
+service marks every digitizer event of such a service display-integrated, WindowServer turns the digitizer events of any service that
+conforms to Digitizer / Touch Screen into direct-touch events, and BackBoard's direct-touch processor (in WindowServer) takes a built-in
+touch-screen service as the main display's digitizer. So PianoTouch can present the panel as a plain HID multi-touch touch screen,
+with our own identity and descriptor; no Apple file, no device-tree node, no display UUID.
+
+### 18.1 The device (`TouchScreenHid.h`) and its driver
+`PianoTouchScreen` (vendor 0x1af4, product 0x5453, location 0x50545300, transport SPI, manufacturer UniXNU, built-in, DisplayIntegrated,
+primary usage Digitizer / Touch Screen): a Touch Screen application collection, report 1 of 49 bytes, eight Finger collections of Tip
+Switch, In Range, Touch Valid, Untouch, Contact Identifier and X / Y (0..32767, physical 236.8 x 158.1 mm). PianoTouch.json's
+`PianoTouchScreenEventDriver` gives it IOHIDFamily's IOHIDEventDriver (score 3000, DigitizerCollectionDispatch). Never Apple's vendor or
+manufacturer (AppleMultitouchDriver's touch-screen personality would take it for its own parser).
+
+### 18.2 The router (`TouchNative.h`)
+Every followed finger keeps a slot from its first frame to its lift (Contact Identifier = slot + 1: the path index); a report per frame
+while a finger is down, the lift as one report, nothing at rest; palms never; a finger that turns palm cancels every touch (tip + Untouch,
+then released) and nothing follows until every contact is up; frames lost cancel the same way. Positions in the rotated desktop
+(pat_rotate), or the panel's axes (`piano-touch-native-axes=1`). In native mode the pointer gestures and the multitouch path get nothing.
+
+### 18.3 Boot arguments and the switch
+`piano-touch-native=1` publishes the device and starts native; `=2` publishes it and keeps the pointer gestures until root writes `on` to
+`machdep.piano_touch_native` (`off` back, `axes=panel|desktop`; taken when no contact is active): an A/B on one boot. Reading the sysctl
+gives the driver macOS gave the device, its DisplayIntegrated / Built-In / collection-dispatch flags, the mode, reports, downs, ups,
+cancels, palms. Needs `piano-touch=2`. Default 0: nothing published.
+
+### 18.4 Host tests (`tests/touch_native_host.cpp`)
+The usage constants against the SDK; the descriptor through an independent item parser (one Touch Screen application collection, eight
+Finger collections with every field at its bit offset, nothing global leaking between items); the packer through the parsed offsets; a
+model of IOHIDEventDriver's digitizer rules (finger transducers, collection dispatch, Touch Valid, the transducer index, dropped empty
+slots, touch / range / position / cancel masks) fed with the router's reports for a tap, a drag, two fingers, nine fingers, palms (resting,
+grown), frames lost, 90 degrees in both axes and an injected two-finger spread.
+
+### 18.5 Not yet
+The run (`touch-native1`): does WindowServer acquire it as the main display's digitizer, do touches reach AppKit (direct touches in a view
+that takes them; clicks, scrolling, magnify and rotation in one that does not), which axes BackBoard expects under rotation, system edge
+gestures. Without a display UUID WindowServer does not mark the display touch-capable ("DisplaySupportsTouch"); nothing found reads it.
+
+### 18.6 The display binding (touch-native1, 2026-11-23)
+touch-native1: WindowServer made a direct-touch event of every report and BackBoard took the touch screen as the main display's
+digitizer, but no touch reached an app: BackBoard files a digitizer without `displayUUID` under "<main>", and WindowServer's render
+space (BackBoard's hit test) resolves a display only from a UUID string. The event service now carries `displayUUID`:
+`piano-touch-native-uuid=U` at boot, or root writes `uuid=U` to `machdep.piano_touch_native` (the touch screen is published again; a
+service's displayUUID is read only when it appears). U is the panel's CGDisplayCreateUUIDFromDisplayID (TouchProbe prints it).
+
+### 18.7 The binding by itself and the axes (touch-native2, 2026-11-23)
+touch-native2 delivered taps (clicks), long presses (right clicks), one-finger drags, pinches (magnify) and rotations to AppKit once the
+event service carried the display UUID. Two findings: the UUID is NativeGopDisplay's own constant IOMFBUUID for the panel, so PianoTouch
+now reads it from the panel's NativeGopDisplay (the instance without D6's `piano-dp-fake` role) at start, or from the frame thread until
+it is there (published at most 60 s late; `piano-touch-native-uuid=U` still overrides); and BackBoard applies the display's rotation to a
+digitizer's positions itself (a tap at panel (400, 1800) under 90 degrees landed at the panel's spot only in the panel's axes), so the
+native positions now default to the panel's axes (`piano-touch-native-axes=0`: the rotated desktop's). What AppKit makes of touches in a
+view without its own touch handling, by design: a pan is a left-mouse drag (scrolling comes from NSScrollView's touch scrolling), a
+two-finger single tap is nothing (a two-finger double tap is smart magnify; the secondary click is the long press).

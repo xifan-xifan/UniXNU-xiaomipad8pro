@@ -6,6 +6,15 @@
 
 namespace {
 bool arcUsable(const Sm8750RpmhArc &arc) {return arc.present && arc.count && arc.count<=Sm8750RpmhArcMaxLevels;}
+bool arcValid(const Sm8750RpmhArc &arc)
+{
+    if(!arc.present)return !arc.count;
+    if(arc.count>Sm8750RpmhArcMaxLevels)return false;
+    if(!arc.count)return true; // cmd-db dummy
+    if(arc.vlvl[0])return false;
+    for(unsigned i=1;i<arc.count;++i)if(arc.vlvl[i]<=arc.vlvl[i-1])return false;
+    return true;
+}
 
 IOReturn refuse(A830VoteTables *out,uint32_t step,uint32_t value,uint32_t resource,IOReturn result)
 {
@@ -55,7 +64,15 @@ IOReturn voteTables(const Sm8750RpmhResources &res,const Adreno830Board &board,A
         uint32_t vote=0;
         if(A830Votes::arcVote(res.gfx,secondary,level.vlvl,&vote)!=kIOReturnSuccess)
             return refuse(out,A830VotesStepGx,g,level.vlvl,kIOReturnUnsupported);
-        out->gx[g]={vote,A830Votes::dependencyVote(res.mx,level.vlvl,linuxForm),level.khz};
+        uint32_t dep=A830Votes::dependencyVote(res.mx,level.vlvl,linuxForm);
+        // BX is optional; use the rounded GX corner, independently of the MX OPP dependency.
+        if(arcUsable(res.gbx)) {
+            const uint32_t cur=vote>>16;
+            unsigned bx=0;
+            while(bx+1<res.gbx.count && res.gbx.vlvl[bx]<cur)++bx;
+            dep=(dep&~(0x3fu<<20))|(bx<<20);
+        }
+        out->gx[g]={vote,dep,level.khz};
     }
     out->gx_count=uint8_t(out->levels+1);
     /* The GMU's own clock: off, then the two qcom,gmu-freq-table entries (KGSL setup_cx_arc_votes: cx.lvl over mx.lvl). */
@@ -331,6 +348,8 @@ IOReturn A830Votes::build(const Sm8750RpmhResources &res,const Adreno830Board &b
     /* annibale's bandwidth rows have x (AB) = 0 on SH0/MC0 (kernel-sequences 5.4, section 14 row 25). */
     out->options=options|(annibale?uint32_t(A830VotesBwNoAb):0u);
     out->bin=-1;
+    if(!arcValid(res.gfx) || !arcValid(res.mx) || !arcValid(res.cx) || !arcValid(res.gmxc) || !arcValid(res.gbx))
+        return refuse(out,A830VotesStepCmdDb,Sm8750RpmhCorrupt,Sm8750RpmhResGfx,kIOReturnBadArgument);
     if(!arcUsable(res.gfx) || !arcUsable(res.mx) || !arcUsable(res.cx))
         return refuse(out,A830VotesStepCmdDb,Sm8750RpmhArgument,
                       !arcUsable(res.gfx)?Sm8750RpmhResGfx:!arcUsable(res.mx)?Sm8750RpmhResMx:Sm8750RpmhResCx,

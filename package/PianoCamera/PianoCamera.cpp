@@ -73,7 +73,7 @@ struct Args {
   uint32_t cc, mclkcc, blocks, qup, spmi, smmu;
   uint32_t votes, mmcxFloor;
   uint32_t frames, pattern, timeoutMs, gain;
-  uint32_t ae, aeTarget, aeSteps;
+  uint32_t ae, aeTarget, aeSteps, liveDiagnostics;
 };
 Args gArgs;
 char gPlanText[160];   // piano-camera-plan as given
@@ -91,6 +91,26 @@ uint8_t *gRawBytes;
 bool gKeepFrame;      // the next level-3 frameReady copies the frame into gRawMem
 uint64_t gKept;       // the bytes it copied
 uint32_t gCaptures;
+
+// gServeLock protects leases, the worker's reference, and PM/start arbitration.
+// The DMA target is never mapped to userspace. Each connection gets different
+// memory, so a mapping retained after close cannot see a later session.
+enum LiveSlotState { slotFree, slotWriting, slotReady, slotHeld };
+LiveSlotState gSlotState[kPianoCameraSlots];
+PianoCameraLiveFrame gSlots[kPianoCameraSlots];
+PianoCameraLiveStatus gLiveStatus;
+IOBufferMemoryDescriptor *gLiveMemory;
+uint64_t gLiveToken;
+bool gLiveActive, gLiveStop, gSuspended, gHardwareUnsafe;
+bool gFrontProbePassed;   // camera worker, under gSequenceLock
+uint32_t gLiveSensor;
+
+void cancelLiveLocked()
+{
+  gLiveStop = true;
+  IOLockWakeup(gServeLock, &gLiveStatus, false);
+}
+
 
 uint32_t bootArg(const char *name, uint32_t fallback)
 {
@@ -129,6 +149,7 @@ void readArgs()
   gArgs.ae = bootArg("piano-camera-ae", 1) ? 1 : 0;   // level 3: the exposure loop for the scene (CameraStream.h)
   gArgs.aeTarget = clampArg(bootArg("piano-camera-ae-target", 160), 16, 800);
   gArgs.aeSteps = clampArg(bootArg("piano-camera-ae-steps", 8), 1, 8);
+  gArgs.liveDiagnostics = bootArg("piano-camera-live-diagnostics", 0) != 0;
   // piano-camera-plan (CameraPlan.h): its level for probe and the power tree; a plan that does not parse leaves level 1 (the survey
   // and the plan's error line, nothing written).
   gPlanText[0] = 0;
@@ -772,17 +793,41 @@ class Ops {
     va_end(ap);
     IOLog("PianoCamera: %s\n", line);
   }
+  // Level 5 must reserve before the desktop fragments wired memory. This costs
+  // 16 MiB + 16 KiB for the service's lifetime, not one allocation per app start.
+  // No MMIO, power or SMMU route is changed here. Failed hardware teardown keeps
+  // the lease; the existing unsafe-state gate then refuses another start.
+  bool reserveDma()
+  {
+    Dma d;
+    if (!dmaAlloc(kRawCap, true, d)) return false;
+    dmaReserve.install(d);
+    ::note("dma reserve ready bytes=%llu pa=%#llx tables=%#llx alignment=2097152 policy=early-dma-v1",
+           (unsigned long long)d.bytes, (unsigned long long)d.pa, (unsigned long long)d.tablePa);
+    return true;
+  }
   // Level 3: the frame buffer (one physically contiguous range, 2 MiB aligned, below 1 TiB: the write master's reach), a cacheable
-  // kernel view; the window's two table pages (one 16 KiB XNU page, contiguous).
+  // kernel view; the window's two 4 KiB table pages in a 16 KiB contiguous allocation.
   bool dmaAlloc(uint64_t bytes, bool tables, Dma &d)
   {
     renew(d);
+    if (dmaReserve.ready()) {
+      const bool ok = dmaReserve.take(bytes, tables, d);
+      ::note("dma reserve lease bytes=%llu tables=%u busy=%u result=%u pa=%#llx", (unsigned long long)bytes,
+             tables, dmaReserve.busy(), ok, (unsigned long long)d.pa);
+      return ok;
+    }
     stackCheck("the frame buffer's allocation");
     IOBufferMemoryDescriptor *buf = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
         kernel_task, IOOptionBits(kIODirectionInOut) | IOOptionBits(kIOMemoryPhysicallyContiguous), bytes, 0x000000ffffe00000ull);
-    if (!buf || buf->prepare() != kIOReturnSuccess) {
-      if (buf) buf->release();
-      ::note("dma: no physically contiguous %llu bytes (2 MiB aligned) for the frame buffer", (unsigned long long)bytes);
+    if (!buf) {
+      ::note("dma: failed step=frame-alloc bytes=%llu alignment=2097152 result=%#x", (unsigned long long)bytes, kIOReturnNoMemory);
+      return false;
+    }
+    const IOReturn prepared = buf->prepare();
+    if (prepared != kIOReturnSuccess) {
+      ::note("dma: failed step=frame-prepare bytes=%llu result=%#x", (unsigned long long)bytes, prepared);
+      buf->release();
       return false;
     }
     IOByteCount length = 0;
@@ -790,23 +835,38 @@ class Ops {
     d.bytes = bytes;
     d.cpu = static_cast<uint8_t *>(buf->getBytesNoCopy());
     d.cookie = buf;
-    if (!d.pa || length < bytes || !d.cpu) {
-      ::note("dma: the frame buffer is not one segment (%#llx, %llu of %llu bytes)", (unsigned long long)d.pa, (unsigned long long)length,
-             (unsigned long long)bytes);
+    if (!d.pa || length < bytes || !d.cpu || (d.pa & (kIovaBlockBytes - 1)) || d.pa >= kWmAddressLimit ||
+        bytes > kWmAddressLimit - d.pa) {
+      ::note("dma: failed step=frame-layout pa=%#llx segment=%llu bytes=%llu cpu=%u result=%#x", (unsigned long long)d.pa,
+             (unsigned long long)length, (unsigned long long)bytes, d.cpu != nullptr, kIOReturnBadArgument);
       dmaFree(d);
       return false;
     }
     if (tables) {
       tableMem = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
           kernel_task, IOOptionBits(kIODirectionInOut) | IOOptionBits(kIOMemoryPhysicallyContiguous), 0x4000, 0x000000fffffff000ull);
-      if (!tableMem || tableMem->prepare() != kIOReturnSuccess) {
-        if (tableMem) tableMem->release();
+      if (!tableMem) {
+        ::note("dma: failed step=table-alloc bytes=16384 result=%#x", kIOReturnNoMemory);
+        dmaFree(d);
+        return false;
+      }
+      const IOReturn tablePrepared = tableMem->prepare();
+      if (tablePrepared != kIOReturnSuccess) {
+        ::note("dma: failed step=table-prepare result=%#x", tablePrepared);
+        tableMem->release();
         tableMem = nullptr;
         dmaFree(d);
         return false;
       }
-      d.tablePa = tableMem->getPhysicalSegment(0, nullptr, kIOMemoryMapperNone);
+      IOByteCount tableLength = 0;
+      d.tablePa = tableMem->getPhysicalSegment(0, &tableLength, kIOMemoryMapperNone);
       d.tables = static_cast<uint64_t *>(tableMem->getBytesNoCopy());
+      if (!d.tablePa || (d.tablePa & 0xfff) || tableLength < 0x4000 || !d.tables) {
+        ::note("dma: failed step=table-layout pa=%#llx segment=%llu cpu=%u result=%#x", (unsigned long long)d.tablePa,
+               (unsigned long long)tableLength, d.tables != nullptr, kIOReturnBadArgument);
+        dmaFree(d);
+        return false;
+      }
     }
     ::note("dma: frame buffer %llu bytes at %#llx (cpu %p)%s", (unsigned long long)bytes, (unsigned long long)d.pa, (void *)d.cpu,
            tables ? "; the window's tables follow" : "");
@@ -815,6 +875,12 @@ class Ops {
   }
   void dmaFree(Dma &d)
   {
+    if (dmaReserve.ready()) {
+      const uint64_t pa = d.pa;
+      const bool ok = dmaReserve.giveBack(d);
+      ::note("dma reserve return pa=%#llx result=%u busy=%u", (unsigned long long)pa, ok, dmaReserve.busy());
+      return;   // keep both prepared descriptors; never free a live DMA target
+    }
     if (IOBufferMemoryDescriptor *buf = static_cast<IOBufferMemoryDescriptor *>(d.cookie)) {
       buf->complete();
       buf->release();
@@ -851,7 +917,63 @@ class Ops {
     memcpy(gRawBytes, buf, n);
     gKept = n;
   }
+  uint64_t hostTicks() { return mach_absolute_time(); }
+  bool liveCancelled()
+  {
+    IOLockLock(gServeLock);
+    const bool cancelled = gLiveStop;
+    IOLockUnlock(gServeLock);
+    return cancelled;
+  }
+  void livePaced(uint64_t missing)
+  {
+    IOLockLock(gServeLock);
+    ++gLiveStatus.paced;
+    gLiveStatus.dropped += missing;
+    IOLockUnlock(gServeLock);
+  }
+  void liveFrame(const uint8_t *buf, const StreamResult &r, uint64_t sequence, uint64_t sof, uint64_t missing)
+  {
+    const uint32_t bytes = r.frameBytes;
+    IOLockLock(gServeLock);
+    gLiveStatus.dropped += missing;
+    if (gLiveStop) {
+      IOLockUnlock(gServeLock);
+      return;
+    }
+    unsigned slot = 0;
+    while (slot < kPianoCameraSlots && gSlotState[slot] != slotFree) ++slot;
+    if (slot == kPianoCameraSlots || bytes > kPianoCameraSlotBytes || !bytes) {
+      ++gLiveStatus.dropped;
+      IOLockUnlock(gServeLock);
+      return;
+    }
+    auto *base = static_cast<uint8_t *>(gLiveMemory->getBytesNoCopy());
+    gSlotState[slot] = slotWriting;
+    IOLockUnlock(gServeLock);
+    memcpy(base + uint64_t(slot) * kPianoCameraSlotBytes, buf, bytes);
+    IOLockLock(gServeLock);
+    if (gLiveStop) {
+      gSlotState[slot] = slotFree;
+    } else {
+      const bool rear = gLiveSensor == kPianoCameraRear;
+      gSlots[slot] = {kPianoCameraLiveVersion, gLiveSensor, slot, r.width, r.height, bytes / r.height,
+                      rear ? kPianoCameraGRBG : kPianoCameraBGGR, kRawBlack,
+                      r.exposure, r.gain, rear ? kRearExposure.gUnit : kFrontExposure.gUnit, bytes,
+                      sequence, sof, gLiveStatus.dropped};
+      // Unlock publishes both the metadata and completed payload. Wait acquires
+      // the same lock before granting a lease.
+      gSlotState[slot] = slotReady;
+      gLiveStatus.state = kPianoCameraStreaming;
+      if (++gLiveStatus.produced == 1)
+        ::note("abi2 first RAW sensor=%u seq=%llu sof=%llu bytes=%u", gLiveSensor, (unsigned long long)sequence,
+               (unsigned long long)sof, bytes);
+      IOLockWakeup(gServeLock, &gLiveStatus, false);
+    }
+    IOLockUnlock(gServeLock);
+  }
   IOBufferMemoryDescriptor *tableMem = nullptr;
+  DmaReserve dmaReserve;
   const Survey *survey = nullptr;
   bool gccHeld = false;
 };
@@ -987,6 +1109,7 @@ class PianoCamera : public IOService {
   OSDeclareDefaultStructors(PianoCamera)
   void run();
   bool sequence(char *verdict, size_t size);
+  void serveLive(uint32_t sensor);
   void serve();
   static void thread(void *self, wait_result_t);
 
@@ -1016,8 +1139,7 @@ bool PianoCamera::start(IOService *provider)
   if (gArgs.level > 3) {   // 4 (the software ISP) lives in user space: both are level 5's kernel side
     if (gArgs.level != 5) note("piano-camera=%u: level 4 is the user-space ISP (docs/drivers/camera.md 4.4); running 5", gArgs.level);
     gArgs.level = 5;
-    note("level 5: the user client PianoCameraUserClient (a capture per call: the sensor up, the exposure loop, the last RAW10 frame "
-         "kept in memory 0, everything down; an administrator only)");
+    note("level 5: PianoCameraUserClient diagnostic ABI 1 and entitled live ABI 2");
     setProperty("IOUserClientClass", "PianoCameraUserClient");
   }
   if (gPlanText[0] && gPlan.error)
@@ -1032,6 +1154,10 @@ bool PianoCamera::start(IOService *provider)
          gArgs.pattern, gArgs.timeoutMs, gArgs.gain, gArgs.mclk24);
   if (gArgs.level == 1) note("level 1: loads only, nothing written (the SPMI observer's read command is the only store)");
   setProperty("piano-camera", gArgs.level, 32);
+  // Share the actual boot policy with the CMIO publisher; synthetic cameras are
+  // diagnostic devices too, and must not survive piano-camera-pattern=0.
+  setProperty("piano-camera-pattern", gArgs.pattern, 32);
+  note("cmio-apps3-device-policy-v1: pattern=%u", gArgs.pattern);
   gSequenceLock = IOLockAlloc();
   gServeLock = IOLockAlloc();
   thread_t t = nullptr;
@@ -1058,6 +1184,10 @@ void PianoCamera::thread(void *self, wait_result_t)
 // Everything of size in gWork (the camera thread's stack is 16 KiB; c3rp of 2026-11-13 overflowed it).
 void PianoCamera::run()
 {
+  if (gArgs.level >= 5 && !gWork.ops.reserveDma()) {
+    stage(-7, "level 5: early DMA reserve failed; no hardware started, no capture service");
+    return;
+  }
   if (gArgs.delay) {
     note("waiting %u s", gArgs.delay);
     IOSleep(gArgs.delay * 1000);
@@ -1248,19 +1378,101 @@ bool PianoCamera::sequence(char *verdict, size_t size)
   return planGoesOn(clean, false);
 }
 
+// Run the same hardware sequence as ABI 1 with its live consumer and cancellation.
+void PianoCamera::serveLive(uint32_t sensor)
+{
+  IOLockLock(gSequenceLock);
+  Work &k = gWork;
+  IOLockLock(gServeLock);
+  const bool cancelled = gLiveStop || gSuspended;
+  IOLockUnlock(gServeLock);
+  const StreamResult *result = nullptr;
+  if (!cancelled) {
+    note("abi2 worker start sensor=%u", sensor);
+    renew(k.po);
+    k.po.rearCci = !gArgs.rearBus;
+    k.po.mclk24 = true;
+    k.po.cciKhz = gArgs.cciKhz;
+    k.po.bitHalfUs = gArgs.halfUs;
+    k.po.busPullUp = gArgs.pull != 0;
+    k.po.blind = gArgs.blind != 0;
+    k.po.camss = k.po.votes = true;
+    renew(k.o);
+    k.o.live = true;
+    k.o.pattern = false;
+    k.o.ae = gArgs.ae != 0;
+    k.o.aeTarget = gArgs.aeTarget;
+    k.o.liveDiagnostics = gArgs.liveDiagnostics != 0;
+    k.ops.survey = &k.survey;
+    const Sensor which = sensor == kPianoCameraRear ? Sensor::rear : Sensor::front;
+    auto run = [&](unsigned probeFrames) {
+      k.o.liveProbeFrames = probeFrames;
+      Session<Ops> &session = k.session.make(k.ops, k.po);
+      Stream<Ops> &stream = k.stream.make(k.ops, session, k.o);
+      return &stream.run(which, gLoader, gPmic, k.so, k.survey);
+    };
+    if (k.o.liveDiagnostics && which == Sensor::front && !gFrontProbePassed) {
+      constexpr unsigned frames = 30;
+      note("abi2 front probe begin limit=%u timeout-ms=%u", frames, k.o.timeoutMs);
+      result = run(frames);
+      gFrontProbePassed = result->ok && result->bufferFreed && result->bufDone == frames;
+      note("abi2 front probe end frames=%u clean=%u passed=%u failedStep=%d", result->bufDone, result->cleanOff, gFrontProbePassed,
+           int(result->failedStep));
+      if (gFrontProbePassed && !k.ops.liveCancelled()) {
+        k.stream.drop();
+        k.session.drop();
+        result = nullptr;
+      }
+    }
+    if (!result && !k.ops.liveCancelled()) {
+      if (k.o.liveDiagnostics) note("abi2 app stream begin sensor=%u", sensor);
+      result = run(0);
+    }
+  } else {
+    note("abi2 worker cancelled before hardware sensor=%u", sensor);
+  }
+  IOLockLock(gServeLock);
+  gLiveStatus.cleanOff = !result || result->cleanOff;
+  gLiveStatus.failedStep = result ? result->failedStep : 0;
+  gLiveStatus.guardFault = result && result->failure == StreamFailure::guard;
+  gLiveStatus.smmuFault = result ? result->fault.fsr & iova::kFsrFaults : 0;
+  gLiveStatus.aeSamples = result ? result->aeCount : 0;
+  gLiveStatus.state = !result || result->ok ? kPianoCameraStopped : kPianoCameraFailed;
+  if (!gLiveStatus.cleanOff || gLiveStatus.guardFault || gLiveStatus.smmuFault) gHardwareUnsafe = true;
+  note("abi2 live stopped sensor=%u state=%u clean=%u guard=%u smmu=%#x frames=%llu drops=%llu paced=%llu ae=%u failedStep=%d",
+       sensor, gLiveStatus.state, gLiveStatus.cleanOff, gLiveStatus.guardFault, gLiveStatus.smmuFault,
+       (unsigned long long)gLiveStatus.produced, (unsigned long long)gLiveStatus.dropped,
+       (unsigned long long)gLiveStatus.paced, gLiveStatus.aeSamples, int(gLiveStatus.failedStep));
+  IOBufferMemoryDescriptor *mem = gLiveMemory;
+  gLiveMemory = nullptr;
+  gLiveActive = false;
+  IOLockWakeup(gServeLock, &gLiveStatus, false);
+  IOLockUnlock(gServeLock);
+  if (result) {
+    k.stream.drop();
+    k.session.drop();
+  }
+  IOLockUnlock(gSequenceLock);
+  mem->release();
+}
+
 // Level 5: the camera thread waits for a user client's capture (gRequest), runs it as a level-3 sequence with the request's sensor,
 // pattern and exposure loop (one frame after the loop), keeps the frame in memory type 0 and its description in gInfo, and is idle
 // (everything powered down) between captures.
 void PianoCamera::serve()
 {
   gRawMem = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, IOOptionBits(kIODirectionInOut) | IOOptionBits(kIOMemoryKernelUserShared),
-                                                     kRawCap, 16384);
+                                                     kRawCap, 1);
   gRawBytes = gRawMem ? static_cast<uint8_t *>(gRawMem->getBytesNoCopy()) : nullptr;
   memset(&gInfo, 0, sizeof gInfo);
   gInfo.version = kPianoCameraABIVersion;
   gInfo.status = 1;
   gInfo.level = 5;
   if (!gRawBytes) {
+    note("level 5: failed step=%s bytes=%llu result=%#x", gRawMem ? "raw-cpu-view" : "raw-alloc",
+         (unsigned long long)kRawCap, kIOReturnNoMemory);
+    if (gRawMem) gRawMem->release();
+    gRawMem = nullptr;
     stage(-7, "level 5: no memory for the frame (16 MiB); no user client");
     return;
   }
@@ -1270,7 +1482,13 @@ void PianoCamera::serve()
   stage(7, "level 5: ready for captures (PianoCameraUserClient)");
   for (;;) {
     IOLockLock(gServeLock);
-    while (!gRequestPending) IOLockSleep(gServeLock, &gRequestPending, THREAD_UNINT);
+    while (!gRequestPending && !gLiveActive) IOLockSleep(gServeLock, &gRequestPending, THREAD_UNINT);
+    if (gLiveActive) {
+      const uint32_t sensor = gLiveSensor;
+      IOLockUnlock(gServeLock);
+      serveLive(sensor);
+      continue;
+    }
     const PianoCameraCaptureArgs q = gRequest;
     IOLockUnlock(gServeLock);
     note("level 5: capture %u: the %s, %s, exposure loop %s (target %u)", gCaptures + 1, q.sensor == kPianoCameraFront ? "front" : "rear",
@@ -1308,6 +1526,16 @@ class PianoCameraUserClient : public IOUserClient {
  public:
   bool initWithTask(task_t owningTask, void *securityToken, UInt32 type, OSDictionary *properties) override;
   IOReturn clientClose() override;
+  void free() override;
+
+ private:
+  IOReturn liveMethod(uint32_t selector, IOExternalMethodArguments *a);
+  IOReturn startLive(const PianoCameraLiveStartArgs &args);
+  IOBufferMemoryDescriptor *ring_ = nullptr;
+  uint64_t token_ = 0;
+  bool admin_ = false, closed_ = false;
+
+ public:
   IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *a, IOExternalMethodDispatch *dispatch, OSObject *target,
                           void *reference) override;
   IOReturn clientMemoryForType(UInt32 type, IOOptionBits *options, IOMemoryDescriptor **memory) override;
@@ -1315,18 +1543,184 @@ class PianoCameraUserClient : public IOUserClient {
 
 OSDefineMetaClassAndStructors(PianoCameraUserClient, IOUserClient)
 
-// An administrator only, in this version (the camera extension, sandboxed and not root, needs an entitlement check: camera.md 4.5).
+// The signed provider can use ABI 2. ABI 1 remains an administrator diagnostic.
 bool PianoCameraUserClient::initWithTask(task_t owningTask, void *securityToken, UInt32 type, OSDictionary *properties)
 {
-  if (clientHasPrivilege(securityToken, kIOClientPrivilegeAdministrator) != kIOReturnSuccess) return false;
-  return IOUserClient::initWithTask(owningTask, securityToken, type, properties);
+  admin_ = clientHasPrivilege(securityToken, kIOClientPrivilegeAdministrator) == kIOReturnSuccess;
+  if (type != 0) {
+    note("camera open failed step=client-type type=%u", type);
+    return false;
+  }
+  if (!admin_) {
+    OSObject *e = IOUserClient::copyClientEntitlement(owningTask, "com.unixnu.piano-camera.client");
+    const bool allowed = e == kOSBooleanTrue;
+    if (e) e->release();
+    if (!allowed) {
+      note("camera open failed step=client-entitlement");
+      return false;
+    }
+  }
+  if (!admin_) note("abi2 entitled role user client");
+
+  const bool initialized = IOUserClient::initWithTask(owningTask, securityToken, type, properties);
+  if (!initialized) note("camera open failed step=client-init");
+  return initialized;
 }
 
 IOReturn PianoCameraUserClient::clientClose()
 {
+  if (!gServeLock) return kIOReturnNotReady;
+  IOLockLock(gServeLock);
+  closed_ = true;
+  if (token_ && token_ == gLiveToken && gLiveActive) cancelLiveLocked();
+  IOLockUnlock(gServeLock);
   if (!isInactive()) terminate();
   return kIOReturnSuccess;
 }
+
+void PianoCameraUserClient::free()
+{
+  if (ring_) ring_->release();
+  IOUserClient::free();
+}
+
+IOReturn PianoCameraUserClient::startLive(const PianoCameraLiveStartArgs &args)
+{
+  if (args.version != kPianoCameraLiveVersion || (args.sensor != kPianoCameraRear && args.sensor != kPianoCameraFront)) {
+    note("abi2 start failed sensor=%u step=arguments version=%u result=%#x", args.sensor, args.version, kIOReturnBadArgument);
+    return kIOReturnBadArgument;
+  }
+  IOLockLock(gServeLock);
+  if (closed_ || token_ || gRequestPending || gLiveActive || !gServing || gSuspended || gHardwareUnsafe) {
+    note("abi2 start failed sensor=%u step=arbitration closed=%u token=%llu pending=%u active=%u serving=%u suspended=%u unsafe=%u result=%#x",
+         args.sensor, closed_, (unsigned long long)token_, gRequestPending, gLiveActive, gServing, gSuspended, gHardwareUnsafe,
+         kIOReturnBusy);
+    IOLockUnlock(gServeLock);
+    return kIOReturnBusy;
+  }
+  IOLockUnlock(gServeLock);
+
+  const IOOptionBits options = IOOptionBits(kIODirectionInOut) | IOOptionBits(kIOMemoryKernelUserShared);
+  const uint64_t ringBytes = kPianoCameraSlots * uint64_t(kPianoCameraSlotBytes);
+  // The ring is CPU copy transport, never a DMA target. Sharing supplies runtime
+  // page alignment; an explicit alignment above page_size makes IOBMD physically
+  // contiguous (16 KiB alignment did so on our 4 KiB-page kernel).
+  auto *ring = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, options,
+                                                          ringBytes, 1);
+  if (!ring || !ring->getBytesNoCopy()) {
+    note("abi2 start failed sensor=%u step=%s bytes=%llu result=%#x", args.sensor, ring ? "ring-cpu-view" : "ring-alloc",
+         (unsigned long long)ringBytes, kIOReturnNoMemory);
+    if (ring) ring->release();
+    return kIOReturnNoMemory;
+  }
+  // A new mapping can be read even before the first lease.
+  memset(ring->getBytesNoCopy(), 0, ringBytes);
+  IOLockLock(gServeLock);
+  if (closed_ || token_ || gRequestPending || gLiveActive || gSuspended || gHardwareUnsafe) {
+    note("abi2 start failed sensor=%u step=publish-arbitration closed=%u token=%llu pending=%u active=%u suspended=%u unsafe=%u result=%#x",
+         args.sensor, closed_, (unsigned long long)token_, gRequestPending, gLiveActive, gSuspended, gHardwareUnsafe, kIOReturnBusy);
+    IOLockUnlock(gServeLock);
+    ring->release();
+    return kIOReturnBusy;
+  }
+  ring_ = ring;
+  ring->retain();
+  gLiveMemory = ring;
+  token_ = ++gLiveToken;
+  gLiveSensor = args.sensor;
+  gLiveStatus = {};
+  gLiveStatus.version = kPianoCameraLiveVersion;
+  gLiveStatus.sensor = args.sensor;
+  gLiveStatus.state = kPianoCameraStarting;
+  for (auto &state : gSlotState) state = slotFree;
+  gLiveStop = false;
+  gLiveActive = true;
+  note("abi2 ring ready sensor=%u bytes=%llu alignment=runtime-page token=%llu", args.sensor, (unsigned long long)ringBytes,
+       (unsigned long long)token_);
+  IOLockWakeup(gServeLock, &gRequestPending, false);
+  IOLockUnlock(gServeLock);
+  return kIOReturnSuccess;
+}
+
+IOReturn PianoCameraUserClient::liveMethod(uint32_t selector, IOExternalMethodArguments *a)
+{
+  if (selector == kPianoCameraLiveStart) {
+    if (!a->structureInput || a->structureInputSize != sizeof(PianoCameraLiveStartArgs) || a->structureOutputSize) {
+      note("abi2 start failed step=method-layout input=%u output=%u result=%#x", a->structureInputSize, a->structureOutputSize,
+           kIOReturnBadArgument);
+      return kIOReturnBadArgument;
+    }
+    PianoCameraLiveStartArgs args;
+    memcpy(&args, a->structureInput, sizeof args);
+    return startLive(args);
+  }
+  PianoCameraLiveReleaseArgs release = {};
+  if (selector == kPianoCameraLiveRelease) {
+    if (!a->structureInput || a->structureInputSize != sizeof release || a->structureOutputSize)
+      return kIOReturnBadArgument;
+    memcpy(&release, a->structureInput, sizeof release);
+    if (release.version != kPianoCameraLiveVersion || release.slot >= kPianoCameraSlots) return kIOReturnBadArgument;
+  } else {
+    const size_t size = selector == kPianoCameraLiveWait ? sizeof(PianoCameraLiveFrame) : sizeof(PianoCameraLiveStatus);
+    if (a->structureInputSize || !a->structureOutput || a->structureOutputSize != size) return kIOReturnBadArgument;
+  }
+
+  IOLockLock(gServeLock);
+  IOReturn rc = kIOReturnNotOpen;
+  if (closed_ || !token_ || token_ != gLiveToken) {
+    IOLockUnlock(gServeLock);
+    return rc;
+  }
+  switch (selector) {
+  case kPianoCameraLiveStop: {
+    cancelLiveLocked();
+    uint64_t deadline;
+    clock_interval_to_deadline(4000, kMillisecondScale, &deadline);
+    while (gLiveActive && token_ == gLiveToken) {
+      if (IOLockSleepDeadline(gServeLock, &gLiveStatus, deadline, THREAD_UNINT) == THREAD_TIMED_OUT) break;
+    }
+    rc = token_ != gLiveToken ? kIOReturnNotOpen : gLiveActive ? kIOReturnTimeout : kIOReturnSuccess;
+    if (!rc) memcpy(a->structureOutput, &gLiveStatus, sizeof gLiveStatus);
+    break;
+  }
+  case kPianoCameraLiveInfo:
+    memcpy(a->structureOutput, &gLiveStatus, sizeof gLiveStatus);
+    rc = kIOReturnSuccess;
+    break;
+  case kPianoCameraLiveWait: {
+    uint64_t deadline;
+    clock_interval_to_deadline(250, kMillisecondScale, &deadline);
+    while (!closed_ && gLiveActive && !gLiveStop && token_ == gLiveToken) {
+      unsigned best = kPianoCameraSlots;
+      for (unsigned i = 0; i < kPianoCameraSlots; ++i)
+        if (gSlotState[i] == slotReady && (best == kPianoCameraSlots || gSlots[i].sequence < gSlots[best].sequence)) best = i;
+      if (best < kPianoCameraSlots) {
+        gSlotState[best] = slotHeld;
+        memcpy(a->structureOutput, &gSlots[best], sizeof(PianoCameraLiveFrame));
+        rc = kIOReturnSuccess;
+        break;
+      }
+      const auto wake = IOLockSleepDeadline(gServeLock, &gLiveStatus, deadline, THREAD_ABORTSAFE);
+      if (wake != THREAD_AWAKENED) {
+        rc = wake == THREAD_TIMED_OUT ? kIOReturnTimeout : kIOReturnAborted;
+        break;
+      }
+    }
+    break;
+  }
+  case kPianoCameraLiveRelease:
+    rc = kIOReturnBadArgument;
+    if (gSlotState[release.slot] == slotHeld && release.sequence == gSlots[release.slot].sequence) {
+      gSlotState[release.slot] = slotFree;
+      rc = kIOReturnSuccess;
+    }
+    break;
+  default: rc = kIOReturnUnsupported; break;
+  }
+  IOLockUnlock(gServeLock);
+  return rc;
+}
+
 
 // One capture: posted to the camera thread, waited for (at most the request's timeout); one at a time.
 static IOReturn capture(const PianoCameraCaptureArgs &args, PianoCameraFrameInfo &out)
@@ -1336,7 +1730,7 @@ static IOReturn capture(const PianoCameraCaptureArgs &args, PianoCameraFrameInfo
     IOLockUnlock(gServeLock);
     return kIOReturnNotReady;
   }
-  if (gRequestPending) {
+  if (gRequestPending || gLiveActive || gSuspended || gHardwareUnsafe) {
     IOLockUnlock(gServeLock);
     return kIOReturnBusy;
   }
@@ -1360,7 +1754,13 @@ static IOReturn capture(const PianoCameraCaptureArgs &args, PianoCameraFrameInfo
 IOReturn PianoCameraUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *a, IOExternalMethodDispatch *, OSObject *,
                                                void *)
 {
-  if (!a || !a->structureOutput || a->structureOutputSize < sizeof(PianoCameraFrameInfo)) return kIOReturnBadArgument;
+  if (!a || a->scalarInputCount || a->scalarOutputCount || !gServeLock) {
+    note("camera method failed selector=%u step=method-arguments result=%#x", selector, kIOReturnBadArgument);
+    return kIOReturnBadArgument;
+  }
+  if (selector >= kPianoCameraLiveStart && selector <= kPianoCameraLiveRelease) return liveMethod(selector, a);
+  if (!admin_) return kIOReturnNotPrivileged;
+  if (!a->structureOutput || a->structureOutputSize < sizeof(PianoCameraFrameInfo)) return kIOReturnBadArgument;
   PianoCameraFrameInfo info;
   IOReturn rc = kIOReturnSuccess;
   switch (selector) {
@@ -1389,17 +1789,35 @@ IOReturn PianoCameraUserClient::externalMethod(uint32_t selector, IOExternalMeth
 
 IOReturn PianoCameraUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options, IOMemoryDescriptor **memory)
 {
-  if (type != kPianoCameraMemoryRaw || !gRawMem) return kIOReturnBadArgument;
-  gRawMem->retain();
-  *memory = gRawMem;
+  if (!gServeLock) return kIOReturnNotReady;
+  IOLockLock(gServeLock);
+  IOBufferMemoryDescriptor *buffer = nullptr;
+  if (!closed_) {
+    if (type == kPianoCameraMemoryRing) buffer = ring_;
+    if (type == kPianoCameraMemoryRaw && admin_ && gServing) buffer = gRawMem;
+  }
+  if (buffer) buffer->retain();
+  IOLockUnlock(gServeLock);
+  if (!buffer) {
+    note("camera map failed type=%u step=memory-descriptor result=%#x", type, kIOReturnBadArgument);
+    return kIOReturnBadArgument;
+  }
+  *memory = buffer;
   *options = kIOMapReadOnly;
   return kIOReturnSuccess;
 }
 
-// A sequence is short (well under a second) and always ends powered down: a power transition only waits for it.
+// Block new capture requests and signal live cancellation before waiting for the hardware sequence.
 IOReturn PianoCamera::setPowerState(unsigned long state, IOService *)
 {
-  if (state == pianopower::kOff && gSequenceLock) {
+  const bool off = state == pianopower::kOff;
+  if (gServeLock) {
+    IOLockLock(gServeLock);
+    gSuspended = off;
+    if (off && gLiveActive) cancelLiveLocked();
+    IOLockUnlock(gServeLock);
+  }
+  if (off && gSequenceLock) {
     IOLockLock(gSequenceLock);
     IOLockUnlock(gSequenceLock);
   }

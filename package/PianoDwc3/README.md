@@ -17,7 +17,7 @@ Design, hardware facts, boot arguments, test plan and the Mac-side commands: `do
 |---|---|
 | `PianoDwc3.cpp` | the IOService on IOPlatformExpertDevice; read-only probe, takeover, log tail, monitor, `/dev/pianousb`, the HID devices and their command thread |
 | `PianoUsbNet.cpp`, `UsbNet.h` | the network function's macOS side: the IOEthernetController, its frame queues and receive thread (`piano-usb-net=1`) |
-| `Dwc3Gadget.h` | portable DWC3 gadget core: event buffer, EP0 (chapter 9, CDC-ACM and CDC-NCM requests), bulk transfers, NTBs, EP0 trace and watchdog |
+| `Dwc3Gadget.h` | portable DWC3 gadget core: event buffer, EP0 (chapter 9, CDC-ACM and CDC-NCM requests), bulk transfers, NTBs, EP0 trace and watchdog, EP0 left with SET STALL and the controller recovery (soft reset) of a wedged core (`docs/drivers/usb-device-debug.md` §16.1) |
 | `UsbDescriptors.h` | composite device, two or three ACM functions (IAD) and optionally the NCM function, USB 2.0 high/full speed |
 | `Ncm.h` | NTB16 writer and parser, NTB parameters, NCM request codes, the frame queue, portable |
 | `TxFifoPlan.h` | the TX FIFO layout of the IN endpoints in use (with the network function), portable |
@@ -27,7 +27,7 @@ Design, hardware facts, boot arguments, test plan and the Mac-side commands: `do
 | `UsbHandoff.h` | the controller hand-off to PianoUsbHost's host mode (`piano-usb-handoff=1`, default off): the platform function's asks and states, the USB thread's decision, portable (`docs/drivers/usb-host.md` §6.6) |
 | `UsbCold.h` | the cold start (`piano-usb-cold`, default auto): the inherited state read and judged, then GDSC/clocks, stop, the rails (RPMh under PianoA830's DRV-2 lock), the eUSB2 repeater and the M31 PHY from this driver's own tables; the test hook (`piano-usb-cold-sim`) and the link watch, portable (`docs/drivers/usb-device-debug.md` §17) |
 | `Dwc3Regs.h`, `PianoUsbHw.h` | register facts, with their sources |
-| `tests/` | host tests: the gadget core (2 and 3 ports, without and with the network function; the ACM-only descriptors against their pre-network bytes), NTB16 and the TX FIFO plan, the SMMU planner, the input parser, the wait tiers, the hand-off decisions, the cold start against a model of the USB hardware (`tests/run.sh`) |
+| `tests/` | host tests: the gadget core (2 and 3 ports, without and with the network function; the ACM-only descriptors against their pre-network bytes; EP0's recoveries and the controller recovery against a model of the core's control state machine), NTB16 and the TX FIFO plan, the SMMU planner, the input parser, the wait tiers, the hand-off decisions, the cold start against a model of the USB hardware (`tests/run.sh`) |
 
 Build: `tooling/k27/build-native-piano-dwc3.sh` (host tests, the objects, the import check, the PianoUsbNet vtable check). PianoDwc3 is in
 `configs/k27-native-kexts.txt` and inert without `piano-usb`. Sources and licences: `UPSTREAM`, `LICENSE` (BSD-2-Clause-Patent).

@@ -65,7 +65,7 @@ static int transfer(void *ctx, uint8_t address, const uint8_t *out, uint32_t out
         const int acked = !(reg == FS19XX_REG_PWRCTRL && (v & FS19XX_PWRCTRL_I2CR)) && reg != m.fail_reg;
         if (m.writes < 4096) m.log[m.writes++] = (struct Write){address, reg, v, acked};
         // the safety invariants, checked at every write
-        if (reg == FS19XX_REG_VOLCTRL && (v >> 8) > FS19XX_GAIN_CAP) m.violations++;
+        if (reg == FS19XX_REG_VOLCTRL && (v >> 8) > FS19XX_GAIN_HARD_LIMIT) m.violations++;   // 243: the core's hard limit (2026-11-21)
         if (!m.allow_power && reg == FS19XX_REG_PWRCTRL && !(v & (FS19XX_PWRCTRL_PWDN | FS19XX_PWRCTRL_I2CR))) m.violations++;
         if (!m.allow_power && reg == FS19XX_REG_DACCTRL && !(v & FS19XX_DACCTRL_MUTE_BIT)) m.violations++;
         if (reg == FS19XX_REG_PWRCTRL && (v & FS19XX_PWRCTRL_I2CR)) {reset_amp(a); return -1;}   // soft reset: no acknowledge
@@ -161,7 +161,8 @@ static void build_fsm(int hostile)
 static void testBasics(void)
 {
     CHECK(fsm_crc16((const uint8_t *)"123456789", 9) == 0xbb3d);   // CRC-16/ARC check value
-    CHECK(fs19xx_gain_clamp(255) == 231 && fs19xx_gain_clamp(232) == 231 && fs19xx_gain_clamp(UINT32_MAX) == 231 && fs19xx_gain_clamp(231) == 231 && fs19xx_gain_clamp(192) == 192 && fs19xx_gain_clamp(160) == 160);
+    CHECK(fs19xx_gain_clamp(255) == 243 && fs19xx_gain_clamp(244) == 243 && fs19xx_gain_clamp(UINT32_MAX) == 243 && fs19xx_gain_clamp(243) == 243 && fs19xx_gain_clamp(231) == 231 && fs19xx_gain_clamp(192) == 192 && fs19xx_gain_clamp(160) == 160);
+    CHECK(FS19XX_GAIN_CAP == 231 && FS19XX_GAIN_CAP_PROTECTED == 243 && FS19XX_GAIN_HARD_LIMIT == 243 && fs19xx_gain_db10(243) == -45);
     CHECK(fs19xx_gain_db10(231) == -90 && fs19xx_gain_db10(192) == -236 && fs19xx_gain_db10(160) == -356 && fs19xx_gain_db10(255) == 0 && fs19xx_gain_db10(215) == -150);
     int changed;
     CHECK(fs19xx_filter(FS19XX_REG_PWRCTRL, 0, &changed) == 1 && changed);
@@ -308,7 +309,7 @@ static void testStartStop(void)
     CHECK(m.violations == 0);
     for (int i = 0; i < 4; ++i) {
         const struct Amp *a = &m.amp[i];
-        CHECK(amps[i].gain == FS19XX_GAIN_CAP && a->reg[FS19XX_REG_VOLCTRL] == 0xe7c0);   // 255 asked, 231 written
+        CHECK(amps[i].gain == FS19XX_GAIN_HARD_LIMIT && a->reg[FS19XX_REG_VOLCTRL] == 0xf3c0);   // 255 asked, the hard limit 243 written
         CHECK(a->reg[FS19XX_REG_I2SCTRL] == (0x9000 | 0x0800 | 0x0003));                    // 48 kHz, data out, other bits kept
         CHECK(a->reg[FS19XX_REG_PLLCTRL1] == 0x0260 && a->reg[FS19XX_REG_PLLCTRL2] == 0x0540 && a->reg[FS19XX_REG_PLLCTRL3] == 0x0018);
         CHECK(a->reg[FS19XX_REG_OTPACC] == 0 && a->reg[FS19XX_REG_TSCTRL] == FS19XX_TSCTRL_TSEN && a->reg[FS19XX_REG_DACCTRL] == FS19XX_DACCTRL_UNMUTE);
@@ -337,8 +338,10 @@ static void testStartStop(void)
     st[1].ok = 1;
     first[0].status = 0x0040;  // top left's own first reading differs from now
     CHECK(fs19xx_group_check(st, first, 4) == 0x1);
-    st[0].volctrl = 0xe8c0;    // a gain above the cap read back
+    st[0].volctrl = 0xf4c0;    // a gain above the hard limit 243 read back
     CHECK(fs19xx_group_check(st, 0, 4) & 0x1);
+    st[0].volctrl = 0xf3c0;    // 243 itself is healthy (the protected cap; AudioLive allows it only under protection)
+    CHECK(!(fs19xx_group_check(st, 0, 4) & 0x1));
 
     // shut down: mute, power down, 35 ms, blocks off; then the status says down
     const uint64_t slept = m.slept_us;

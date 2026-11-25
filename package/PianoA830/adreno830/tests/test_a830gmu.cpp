@@ -1044,6 +1044,50 @@ int main()
         adreno830_profile_value=A830ProfileAnnibale;
         checks+=13;
     }
+    // C5 strict stop: each formerly warning-only branch must deny a restart.
+    for(unsigned fault=0;fault<9;++fault) {
+        initial();A830Gmu gmu;bindGmu(gmu);boot(gmu);
+        CHECK(gmu.oobSet(nullptr)==0 && gmu.waitGxOn()==0);
+        if(fault==1)m.tcs_busy=true;
+        if(fault==2)m.gbif_ack=false;
+        if(fault==3)m.gx_collapse_ok=false;
+        if(fault==4)m.rscc_sleep_ok=false;
+        if(fault==5)m.vote_fail=-5;
+        if(fault==6)m.fail_read=m.reads+1;
+        if(fault==7)m.fail_write=m.writes+1;
+        if(fault==8) {m.cfg_ignore=uint32_t(SYSRESET);R(SYSRESET)=0;}
+        const IOReturn r=gmu.forceOff(true);
+        CHECK(fault?r!=0:r==0);++checks;
+    }
+    for(unsigned bit=1;bit<=2;++bit) {
+        initial();A830Gmu gmu;bindGmu(gmu);boot(gmu);R(GXSTAT)=bit;m.gx_collapse_ok=false;
+        CHECK(gmu.forceOff(true)!=0);++checks; // either lone status bit is insufficient
+    }
+    for(unsigned fault=0;fault<10;++fault) {
+        initial();A830Gmu gmu;bindGmu(gmu);boot(gmu);
+        CHECK(gmu.oobSet(nullptr)==0 && gmu.waitGxOn()==0);
+        const auto gxAccess=m.gx_accesses;
+        m.log.clear();
+        if(fault==1)m.tcs_busy=true;
+        if(fault==2)m.gbif_ack=false;
+        if(fault==3)m.gx_collapse_ok=false;
+        if(fault==4)m.rscc_sleep_ok=false;
+        if(fault==5)m.vote_fail=-5;
+        if(fault==6)R(GXSTAT)=UINT32_MAX;
+        if(fault==7) {m.cfg_ignore=uint32_t(FENCE_CTRL);R(FENCE_CTRL)=1;}
+        if(fault==8) {m.cfg_ignore=uint32_t(SYSRESET);R(SYSRESET)=0;}
+        if(fault==9)R(GXSTAT)=3, R(GX_CFG)=1u<<15;
+        const auto result=gmu.forceOffStrict(hooks.gx_vote,hooks.gx_cookie);
+        CHECK((result==kIOReturnSuccess)==(fault==0 || fault==9));
+        CHECK(m.gx_accesses==gxAccess && !countOf('r',GENERAL9));
+        if(fault==1 || fault==2 || fault==7)CHECK(!countOf('w',SYSRESET));
+        if(fault==5 || fault==6 || fault==7 || fault==8 || fault==9)CHECK(!countOf('w',GX_GDSCR));
+        if(fault==3)CHECK(m.votes.size()==1 && m.votes.front());
+        if(fault==0)CHECK(m.votes.size()==2 && m.votes.front() && !m.votes.back() && gmu.rsccAsleep());
+        if(fault==9)CHECK(m.votes.empty() && gmu.rsccAsleep());
+        if(fault&&fault!=9)CHECK(gmu.failure().step!=0 && countOf('w',GBIF_HALT,0)==(fault==2?0:1));
+        ++checks;
+    }
     CHECK(memory.release()==kIOReturnSuccess && fixture.live.empty());
     std::printf("PASS: A830 GMU over a register model with %s gen80000_gmu.bin: B1-B8 and its fatal/recorded conditions, OOB and "
                 "GX confirmation, force-off in KGSL order, RSCC/GENERAL_9, slumber S2-S9, IFPC helpers, CX timer seed, 336/337 "

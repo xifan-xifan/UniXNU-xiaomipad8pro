@@ -21,6 +21,14 @@
       "IOProviderClass": "IOPlatformExpertDevice",
       "IOProbeScore": 100,
       "IOMatchCategory": "PianoPolicy"
+    },
+    "AppleSMC": {
+      "CFBundleIdentifier": "com.unixnu.driver.PianoPolicy",
+      "IOClass": "AppleSMC",
+      "IOProviderClass": "IOResources",
+      "IOResourceMatch": "IOKit",
+      "IOProbeScore": 100,
+      "IOMatchCategory": "AppleSMC"
     }
   }
 }

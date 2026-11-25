@@ -27,6 +27,32 @@ In direct mode (`data-persist=2`, `DirectDisk.h`) a changed page lives only in t
 from the window, any other page from the seed (or as zero). Writes go to the window with FUA: first the run of pages, then the
 bitmap blocks that gained bits, both before the write completes.
 
+### Concurrent direct I/O
+
+`data-store-concurrent=1` opts a read-write direct store into up to eight concurrent requests, each with its own
+128 KiB stage. The startup line `NativeRamBlock: Data I/O mode … depth …` reports the mode and the allocated depth.
+An omitted argument or `=0` uses the single gate. If stage allocation stops early, concurrency uses the available
+depth. A failed commit-lock allocation falls back to the single gate.
+
+Read requests can share page ranges. Writes hold their entire 4 KiB page range exclusively, including 512-byte partial
+updates. Every data write uses FUA. The bitmap publisher can merge runs that have already completed data FUA, with
+one FUA write per affected bitmap block in that group. A writer never waits for a batch to form. Readers see each new
+bit after its bitmap write succeeds, and the request completes after all its bits are durable. Overwrites of present
+pages send only data FUA. Interrupted multi-page writes can leave a partial update, as with the single gate.
+
+Synchronization fences admission and drains prior admitted requests. A successful fence requires no extra device
+flush because data and bitmap writes complete with FUA. Sleep drains before the existing store cache sync and holds
+new requests until wake. A failed sleep sync reopens admission and vetoes UFS suspend. Stop closes admission and
+drains before releasing storage. A write failure latches state 5 and closes further writes for the boot. A stage that
+the controller may still DMA into or out of stays quarantined until reboot.
+
+For same-boot A/B after booting with `data-store-concurrent=1`, root can set `machdep.piano_data_concurrent` to 0
+for the single-gate control or back to 1. The switch drains I/O first and refuses after a write failure or DMA
+quarantine. `sysctl machdep.piano_data_io` reports the active mode, stage depth, maximum inflight requests, requests
+that waited in stage/range/fence admission, and successful bitmap publications. These counters reset when the mode
+changes. The single-gate wait counter excludes lock contention. Open, seed/window binding, read-only probes, the
+volatile fallback and flatten use the same paths and on-disk bytes in either mode.
+
 ## 2. Store format (`PersistOverlay.h`)
 
 All integers little endian. Block 0:
@@ -41,13 +67,15 @@ All integers little endian. Block 0:
 | 56-59 | generation (counts re-initialisations) |
 | 60-63 | CRC-32 of bytes 0-59 |
 | 64-71 | `SHNGEXT1`: the extension (UniXNU-piano, 2026-11-11); all zero when absent |
-| 72-75 | flags: bit 0 `kSelfContained` |
+| 72-75 | flags: bit 0 `kSelfContained`, bit 1 `kBound` |
 | 76-79 | 0 |
 | 80-87 | pages the flatten wrote (diagnostic) |
-| 88-123 | 0 |
+| 88-95 | absolute window start LBA when `kBound` is set, otherwise zero |
+| 96-123 | 0 |
 | 124-127 | CRC-32 of bytes 0-59 followed by bytes 64-123 (`extensionCrc`) |
 
-Blocks 1 to 96 hold the presence bitmap (one bit per page). Page i is at block 97 + i and is valid only when its bit is set.
+Blocks 1 through B hold the presence bitmap, with one bit per page and B = ceil(page count / 32768).
+B is 96 for 12 GiB and 1600 for 200 GiB. Page i is at block B + 1 + i and is valid only when its bit is set.
 
 Compatibility. Bytes 0-63 are the version 1 header every earlier kernel writes and reads. With flags 0 the encoder writes it byte
 for byte as before; `Test/guard.cpp` and `tooling/persist/test-data-store.py` check this against a hand-built old header. The

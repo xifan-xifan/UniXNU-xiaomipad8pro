@@ -8,6 +8,7 @@
 #include <cstring>
 #include <vector>
 #include <array>
+#include <algorithm>
 #include <string>
 #include <CommonCrypto/CommonDigest.h>
 #include "VideoSession.h"
@@ -52,12 +53,14 @@ struct Peer {
   std::vector<Words> releasePending;
   std::vector<uint32_t> headers,packets,comvCounts,comvSizes;
   uint32_t sid=0;
+  std::vector<Words> wire;
   unsigned n=4,etbs=0,ftbs=0,dpbs=0,opens=0,closes=0,stops=0,drains=0;
   unsigned settingsResume=0,drainInputResume=0,drainRawResume=0;
   uint32_t pscPoc=0,pscProfile=2,pscLevel=4;
   uint32_t pscResolution=0x014000f0,pscDepth=0x00080008,pscCoded=1,pscCrop0=0,pscCrop1=0;
   bool omitOptional=false;
   unsigned decodeOrderProperties=0;
+  bool watchdogOnStop=false,watchdogOnClose=false;
   bool autoEbd=true,autoDrainAck=true,autoDrainLast=true,dropStop=false,dropClose=false,lateClose=false;
   bool lastWithPicture=false;
   uint64_t finalToken=0;
@@ -110,6 +113,7 @@ struct Peer {
     uint32_t data[hfi::kBufferWords],got=0;
     CHECK(hfi::read(mem,hfi::kCmdq,data,sizeof data,&got,[]{})==0);
     CHECK(got==bytes&&data[7]==1);
+    wire.emplace_back(data,data+got/4);
     const auto *p=data+8;const auto type=p[1],flags=p[2],port=p[4],payload=p[3];
     headers.push_back(data[2]);packets.push_back(p[5]);
     if(type==Open){CHECK(data[1]==0&&flags==3&&payload==1);sid=p[8];++opens;return 0;}
@@ -141,8 +145,8 @@ struct Peer {
       if(autoDrainLast){if(lastWithPicture)output(finalToken,4,0x10000000);else emptyLast();}
       return 0;
     }
-    if(type==Stop){CHECK(flags==7);++stops;if(!dropStop)reply({packet(Stop,1,port,0)});return 0;}
-    if(type==Close){CHECK(flags==7&&port==0);++closes;if(!dropClose){reply({packet(Close,1,0,0)});if(lateClose)reply({packet(0x03000162,0,2,1,{2})});}return 0;}
+    if(type==Stop){CHECK(flags==7);++stops;if(watchdogOnStop)ops.watchdog=true;if(!dropStop)reply({packet(Stop,1,port,0)});return 0;}
+    if(type==Close){if(watchdogOnClose)ops.watchdog=true;CHECK(flags==7&&port==0);++closes;if(!dropClose){reply({packet(Close,1,0,0)});if(lateClose)reply({packet(0x03000162,0,2,1,{2})});}return 0;}
     if(type==0x03000193)comvCounts.push_back(p[8]);
     if(type==0x0300015b&&port==1){CHECK(p[8]==1&&payload==1&&etbs==0);++decodeOrderProperties;}
     if(type==Subscribe)CHECK(flags==3&&payload==11);
@@ -160,6 +164,87 @@ struct Fixture {
   void drain() {CHECK(tx.beginDrain()==0);pump();CHECK(tx.drainStatus()==1);}
   void close() {CHECK(tx.shutdown()==0);CHECK(peer.stops==2&&peer.closes==1&&tx.r.closed);}
 };
+static void preparedInputTests() {
+  // Session creation may finish well before its first compressed sample. It
+  // must not decode the default fixture, start output, or acquire a credit.
+  for(unsigned disposition=0;disposition<4;++disposition) {
+    Fixture f;f.tx.sessionId=f.sid;f.tx.accessUnit=nullptr;f.tx.accessUnitBytes=0;
+    CHECK(f.tx.prepareInput()==0 && f.tx.r.stage==Input);
+    CHECK(f.peer.opens==1 && f.tx.openSent && f.tx.inputStarted && !f.tx.rawStarted);
+    CHECK(!f.peer.etbs && !f.peer.ftbs && !f.peer.dpbs && !f.peer.drains && !f.tx.ledger.pending);
+    CHECK(f.tx.prepareInput()==kErrArgument); // no duplicate OPEN
+    f.peer.hw.clock+=10000000;
+    CHECK(f.tx.pump()==0 && f.tx.deadline==UINT64_MAX);
+    CHECK(!f.tx.nativeInput(f.sid+1,kAccessUnit,sizeof kAccessUnit,19));
+    if(disposition==0) {
+      CHECK(f.tx.nativeInput(f.sid,kAccessUnit,sizeof kAccessUnit,19));
+      CHECK(f.tx.transaction()==0 && f.peer.opens==1 && f.peer.etbs==1);
+      f.pump();f.releaseAll();f.close();
+      CHECK(f.tx.transaction()==kErrArgument);
+    } else if(disposition==1) {
+      CHECK(f.tx.shutdown(true)==0 && f.peer.stops==1 && f.peer.closes==1);
+      CHECK(!f.tx.r.stopRaw && f.tx.r.stopInput && f.tx.r.closed);
+      CHECK(!f.peer.etbs && !f.tx.ledger.accepted);
+      for(unsigned i=0;i<f.layout.used;++i)CHECK(!f.layout.buf[i].queued);
+      CHECK(!f.tx.nativeInput(f.sid,kAccessUnit,sizeof kAccessUnit,19));
+    } else {
+      if(disposition==2)f.peer.dropStop=true;
+      else f.peer.watchdogOnStop=true;
+      const int error=disposition==2?kErrHfiTimeout:kErrWatchdog;
+      CHECK(f.tx.shutdown(true)==error && f.peer.stops==1 && !f.peer.closes);
+      const auto commands=f.peer.headers.size();
+      CHECK(f.tx.shutdown(true)==error && f.peer.headers.size()==commands);
+    }
+  }
+}
+static void productionWorkTests() {
+  // General native buffers are firmware outputs, not CPU sentinel fixtures.
+  // Poison their backing independently of the decoder and inspect every slot
+  // before any modeled FBD; this catches hidden writes as well as wrong extents.
+  Fixture f;CHECK(f.layout.init(320,240) && f.layout.general);
+  std::fill(f.peer.arena.begin(),f.peer.arena.end(),0x3c);
+  diagnostic::History history;f.tx.history=&history;
+  f.start();
+  bool pristine=true;
+  for(unsigned i=0;i<f.layout.maxN();++i) {
+    const auto &raw=*f.layout.find(Raw,i);
+    for(unsigned j=0;j<raw.capacity;++j)pristine&=f.peer.arena[raw.off+j]==0x3c;
+  }
+  CHECK(pristine);
+  CHECK(history.commands.total==f.peer.headers.size());
+  CHECK(f.peer.hw.log.find("V4 TX stage 5 ")!=std::string::npos);
+  CHECK(f.peer.hw.log.find("V4 TX stage 6 ")!=std::string::npos);
+  CHECK(f.peer.hw.log.find("V4 property ")==std::string::npos);
+  // FBD ownership, retained TX/RX evidence, publication loan and STOP/CLOSE
+  // must remain real after removing the unrelated diagnostic writes/text.
+  f.peer.output(0x100000001ull);f.pump();
+  SelfTest<Peer>::OutputFrame frame;CHECK(f.tx.popOutput(frame));
+  CHECK(frame.token==0x100000001ull && f.peer.arena[f.layout.find(Raw,frame.index)->off]==1);
+  CHECK(history.messages.total && f.tx.releaseOutput(frame.index,frame.token)==0);
+  f.close();
+  // Host-only packet evidence permits a byte-for-byte comparison with the
+  // previous implementation; no tablet or proprietary payload is involved.
+  if(std::getenv("VIDEO_PACKET_EVIDENCE"))for(const auto &p:f.peer.wire) {
+    std::printf("WIRE");for(auto w:p)std::printf(" %08x",w);std::putchar('\n');
+  }
+}
+static void nativeCleanupFailureTests() {
+  for(unsigned kind=0;kind<3;++kind) {
+    Fixture f;f.start();f.pump();f.releaseAll();
+    if(kind==0)f.peer.dropStop=true;
+    if(kind==1)f.peer.watchdogOnStop=true;
+    if(kind==2)f.peer.watchdogOnClose=true;
+    const unsigned samples=f.peer.watchdogSamples;
+    const int rc=f.tx.shutdown(true);
+    CHECK(rc==(kind==0?kErrHfiTimeout:kErrWatchdog) && f.tx.r.close==rc);
+    CHECK(f.peer.stops==(kind==2?2u:1u) && f.peer.closes==(kind==2?1u:0u));
+    if(kind==1)CHECK(f.tx.r.stopRaw); // ACK does not erase the same-pump watchdog
+    if(kind==2)CHECK(f.tx.r.closed && f.peer.watchdogSamples-samples==3);
+    const unsigned stops=f.peer.stops,closes=f.peer.closes;
+    CHECK(f.tx.shutdown(true)==rc && f.peer.stops==stops && f.peer.closes==closes);
+    CHECK(f.peer.hw.log.find("no-further-HFI 1")!=std::string::npos);
+  }
+}
 static void ledgerTests() {
   stream::Ledger l;
   CHECK(l.freeInput()==0&&!l.find(1));
@@ -182,6 +267,36 @@ static void ledgerTests() {
   // Cancellation settles identities while physical loans remain owned until
   // the consumer releases them or final quiesce fences the entire arena.
   CHECK(!l.loansEmpty()&&l.release(0,11)&&!l.release(0,11)&&l.loansEmpty());
+}
+static void stockReplyWindowTests() {
+  // A stock producer waits for each dfrm reply, but never waits for decoded
+  // callbacks. Four replies may precede ACK; the fifth must not enter DMA.
+  stream::Ledger l;
+  uint64_t held=0;unsigned replies=0,acks=0,maxPending=0;
+  for(uint64_t token=1;token<=60;++token){
+    auto *f=l.accept(token,9,false);CHECK(f&&f->phase==stream::Phase::Admitting);
+    if(l.pending>maxPending)maxPending=l.pending;
+    if(l.replyReady()) {CHECK(l.publish(token));++replies;}
+    else {
+      held=token;CHECK(l.published()==4&&l.pending==5&&l.nextAdmission()==f);
+      CHECK(!l.submit(token,0)); // unpublished reply cannot race its completion
+      // The receiver runs independently of the waiting producer. Retiring the
+      // earliest ACK opens the window without requiring the held frame.
+      CHECK(l.retire(++acks));CHECK(l.replyReady()&&l.nextAdmission()->token==held);
+      CHECK(l.publish(held));++replies;held=0;
+    }
+    CHECK(l.published()<=stream::PublishedWindow&&l.pending<=5);
+  }
+  CHECK(replies==60&&acks==56&&maxPending==5&&!held);
+  // A finish at the end of preroll does not complete until the outstanding
+  // Demt ACK, and must not turn a ready picture into a firmware drain.
+  while(l.pending)CHECK(l.retire(++acks));
+  CHECK(acks==60&&l.pending==0&&!l.draining&&!l.paused&&l.replyReady());
+  CHECK(l.accept(61,9,false)&&l.publish(61)); // same epoch continues normally
+  for(uint64_t token=62;token<=65;++token)CHECK(l.accept(token,9,false));
+  CHECK(l.nextAdmission()->token==62); // oldest reservation, not array slot
+  l.cancel();CHECK(!l.replyReady()&&!l.nextAdmission()&&l.pending==0&&l.cancelled==5);
+  CHECK(!l.publish(65)); // no late success after cancellation
 }
 static void guestTests() {
   stream::Guest guest;
@@ -211,6 +326,14 @@ static void guestTests() {
   CHECK(!replacement.reply(101,demt)&&!replacement.expired(12001));
 }
 static void ownerTests() {
+  // A known native failure must block acquisition even after DMA was freed.
+  for (int error : {-20,-24,-25}) {
+    stream::Owner failed; uint32_t session=0,next=0;
+    CHECK(failed.acquire(&session)==0 && failed.start(session));
+    CHECK(failed.closing(session,false)==0);
+    failed.closed(false,error);
+    CHECK(failed.phase==stream::Owner::Poisoned && failed.acquire(&next)==-16 && next==0);
+  }
   stream::Owner o;uint32_t a=0,b=0;
   CHECK(o.acquire(nullptr)==-22&&o.acquire(&a)==0&&o.owns(a));
   CHECK(o.acquire(&b)==-16&&!o.owns(a+1)&&!o.start(a+1));CHECK(o.start(a)&&!o.start(a));
@@ -516,7 +639,8 @@ static void passiveHardwareTests() {
   // Corrupt indices/size must never authorize an out-of-bounds pending-head read.
   m.mem.st(hfi::qhdr(0)+hfi::kQRead,size);diagnostic::Hardware bad;bad.capture(m);CHECK(!bad.headWords[0]);
 }
-int main() {
+int main() { preparedInputTests();productionWorkTests();nativeCleanupFailureTests();
+  stockReplyWindowTests();
   firstTimeoutObservationTests();passiveHardwareTests();
   ancillaryPictureTests();
   finishDispositionTests();

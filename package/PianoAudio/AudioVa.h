@@ -1,20 +1,8 @@
 /* SPDX-License-Identifier: BSD-2-Clause-Patent */
-/* Level 10: the LPASS VA macro's DMIC path for piano's two microphones, as register values and their order; the owner supplies the
- * loads, stores and sleeps (AudioBoard.cpp: the macro's first page at 0x07660000 and the LPI pins at 0x07760000 + n * 0x1000, mapped
- * uncached). Called only while the DSP's PRM holds the macro and dcodec votes and the VA mclk (TX core mclk, 19.2 MHz): both the
- * macro and the LPI TLMM are clocked by them, and an access to an unclocked block may stall the bus.
- *   on   the LPI DMIC pins (gpio6 clock / gpio7 data: the VA DMIC0/1 pair, "dmic1" in the LPI pin table; gpio8 / gpio9: DMIC2/3,
- *        "dmic2"): function 1, 4 mA, the clocks driven; the macro's clock (MCLK enable, the FS counter enabled and cleared, the FS
- *        broadcast); both decimators at 48 kHz; DEC0 <- DMIC0, DEC1 <- DMIC2 (the input muxes and each path's DMIC select); the
- *        decimators' gain; each decimator powered up as Linux's VA macro does (its clock, the high-pass zero gate, the 150 Hz cut-off,
- *        about 9 ms); then the DMIC clocks of both pairs at 9.6 MHz / 4 = 2.4 MHz (the DT's qcom,dmic-sample-rate), the DMIC reset
- *        released; last the decimators unmuted
- *   off  the reverse: both decimators muted, the DMIC clocks stopped, the decimators' clocks off, the input muxes to zero, the
- *        macro's clock off; the LPI pins as found
- * Facts (offsets, fields, values, the order) from Linux's lpass-va-macro.c, pinctrl-lpass-lpi.{c,h} and pinctrl-sm8650-lpass-lpi.c
- * (the DT's LPI compatible falls back to sm8650's) and the ASoC power sequence, read as a specification only (GPL-2.0); the piano
- * DT (the VA macro and LPI nodes, their pin states); Ubuntu's UCM (DEC0 <- DMIC0 side top, DEC1 <- DMIC2 side bottom, gain 124).
- * Portable C, new code for PianoAudio; host-tested against a register model in tests/va_host.c. */
+/* Level 10: the LPASS VA macro and LPI DMIC pins. Access only while the PRM macro and
+ * dcodec votes and TX core MCLK hold. DEC1 keeps the side-bottom DMIC2 reference.
+ * Register and pin facts from Linux lpass-va-macro and sm8650-lpass-lpi, piano DT,
+ * Ubuntu UCM (legacy side mics), and ODM piano audio routing (main DMIC4). */
 #ifndef PIANO_AUDIO_VA_H
 #define PIANO_AUDIO_VA_H
 #include <stdint.h>
@@ -28,6 +16,8 @@ extern "C" {
 #define VA_TOP_CFG0 0x080u                /* bit 1: FS broadcast enable */
 #define VA_DMIC01_CTL 0x084u              /* the DMIC0/1 pair: bit 0 clock enable, bits 3:1 the divider code (2: / 4) */
 #define VA_DMIC23_CTL 0x088u              /* the DMIC2/3 pair */
+#define VA_DMIC45_CTL 0x08cu              /* the DMIC4/5 pair */
+#define VA_DMIC67_CTL 0x090u              /* the DMIC6/7 pair */
 #define VA_DMIC_CFG 0x094u                /* bit 7: all DMICs held in reset (its reset value 0x80) */
 #define VA_ADC_MUX0_CFG0 0x100u           /* DEC0's DMIC: bits 7:4 = n + 1 for DMIC n, 0 none */
 #define VA_ADC_MUX0_CFG1 0x104u           /* DEC0's source: bit 0 = 0 the DMICs (1: SoundWire) */
@@ -52,22 +42,55 @@ typedef struct {
     void (*write)(void *ctx, uint32_t offset, uint32_t value);
     void (*sleep_us)(void *ctx, uint32_t us);
 } AudioVaIo;
-/* The macro's DMIC path on, with the decimators' gain (capped at AUDIO_VA_GAIN_MAX). 0, or -1 when the macro does not take its
- * clock (MCLK enable does not read back): then nothing after it was written and the clock is off again. */
-int audio_va_on(const AudioVaIo *io, unsigned gain);
-void audio_va_off(const AudioVaIo *io);
+#define AUDIO_MIC_ROUTE_LEGACY (-1)
+static inline int audio_mic_route_valid(int route)
+{
+    return route == AUDIO_MIC_ROUTE_LEGACY || route == 0 || route == 2 || route == 4 || route == 6;
+}
+/* The accepted boot spelling is exactly one of the signed route values. */
+static inline int audio_mic_route_parse(const char *text, int *route)
+{
+    int value;
+    if (text[0] == '-' && text[1] == '1' && !text[2]) value = -1;
+    else if (text[0] >= '0' && text[0] <= '9' && !text[1]) value = text[0] - '0';
+    else return 0;
+    if (!audio_mic_route_valid(value)) return 0;
+    *route = value;
+    return 1;
+}
+static inline unsigned audio_mic_dec0(int route) {return route == AUDIO_MIC_ROUTE_LEGACY ? 0u : (unsigned)route;}
+static inline const char *audio_mic_mono_name(int route) {return route == AUDIO_MIC_ROUTE_LEGACY ? "mean" : "DEC0";}
 
-/* The LPI DMIC pins: CFG (pull bits 1:0, function 5:2, drive (mA / 2 - 1) 8:6, output enable 9) and VALUE (bit 1 the output). */
+typedef struct {
+    uint32_t mux[2], src[2], tx[2], cfg[2], ctl[4];
+    uint32_t mclk, fs_count, fs_broadcast;
+} AudioVaReadback;
+unsigned audio_va_pair_mask(int route);
+/* Returns -1 for invalid route or failed MCLK, -2 for failed route readback
+ * after cleanup, -3 if cleanup readback also failed. */
+int audio_va_on(const AudioVaIo *io, unsigned gain, int route, AudioVaReadback *rb);
+int audio_va_off(const AudioVaIo *io, int route, AudioVaReadback *rb);
+
+/* At most two distinct clock/data pin pairs. The caller maps every selected
+ * page before changing pins and retains all mappings through restore. */
 #define AUDIO_VA_PINS 4u
 typedef struct {
-    unsigned gpio;                        /* the LPI TLMM's pin */
-    const char *name;
+    unsigned gpio;
     uint32_t cfg;
-    uint32_t value;                       /* written before cfg when `drive` */
     int drive;
 } AudioVaPin;
-/* The four pins' values while the path is on: gpio6 dmic1 clock, gpio7 dmic1 data, gpio8 dmic2 clock, gpio9 dmic2 data. */
-const AudioVaPin *audio_va_pins(void);
+typedef struct {
+    void *ctx;
+    uint32_t (*read)(void *ctx, unsigned pin, unsigned offset);
+    void (*write)(void *ctx, unsigned pin, unsigned offset, uint32_t value);
+} AudioVaPinIo;
+typedef struct {
+    uint32_t old_cfg, old_value, cfg, value;
+} AudioVaPinState;
+
+unsigned audio_va_pins(int route, AudioVaPin pins[AUDIO_VA_PINS]);
+unsigned audio_va_pin_apply(const AudioVaPinIo *io, const AudioVaPin *pins, AudioVaPinState *state, unsigned count);
+unsigned audio_va_pin_restore(const AudioVaPinIo *io, AudioVaPinState *state, unsigned count);
 
 #ifdef __cplusplus
 }

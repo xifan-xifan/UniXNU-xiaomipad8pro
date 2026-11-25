@@ -263,6 +263,19 @@ inline void safeOff(const Hw &hw, PowerState &p, const Options &opt)
   }
 }
 
+inline bool wifiOffPins(const Hw &hw)
+{
+  if (!hw.read) return false;
+  const uint32_t config = pinConfig(-1, 0, 2, true);
+  const unsigned pins[] = {kPinWlanEn, kPinPerst};
+  for (const unsigned pin : pins) {
+    const uint32_t offset = kPins[pin].gpio * kTlmmStride;
+    if ((hw.read(hw.ctx, kWinTlmm, offset) & 0x3ffu) != config || (hw.read(hw.ctx, kWinTlmm, offset + 4) & 2u))
+      return false;
+  }
+  return true;
+}
+
 // ---- level 2 ----------------------------------------------------------------------------------------------------------------
 // The owner fills p.rails[i].ppid and .address (from level 1's PMIC survey and cmd-db lookup) before calling this.
 inline int powerUp(PowerState &p, const Hw &hw, const Options &opt)

@@ -145,6 +145,11 @@ QcomGlinkChannel *qcom_glink_channel(QcomGlink *g, const char *name, uint32_t in
         c->storage = storage;
         c->intent_size = intent_size;
         c->intent_count = intent_count;
+        c->fixed_intent_count = intent_count;
+        for (unsigned k = 0; k < intent_count; ++k) {
+            c->local[k].data = storage + (size_t)k * intent_size;
+            c->local[k].size = intent_size;
+        }
         c->initiator = open_now != 0;
         c->open_sent = open_now ? 0 : 2;  /* 2: wait for the remote's OPEN before sending ours */
         for (unsigned k = 0; k < QCOM_GLINK_MAX_PENDING_OPENS; ++k) {   /* the remote opened it already: answered by progress() */
@@ -191,15 +196,22 @@ static int advertise(QcomGlink *g, QcomGlinkChannel *c, unsigned index)
     uint8_t m[16];
     m[0] = QCOM_GLINK_INTENT; m[1] = 0; m[2] = (uint8_t)c->lcid; m[3] = (uint8_t)(c->lcid >> 8);
     put32(m + 4, 1);
-    put32(m + 8, c->intent_size);
+    put32(m + 8, c->local[index].size);
     put32(m + 12, index + 1);
     const int rc = tx(g, m, 16, 0, 0);
     if (!rc) {c->local[index].advertised = 1; c->local[index].fill = 0;}
     return rc;
 }
 
-static void reset_channel(QcomGlinkChannel *c)
+static void reset_channel(QcomGlink *g, QcomGlinkChannel *c)
 {
+    for (unsigned i = c->fixed_intent_count; i < c->intent_count; ++i) {
+        g->intent_free(c->local[i].data, c->local[i].size);
+        g->dynamic_bytes -= c->local[i].size;
+        c->local[i].data = 0;
+        c->local[i].size = 0;
+    }
+    c->intent_count = c->fixed_intent_count;
     c->open_acked = c->remote_open = c->up = c->intent_asked = c->ack_due = 0;
     c->open_sent = c->initiator ? 0 : 2;
     for (unsigned i = 0; i < QCOM_GLINK_MAX_LOCAL_INTENTS; ++i) c->local[i].advertised = c->local[i].busy = c->local[i].done_due = 0, c->local[i].fill = 0;
@@ -219,6 +231,11 @@ static int return_intent(QcomGlink *g, QcomGlinkChannel *c, unsigned index)
 static void progress(QcomGlink *g)
 {
     if (g->reply_due) {
+        if (g->reply_offer) {
+            QcomGlinkChannel *c = by_lcid(g, g->reply_cid);
+            if (advertise(g, c, g->reply_offer - 1)) return;
+            g->reply_offer = 0;
+        }
         if (command(g, g->reply_cmd, g->reply_cid, g->reply_value)) return;
         g->reply_due = 0;
         g->reply_retried++;
@@ -273,16 +290,16 @@ static int handle_data(QcomGlink *g, uint16_t cmd, uint32_t rcid, uint32_t liid,
         g->dropped++;
     } else {
         uint32_t fill = cmd == QCOM_GLINK_TX_DATA ? 0 : c->local[index].fill;
-        if ((uint64_t)fill + chunk + left > c->intent_size) {
+        if ((uint64_t)fill + chunk + left > c->local[index].size) {
             g->dropped++;
             fill = 0;
         } else {
-            rx_peek(&g->rx, 16, c->storage + (size_t)index * c->intent_size + fill, chunk);
+            rx_peek(&g->rx, 16, c->local[index].data + fill, chunk);
             fill += chunk;
             if (!left) {
                 c->local[index].busy = 1;
                 g->rx_data++;
-                if (c->client.receive) c->client.receive(c->context, c, c->storage + (size_t)index * c->intent_size, fill);
+                if (c->client.receive) c->client.receive(c->context, c, c->local[index].data, fill);
                 fill = 0;
                 /* The remote still owns the intent until DONE actually fits in the shared FIFO. */
                 if (return_intent(g, c, index)) {
@@ -319,6 +336,48 @@ static void note_unknown(QcomGlink *g, const char *name)
     if (used) list[used++] = ' ';
     for (unsigned b = 0; b < n; ++b) list[used++] = name[b];
     list[used] = 0;
+}
+static void note_request(QcomGlinkIntentStats *s, uint32_t size, int granted)
+{
+    if (!s->requests || size < s->min_size) s->min_size = size;
+    if (size > s->max_size) s->max_size = size;
+    s->requests++;
+    s->last_size = size;
+    s->size_sum += size;
+    if (granted) s->granted++; else s->refused++;
+}
+static void note_ack(QcomGlinkIntentStats *s, uint32_t granted)
+{
+    s->acks++;
+    if (granted) s->ack_granted++; else s->ack_refused++;
+}
+/* Independent implementation of the requested-size allocation behaviour. Bounds cover the whole edge,
+ * not just one channel. The fixed pool and its default-off grant decision are unchanged. */
+static unsigned requested_intent(QcomGlink *g, QcomGlinkChannel *c, uint32_t size, const char **reason)
+{
+    const unsigned none = QCOM_GLINK_MAX_LOCAL_INTENTS;
+    if (!c) {*reason = "unknown-channel"; return none;}
+    if (!c->up) {*reason = "channel-down"; return none;}
+    if (!g->dynamic_intents) {
+        if (size > c->intent_size) {*reason = "exceeds-fixed-size"; return none;}
+        for (unsigned k = 0; k < c->intent_count; ++k)
+            if (!c->local[k].advertised && !c->local[k].busy) {*reason = "fixed-idle"; return k;}
+        *reason = "no-idle-unadvertised";
+        return none;
+    }
+    if (!size) {*reason = "zero-size"; return none;}
+    if (size > QCOM_GLINK_DYNAMIC_INTENT_MAX) {*reason = "size-cap"; return none;}
+    if (c->intent_count == QCOM_GLINK_MAX_LOCAL_INTENTS) {*reason = "slot-cap"; return none;}
+    if (g->dynamic_bytes > QCOM_GLINK_DYNAMIC_TOTAL_MAX - size) {*reason = "total-cap"; return none;}
+    if (!g->intent_alloc || !g->intent_free) {*reason = "no-allocator"; return none;}
+    uint8_t *data = g->intent_alloc(size);
+    if (!data) {*reason = "allocation-failed"; return none;}
+    const unsigned k = c->intent_count++;
+    c->local[k].data = data;
+    c->local[k].size = size;
+    g->dynamic_bytes += size;
+    *reason = "allocated-requested-size";
+    return k;
 }
 static int receive_one(QcomGlink *g)
 {
@@ -379,7 +438,7 @@ static int receive_one(QcomGlink *g)
             for (unsigned b = 0; b < QCOM_GLINK_NAME; ++b) g->pending[slot].name[b] = name[b];
         } else {
             if (c->remote_open && c->up && c->client.state) c->client.state(c->context, c, 0);
-            if (c->remote_open) reset_channel(c);
+            if (c->remote_open) reset_channel(g, c);
             if (command(g, QCOM_GLINK_OPEN_ACK, param1, 0)) return 0;
             c->rcid = param1;
             c->remote_open = 1;
@@ -396,7 +455,7 @@ static int receive_one(QcomGlink *g)
         if ((c = by_rcid(g, param1))) {
             const int was = c->up;
             if (c->open_sent == 1 && command(g, QCOM_GLINK_CLOSE, c->lcid, 0)) return 0;
-            reset_channel(c);
+            reset_channel(g, c);
             if (was && c->client.state) c->client.state(c->context, c, 0);
         } else {
             for (unsigned k = 0; k < QCOM_GLINK_MAX_PENDING_OPENS; ++k)   /* a pending open withdrawn */
@@ -444,19 +503,19 @@ static int receive_one(QcomGlink *g)
                 }
         break;
     case QCOM_GLINK_RX_INTENT_REQ: {
-        /* Grant it if a buffer of ours that is big enough is not advertised (all are, normally: then refuse). */
-        int granted = 0;
-        if ((c = by_rcid(g, param1)) && c->up && param2 <= c->intent_size)
-            for (unsigned k = 0; k < c->intent_count; ++k)
-                if (!c->local[k].advertised && !c->local[k].busy) {
-                    if (advertise(g, c, k)) return 0;
-                    granted = 1;
-                    break;
-                }
+        c = by_rcid(g, param1);
+        const char *reason = 0;
+        const unsigned slot = requested_intent(g, c, param2, &reason);
+        const int granted = slot != QCOM_GLINK_MAX_LOCAL_INTENTS;
+        note_request(&g->intents, param2, granted);
+        if (c) note_request(&c->intents, param2, granted);
+        if (g->intent_event) g->intent_event(g->intent_context, c, cmd, param1, param2, (uint32_t)granted, reason);
         const uint16_t cid = c ? c->lcid : param1;
-        if (command(g, QCOM_GLINK_RX_INTENT_REQ_ACK, cid, (uint32_t)granted)) {
-            /* Advertising may already have succeeded: retain that grant instead of replaying it as a refusal. */
+        const int offer_due = granted && advertise(g, c, slot);
+        if (offer_due || command(g, QCOM_GLINK_RX_INTENT_REQ_ACK, cid, (uint32_t)granted)) {
+            /* Consume/count the request once. Retry an owed offer before ACK=1, without allocating again. */
             g->reply_due = 1;
+            g->reply_offer = offer_due ? slot + 1 : 0;
             g->reply_cmd = QCOM_GLINK_RX_INTENT_REQ_ACK;
             g->reply_cid = cid;
             g->reply_value = (uint32_t)granted;
@@ -465,7 +524,11 @@ static int receive_one(QcomGlink *g)
         break;
     }
     case QCOM_GLINK_RX_INTENT_REQ_ACK:
-        if ((c = by_rcid(g, param1)) && !param2) c->intent_asked = 0;
+        c = by_rcid(g, param1);
+        note_ack(&g->intents, param2);
+        if (c) {note_ack(&c->intents, param2); if (!param2) c->intent_asked = 0;}
+        if (g->intent_event) g->intent_event(g->intent_context, c, cmd, param1, c ? c->intents.last_tx_size : 0, param2,
+                                          c ? (param2 ? "remote-granted" : "remote-refused") : "unknown-channel");
         break;
     case QCOM_GLINK_TX_DATA:
     case QCOM_GLINK_TX_DATA_CONT: {
@@ -515,7 +578,11 @@ int qcom_glink_send(QcomGlink *g, QcomGlinkChannel *c, const void *data, uint32_
             (best == QCOM_GLINK_MAX_REMOTE_INTENTS || c->remote[k].size < c->remote[best].size))
             best = k;
     if (best == QCOM_GLINK_MAX_REMOTE_INTENTS) {
-        if (!c->intent_asked && command(g, QCOM_GLINK_RX_INTENT_REQ, c->lcid, length) == QcomGlinkOk) c->intent_asked = 1;
+        if (!c->intent_asked && command(g, QCOM_GLINK_RX_INTENT_REQ, c->lcid, length) == QcomGlinkOk) {
+            c->intent_asked = 1;
+            c->intents.requests_tx++; c->intents.last_tx_size = length;
+            g->intents.requests_tx++; g->intents.last_tx_size = length;
+        }
         if (g->kick_pending && g->kick) {g->kick_pending = 0; g->kick(g->kick_context);}
         return QcomGlinkAgain;
     }

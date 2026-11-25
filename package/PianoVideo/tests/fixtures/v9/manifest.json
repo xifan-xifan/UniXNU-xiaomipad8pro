@@ -1,0 +1,20 @@
+{
+  "format": 1,
+  "provenance": "Leo Zhang HEVC transcodes of the project-owned v8/high1080 FFmpeg test pattern; no downloaded media",
+  "fixtures": {
+    "main10": {
+      "movie": "main10-1080.mp4",
+      "sha256": "f0c2f63aa03a6443036b395cb5516b5fee55e653c96da8c57b5207141686f16c",
+      "reference": "main10-reference.json",
+      "frames": 60,
+      "depth": 10
+    },
+    "main8": {
+      "movie": "main8-1080.mp4",
+      "sha256": "ccc8163cd4434f07d81039b1c72fb8a748995acc8ade65c37efe6dfcb7bc6632",
+      "reference": "main8-reference.json",
+      "frames": 60,
+      "depth": 8
+    }
+  }
+}

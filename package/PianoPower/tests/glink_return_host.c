@@ -4,6 +4,7 @@
 #include "../QcomGlink.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 static unsigned checks, failures, deliveries, kicks;
 #define CHECK(x) do { ++checks; if (!(x)) { ++failures; printf("FAIL line %d: %s\n", __LINE__, #x); } } while (0)
@@ -210,6 +211,96 @@ static void pmic_channel_returns(int reuse)
     qcom_glink_poll(&f.g);
     CHECK(!f.g.retry_pending && !pmic->local[0].busy && received==1 && deliveries==before+1);
 }
+static unsigned allocations, freed, events, fail_alloc;
+static const char *last_reason;
+static uint8_t *intent_alloc(uint32_t size) {if(fail_alloc)return NULL; ++allocations;return malloc(size);}
+static void intent_free(uint8_t *bytes,uint32_t size) {(void)size;++freed;free(bytes);}
+static void intent_event(void *ctx,const QcomGlinkChannel *c,uint16_t cmd,uint16_t rcid,uint32_t size,uint32_t granted,const char *reason)
+{(void)ctx;(void)c;(void)cmd;(void)rcid;(void)size;(void)granted;++events;last_reason=reason;}
+static void enable_intents(Fixture *f)
+{f->g.dynamic_intents=1;f->g.intent_alloc=intent_alloc;f->g.intent_free=intent_free;f->g.intent_event=intent_event;}
+static void ask(Fixture *f,uint32_t size)
+{remote(f,QCOM_GLINK_RX_INTENT_REQ,7,size,NULL,0);qcom_glink_poll(&f->g);}
+static void close_intents(Fixture *f)
+{f->tt=f->th;remote(f,QCOM_GLINK_CLOSE,7,0,NULL,0);qcom_glink_poll(&f->g);}
+static void intent_counts(void)
+{
+    Fixture f;QcomGlinkChannel *c=setup(&f,1,1);f.g.intent_event=intent_event;
+    const unsigned before=events;
+    ask(&f,16);CHECK(take(&f,QCOM_GLINK_RX_INTENT_REQ_ACK,0)==1 && !strcmp(last_reason,"no-idle-unadvertised"));
+    ask(&f,32);CHECK(take(&f,QCOM_GLINK_RX_INTENT_REQ_ACK,0)==1 && !strcmp(last_reason,"exceeds-fixed-size"));
+    remote(&f,QCOM_GLINK_RX_INTENT_REQ,99,64,NULL,0);qcom_glink_poll(&f.g);
+    CHECK(take(&f,QCOM_GLINK_RX_INTENT_REQ_ACK,0)==1 && !strcmp(last_reason,"unknown-channel"));
+    CHECK(c->intents.requests==2 && c->intents.refused==2 && !c->intents.granted);
+    CHECK(c->intents.last_size==32 && c->intents.min_size==16 && c->intents.max_size==32 && c->intents.size_sum==48);
+    CHECK(f.g.intents.requests==3 && f.g.intents.size_sum==112 && events==before+3);
+    CHECK(qcom_glink_send(&f.g,c,"lux!",4)==QcomGlinkAgain);
+    CHECK(c->intents.requests_tx==1 && c->intents.last_tx_size==4);
+    remote(&f,QCOM_GLINK_RX_INTENT_REQ_ACK,7,1,NULL,0);
+    remote(&f,QCOM_GLINK_RX_INTENT_REQ_ACK,7,0,NULL,0);
+    remote(&f,QCOM_GLINK_RX_INTENT_REQ_ACK,99,0,NULL,0);qcom_glink_poll(&f.g);
+    CHECK(c->intents.acks==2 && c->intents.ack_granted==1 && c->intents.ack_refused==1 && !c->intent_asked);
+    CHECK(f.g.intents.acks==3 && f.g.intents.ack_refused==2 && events==before+6);
+}
+static void dynamic_pressure(unsigned room)
+{
+    Fixture f;QcomGlinkChannel *c=setup(&f,1,1);enable_intents(&f);
+    const unsigned before=allocations,old_events=events;
+    f.th=sizeof f.tx-24-room;
+    ask(&f,64);
+    CHECK(c->intents.requests==1 && c->intents.granted==1 && allocations==before+1 && events==old_events+1);
+    CHECK(c->intent_count==2 && f.g.dynamic_bytes==64 && f.g.reply_due && f.rt==f.rh);
+    CHECK((f.g.reply_offer!=0)==(room==0));
+    qcom_glink_poll(&f.g);qcom_glink_poll(&f.g);
+    CHECK(c->intents.requests==1 && allocations==before+1 && events==old_events+1);
+    f.tt=f.th;qcom_glink_poll(&f.g);
+    /* room=0: deferred offer must precede ACK=1, even when it wraps the TX FIFO. */
+    if(room==0){uint8_t h[16];for(unsigned i=0;i<16;++i)h[i]=f.tx[(f.tt+i)%sizeof f.tx];
+        CHECK(h[0]==QCOM_GLINK_INTENT && get32(h+8)==64 && get32(h+12)==2);}
+    CHECK(take(&f,QCOM_GLINK_RX_INTENT_REQ_ACK,1)==1 && !f.g.reply_due && !f.g.reply_offer);
+    CHECK(c->local[1].advertised && c->local[1].size==64 && c->local[1].data!=f.storage);
+    const unsigned old_deliveries=deliveries;
+    data(&f,QCOM_GLINK_TX_DATA,2,"lu",2,2);data(&f,QCOM_GLINK_TX_DATA_CONT,2,"x!",2,0);qcom_glink_poll(&f.g);
+    CHECK(deliveries==old_deliveries+1 && take(&f,QCOM_GLINK_RX_DONE_W_REUSE,2)==1);
+    CHECK(c->local[1].advertised && !c->local[1].busy);
+    const unsigned old_freed=freed;close_intents(&f);
+    CHECK(freed==old_freed+1 && !f.g.dynamic_bytes && c->intent_count==1 && !c->local[1].data);
+    CHECK(c->intents.requests==1); /* lifetime counters survive reset */
+}
+static void large_receive(void *ctx,QcomGlinkChannel *c,const uint8_t *bytes,uint32_t n)
+{(void)c;CHECK(n==48);for(unsigned i=0;i<n;++i)CHECK(bytes[i]==(uint8_t)i);++*(unsigned *)ctx;}
+static void dynamic_capacity(int reuse)
+{
+    Fixture f;QcomGlinkChannel *c=setup(&f,reuse,1);enable_intents(&f);
+    ask(&f,64);CHECK(take(&f,QCOM_GLINK_RX_INTENT_REQ_ACK,1)==1);
+    unsigned received=0;c->client.receive=large_receive;c->context=&received;
+    uint8_t payload[56];put32(payload,48);put32(payload+4,0);for(unsigned i=0;i<48;++i)payload[i+8]=(uint8_t)i;
+    remote(&f,QCOM_GLINK_TX_DATA,7,2,payload,sizeof payload);qcom_glink_poll(&f.g);
+    CHECK(received==1 && !f.g.dropped && take(&f,reuse?QCOM_GLINK_RX_DONE_W_REUSE:QCOM_GLINK_RX_DONE,2)==1);
+    CHECK(c->local[1].advertised); /* non-reuse: progress re-advertises its real 64B capacity */
+    close_intents(&f);CHECK(!f.g.dynamic_bytes);
+}
+static void dynamic_limits(void)
+{
+    Fixture f;QcomGlinkChannel *c=setup(&f,1,1);enable_intents(&f);
+    const unsigned before=allocations;
+    ask(&f,0);CHECK(!strcmp(last_reason,"zero-size"));take(&f,8,0);
+    ask(&f,QCOM_GLINK_DYNAMIC_INTENT_MAX+1);CHECK(!strcmp(last_reason,"size-cap"));take(&f,8,0);
+    ask(&f,0xffffffffu);CHECK(!strcmp(last_reason,"size-cap"));take(&f,8,0);
+    fail_alloc=1;ask(&f,64);CHECK(!strcmp(last_reason,"allocation-failed"));take(&f,8,0);fail_alloc=0;
+    CHECK(allocations==before && !f.g.dynamic_bytes && c->intent_count==1);
+    for(unsigned i=0;i<4;++i){ask(&f,QCOM_GLINK_DYNAMIC_INTENT_MAX);CHECK(take(&f,8,1)==1);}
+    CHECK(f.g.dynamic_bytes==QCOM_GLINK_DYNAMIC_TOTAL_MAX);
+    ask(&f,1);CHECK(take(&f,8,0)==1 && !strcmp(last_reason,"total-cap"));
+    CHECK(c->intents.requests==9 && c->intents.granted==4 && c->intents.refused==5);
+    close_intents(&f);CHECK(!f.g.dynamic_bytes);
+    c=setup(&f,1,0);enable_intents(&f);
+    for(unsigned i=0;i<QCOM_GLINK_MAX_LOCAL_INTENTS;++i){ask(&f,4);CHECK(take(&f,8,1)==1);}
+    ask(&f,4);CHECK(take(&f,8,0)==1 && !strcmp(last_reason,"slot-cap"));
+    CHECK(c->intent_count==QCOM_GLINK_MAX_LOCAL_INTENTS && f.g.dynamic_bytes==4*QCOM_GLINK_MAX_LOCAL_INTENTS);
+    close_intents(&f);CHECK(!f.g.dynamic_bytes && !c->intent_count);
+    CHECK(allocations==freed);
+}
 int main(void)
 {
     for(int reuse=0;reuse<=1;++reuse)for(int frag=0;frag<=1;++frag)completion(reuse,frag,1);
@@ -218,6 +309,8 @@ int main(void)
     close_reopen();
     shared_channel_returns();
     pmic_channel_returns(0);pmic_channel_returns(1);
+    intent_counts();dynamic_pressure(0);dynamic_pressure(16);
+    dynamic_capacity(0);dynamic_capacity(1);dynamic_limits();
     printf("glink_return_host: %u checks, %u failures, %u delivered, %u kicks\n",checks,failures,deliveries,kicks);
     return failures?1:0;
 }

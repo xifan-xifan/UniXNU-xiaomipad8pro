@@ -138,7 +138,7 @@ std::vector<uint8_t> wire(uint32_t type,uint32_t key,uint32_t kind,const std::ve
 }
 bool audit(Clip &clip,bool publicOnly) {
   using namespace vtwire;
-  auto fmt=formatWire(clip.format),m=wire(cc("dsta"),cc(",fds"),cc("=fds"),fmt);contract::FormatReport report;pianovideo::avc::Config config;
+  auto fmt=formatWire(clip.format),m=wire(cc("dsta"),cc(",fds"),cc("=fds"),fmt);contract::FormatReport report;pianovideo::codec::Config config;
   if(!check("real-coremedia-format-contract",contract::formatRequest(m.data(),uint32_t(m.size()),report,&config)))return false;
   // Some hosts export these private helpers; 27.3 keeps them local. Missing
   // exports only prevent this offline audit. Public VT decode still calls the

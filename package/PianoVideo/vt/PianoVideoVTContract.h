@@ -5,14 +5,36 @@
 #include "PianoVideoVTWire.h"
 #include "PianoVideoNative.h"
 #include "../VideoFixture.h"
-#include "PianoVideoAVC.h"
+#include "PianoVideoCodec.h"
 namespace pianovideo { namespace vtcontract {
 constexpr uint32_t kMaxAuBytes = 1u << 20;
 // Bound snapshots independently of the native AU limit. Rejected frames still
 // need completion; a dfrm error reply alone does not retire a VT frame.
 constexpr uint32_t kMaxMessageBytes = 4u << 20;
-constexpr uint32_t kMaxSurfaceBytes = 4u << 20; // bounded task wiring for the tiny qualification pool
+constexpr uint32_t kMaxSurfaceBytes = 64u << 20; // bounded NV12/P010 task wiring
 constexpr uint32_t kParameterBytes = 35; // start4+SPS22+start4+PPS5
+// Same metadata for inventory registration and the global dcap query. Apple
+// profile/level numbers are deliberately separate from the HFI enums. The
+// experimental HEVC envelope excludes unqualified 4K cold reopen.
+inline int capabilities(vtwire::Plist &p,bool hevc) {
+  const int profileValues[]={p.integer(hevc?1:66),p.integer(hevc?2:77),hevc?-1:p.integer(100)};
+  const int profiles=p.array(profileValues,hevc?2:3);
+  const int keys[]={p.string("VTIsHardwareAccelerated"),p.string("VTMaxDecodeLevel"),p.string("VTMaxPlaybackLevel")};
+  const int values[]={p.boolean(true),p.integer(hevc?codec::kHevcMaxLevel:42),p.integer(hevc?codec::kHevcMaxLevel:42)};
+  const int support=p.dict(keys,values,3);
+  const int perKeys[]={p.string(hevc?"1":"66"),p.string(hevc?"2":"77"),hevc?-1:p.string("100")};
+  const int perValues[]={support,support,support};
+  const int per=p.dict(perKeys,perValues,hevc?2:3);
+  const int rootKeys[]={p.string("VTSupportedProfiles"),p.string("VTPerProfileSupport")};
+  const int rootValues[]={profiles,per};return p.dict(rootKeys,rootValues,2);
+}
+inline int inventoryEntry(vtwire::Plist &p,bool hevc) {
+  const int type=p.string(hevc?"hvc1":"avc1");
+  const int keys[]={p.string("VTCodecType"),p.string("CMClassImplementationName"),p.string("IsPreferredInternalPlugin"),p.string("VTRating"),p.string("CMClassImplementationID"),p.string("VTDecoderCapabilities")};
+  const int values[]={p.array(&type,1),p.string(hevc?"PianoVideo native bounded HEVC Main Main10":"PianoVideo native bounded AVC High"),p.boolean(false),p.integer(400),p.string(hevc?"com.unixnu.pianovideo.decoder.hevc":"com.unixnu.pianovideo.decoder.avc"),capabilities(p,hevc)};
+  return p.dict(keys,values,6);
+}
+inline uint32_t completionInfo(uint32_t flags,bool image,int error) {return (flags&1)|((image&&!error)?0u:2u);}
 inline bool atoms(const uint8_t *p, uint32_t n) {
   const uint8_t *at = p, *end = p + n;
   vtwire::Atom a;
@@ -92,12 +114,14 @@ inline uint32_t normalize(const uint8_t *p, uint32_t n, uint8_t *out, uint32_t c
   const uint32_t bytes = n + kParameterBytes;
   return normalizedAu(out, bytes) ? bytes : 0;
 }
-inline uint32_t normalize(const uint8_t *p, uint32_t n, uint8_t *out, uint32_t cap, const avc::Config &cfg, bool prepend) {
-  return avc::normalize(p,n,out,cap,cfg,prepend);
+inline uint32_t normalize(const uint8_t *p, uint32_t n, uint8_t *out, uint32_t cap, const codec::Config &cfg, bool prepend) {
+  return codec::normalize(p,n,out,cap,cfg,prepend);
 }
 // Target version6 indexed keys are stable table positions, confirmed in the
 // decoded 27.3 initializer: SampleDescriptionExtensionAtoms=49 (0x1972d1cd8),
-// avcC=105 and sinf=109 (0x1972d2038; constant strings 0x19735aff4).
+// avcC=105 and sinf=109 (0x1972d2038). hvcC=112: array starts
+// sp+8 at 0x1972d1a48; hvcC constant 0x1e406ca10 is stored at sp+0x388
+// at 0x1972d2090. These are target table positions, not FourCC ordering.
 inline bool dictionaryEntry(const uint8_t *p, uint32_t n, uint16_t index, const char *name, vtwire::Atom &out, bool *present = nullptr) {
   if (!atoms(p,n)) return false;
   const uint8_t *at=p,*end=p+n; vtwire::Atom item; bool found=false;
@@ -132,34 +156,36 @@ inline bool plistData(const uint8_t *p,uint32_t n,const uint8_t *&bytes,uint32_t
   if(length>UINT32_MAX || length!=table-at)return false;
   bytes=p+at;count=uint32_t(length);return true;
 }
-inline bool sampleFormat(const vtwire::Atom &fdsc,const avc::Config &cfg) {
+inline bool sampleFormat(const vtwire::Atom &fdsc,const codec::Config &cfg) {
   using namespace vtwire; Atom media,codec,dimensions,extensions,dictionary,description,configuration;
   auto le32=[](const uint8_t *p){uint32_t v;memcpy(&v,p,4);return v;};
   if (!unique(fdsc.body,fdsc.size,cc("mdia"),media) || media.size!=4 || le32(media.body)!=cc("vide") ||
-      !unique(fdsc.body,fdsc.size,cc("codc"),codec) || codec.size!=4 || le32(codec.body)!=cc("avc1") ||
-      !unique(fdsc.body,fdsc.size,cc("vdim"),dimensions) || dimensions.size!=8 || le32(dimensions.body)!=320 || le32(dimensions.body+4)!=240 ||
+      !unique(fdsc.body,fdsc.size,cc("codc"),codec) || codec.size!=4 || le32(codec.body)!=cfg.format() ||
+      !unique(fdsc.body,fdsc.size,cc("vdim"),dimensions) || dimensions.size!=8 || le32(dimensions.body)!=cfg.s.width || le32(dimensions.body+4)!=cfg.s.height ||
       !unique(fdsc.body,fdsc.size,cc("extn"),extensions) || !unique(extensions.body,extensions.size,cc("dict"),dictionary))return false;
   Atom protection; bool protectedData=false;
   dictionaryEntry(dictionary.body,dictionary.size,101,"CommonEncryptionProtected",protection,&protectedData);
   dictionaryEntry(dictionary.body,dictionary.size,102,"CommonEncryptionTrackEncryptionBox",protection,&protectedData);
   dictionaryEntry(dictionary.body,dictionary.size,103,"CommonEncryptionOriginalFormat",protection,&protectedData);
   if (protectedData || !dictionaryEntry(dictionary.body,dictionary.size,49,"SampleDescriptionExtensionAtoms",description) || description.type!=cc("dict") ||
-      !dictionaryEntry(description.body,description.size,105,"avcC",configuration) || configuration.type!=cc("datv"))return false;
+      !dictionaryEntry(description.body,description.size,cfg.isHevc()?112:105,cfg.isHevc()?"hvcC":"avcC",configuration) || configuration.type!=cc("datv"))return false;
   dictionaryEntry(description.body,description.size,109,"sinf",protection,&protectedData);
+  dictionaryEntry(description.body,description.size,cfg.isHevc()?105:112,cfg.isHevc()?"avcC":"hvcC",protection,&protectedData);
   if(protectedData)return false;
-  const uint8_t *p=nullptr;uint32_t n=0;avc::Config incoming;
-  return plistData(configuration.body,configuration.size,p,n) && avc::config(p,n,incoming) && cfg.same(incoming);
+  const uint8_t *p=nullptr;uint32_t n=0;codec::Config incoming;
+  return plistData(configuration.body,configuration.size,p,n) &&
+    (cfg.isHevc()?codec::parseHevc(p,n,incoming):codec::parseAvc(p,n,incoming)) && cfg.same(incoming);
 }
 struct InputReport {
   int64_t token = 0;
   bool hasToken = false, transportReject = false;
   uint32_t flags = 0;
-  avc::Picture picture;
+  codec::Picture picture;
   uint32_t parameterType = 0, bytes = 0;
   const uint8_t *data = nullptr;
   const char *decision = "frame-parameter";
 };
-inline bool inputRequest(const uint8_t *m, uint32_t n, InputReport &r, const avc::Config *cfg = nullptr) {
+inline bool inputRequest(const uint8_t *m, uint32_t n, InputReport &r, const codec::Config *cfg = nullptr) {
   r = InputReport{};
   if (!message(m,n) || !(r.hasToken = vtwire::paramS64(m,n,vtwire::cc(",frm"),r.token))) return false;
   vtwire::Param p; vtwire::Atom sbuf,sdat;
@@ -168,8 +194,8 @@ inline bool inputRequest(const uint8_t *m, uint32_t n, InputReport &r, const avc
     r.decision = "decode-flags";
     if (!vtwire::param(m,n,vtwire::cc(",dfl"),p) || p.type != vtwire::cc("=u32") || p.size != 4) { r.transportReject = true; return false; }
     r.flags = vtwire::be32(p.value);
-    // A synchronous callback cannot wait for a guest reply through selector3.
-    if (!(r.flags & 1) || (r.flags & ~15u)) { r.transportReject = true; return false; }
+    // selector3 only enqueues; a separate worker owns synchronous completion.
+    if (r.flags & ~15u) { r.transportReject = true; return false; }
     r.decision = "unsupported-frame-options";
     if (vtwire::param(m,n,vtwire::cc(",fop"),p)) { r.transportReject = true; return false; }
   }
@@ -206,7 +232,7 @@ inline bool inputRequest(const uint8_t *m, uint32_t n, InputReport &r, const avc
     if (vtwire::find(sbuf.body,sbuf.size,vtwire::cc("fdsc"),fdsc) &&
         (!unique(sbuf.body,sbuf.size,vtwire::cc("fdsc"),fdsc) || !sampleFormat(fdsc,*cfg)))return false;
     r.decision = "sample-not-qualified";
-    if (!avc::accessUnit(r.data,r.bytes,*cfg,&r.picture)) return false;
+    if (!codec::accessUnit(r.data,r.bytes,*cfg,&r.picture)) return false;
   } else if (!sample(r.data,r.bytes)) return false;
   r.decision = "accept"; return true;
 }
@@ -232,7 +258,7 @@ inline bool imageExtensions(const uint8_t *p, uint32_t n, uint32_t &atomBytes, b
   atomBytes = n;
   return true;
 }
-inline bool format(const vtwire::ImageDescription &d, FormatReport *report = nullptr, avc::Config *config = nullptr) {
+inline bool formatParsed(const vtwire::ImageDescription &d, FormatReport *report, codec::Config &parsed) {
   using namespace vtwire;
   FormatReport local;
   FormatReport &r = report ? *report : local;
@@ -241,25 +267,41 @@ inline bool format(const vtwire::ImageDescription &d, FormatReport *report = nul
   r.decision = "extension-layout";
   if (!imageExtensions(d.extensions, d.extensionsSize, r.atomBytes, r.terminalZero)) return false;
   r.decision = "codec";
-  if (d.codec != cc("avc1")) return false;
+  const bool hevc=d.codec==cc("hvc1");
+  if (d.codec != cc("avc1") && !hevc) return false;
   r.decision = "dimensions";
-  if (d.width != 320 || d.height != 240) return false;
-  r.decision = "avcC-missing-or-duplicate";
-  Atom avc;
-  if (!unique(d.extensions, r.atomBytes, cc("avcC"), avc)) return false;
-  r.avcBytes = avc.size;
-  r.decision = "avcC-configuration";
-  avc::Config parsed;
-  if (!avc::config(avc.body,avc.size,parsed)) return false;
+  if (!d.width || !d.height || d.width > (hevc?3840u:1920u) || d.height > (hevc?2160u:1080u) || ((d.width | d.height) & 1)) return false;
+  r.decision = hevc?"hvcC-missing-or-duplicate":"avcC-missing-or-duplicate";
+  Atom parameter;
+  if (!unique(d.extensions, r.atomBytes, hevc?cc("hvcC"):cc("avcC"), parameter)) return false;
+  r.avcBytes = parameter.size;
+  r.decision = hevc?"hvcC-configuration":"avcC-configuration";
+  if (!(hevc?codec::parseHevc(parameter.body,parameter.size,parsed):codec::parseAvc(parameter.body,parameter.size,parsed)) ||
+      d.width != parsed.s.width || d.height != parsed.s.height) return false;
+  r.decision = "hevc-native-envelope";
+  if (!codec::nativeAdmitted(parsed)) return false;
   Atom protectedAtom;
-  r.decision = "protected-or-hevc";
-  if (find(d.extensions, r.atomBytes, cc("sinf"), protectedAtom) || find(d.extensions, r.atomBytes, cc("hvcC"), protectedAtom)) return false;
-  if (config) *config = parsed;
+  r.decision = "protected-or-codec-mismatch";
+  if (find(d.extensions, r.atomBytes, cc("sinf"), protectedAtom) ||
+      find(d.extensions, r.atomBytes, hevc?cc("avcC"):cc("hvcC"), protectedAtom)) return false;
+  Atom colr;
+  if(find(d.extensions,r.atomBytes,cc("colr"),colr)) {
+    if(!unique(d.extensions,r.atomBytes,cc("colr"),colr)||colr.size<10)return false;
+    if(vtwire::be32(colr.body)==cc("nclx") && (colr.size!=11 || (colr.body[10]&0x80)))return false;
+  }
   r.decision = "accept";
   return true;
 }
+// Keep the optional result's large parser record off callers that already
+// supplied storage. Kernel paths always provide their heap/session object.
+__attribute__((noinline)) inline bool formatUnstored(const vtwire::ImageDescription &d,FormatReport *report) {
+  codec::Config parsed;return formatParsed(d,report,parsed);
+}
+inline bool format(const vtwire::ImageDescription &d, FormatReport *report = nullptr, codec::Config *config = nullptr) {
+  return config?formatParsed(d,report,*config):formatUnstored(d,report);
+}
 // Shared by dsta/dcan and by the real CoreMedia serializer host test.
-inline bool formatRequest(const uint8_t *m, uint32_t n, FormatReport &r, avc::Config *config = nullptr) {
+inline bool formatRequest(const uint8_t *m, uint32_t n, FormatReport &r, codec::Config *config = nullptr) {
   using namespace vtwire;
   r = FormatReport{};
   r.decision = "message-layout";
@@ -283,25 +325,42 @@ inline bool extent(uint64_t offset, uint64_t stride, uint64_t rows, uint64_t wid
   return rows && width && stride >= width && offset <= size && width <= size-offset && rows-1 <= (size-offset-width)/stride;
 }
 inline bool layout(const native::Layout &l, uint64_t length) {
-  return l.width == 320 && l.height == 240 && l.stride == 384 && l.scanlines == 256 && l.yOffset == 0 && l.uvOffset == 98304 &&
-    l.bytes <= length && l.bytes >= 144256 && l.bitdepth == 8 && l.format == vtwire::cc("420v") &&
-    extent(l.yOffset,l.stride,l.height,l.width,l.bytes) && extent(l.uvOffset,l.stride,l.height/2,l.width,l.bytes);
+  const bool hevc=l.codec==vtwire::cc("hvc1"), ten=l.bitdepth==10;
+  const uint32_t sampleBytes=ten?2:1, maxWidth=hevc?3840:1920, maxHeight=hevc?2160:1080;
+  const uint32_t expectedStride=((l.codedWidth*sampleBytes+(ten?255:127))&~(ten?255u:127u));
+  return (hevc||l.codec==vtwire::cc("avc1")) && (!ten||hevc) && (l.bitdepth==8||ten) &&
+    l.width >= 96 && l.height >= 96 && l.width <= maxWidth && l.height <= maxHeight && !((l.width|l.height)&1) &&
+    l.codedWidth >= l.width && l.codedWidth <= maxWidth && l.codedHeight >= l.height && l.codedHeight <= (hevc?2176u:1088u) &&
+    !((l.codedWidth|l.codedHeight|l.cropLeft|l.cropTop)&1) &&
+    l.cropLeft <= l.codedWidth-l.width && l.cropTop <= l.codedHeight-l.height &&
+    l.stride == expectedStride && l.scanlines == ((l.codedHeight+31)&~31u) &&
+    uint64_t(l.yOffset) == uint64_t(l.cropTop)*l.stride+uint64_t(l.cropLeft)*sampleBytes &&
+    uint64_t(l.uvOffset) == uint64_t(l.stride)*l.scanlines+uint64_t(l.cropTop/2)*l.stride+uint64_t(l.cropLeft)*sampleBytes &&
+    l.bytes <= length && l.bytes <= kMaxSurfaceBytes && l.format == vtwire::cc(ten?"x420":"420v") &&
+    !(l.yOffset & (sampleBytes-1)) && !(l.uvOffset & (sampleBytes-1)) &&
+    extent(l.yOffset,l.stride,l.height,uint64_t(l.width)*sampleBytes,l.bytes) &&
+    extent(l.uvOffset,l.stride,l.height/2,uint64_t(l.width)*sampleBytes,l.bytes) &&
+    uint64_t(l.yOffset)+uint64_t(l.height-1)*l.stride+uint64_t(l.width)*sampleBytes <= l.uvOffset;
 }
 struct Plane { uint64_t width = 0, height = 0, offset = 0, stride = 0; uint32_t nonlinear = 0; };
 struct Surface {
   uint64_t base = 0, size = 0; uint32_t id = 0, format = 0, planes = 0; Plane plane[2];
 };
-inline bool surface(const Surface &s) {
-  return s.base && s.size && s.size <= kMaxSurfaceBytes && s.base <= UINT64_MAX-s.size && s.format == vtwire::cc("420v") && s.planes == 2 &&
-    s.plane[0].width == 320 && s.plane[0].height == 240 && s.plane[1].width == 160 && s.plane[1].height == 120 &&
+inline bool surface(const Surface &s, uint32_t width = 320, uint32_t height = 240, uint32_t format = vtwire::cc("420v")) {
+  const bool ten=format==vtwire::cc("x420");const uint64_t rowBytes=uint64_t(width)*(ten?2:1);
+  return (ten||format==vtwire::cc("420v")) && width >= 96 && height >= 96 && width <= 3840 && height <= 2160 && !((width|height)&1) &&
+    s.base && s.size && s.size <= kMaxSurfaceBytes && s.base <= UINT64_MAX-s.size && s.format == format && s.planes == 2 &&
+    s.plane[0].width == width && s.plane[0].height == height && s.plane[1].width == width/2 && s.plane[1].height == height/2 &&
     !s.plane[0].nonlinear && !s.plane[1].nonlinear &&
-    extent(s.plane[0].offset,s.plane[0].stride,240,320,s.size) && extent(s.plane[1].offset,s.plane[1].stride,120,320,s.size) &&
-    s.plane[1].offset >= s.plane[0].offset + 239*s.plane[0].stride + 320;
+    !(s.plane[0].offset&(ten?1u:0u)) && !(s.plane[1].offset&(ten?1u:0u)) &&
+    !(s.plane[0].stride&(ten?1u:0u)) && !(s.plane[1].stride&(ten?1u:0u)) &&
+    extent(s.plane[0].offset,s.plane[0].stride,height,rowBytes,s.size) && extent(s.plane[1].offset,s.plane[1].stride,height/2,rowBytes,s.size) &&
+    s.plane[1].offset >= s.plane[0].offset + uint64_t(height-1)*s.plane[0].stride + rowBytes;
 }
 // Native 27.3 IOSurface lookup lock result. Plane+0x6c is a byte:
 // IOSurfaceClientGetBytesPerRowOfPlane 0x1876b7978 uses ldrb, as does
 // GetBaseAddressOfPlane 0x1876b7c2c. Neighbouring bytes are not this flag.
-inline bool surfaceResult(const uint8_t *b, uint32_t n, uint32_t id, Surface &v) {
+inline bool surfaceResult(const uint8_t *b, uint32_t n, uint32_t id, Surface &v, uint32_t width = 320, uint32_t height = 240, uint32_t format = vtwire::cc("420v")) {
   if (!b || n != 0xc68) return false;
   auto u64 = [&](uint32_t at) { uint64_t x; memcpy(&x,b+at,8); return x; };
   auto u32 = [&](uint32_t at) { uint32_t x; memcpy(&x,b+at,4); return x; };
@@ -310,7 +369,7 @@ inline bool surfaceResult(const uint8_t *b, uint32_t n, uint32_t id, Surface &v)
     const uint32_t at=0x88+p*0x98;
     v.plane[p]={u64(at),u64(at+8),u64(at+0x18),u64(at+0x20),b[at+0x6c]};
   }
-  return v.id==id && surface(v);
+  return v.id==id && surface(v,width,height,format);
 }
 // All calls under the session lock. Invalid input does not consume the one-AU
 // budget. Cancellation suppresses success, settles an accepted frame once.

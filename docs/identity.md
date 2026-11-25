@@ -66,6 +66,9 @@ system volume is macOS 27.3 since 2026-11-14; the old 27.0.1 volume was cleared 
 | `hw.product` / `hw.model` | SoftwareUpdateCoreSupport, libauthinstall, libamsupport, BiomeFoundation, AppleDeviceQuerySupport, Bootability; System Information, ProductKit (IORegistry `model`) | Software Update's catalog query and TSS (2.5) |
 | per-target / per-model tables | AboutSettings, MonitorPanel, Portrait (J413 ...); BiometricKitUI, MicroLocationDaemon (Mac15,4, Mac16,2, ...) | a real model's entry brings its UI assumptions (About picture, built-in display options, Touch ID UI) |
 | `board-id` (`/chosen`, absent here) | LoginUIKit ("No board-id entry was available"), CoreDisplay/IOKit (`board-ids`), libpmenergy, PowerlogCore, GPUInfo, MobileAssetDaemon, SoftwareUpdateCoreSupport, OSPersonalization, libAudioDSPCore, VoiceProcessor, libImage4 | unchanged by every candidate (an absent board-id is today's state) |
+
+> **27.3 line (2026-11-24, confirmed on the tablet):** `configs/k273-adt.toml` sets `/chosen board-id = 4` and `chip-id = 0x6050`, the 27.3 BuildManifest's K114cAP values (ApBoardID 0x04, ApChipID 0x6050, ApSecurityDomain 0x01). `ioreg` on the tablet reads `board-id = <04000000>`, `chip-id = <50600000>`, `hw.target` K114cAP, and no "No board-id entry" log line. The rows above describe the retired 27.0.1 (vma2) identity.
+
 | system-volume files by model | CoreTypes icons, `/System/Library/Displays/.../Overrides/Models` pictures, jetsam (`com.apple.jetsamproperties.Mac.plist`: one file for every Mac, no per-target keys), IOPlatformPluginFamily (Intel only) | pictures; jetsam unaffected |
 | Data volume, written at runtime | configd `preferences.plist` and InterfaceNamer `NetworkInterfaces.plist` carry `Model` = hw.model; a file made on another model is moved aside (`preferences-<model>.plist`, `NetworkInterfaces.plist-<model>`) and a new one started; ComputerName / LocalHostName / SMB `NetBIOSName` default from the model and product name | **verified on the installed store**: the seed's files (made on iPad7,1) were moved aside at its first VirtualMac2,1 boot (2026-11-11 20:31). A new identity does the same once: network services new, and the interface database empty, so en0/en1 wait for InterfaceNamer's IOKit-quiet timeout (240 s) unless a model-less database is staged (desk-dev does: `tooling/k27/desk-dev-NetworkInterfaces.plist`) |
 | the Data seed | no MobileGestalt cache, no eligibility cache, no `Model` other than the seed era's iPad7,1 | RAM images with any identity start clean; the installed store may hold a MobileGestalt cache made under VirtualMac2,1 (root-only, not read: inferred risk, delete it at the first boot of a new identity) |
@@ -238,3 +241,77 @@ PIANO_VMM_PRESENT=0`, `NativeAES vs IOAESAccelerator: 0 problem slots`, 26 nativ
 | `ram-desk-dev-aes-k114c-netdb` | k114c | staged, as desk-dev before | `0e61978a0bb61cc2...` |
 | `ram-desk-dev-aes-vma2` | vma2 | staged | `f2eb4c849585fcfc...` |
 | `ram-desk-dev-aes-dump` | the loop's dump image | - | `b37c9c421a2a34d1...` |
+
+## 9. The 5 s wait before every app's first window (2026-11-22) and its cause, MobileGestalt's syscfg source
+
+**Seen (the installed v13.1x, a Calculator launch under a whole-system spindump with its unified log):** every app needs 5.3-5.9 s
+to its first window. The main thread spends 5.0 s in `-[NSApplication init]` → `+[NSAppearance _aquaAppearance]` →
+`NSColorGetUserAccentColor` → `NSUserAccentColorGetHardwareAccentColorName` → `MGCopyAnswer("DeviceEnclosureColor")`, parked in
+`dispatch_semaphore_wait`; libMobileGestalt logs `Unable to read diagnostic data from service`, then exactly 5.00 s later
+`giving up waiting for match - runloop result is 3` (kCFRunLoopRunTimedOut) and `copySyscfgDictionary(void) enumeration of
+<private> failed`.
+
+**The path (27.3's libMobileGestalt: symbols, strings and the functions on this path; no code copied).** The enclosure color is
+a syscfg key, so MobileGestalt builds its per-process sysconfig dictionary (`copySyscfgDictionary`, cached per process after the
+first call, also when it stays empty). Its source list ("MGSysConfigPolicy") is the EAN one only with `/defaults
+ean-storage-present` (an Apple-silicon Mac's NVMe EAN); otherwise, or when the EAN one fails, the default policy has a single source,
+`DAAD` (diagnostic data access), plus `vmpv` (`/chosen syscfg-vmpv-data`) when `kern.hv_vmm_present` is 1. `DAAD` reads, in order:
+
+1. `IODeviceTree:/chosen` `syscfg-v2-data` (data);
+2. the property `AppleDiagnosticDataSysCfg` of an `AppleDiagnosticDataAccess` or `AppleDiagnosticDataAccessReadOnly` service;
+3. unless `kern.hv_vmm_present` is 1: `IOServiceAddMatchingNotification(kIOMatchedNotification,
+   IOServiceMatching("AppleDiagnosticDataAccessReadOnly"))` on a private run loop mode, `CFRunLoopRunInMode(5.0 s)`, the caller
+   blocked on a semaphore, then step 2 again.
+
+It then wants the magic `SCfg` and entries that fit, else `syscfg is not initialized!` and an empty dictionary. On a Mac, 27.3's
+`AppleDiagnosticDataAccessReadOnly` kext drives the NOR flash's syscfg partition (an `AppleARMNORFlashDevice` named
+`diagnostic-data,format1`, or an `AppleNANDConfigAccess`), so step 2 answers at once; on the Apple-silicon Mac read for this its
+`AppleDiagnosticDataSysCfg` is 128 KiB of 0xFF (an erased partition), and its MobileGestalt logs `syscfg is not initialized!`,
+`enumeration of <private> failed` and keeps an empty dictionary, without waiting. Piano has no such provider, so step 3 always times
+out: once in every process that asks for a syscfg-backed key, and AppKit asks in every app's `NSApplication` init. By the code the
+VM-era images never paid it (`vmm-present` 1 skips step 3; not measured on a VM-era boot): it came with the truthful
+`vmm-present` 0.
+
+**The fix: `configs/k273-adt.toml` `/chosen syscfg-v2-data`**, 24 bytes of 0xFF: the Mac's erased region, in the length
+MobileGestalt reads before the magic. Step 1 then answers at once and everything after it is what that Mac does: the same
+`syscfg is not initialized!`, the same empty dictionary as after piano's timeout, `DeviceEnclosureColor` absent (the default accent
+color), the raw-syscfg answer nothing. A valid empty `SCfg` table would also end the wait, but would make the raw-syscfg answer a
+24-byte table where a Mac has none. Not changed here (they cost no time: their log lines carry the same millisecond):
+`/product product-id` (`invalid product id '(null)'`: MobileGestalt's device map wants 20 bytes), `/arm-io soc-generation` (read
+also by DeviceIdentity, MobileActivation and the ISP media-capture plug-ins: a value there is its own change), and
+`/usr/lib/libMobileGestaltExtensions.dylib` (`couldn't load support library`: not in 27.3's shared cache; the Mac logs it too).
+
+**The Wi-Fi address (2026-11-22, the first boot with the fix above):** apps no longer waited (35 launches, median 1.8 s to the first
+window), but 97 waits remained over the whole boot, 92 of them the Wi-Fi address: background agents compute the UDID (`missing
+value for property udid-version`), which needs it, and akd asks about every 5 s (82 waits). MobileGestalt's Wi-Fi address answer
+reads, in order: `/chosen mac-address-wifi0`; the `local-mac-address` of a service named `sdio`, `wlan` or `marconi-wifi`; outside a
+VM, 5 s of `IOServiceMatching("IONetworkController")`, looking among each controller's parents for one of those names; the syscfg
+key `WMac`; then `Could not get wifi address`. A Mac answers at the first step (iBoot fills `/chosen mac-address-wifi0`, as it fills
+`mac-address-ethernet0` and `mac-address-bluetooth0`); its Wi-Fi has none of those names either. **The fix:** `configs/k273-adt.toml`
+`/chosen mac-address-wifi0` = `02:50:49:41:4e:01`, piano's own locally administered address that the Wi-Fi interface en0 takes by
+default (PianoNullEthernet's; a join profile's `mac=` can give en0 another, and MobileGestalt then still answers this one: only
+MobileGestalt and libZhuGeArmory read the property, and the identity keys only need it stable).
+
+**The sandboxed daemons (2026-11-22, the second boot):** 6 waits were left, in two kinds of process. studentd and symptomsd-diag run
+under sandboxes that deny IOKit property reads except a short list, so they can read neither `/chosen` property; on a Mac their syscfg
+wait still ends at once, because MobileGestalt's match for `AppleDiagnosticDataAccessReadOnly` finds the existing service (the matched
+notification's first pass over the existing services sets it done; the refused property read only leaves the dictionary empty).
+**The fix:** ARMPlatformStandIn carries that service, `AppleDiagnosticDataAccess` and its subclass `AppleDiagnosticDataAccessReadOnly`
+(the Mac's class tree), one object matched on IOResources with an erased 24-byte `AppleDiagnosticDataSysCfg` and nothing else (no
+hardware, no user client; `package/ARMPlatformStandIn/DiagnosticDataStandIn.cpp`). In 27.3's shared cache only libMobileGestalt names
+these classes, no executable of the Mac read for this does, and the kernel collection has no user of them.
+
+Left, with reasons: symptomsd-diag's Wi-Fi address wait. Its sandbox refuses every property MobileGestalt reads for it
+(`mac-address-wifi0`, `local-mac-address`), so the IONetworkController match can never finish early; a Mac waits there too. And the Wi-Fi
+vendor (5 s, three times, for an `AppleOLYHAL` after a `centauri` service with `ModuleVendor`, a string the Mac's Wi-Fi driver puts on
+its `centauri` node): only Apple's BlueTool asks it at boot, before the piano Bluetooth runtime replaces it (the controller comes up
+after `piano-bt-delay`, not after BlueTool); answering would mean a `centauri` node, which the Mac's Centauri booter, updater and
+personalization code act on, or a class named after Apple's Wi-Fi HAL, i.e. claiming Apple's Wi-Fi hardware.
+
+**The boot's check:** `ioreg -p IODeviceTree -n chosen -r -d 1 | grep -E 'syscfg-v2-data|mac-address-wifi0'` shows both; in `log
+show` of a launch window no `giving up waiting for match` and no `Unable to read diagnostic data from service`, but `syscfg is not
+initialized!` (the erased region read; `No persisted cache on this platform.`, logged by every process's first MobileGestalt call,
+is the known-positive); the time to the first window drops by about 5 s; over the whole boot, `giving up waiting for match` only in
+symptomsd-diag (one, the Wi-Fi address) and Apple's BlueTool (three, the Wi-Fi vendor), no `Could not get wifi address` outside
+symptomsd-diag; console `ARMPlatformStandIn: AppleDiagnosticDataAccessReadOnly registered`. `tooling/adt/check-syscfg.py ADT` checks
+an ADT file's two values on the host.

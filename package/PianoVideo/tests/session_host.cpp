@@ -8,6 +8,7 @@
 #include <vector>
 #include <string>
 #include <memory>
+#include <algorithm>
 #include <CommonCrypto/CommonDigest.h>
 #include "VideoSession.h"
 #include "VideoArena.h"
@@ -80,11 +81,15 @@ struct Peer {
   bool wrongTimestamp = false, wrongIova = false, corrupt = false, sessionError = false, readonly = false, late = false,
        systemError = false;
   bool opened = false, input = false, raw = false, resumed = false;
+  bool hevc = false;
+  uint32_t depth = 8, firmwareMinimum = 4, hevcPicture = 1;
+  HevcGeometry hg;
+  std::vector<std::vector<uint32_t>> properties, subscriptions;
   std::vector<uint32_t> uc;
   std::vector<uint8_t> arena;
   std::vector<std::vector<uint32_t>> raws, pendingReleases;
   std::vector<uint32_t> traceTypes, comvSizes, comvCounts, headers, packets;
-  Peer() : uc(kUcBytes / 4), arena(kArenaBytes, 0)
+  Peer() : uc(kUcBytes / 4), arena(kAvcArenaBytes, 0)
   {
     mem.uc = uc.data();
     dma.arena = arena.data();
@@ -137,7 +142,7 @@ struct Peer {
       return 0;
     }
     if (type == 0x01000008) {
-      CHECK(port == 1 && flags == 3 && payload == 1 && p[8] == 0x0100000c && releaseCount == 5);
+      CHECK(port == 1 && flags == 3 && payload == 1 && p[8] == 0x0100000c && releaseCount == (hevc ? 4u : 5u));
       resumed = true;
       for (const auto &b : pendingReleases)
         reply({packet(0x01000009, 0, 1, 5, b)});
@@ -151,7 +156,7 @@ struct Peer {
       std::vector<uint32_t> b(p + 8, p + 24);
       const uint32_t bt = b[0];
       CHECK((b[10] & 0x200) != 0 && b[3] == 0 && b[4] == 0 && b[6] == 0);
-      CHECK(b[2] >= 0x80400000 && uint64_t(b[2]) + b[5] <= 0x84400000);
+      CHECK(b[2] >= kArenaBase && uint64_t(b[2]) + b[5] <= kArenaBase + (hevc ? kArenaBytes : 64*1024*1024));
       if (b[10] & 1) {
         CHECK(flags == 3);
         ++releaseCount;
@@ -167,12 +172,16 @@ struct Peer {
         ++partial;
       }
       if (bt == 6) {
-        CHECK(raw && resumed && b[5] == 155648);
+        CHECK(raw && resumed && b[5] == (hevc ? hg.dpb : 155648));
         ++dpbs;
       }
       if (bt == 2) {
-        CHECK(raw && resumed && b[5] == 147456 && b[7] == 0);
+        CHECK(raw && resumed && b[5] == (hevc ? hg.raw : 147456) && b[7] == 0);
         raws.push_back(b);
+        if(hevc && raws.size()==firmwareMinimum) {
+          b[7]=(hevcPicture&0x40)?0:hg.raw;b[8]=uint32_t(expectedToken);b[9]=uint32_t(expectedToken>>32);b[10]=0;
+          reply({packet(0x01000009,0,2,5,b),packet(0x03000162,0,2,1,{hevcPicture})});
+        }
       }
       if (bt == 1) {
         CHECK(input && !raw && b[5] == 7077888 && b[7] == expectedInput.size() && b[8] == uint32_t(expectedToken) && b[9] == uint32_t(expectedToken >> 32));
@@ -181,7 +190,12 @@ struct Peer {
         b[7] = 0;
         b[8] = b[9] = 0; // input completion metadata is not an echoed-timestamp contract; RAW is correlated strictly
         reply({packet(type, 0, 1, 5, b)});
-        if (!dropPsc)
+        if (!dropPsc && hevc)
+          reply({packet(0x0100000c,0,1,0),packet(0x03000103,0,1,1,{(hg.width<<16)|hg.height}),
+            packet(0x03000105,0,1,13,{0,0}),packet(0x0300010f,0,1,1,{(depth<<16)|depth}),
+            packet(0x03000124,0,1,1,{firmwareMinimum}),packet(0x03000107,0,1,9,{depth==10?2u:0u}),
+            packet(0x03000108,0,1,9,{4}),packet(kHevcTier,0,1,9,{0}),packet(0x03000155,0,1,10,{0x14000003})});
+        else if (!dropPsc)
           reply({packet(0x0100000c, 0, 1, 0), packet(0x03000103, 0, 1, 1, {badPsc ? 0x01400100u : 0x014000f0u}),
                  packet(0x03000105, 0, 1, 13, {0, 0}), packet(0x0300010f, 0, 1, 1, {0x00080008}), packet(0x03000120, 0, 1, 1, {1}),
                  packet(0x03000124, 0, 1, 1, {n}), packet(0x03000128, 0, 1, 1, {2}), packet(0x03000107, 0, 1, 1, {0}),
@@ -246,8 +260,10 @@ struct Peer {
     // Verify every payload category of the pinned property/subscription contract independently of the implementation's builder.
     if (type == 0x0100000b) {
       CHECK(flags == 3 && payload == 11 && (p[8] == 1 || p[8] == 2));
+      subscriptions.emplace_back(p+8,p+p[0]/4);
     } else {
       CHECK(type > 0x03000000 && type < 0x03ffffff && flags == 0);
+      properties.push_back({type,port,payload,p[8],p[0]>=40?p[9]:0});
     }
     return 0;
   }
@@ -465,8 +481,107 @@ static void nativeTests()
   native::State preInput; CHECK(preInput.acquire(&sid) == 0 && preInput.closing(sid) == 0);
   preInput.closed(false); CHECK(preInput.acquire(&other) == 0 && other != sid);
 }
+static void generalGeometryTests() {
+  Peer p;Layout layout;CHECK(layout.init(1920,1088));SelfTest<Peer> tx(p,layout);
+  tx.streaming=true;tx.activeWidth=1920;tx.activeHeight=1080;
+  tx.expectedProfile=4;tx.expectedLevel=11;
+  tx.psc.resolution=0x07800440;tx.psc.crop[0]=0;tx.psc.crop[1]=8;
+  tx.psc.returned=0x2a;
+  tx.psc.poc=tx.expectedPoc;tx.psc.profile=4;tx.psc.level=11;tx.psc.n=16;
+  CHECK(tx.pscSupported());
+  tx.psc.returned=0x0a;CHECK(!tx.pscSupported());tx.psc.returned=0x2a;
+  tx.psc.n=17;CHECK(!tx.pscSupported());tx.psc.n=16;
+  tx.psc.crop[1]=7;CHECK(!tx.pscSupported());tx.psc.crop[1]=10;CHECK(!tx.pscSupported());
+  tx.psc.crop[1]=8;CHECK(tx.adoptPscGeometry());
+  tx.psc.resolution=0x07800438;tx.psc.crop[1]=0;
+  CHECK(tx.pscSupported() && tx.adoptPscGeometry());
+  CHECK(layout.geometry.stride==1920 && layout.geometry.scanlines==1088 && layout.rawBytes()==3133440);
+  CHECK(layout.find(Raw,15)->size==3133440 && layout.find(Dpb,15)->size==3153920);
+  std::vector<uint64_t> words(vsmmu::kSessionTablePages*512),pages(kArenaPages),uc(vsmmu::kUcPages);
+  for(unsigned i=0;i<pages.size();++i)pages[i]=0x900000000ull+4096ull*i;
+  for(unsigned i=0;i<uc.size();++i)uc[i]=0x8d0000000ull+4096ull*i;
+  vsmmu::Tables tables{words.data(),0x8e0000000ull,vsmmu::kSessionTablePages};
+  CHECK(vsmmu::build(tables,uc.data(),unsigned(uc.size()),0x8e1000000ull));
+  CHECK(buildArena(tables,layout,pages.data()));
+  // Exercise the newly added L3 tables beyond the old 64 MiB aperture.
+  const auto *last=layout.find(Raw,15);CHECK(last && last->off>64*1024*1024);
+  CHECK(vsmmu::walk(tables,last->iova()+last->capacity-1)==pages[(last->off+last->capacity-1)/4096]+((last->capacity-1)&4095));
+  CHECK(!vsmmu::walk(tables,last->iova()+((last->capacity+16383)&~16383u)));
+  CHECK(!vsmmu::walk(tables,kArenaBase+kArenaBytes));
+}
+static void hevcProtocolTests() {
+  // The independent peer returns HEVC-only PSC fields and firmware N, then an
+  // owned RAW without DRAIN. It is a protocol test, not firmware decode proof.
+  for(uint32_t depth : {8u,10u})for(uint32_t kind : {1u,0x10u,0x20u,0x40u}) {
+    Peer p;p.hevc=true;p.depth=depth;p.hevcPicture=kind;p.firmwareMinimum=6;
+    CHECK(p.hg.configure(320,256,depth));
+    Layout layout;CHECK(layout.initHevc(320,256,depth));SelfTest<Peer> tx(p,layout);
+    for(unsigned i=0;i<layout.maxN();++i) {
+      const auto &raw=*layout.find(Raw,i);
+      std::fill(p.arena.begin()+raw.off,p.arena.begin()+raw.off+raw.capacity,0x5c);
+    }
+    tx.streaming=true;tx.activeWidth=320;tx.activeHeight=256;tx.expectedDepth=depth;
+    tx.expectedProfile=depth==10?2:0;tx.expectedLevel=4;tx.expectedTier=0;
+    tx.psc.resolution=0x01400100;tx.psc.depth=(depth<<16)|depth;tx.psc.profile=tx.expectedProfile;
+    tx.psc.level=4;tx.psc.tier=0;tx.initialPsc=tx.psc;
+    tx.sessionId=0x5635abcd;tx.checkGolden=false;tx.accessUnit=nullptr;tx.accessUnitBytes=0;
+    CHECK(tx.prepareInput()==0 && p.inputCount==0 && !p.raw && tx.ledger.pending==0);
+    p.hw.clock+=10000000;
+    CHECK(tx.pump()==0 && tx.deadline==UINT64_MAX);
+    CHECK(tx.nativeInput(0x5635abcd,kAccessUnit,sizeof kAccessUnit,kTimestamp));
+    CHECK(tx.transaction()==0 && tx.pump()==0);
+    bool pristine=true;
+    for(unsigned i=0;i<layout.maxN();++i) {
+      const auto &raw=*layout.find(Raw,i);
+      for(unsigned j=0;j<raw.capacity;++j)pristine&=p.arena[raw.off+j]==0x5c;
+    }
+    CHECK(pristine); // this peer returns FBD metadata without writing pixels
+    CHECK(tx.psc.n==6 && tx.psc.returned==0x7ae && tx.r.psc==1 && tx.r.decoded==1);
+    CHECK(p.partial==0 && p.releaseCount==4 && p.dpbs==6 && p.raws.size()==6);
+    CHECK(p.comvCounts==std::vector<uint32_t>({4,6}));
+    SelfTest<Peer>::OutputFrame output;CHECK(tx.popOutput(output));
+    CHECK(output.token==kTimestamp && output.bytes==((kind&0x40)?0:p.hg.raw));
+    CHECK(tx.releaseOutput(output.index,output.token)==0);
+    bool codec=false,format=false,stride=false,tier=false;
+    for(const auto &v:p.properties) {
+      if(v[0]==0x03000100)codec=v[3]==3 && v[2]==9;
+      if(v[0]==0x03000101)format=v[3]==(depth==10?3u:1u);
+      if(v[0]==0x03000104)stride=v[3]==((p.hg.stride/(depth==10?2:1))<<16|p.hg.scanlines);
+      if(v[0]==kHevcTier)tier=true;
+      CHECK(v[0]!=0x03000120 && v[0]!=0x03000128);
+    }
+    CHECK(codec&&format&&stride&&tier);
+    for(const auto &v:p.subscriptions)for(unsigned i=1;i<v.size();++i)CHECK(v[i]!=0x03000120 && v[i]!=0x03000128);
+    CHECK(tx.shutdown()==0 && tx.r.stopRaw && tx.r.stopInput && tx.r.closed);
+  }
+  // A 4K10 returned PSC may shrink coded2176 to2160 only if all capacities
+  // still fit. Missing profile/tier/level/crop/minimum is never a seeded pass.
+  Peer p;Layout layout;CHECK(layout.initHevc(3840,2176,10));SelfTest<Peer> tx(p,layout);
+  tx.streaming=true;tx.activeWidth=3840;tx.activeHeight=2160;tx.expectedDepth=10;tx.expectedProfile=2;tx.expectedLevel=11;tx.expectedTier=1;
+  tx.psc.resolution=(3840u<<16)|2160;tx.psc.depth=0x000a000a;tx.psc.profile=2;tx.psc.level=11;tx.psc.tier=1;tx.psc.n=10;tx.psc.returned=0x7ae;
+  CHECK(tx.pscSupported());
+  for(unsigned bit:{1u,2u,3u,5u,7u,8u,10u}) {tx.psc.returned^=1u<<bit;CHECK(!tx.pscSupported());tx.psc.returned^=1u<<bit;}
+  tx.psc.n=11;CHECK(!tx.pscSupported());tx.psc.n=10;
+  tx.psc.depth=0x00080008;CHECK(!tx.pscSupported());tx.psc.depth=0x000a000a;
+  tx.psc.tier=0;CHECK(!tx.pscSupported());tx.psc.tier=1;
+  CHECK(tx.adoptPscGeometry() && tx.rawPixelStride()==3840 && tx.rawStride()==7680 && layout.rawBytes()==25067520);
+  // Rejected PSC still preserves both crop words and the full returned mask
+  // before the first-error line; this is the evidence needed on the first boot.
+  Peer bad;Layout small;CHECK(small.initHevc(320,256,8));SelfTest<Peer> rejected(bad,small);
+  rejected.streaming=true;rejected.activeWidth=320;rejected.activeHeight=256;
+  rejected.r.stage=FirstPsc;rejected.deadline=UINT64_MAX;
+  bad.reply({Peer::packet(Settings,0,1,0),Peer::packet(0x03000103,0,1,1,{0x01400100}),
+    Peer::packet(0x03000105,0,1,13,{0,2}),Peer::packet(0x0300010f,0,1,1,{0x00080008}),
+    Peer::packet(0x03000124,0,1,1,{6}),Peer::packet(0x03000107,0,1,9,{0}),
+    Peer::packet(0x03000108,0,1,9,{4}),Peer::packet(kHevcTier,0,1,9,{0})},rejected.sessionId);
+  CHECK(rejected.pump()==kErrHfi && rejected.r.psc==0);
+  const auto observed=bad.hw.log.find("V9 HEVC PSC observed port 1 returned 000005ae res 01400100 crop 00000000/00000002 depth 00080008 N 6 profile 0 level 4 tier 0");
+  CHECK(observed!=std::string::npos && observed<bad.hw.log.find("V4 first-error"));
+}
 int main()
 {
+  hevcProtocolTests();
+  generalGeometryTests();
   nativeTests();
   layoutTests();
   for (unsigned n : {1u, 4u, 7u, 64u})

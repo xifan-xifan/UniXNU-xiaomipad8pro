@@ -85,6 +85,10 @@ enum NativeAdrenoAllocWhy : uint8_t {
     NativeAdrenoAllocWhyImport,        /* a bytes, b status, c the import's stage (native_adreno_import_stage), d the address */
 };
 struct NativeAdrenoAllocRefusal {uint8_t why;uint32_t method;uint64_t a,b,c,d,e;NativeAdrenoMemoryFailure failure{};};
+struct NativeAdrenoResidencyUsage {
+    uint64_t resident_bytes=0,peak_resident_bytes=0,import_bytes=0,peak_import_bytes=0;
+    uint64_t imports=0,peak_imports=0;
+};
 #endif
 class NativeAdrenoUserClient final {
     struct Queue {uint32_t id=0;bool active=false;};
@@ -121,6 +125,7 @@ class NativeAdrenoUserClient final {
 #ifdef ADRENO830_MACOS
     /* UniXNU-piano: the live mappings (relaxed atomics, written under the connection's lock) and the last BoMap refusal. */
     uint64_t mapped_objects_=0,mapped_spans_=0,mapped_bytes_=0;
+    uint64_t peak_mapped_bytes_=0,peak_import_bytes_=0,imports_=0,peak_imports_=0;
     /* UniXNU-piano (2026-11-12): the live objects by size class (account() adds and takes away; relaxed atomics, as the bytes above). */
     uint64_t size_count_[NativeAdrenoSizeClasses]={},size_bytes_[NativeAdrenoSizeClasses]={};
     NativeAdrenoMapRefusal map_refusal_{};
@@ -132,6 +137,16 @@ class NativeAdrenoUserClient final {
     IOReturn refuseAlloc(uint8_t why,uint32_t method,IOReturn status,uint64_t a=0,uint64_t b=0,uint64_t c=0,uint64_t d=0,uint64_t e=0)
     {alloc_refusal_={why,method,a,b,c,d,e};return status;}
     IOReturn refuseAllocMemory(uint64_t bytes,IOReturn status);
+    /* UniXNU-piano (2026-11-21): the last Submit refusal (NativeAdrenoSubmitRefusal): this object's own checks, or the submit object's
+     * with the entry's BO handle put back in (its VM mapping handle in b). count is the request's buffer_count. */
+    NativeAdrenoSubmitRefusal submit_refusal_{};
+    IOReturn refuseSubmit(uint8_t why,IOReturn status,uint32_t index=UINT32_MAX,const NativeAdrenoAbiSubmitBuffer *wire=nullptr,
+        uint64_t mapped=0,uint64_t mapped_bytes=0,uint64_t a=0,uint64_t b=0)
+    {
+        submit_refusal_={why,index,submit_refusal_.count,wire?wire->handle:0,wire?wire->iova:0,wire?wire->bytes:0,mapped,mapped_bytes,a,b,
+                         status};
+        return status;
+    }
 #endif
     Queue queues_[NativeAdrenoAbiMaxQueues]{};
     NativeAdrenoVm *vm_=nullptr;
@@ -222,11 +237,15 @@ public:
     /* UniXNU-piano: the mappings this connection holds (any thread, relaxed reads) and why its last BoMap was refused (read by the
      * IOKit wrapper right after that call, under the connection's lock). */
     void mapUsage(NativeAdrenoMapUsage *) const;
+    /* GPU-mapped bytes and published import handles (including scanout), with lifetime high-water marks. */
+    NativeAdrenoResidencyUsage residencyUsage() const;
     /* UniXNU-piano (2026-11-12): the live objects by size class (NativeAdrenoSizeUsage), for the console's va/sizes lines. */
     void sizeUsage(NativeAdrenoSizeUsage *) const;
     NativeAdrenoMapRefusal lastMapRefusal() const {return map_refusal_;}
     /* UniXNU-piano (2026-11-12): why the last BoAlloc or BoImport was refused (read as lastMapRefusal is). */
     NativeAdrenoAllocRefusal lastAllocRefusal() const {return alloc_refusal_;}
+    /* UniXNU-piano (2026-11-21): why the last Submit was refused (why None: it was not, or before any check; read as lastMapRefusal is). */
+    NativeAdrenoSubmitRefusal lastSubmitRefusal() const {return submit_refusal_;}
     /* The largest BO or import this connection can use, Query's max_bo_bytes: its GPU window (a larger object could never be mapped),
      * page aligned, at most NativeAdrenoMemoryMaxBytes; NativeAdrenoMemoryMaxBytes without a window. Upstream: 256 MiB
      * (NativeAdrenoAbiMaxBoBytesShift) whatever the window. */

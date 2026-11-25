@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <IOKit/IOLib.h>
+#include "NativeAdrenoMemory.h"   /* NativeAdrenoNewMeta: the GPU metadata heap (UniXNU-piano, GPU-PAGED P1c) */
 /* Handle -> slot of a fixed table whose handles are never 0: open addressing over twice the slots with linear probing, deletion by
  * backward shift (no tombstones), so a lookup is a few probes instead of a walk over every slot. i567: the submit path looked each IB's
  * handle up three times by walking a 4096-entry table, and the table had to grow to 16384 entries. */
@@ -23,14 +24,14 @@ public:
         if(!slots || slots>Slots || (slots&(slots-1)))return false;
         if(cells_ && size_!=slots*2)release();
         if(!cells_) {
-            cells_=IONewData(Cell,slots*2);
+            cells_=NativeAdrenoNewMeta(Cell,slots*2);   /* UniXNU-piano (GPU-PAGED P1c): the shared data range */
             if(!cells_)return false;
             size_=slots*2;mask_=size_-1;
         }
         memset(cells_,0,sizeof(Cell)*size_);
         return true;
     }
-    void release() {if(cells_)IODeleteData(cells_,Cell,size_);cells_=nullptr;size_=mask_=0;}
+    void release() {if(cells_)NativeAdrenoDeleteMeta(cells_,Cell,size_);cells_=nullptr;size_=mask_=0;}
     /* The slots of the last allocate() (0 while released). */
     size_t capacity() const {return size_/2;}
     /* UINT32_MAX: not present. */
@@ -85,8 +86,8 @@ template<size_t Slots,size_t Quarantine=4096> class NativeAdrenoHandleSlots {
 public:
     bool allocate()
     {
-        if(!queue_)queue_=IONewData(Free,Slots);
-        if(!generation_)generation_=IONewData(uint32_t,Slots);
+        if(!queue_)queue_=NativeAdrenoNewMeta(Free,Slots);
+        if(!generation_)generation_=NativeAdrenoNewMeta(uint32_t,Slots);
         if(!queue_ || !generation_) {release();return false;}
         for(size_t i=0;i<Slots;++i) {queue_[i]={uint32_t(i),0};generation_[i]=0;}
         head_=0;count_=Slots;allocations_=Quarantine;   /* never-used slots are past any quarantine */
@@ -94,8 +95,8 @@ public:
     }
     void release()
     {
-        if(queue_)IODeleteData(queue_,Free,Slots);
-        if(generation_)IODeleteData(generation_,uint32_t,Slots);
+        if(queue_)NativeAdrenoDeleteMeta(queue_,Free,Slots);
+        if(generation_)NativeAdrenoDeleteMeta(generation_,uint32_t,Slots);
         queue_=nullptr;generation_=nullptr;head_=count_=0;
     }
     /* The oldest free slot past its quarantine, or UINT32_MAX (none free, or the oldest freed too recently). */

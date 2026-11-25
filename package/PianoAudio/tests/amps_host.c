@@ -170,24 +170,30 @@ int main(void)
     CHECK(audio_amps_start(&g, 160) == AudioAmpsErrStart && !g.started);
     m.fail_after = -1;
     for (int i = 0; i < 4; ++i) CHECK(m.amp[i].reg[FS19XX_REG_DACCTRL] == FS19XX_DACCTRL_MUTE);
-    // levels 8-10: the playing gain at most the cap asked for and never above the core's 231; muted and unmuted while powered;
+    // levels 8-10: the playing gain at most the cap asked for and never above the core's hard limit 243; muted and unmuted while powered;
     // off and started again without a new configuration (the reset lines stay released)
     model();
     audio_amps_init(&g, &io);
     audio_amps_probe(&g);
     CHECK(audio_amps_configure(&g, fsm, fsm_bytes, 1) == AudioAmpsOk);
     CHECK(audio_amps_start_capped(&g, 255, UINT32_MAX) == AudioAmpsOk);
-    for (int i = 0; i < 4; ++i) CHECK(m.amp[i].reg[FS19XX_REG_VOLCTRL] >> 8 == FS19XX_GAIN_CAP && m.amp[i].reg[FS19XX_REG_DACCTRL] == FS19XX_DACCTRL_MUTE);
+    for (int i = 0; i < 4; ++i) CHECK(m.amp[i].reg[FS19XX_REG_VOLCTRL] >> 8 == FS19XX_GAIN_HARD_LIMIT && m.amp[i].reg[FS19XX_REG_DACCTRL] == FS19XX_DACCTRL_MUTE);
     CHECK(audio_amps_unmute(&g) == AudioAmpsOk);
     for (unsigned s = 0; s < 4; ++s) CHECK(audio_amps_gain_slot(&g, s, 192, 231) == AudioAmpsOk);
     CHECK(audio_amps_read(&g) == 0 && audio_amps_check(&g) == 0);
     for (unsigned s = 0; s < 4; ++s) {
         CHECK(g.amp[s].gain == 192 && g.status[s].volctrl == 0xc0c0);
         const unsigned writes = m.events;
-        CHECK(audio_amps_gain_slot(&g, s, UINT32_MAX, UINT32_MAX) == AudioAmpsOk);
+        CHECK(audio_amps_gain_slot(&g, s, UINT32_MAX, 231) == AudioAmpsOk);   // the caller's cap (passthrough): 231
         CHECK(m.events == writes + 1 && g.amp[s].gain == 231 && m.amp[s].reg[FS19XX_REG_VOLCTRL] == 0xe7c0);
     }
     CHECK(audio_amps_read(&g) == 0 && audio_amps_check(&g) == 0);   // active 231 is healthy
+    for (unsigned s = 0; s < 4; ++s) {   // no cap from the caller: the core's hard limit 243 (protected), healthy too
+        CHECK(audio_amps_gain_slot(&g, s, UINT32_MAX, UINT32_MAX) == AudioAmpsOk);
+        CHECK(g.amp[s].gain == 243 && m.amp[s].reg[FS19XX_REG_VOLCTRL] == 0xf3c0);
+    }
+    CHECK(audio_amps_read(&g) == 0 && audio_amps_check(&g) == 0);
+    for (unsigned s = 0; s < 4; ++s) CHECK(audio_amps_gain_slot(&g, s, 231, 231) == AudioAmpsOk);
     CHECK(audio_amps_gain_slot(&g, 4, 231, 231) == AudioAmpsErrState);
     CHECK(audio_amps_unmute(&g) == AudioAmpsOk && audio_amps_mute(&g) == 0);
     for (int i = 0; i < 4; ++i) CHECK(m.amp[i].reg[FS19XX_REG_DACCTRL] == FS19XX_DACCTRL_MUTE && !(m.amp[i].reg[FS19XX_REG_PWRCTRL] & 1));

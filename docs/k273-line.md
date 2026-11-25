@@ -70,10 +70,12 @@ linux_data is overwritten (owner decision).
 
 ## 4. RAM images
 
-`tooling/k273/build-k273-image.sh` builds the 27.3 KC, ADT and RAM images with `K273_KERNEL`.
-With `K273_ROOT=k273`, set `K273_ROOT_PART=linux_rootfs` when the 27.3 root image is on the separate root partition.
-The default `K273_ROOT_PART=linux_data` retains the historical layout. `K273_ROOT=k27` still refers to the retired 27.0.1 root.
-For the persistent 27.3 profile with Data on `linux_data`, see the §13.8 recipe in [persistent-boot.md](persistent-boot.md).
+`tooling/k273/build-k273-image.sh` builds the 27.3 KC, ADT and RAM images with `K273_KERNEL`. **2026-11-14 layout caveat:**
+its `K273_ROOT=k273` default still names `native-ufs-root-part=linux_data`, and `K273_ROOT=k27` names the cleared 27.0.1 root;
+neither describes the current installation. For the current root on `linux_rootfs` and store on `linux_data`, use
+`tooling/k273/build-k273-esp.py --root-part linux_rootfs` and the §13.8 recipe in [persistent-boot.md](persistent-boot.md),
+whose RAM test is `out/ram-k273-v2ro`. The old `K273_ROOT` choices and the desk-dev recipe below are retained only as the
+first-line build record; do not use them against the current layout.
 
 ```sh
 PIANO_GPU=2 tooling/k273/build-k273-image.sh            # KC, ADT, Turnip stage (27.3 trust) in out/

@@ -16,6 +16,9 @@ restart reason back to normal, so a "reset fastboot" sent near 170 s booted the 
   kPEHaltCPU PSCI SYSTEM_OFF, through the conduit piano_psci_reset uses; the PMIC restart reason
   is not touched. Every other type answers -1 as before (the panic restart still ends in
   halt_all_cpus' PSCI SYSTEM_RESET). machdep.piano_psci_halt switches it at run time.
+- piano-panic-hold-ms (default 0): delay panic restart types 4 and 9 by
+  up to 20 seconds on the architectural virtual counter, with interrupts
+  masked for the wait. Keep the existing restart path.
 - The restart word (osfmk/arm64/piano_halt_policy.h, host-tested): PEHaltRestart's entry for the
   halt/restart types and machdep.piano_restart_started=1 (PianoDwc3's reset, before it writes its
   reason) mark a restart begun; from then on the guard's health decision does not write the
@@ -112,7 +115,7 @@ diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
  #define GH_WDT_CONTROL  0x86000005ULL
  #define GH_WDT_STATUS   0x86000006ULL
  #define GH_WDT_PING     0x86000007ULL
-@@ -1227,8 +1228,134 @@
+@@ -1227,8 +1228,151 @@
  	uint64_t ns;
  	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
  	return ns;
@@ -166,6 +169,7 @@ diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
 + * restart's halt_all_cpus(TRUE) gets the same SYSTEM_RESET here. machdep.piano_psci_halt switches it at run time (0 off, 1 on).
 + */
 +TUNABLE(uint32_t, piano_psci_halt_arg, "piano-psci-halt", 1);
++static TUNABLE(int64_t, piano_panic_hold_ms, "piano-panic-hold-ms", 0);
 +static uint32_t piano_psci_halt_on;
 +
 +static int32_t
@@ -183,6 +187,18 @@ diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
 +static int
 +piano_pe_halt_restart(unsigned int type)
 +{
++	if (piano_panic_hold_ms > 0 &&
++	    (type == kPEPanicRestartCPU || type == kPEPanicRestartCPUNoCallouts)) {
++		uint64_t daif;
++		__asm__ volatile ("mrs %0, DAIF\n\tmsr DAIFSet, #0xf" : "=r"(daif) :: "memory");
++		const uint64_t ticks = __builtin_arm_rsr64("CNTFRQ_EL0") * (uint64_t)piano_panic_hold_ms / 1000;
++		__builtin_arm_isb(ISB_SY);
++		const uint64_t start = __builtin_arm_rsr64("CNTVCT_EL0");
++		do {
++			__builtin_arm_isb(ISB_SY);
++		} while (__builtin_arm_rsr64("CNTVCT_EL0") - start < ticks);
++		__asm__ volatile ("msr DAIF, %0" :: "r"(daif) : "memory");
++	}
 +	const uint32_t fn = piano_halt_psci_function(type, os_atomic_load(&piano_psci_halt_on, relaxed) != 0);
 +	if (fn == 0) {
 +		return -1;
@@ -200,6 +216,7 @@ diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
 +static void
 +piano_psci_halt_init(void)
 +{
++	piano_panic_hold_ms = MIN(piano_panic_hold_ms, 20000);
 +	if (ml_psci_conduit != ML_PSCI_CONDUIT_SMC) {
 +		return;   /* a VM: halt_all_cpus' hvc ends it, as before */
 +	}
@@ -213,6 +230,9 @@ diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
 +	}
 +	os_atomic_store(&piano_psci_halt_on, 1u, relaxed);
 +	PE_halt_restart = piano_pe_halt_restart;
++	if (piano_panic_hold_ms > 0) {
++		printf("piano-panic-hold: armed for %u ms\n", (unsigned)piano_panic_hold_ms);
++	}
 +	printf("piano-psci-halt: on: a restart is PSCI SYSTEM_RESET, a power-off PSCI SYSTEM_OFF, through smc (piano-psci-halt=0: off)\n");
 +}
 +STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, piano_psci_halt_init);
@@ -247,7 +267,7 @@ diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
  /* kern_exec, every image activation: the milestone is the first exec whose p_comm is its name. */
  void
  piano_boot_guard_exec(const char *comm)
-@@ -1299,8 +1426,13 @@
+@@ -1299,8 +1443,13 @@
  	piano_guard_state = PIANO_GUARD_HEALTHY;
  	if (piano_guard_keep_reason) {
  		printf("piano-boot-guard: healthy after %u s, restart reason stays bootloader (piano-reset-to)\n", piano_guard_secs);

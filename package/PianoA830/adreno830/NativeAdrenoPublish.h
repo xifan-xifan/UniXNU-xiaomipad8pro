@@ -42,8 +42,17 @@ class OSDictionary;
  * (which then falls back to an OpenGL ES context that does not exist here) took it down: AegirPoster aborted 22 times and
  * KaleidoscopePoster faulted 17 times when the wallpaper gallery opened (run 20261030-144045-m8-full-1). Thirty-two (2026-10-30
  * evening): MobileSMS faulted five times in CI::GLContext::init (run 20261030-213341-island-apps-1), an app the list did not name.
- * Each slot is also a submit range (NativeAdrenoSubmitRanges) with its own reserved job. */
+ * Each slot is also a submit range (NativeAdrenoSubmitRanges) with its own reserved job.
+ * UniXNU-piano (2026-11-22, private GPU-SLOTS.md): 64 slots on macOS. An installed session (v13.1y3) refused every app opened after 24
+ * GPU connections (21 ordinary apps in small slots, 4 kept, large slots 2-3 empty all session: Dock and WallpaperAgent never open a
+ * device on 27.3), and Maps ran out of its 320 MiB window: the 64 GiB table below gives 54 ordinary 1 GiB windows. The keep is 2 on
+ * macOS (NativeAdrenoListedSmallKeepMacOS) and an ordinary app borrows a free large slot instead of being refused. */
+#ifdef ADRENO830_MACOS
+enum : unsigned {NativeAdrenoMaxClients=64,NativeAdrenoLargeSlots=3,NativeAdrenoListedSmallKeep4G=3,NativeAdrenoListedSmallKeep16G=4,
+                 NativeAdrenoListedSmallKeepMacOS=2};
+#else
 enum : unsigned {NativeAdrenoMaxClients=32,NativeAdrenoLargeSlots=3,NativeAdrenoListedSmallKeep4G=3,NativeAdrenoListedSmallKeep16G=4};
+#endif
 struct NativeAdrenoClientWindow {uint64_t start,bytes;};
 inline constexpr NativeAdrenoClientWindow NativeAdrenoClientWindows4G[NativeAdrenoMaxClients]={
     {0x20000000ull,0x60000000ull},
@@ -55,9 +64,19 @@ inline constexpr NativeAdrenoClientWindow NativeAdrenoClientWindows2G[NativeAdre
 #ifdef ADRENO830_MACOS
 /* UniXNU-piano (2026-11-12): macOS's 16 GiB table. The first macOS desktop (run attend4, 24 clients) had WindowServer at 1153 MiB of
  * its 1.5 GiB window and iconservicesagent at 490 MiB of its 512 MiB large one, while no small client passed 77 MiB of its 448: slot 0
- * is now 3.5 GiB (0x20000000 up to 4 GiB), slots 1-3 768 MiB from 4 GiB, slots 4-31 320 MiB each (5 up to 8 GiB, 12 from 8 GiB, 11
- * from 12 GiB, the last up to 0x3FFFFE000, 896 MiB). No window crosses a multiple of 4 GiB; slot 9 starts on 8 GiB and slot 21 on
- * 12 GiB, the space under each line nobody's. */
+ * is now 3.5 GiB (0x20000000 up to 4 GiB), slots 1-3 are 768 MiB, and slots 4-28 are 320 MiB. The tail slot is reserved for one
+ * VideoToolbox decoder connection: 1536 MiB minus the 8 KiB aperture guard, sized for eight 4K RGhA/x420 frame pairs.
+ * No window crosses a multiple of 4 GiB. */
+inline constexpr unsigned NativeAdrenoDecoderSlot=29;
+inline constexpr char NativeAdrenoDecoderSigningId[]="com.apple.coremedia.videodecoder";
+static inline bool NativeAdrenoDecoderClient(bool platform_binary,const char *signing_id)
+{
+    if(!platform_binary || !signing_id)return false;
+    for(unsigned i=0;i<sizeof NativeAdrenoDecoderSigningId;++i) {
+        if(signing_id[i]!=NativeAdrenoDecoderSigningId[i])return false;
+    }
+    return true;
+}
 inline constexpr NativeAdrenoClientWindow NativeAdrenoClientWindows16G[NativeAdrenoMaxClients]={
     {0x20000000ull,0xE0000000ull},{0x100000000ull,0x30000000ull},{0x130000000ull,0x30000000ull},{0x160000000ull,0x30000000ull},
     {0x190000000ull,0x14000000ull},{0x1A4000000ull,0x14000000ull},{0x1B8000000ull,0x14000000ull},{0x1CC000000ull,0x14000000ull},
@@ -66,7 +85,35 @@ inline constexpr NativeAdrenoClientWindow NativeAdrenoClientWindows16G[NativeAdr
     {0x28C000000ull,0x14000000ull},{0x2A0000000ull,0x14000000ull},{0x2B4000000ull,0x14000000ull},{0x2C8000000ull,0x14000000ull},
     {0x2DC000000ull,0x14000000ull},{0x300000000ull,0x14000000ull},{0x314000000ull,0x14000000ull},{0x328000000ull,0x14000000ull},
     {0x33C000000ull,0x14000000ull},{0x350000000ull,0x14000000ull},{0x364000000ull,0x14000000ull},{0x378000000ull,0x14000000ull},
-    {0x38C000000ull,0x14000000ull},{0x3A0000000ull,0x14000000ull},{0x3B4000000ull,0x14000000ull},{0x3C8000000ull,0x37FFE000ull}};
+    {0x38C000000ull,0x14000000ull},{0x3A0000000ull,0x5FFFE000ull}};
+/* UniXNU-piano (2026-11-22, private GPU-SLOTS.md): the 64 GiB aperture's table (pagani-gpu-va=64, the macOS default: a 36-bit input, 32833
+ * preallocated table pages; the context falls back to the 16 GiB table above when they cannot be had). Slot 0 WindowServer's 3.5 GiB as
+ * in the 16 GiB table (2.41 GB reached on the installed v13.1y3, 2026-11-22); large slot 1 (the large list's first choice) 2 GiB
+ * (iconservicesagent filled its 768 MiB), slots 2-3 1 GiB; slots 4-57 ordinary at 1 GiB each from 8 GiB (Maps exhausted 320 MiB; Siri AI
+ * reached 316, Safari 293); slot 58 the decoder's 1536 MiB minus the 8 KiB aperture guard at the top; slots 59-63 no window (the
+ * aperture is full). No window crosses a multiple of 4 GiB (1 GiB windows on 1 GiB lines). */
+inline constexpr unsigned NativeAdrenoDecoderSlot64G=58;
+struct NativeAdrenoClientTable64G {NativeAdrenoClientWindow w[NativeAdrenoMaxClients];};
+constexpr NativeAdrenoClientTable64G NativeAdrenoMakeClientWindows64G()
+{
+    NativeAdrenoClientTable64G t{};
+    t.w[0]={0x20000000ull,0xE0000000ull};
+    t.w[1]={0x100000000ull,0x80000000ull};
+    t.w[2]={0x180000000ull,0x40000000ull};
+    t.w[3]={0x1C0000000ull,0x40000000ull};
+    for(unsigned s=NativeAdrenoLargeSlots+1;s<NativeAdrenoDecoderSlot64G;++s)
+        t.w[s]={0x200000000ull+uint64_t(s-NativeAdrenoLargeSlots-1)*0x40000000ull,0x40000000ull};
+    t.w[NativeAdrenoDecoderSlot64G]={0xFA0000000ull,0x5FFFE000ull};
+    return t;
+}
+inline constexpr NativeAdrenoClientTable64G NativeAdrenoClientTable64=NativeAdrenoMakeClientWindows64G();
+inline constexpr const NativeAdrenoClientWindow *NativeAdrenoClientWindows64G=NativeAdrenoClientTable64.w;
+constexpr unsigned NativeAdrenoClientWindowCount64G()
+{
+    unsigned count=0;
+    for(unsigned s=0;s<NativeAdrenoMaxClients;++s)if(NativeAdrenoClientTable64.w[s].bytes)++count;
+    return count;
+}
 #else
 inline constexpr NativeAdrenoClientWindow NativeAdrenoClientWindows16G[NativeAdrenoMaxClients]={
     {0x20000000ull,0x60000000ull},
@@ -101,14 +148,25 @@ static_assert(NativeAdrenoClientWindowsValid(NativeAdrenoClientWindows4G,0x20000
               NativeAdrenoClientWindowsValid(NativeAdrenoClientWindows16G,0x20000000ull,0x3FFFFE000ull) &&
               NativeAdrenoClientWindows4G[11].start+NativeAdrenoClientWindows4G[11].bytes==0xFFFFE000ull &&
               NativeAdrenoClientWindows4G[0].bytes==0x60000000ull && !NativeAdrenoClientWindows4G[12].bytes &&
-              NativeAdrenoClientWindows16G[NativeAdrenoMaxClients-1].start+NativeAdrenoClientWindows16G[NativeAdrenoMaxClients-1].bytes==
-              0x3FFFFE000ull &&
 #ifdef ADRENO830_MACOS
               NativeAdrenoClientWindows16G[0].bytes==0xE0000000ull &&   /* UniXNU-piano */
+              NativeAdrenoClientWindows16G[NativeAdrenoDecoderSlot].bytes==(1536ull<<20)-8192 &&
+              !NativeAdrenoClientWindows16G[NativeAdrenoDecoderSlot+1].bytes &&
+              NativeAdrenoClientWindowsValid(NativeAdrenoClientWindows64G,0x20000000ull,0xFFFFFE000ull) &&
+              NativeAdrenoClientWindows64G[0].start==0x20000000ull && NativeAdrenoClientWindows64G[0].bytes==0xE0000000ull &&
+              NativeAdrenoClientWindows64G[NativeAdrenoLargeSlots].start+NativeAdrenoClientWindows64G[NativeAdrenoLargeSlots].bytes==
+              0x200000000ull && NativeAdrenoClientWindowCount64G()==59 &&
+              NativeAdrenoClientWindows64G[NativeAdrenoDecoderSlot64G-1].start+NativeAdrenoClientWindows64G[NativeAdrenoDecoderSlot64G-1].bytes
+              <=NativeAdrenoClientWindows64G[NativeAdrenoDecoderSlot64G].start &&
+              NativeAdrenoClientWindows64G[NativeAdrenoDecoderSlot64G].bytes==(1536ull<<20)-8192 &&
+              NativeAdrenoClientWindows64G[NativeAdrenoDecoderSlot64G].start+NativeAdrenoClientWindows64G[NativeAdrenoDecoderSlot64G].bytes==
+              0xFFFFFE000ull && !NativeAdrenoClientWindows64G[NativeAdrenoDecoderSlot64G+1].bytes &&
 #else
+              NativeAdrenoClientWindows16G[NativeAdrenoMaxClients-1].start+NativeAdrenoClientWindows16G[NativeAdrenoMaxClients-1].bytes==
+              0x3FFFFE000ull &&
               NativeAdrenoClientWindows16G[0].bytes==0x60000000ull &&
 #endif
-              NativeAdrenoLargeSlots<NativeAdrenoMaxClients && NativeAdrenoMaxClients<=32,"client windows");
+              NativeAdrenoLargeSlots<NativeAdrenoMaxClients && NativeAdrenoMaxClients<=sizeof(NativeAdrenoRangeMask)*8,"client windows");
 #ifdef ADRENO830_MACOS
 /* UniXNU-piano: no window of a table crosses a multiple of 4 GiB (a BO across the line nobody could show running). */
 constexpr bool NativeAdrenoClientWindowsStayBelowLines(const NativeAdrenoClientWindow *windows)
@@ -118,14 +176,25 @@ constexpr bool NativeAdrenoClientWindowsStayBelowLines(const NativeAdrenoClientW
     return true;
 }
 static_assert(NativeAdrenoClientWindowsStayBelowLines(NativeAdrenoClientWindows16G) &&
-              NativeAdrenoClientWindowsStayBelowLines(NativeAdrenoClientWindows4G),"client windows across 4 GiB");
+              NativeAdrenoClientWindowsStayBelowLines(NativeAdrenoClientWindows4G) &&
+              NativeAdrenoClientWindowsStayBelowLines(NativeAdrenoClientWindows64G),"client windows across 4 GiB");
 #endif
 /* The table for the aperture the published DeviceInfo describes (va_start + va_size; 0 = none: the 4 GiB one): above 4 GiB the 16 GiB
- * table, above 2 GiB the 4 GiB one, else the 2 GiB one. */
+ * table, above 2 GiB the 4 GiB one, else the 2 GiB one. UniXNU-piano: above 16 GiB the 64 GiB table. */
 static inline const NativeAdrenoClientWindow *NativeAdrenoClientWindowsFor(uint64_t va_end)
 {
     if(!va_end)return NativeAdrenoClientWindows4G;
+#ifdef ADRENO830_MACOS
+    if(va_end>0x400000000ull)return NativeAdrenoClientWindows64G;
+#endif
     return va_end>0x100000000ull?NativeAdrenoClientWindows16G:va_end>0x80000000ull?NativeAdrenoClientWindows4G:NativeAdrenoClientWindows2G;
+}
+/* The windows a table has (the slots that can ever be handed out). */
+static inline unsigned NativeAdrenoClientWindowCount(const NativeAdrenoClientWindow *windows)
+{
+    unsigned count=0;
+    for(unsigned s=0;windows && s<NativeAdrenoMaxClients;++s)if(windows[s].bytes)++count;
+    return count;
 }
 /* The end (exclusive) of the highest window of a table: it must lie inside the GPU's input range. */
 static inline uint64_t NativeAdrenoClientWindowsEnd(const NativeAdrenoClientWindow *windows)
@@ -154,11 +223,11 @@ static inline unsigned NativeAdrenoClientSlotAt(const NativeAdrenoClientWindow *
  * flight, an SQE prefetch into the kernel range is nobody's (R2 cp-zap), and the kernel's own client shares range 0 with slot 0. */
 enum NativeAdrenoFaultVerdict : uint32_t {NativeAdrenoFaultAlike,NativeAdrenoFaultApart,NativeAdrenoFaultUndecided,NativeAdrenoFaultPolled,
                                           NativeAdrenoFaultVerdicts};
-static inline NativeAdrenoFaultVerdict NativeAdrenoFaultVerdictFor(unsigned far_slot,bool sampled,bool known,uint32_t ranges)
+static inline NativeAdrenoFaultVerdict NativeAdrenoFaultVerdictFor(unsigned far_slot,bool sampled,bool known,uint64_t ranges)
 {
     if(!sampled)return NativeAdrenoFaultPolled;
     if(!known || !ranges || (ranges&(ranges-1)))return NativeAdrenoFaultUndecided;
-    return unsigned(__builtin_ctz(ranges))==far_slot?NativeAdrenoFaultAlike:NativeAdrenoFaultApart;
+    return unsigned(__builtin_ctzll(ranges))==far_slot?NativeAdrenoFaultAlike:NativeAdrenoFaultApart;
 }
 /* native_adreno_note_page_fault's attribution: the slot whose window holds far (windows null before the shell published: none) is the
  * one charged, as before M14; the verdict above, from the submit object's fence history (null: no answer), goes to
@@ -169,7 +238,7 @@ static inline unsigned NativeAdrenoFaultNote(const NativeAdrenoClientWindow *win
     uint32_t issued,bool sampled,volatile uint32_t *counts)
 {
     const unsigned slot=NativeAdrenoClientSlotAt(windows,far);
-    uint32_t ranges=0;
+    NativeAdrenoRangeMask ranges=0;
     const bool known=sampled && submit && submit->rangesInFlight(completed,issued,&ranges)==kIOReturnSuccess;
     const NativeAdrenoFaultVerdict verdict=NativeAdrenoFaultVerdictFor(slot,sampled,known,ranges);
     counts[verdict]=counts[verdict]+1;
@@ -234,25 +303,56 @@ static inline bool NativeAdrenoListNamesProcess(const char *list,const char *nam
  * while more than NativeAdrenoListedSmallKeep4G (the 4 GiB table's eight) or NativeAdrenoListedSmallKeep16G (the 16 GiB table's 28)
  * of them are free: the listed clients always find a window however many apps hold one (with apps in every small slot the
  * lock-screen poster could not get a device and went black). The 2 GiB table has no small window: only listed processes get one of
- * slots 1-3 there. NativeAdrenoMaxClients when nothing is free for the connection. Slot 0 is never another process's. */
+ * slots 1-3 there. NativeAdrenoMaxClients when nothing is free for the connection. Slot 0 is never another process's.
+ * UniXNU-piano (2026-11-22): on macOS's 16 and 64 GiB tables the keep is NativeAdrenoListedSmallKeepMacOS (2), and any other process
+ * with the small (ordinary) windows down to the keep borrows a free large slot while more than NativeAdrenoLargeKeepForList are free,
+ * instead of a refusal (the installed v13.1y3 refused Preview with large slots 2-3 empty). */
 static inline unsigned NativeAdrenoListedSmallKeep(const NativeAdrenoClientWindow *windows)
 {
+#ifdef ADRENO830_MACOS
+    /* UniXNU-piano: 2 on macOS's 16 and 64 GiB tables (the listed processes are the session's system UI, which opens at login). */
+    if(windows==NativeAdrenoClientWindows16G || windows==NativeAdrenoClientWindows64G)return NativeAdrenoListedSmallKeepMacOS;
+#endif
     return windows==NativeAdrenoClientWindows16G?unsigned(NativeAdrenoListedSmallKeep16G):unsigned(NativeAdrenoListedSmallKeep4G);
 }
+static inline bool NativeAdrenoIsDecoderSlot(const NativeAdrenoClientWindow *windows,unsigned slot)
+{
+#ifdef ADRENO830_MACOS
+    return (windows==NativeAdrenoClientWindows16G && slot==NativeAdrenoDecoderSlot) ||
+           (windows==NativeAdrenoClientWindows64G && slot==NativeAdrenoDecoderSlot64G);
+#else
+    (void)windows;(void)slot;
+    return false;
+#endif
+}
+/* UniXNU-piano (2026-11-22): any other process, with the small windows down to the keep, borrows a free large slot while more than this
+ * many large ones are free (the one left is the large list's: iconservicesagent restarting while its old connection still drains). */
+enum : unsigned {NativeAdrenoLargeKeepForList=1};
 static inline unsigned NativeAdrenoClientSlotFor(bool render_server,bool large,bool listed,const NativeAdrenoClientWindow *windows,
-    const bool taken[NativeAdrenoMaxClients])
+    const bool taken[NativeAdrenoMaxClients],bool decoder=false)
 {
     if(!windows || !taken)return NativeAdrenoMaxClients;
     if(render_server && windows[0].bytes && !taken[0])return 0;
-    unsigned first_large=NativeAdrenoMaxClients,first_small=NativeAdrenoMaxClients,small_free=0;
+    unsigned first_large=NativeAdrenoMaxClients,first_small=NativeAdrenoMaxClients,small_free=0,large_free=0;
     for(unsigned s=1;s<NativeAdrenoMaxClients;++s) {
         if(!windows[s].bytes || taken[s])continue;
-        if(s<=NativeAdrenoLargeSlots) {if(first_large==NativeAdrenoMaxClients)first_large=s;}
+        if(NativeAdrenoIsDecoderSlot(windows,s)) {
+            if(decoder)return s;
+            continue;
+        }
+        if(s<=NativeAdrenoLargeSlots) {if(first_large==NativeAdrenoMaxClients)first_large=s;++large_free;}
         else {if(first_small==NativeAdrenoMaxClients)first_small=s;++small_free;}
     }
     if(render_server || large)return first_large<NativeAdrenoMaxClients?first_large:first_small;
     if(listed)return first_small<NativeAdrenoMaxClients?first_small:first_large;
-    return small_free>NativeAdrenoListedSmallKeep(windows)?first_small:NativeAdrenoMaxClients;
+    if(small_free>NativeAdrenoListedSmallKeep(windows))return first_small;
+#ifdef ADRENO830_MACOS
+    if((windows==NativeAdrenoClientWindows16G || windows==NativeAdrenoClientWindows64G) && large_free>NativeAdrenoLargeKeepForList)
+        return first_large;
+#else
+    (void)large_free;
+#endif
+    return NativeAdrenoMaxClients;
 }
 /* Why an open found no slot, in one log line (adreno830_status_diag_lines, ARCHITECTURE 6.2): the process, its class (L large, l listed, a any
  * other), the free small windows against the ones kept for the listed processes, then every holder as <slot>:<name>/<seconds without a
@@ -260,7 +360,7 @@ static inline unsigned NativeAdrenoClientSlotFor(bool render_server,bool large,b
  * windows and giving an idle connection's back needs: run 20261031-223924 knew only that the opens were refused. "+<n>" counts the
  * lines the rate limit dropped since the last one. At most 26 + 19 + 21 x 32 characters: BootProgress continues it in '+' records.
  * NativeAdrenoSlotLogDue is the rate limit: one line per 5 s, 40 a boot, so a crash loop's opens cannot fill the events ring. */
-enum : unsigned {NativeAdrenoSlotLineBytes=720,NativeAdrenoSlotLogLines=40,NativeAdrenoSlotNameChars=10};
+enum : unsigned {NativeAdrenoSlotLineBytes=26+19+21*NativeAdrenoMaxClients+16,NativeAdrenoSlotLogLines=40,NativeAdrenoSlotNameChars=10};
 enum : uint64_t {NativeAdrenoSlotLogUs=5000000};
 struct NativeAdrenoSlotHolder {const char *name;uint32_t quiet_s;bool orphan;};
 struct NativeAdrenoSlotLog {uint64_t next_us;uint32_t lines,skipped;};
@@ -273,7 +373,8 @@ static inline bool NativeAdrenoSlotLogDue(NativeAdrenoSlotLog *log,uint64_t now_
 static inline unsigned NativeAdrenoClientSmallFree(const NativeAdrenoClientWindow *windows,const bool taken[NativeAdrenoMaxClients])
 {
     unsigned free=0;
-    for(unsigned s=NativeAdrenoLargeSlots+1;windows && taken && s<NativeAdrenoMaxClients;++s)if(windows[s].bytes && !taken[s])++free;
+    for(unsigned s=NativeAdrenoLargeSlots+1;windows && taken && s<NativeAdrenoMaxClients;++s)
+        if(windows[s].bytes && !taken[s] && !NativeAdrenoIsDecoderSlot(windows,s))++free;
     return free;
 }
 static inline void NativeAdrenoSlotLine(char *line,const char *name,char kind,unsigned small_free,unsigned keep,uint32_t skipped,
@@ -558,6 +659,13 @@ uint32_t native_adreno_coherent_imports(void);
  * after the pin and before the GPU can see them, so lines the zero fill or the pages' last owner left dirty are gone before the first GPU
  * write (ARCHITECTURE 4.14.1). A change of that order must take this property away. */
 #define NativeAdrenoImportCleanKey "NativeAdrenoImportClean"
+/* Immutable first capacity refusal for each slot and method (BoAlloc/BoImport/BoMap), independent of unified-log decoding.
+ * entry is slot*3 + method index, row is 0..9. Returns 0 for an empty entry; no driver locks are taken by the reader. */
+enum : unsigned {NativeAdrenoFailureEntries=NativeAdrenoMaxClients*3,NativeAdrenoFailureRows=10};
+int native_adreno_failure_line(unsigned entry,unsigned row,char *line,size_t size);
+/* Active/orphan connection or the last completed connection in each slot. Byte counts are in bytes, including the VM hole. */
+enum : unsigned {NativeAdrenoResidencyLineBytes=384};
+int native_adreno_residency_line(unsigned slot,bool closed,char *line,size_t size);
 /* Connections opened and closed so far, and the published service (null before S9). */
 uint32_t native_adreno_publish_stats(uint32_t *closed);
 IOService *native_adreno_published_service(void);

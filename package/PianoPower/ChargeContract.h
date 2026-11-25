@@ -21,6 +21,19 @@
  * A timeout quarantines the unsequenced GLINK transaction until link reset;
  * a late response can never satisfy a subsequent request. Other failures
  * invalidate the snapshot; a later refresh starts with a drain/probe.
+ *
+ * Source list from the charger firmware (opt-in, piano_contract_allow_
+ * firmware_pdos): this tablet's PPM (UCSI 1.1) advertises no PDO details
+ * (bmOptionalFeatures 0), so GET_PDOS is never sent and a PD sink snapshot
+ * has an RDO but no source list: no PD contract could ever be valid. With
+ * the option on, the owner offers the firmware's own decoded source list
+ * (MCA 0x21011 {min mV, max mV, max mA}, read in a cycle whose PD state is
+ * SNK_Ready); a PD sink status then gets a second, agreeing status read
+ * (as the UCSI PDO path does) and the list is re-encoded as standard source
+ * PDO words in object order. The RDO, PD opmode, sink and connection still
+ * come from UCSI alone; the list must start with vSafe5V, keep fixed objects
+ * ascending and before any PPS APDO. A connection or opmode change drops
+ * the offer; two cycles without a ready list withdraw it.
  */
 #ifndef PIANO_CHARGE_CONTRACT_H
 #define PIANO_CHARGE_CONTRACT_H
@@ -123,7 +136,50 @@ typedef struct {
     uint32_t stage_flags, stage_rdo, stage_pdo[7];
     uint32_t notifies, failures, timeouts, reads, writes, read_replies, write_replies, resets;
     uint64_t command, sent_ms, command_ms, poll_ms, notify_ms, reset_ms, enabled;
+    /* Firmware source list (see the header comment). pdo_fallback survives a
+     * relink; the offer does not. pdo_origin is PIANO_CONTRACT_PDO_* of the
+     * published valid snapshot (0 when invalid). */
+    uint8_t pdo_fallback, pdo_origin, offer_n, offer_misses;
+    uint16_t offer_pdo[7][3];        /* mV, mV, mA: all within 21000 */
+    uint16_t offers;                 /* the counters saturate */
+    uint8_t offer_rejects, offer_withdrawals;
 } PianoChargeContract;
+enum {PIANO_CONTRACT_PDO_NONE = 0, PIANO_CONTRACT_PDO_UCSI = 1, PIANO_CONTRACT_PDO_FIRMWARE = 2};
+
+/* One firmware triplet as a standard source PDO word: fixed (min == max) in
+ * 50 mV / 10 mA units, else a PPS APDO in 100 mV / 50 mA units, rounded
+ * inward. 0 when the triplet is not one the decode below would accept. */
+static inline uint32_t piano_contract_firmware_pdo_word(uint32_t min_mv, uint32_t max_mv, uint32_t max_ma) {
+    if (min_mv == max_mv) {
+        if (min_mv < 3300 || min_mv > 21000 || min_mv % 50 || max_ma < 100 || max_ma > 5000) return 0;
+        return (min_mv / 50u) << 10 | (max_ma / 10u);
+    }
+    if (min_mv > max_mv || min_mv < 3300 || max_mv > 21000 || max_ma < 500 || max_ma > 5000) return 0;
+    {
+        uint32_t lo = (min_mv + 99u) / 100u, hi = max_mv / 100u;
+        if (lo >= hi) return 0;
+        return 3u << 30 | hi << 17 | lo << 8 | (max_ma / 50u);
+    }
+}
+/* A complete firmware list in source object order: vSafe5V first, fixed
+ * objects strictly ascending, all of them before the APDOs (USB PD's own
+ * Source_Capabilities order). Returns the count encoded, 0 for a list that
+ * cannot be the source's object list. */
+static inline unsigned piano_contract_firmware_pdos(const uint32_t pdo[][3], unsigned n, uint32_t out[7]) {
+    unsigned i; uint32_t last_fixed = 0; int apdo = 0;
+    if (!pdo || !n || n > 7) return 0;
+    if (pdo[0][0] != 5000 || pdo[0][1] != 5000) return 0;
+    for (i = 0; i != n; ++i) {
+        uint32_t w = piano_contract_firmware_pdo_word(pdo[i][0], pdo[i][1], pdo[i][2]);
+        if (!w) return 0;
+        if (pdo[i][0] == pdo[i][1]) {
+            if (apdo || pdo[i][0] <= last_fixed) return 0;
+            last_fixed = pdo[i][0];
+        } else apdo = 1;
+        out[i] = w;
+    }
+    return n;
+}
 
 static inline void piano_contract_zero(void *v, unsigned n) {
     uint8_t *p = (uint8_t *)v; unsigned i; for (i = 0; i != n; ++i) p[i] = 0;
@@ -141,11 +197,46 @@ static inline void piano_contract_invalidate(PianoChargeContract *c, int error, 
 }
 static inline void piano_contract_link(PianoChargeContract *c, int up) {
     uint32_t generation = c->generation + 1, seq = c->seq;
-    piano_contract_init(c); c->generation = generation; c->seq = seq;
+    uint8_t fallback = c->pdo_fallback;
+    piano_contract_init(c); c->generation = generation; c->seq = seq; c->pdo_fallback = fallback;
     c->linked = (uint8_t)(up != 0); c->wanted = 0;
     c->stage = up ? PianoContractProbe : PianoContractIdle;
 }
 static inline void piano_contract_refresh(PianoChargeContract *c) { c->wanted = 1; }
+static inline void piano_contract_allow_firmware_pdos(PianoChargeContract *c, int allow) {
+    c->pdo_fallback = (uint8_t)(allow != 0);
+    if (!allow) { c->offer_n = c->offer_misses = 0; }
+}
+static inline void piano_contract_drop_offer(PianoChargeContract *c) {
+    if (c->offer_n && c->offer_withdrawals < 255) ++c->offer_withdrawals;
+    c->offer_n = c->offer_misses = 0;
+    if (c->valid && c->pdo_origin == PIANO_CONTRACT_PDO_FIRMWARE) c->wanted = 1;
+}
+/* Once per finished charger-firmware cycle: ready = this cycle read the
+ * source list and PD state SNK_Ready. A new or changed list replaces the
+ * offer at once and asks for a fresh status; a missing one withdraws it
+ * after two cycles (a renegotiation can pass through a non-ready state).
+ * The published snapshot only changes at the next agreeing status pair. */
+static inline void piano_contract_offer_pdos(PianoChargeContract *c, const uint32_t pdo[][3], unsigned n, int ready) {
+    uint32_t raw[7]; unsigned i, k; int same;
+    if (!c->pdo_fallback) return;
+    if (ready && n && !piano_contract_firmware_pdos(pdo, n, raw)) {
+        if (c->offer_rejects < 255) ++c->offer_rejects;
+        ready = 0;
+    }
+    if (!ready || !n) {
+        if (c->offer_misses < 255) ++c->offer_misses;
+        if (c->offer_misses >= 2) piano_contract_drop_offer(c);
+        return;
+    }
+    c->offer_misses = 0; if (c->offers < 65535) ++c->offers;
+    same = c->offer_n == n;
+    for (i = 0; same && i != n; ++i) for (k = 0; k != 3; ++k) if (c->offer_pdo[i][k] != pdo[i][k]) same = 0;
+    if (same) return;
+    for (i = 0; i != 7; ++i) for (k = 0; k != 3; ++k) c->offer_pdo[i][k] = (uint16_t)(i < n ? pdo[i][k] : 0);
+    c->offer_n = (uint8_t)n;
+    c->wanted = 1;
+}
 static inline int piano_contract_fresh(const PianoChargeContract *c, uint64_t now_ms) {
     return c->valid && !c->notify_pending && now_ms >= c->updated_ms && now_ms - c->updated_ms <= PIANO_CONTRACT_FRESH_MS;
 }
@@ -259,9 +350,20 @@ static inline void piano_contract_reject(PianoChargeContract *c, int error) {
     piano_contract_ack_stage(c, PianoContractRejected, 0);
 }
 static inline void piano_contract_publish(PianoChargeContract *c, uint64_t now_ms) {
-    PianoContractDecoded d; unsigned i; int changed;
-    int valid = c->stage_connected && c->stage_sink && c->stage_pd &&
-                piano_contract_decode(c->stage_pdo, c->stage_pdos, c->stage_rdo, &d);
+    PianoContractDecoded d; unsigned i; int changed, valid; uint8_t origin = PIANO_CONTRACT_PDO_NONE;
+    if (c->stage_connected && c->stage_sink && c->stage_pd) {
+        if (c->stage_pdos) origin = PIANO_CONTRACT_PDO_UCSI;
+        else if (c->pdo_fallback && !(c->features & 16u) && c->offer_n) {
+            uint32_t raw[7] = {0}, list[7][3] = {{0}}; unsigned n, k;
+            for (i = 0; i != 7; ++i) for (k = 0; k != 3; ++k) list[i][k] = c->offer_pdo[i][k];
+            n = piano_contract_firmware_pdos((const uint32_t (*)[3])list, c->offer_n, raw);
+            for (i = 0; i != n; ++i) c->stage_pdo[i] = raw[i];
+            c->stage_pdos = (uint8_t)n;
+            if (n) origin = PIANO_CONTRACT_PDO_FIRMWARE;
+        }
+    }
+    valid = c->stage_connected && c->stage_sink && c->stage_pd &&
+            piano_contract_decode(c->stage_pdo, c->stage_pdos, c->stage_rdo, &d);
     changed = c->status_valid && (c->connected != c->stage_connected || c->sink != c->stage_sink ||
               c->pd != c->stage_pd || c->rdo != c->stage_rdo || c->pdos != c->stage_pdos);
     for (i = 0; i != c->stage_pdos; ++i) if (c->status_valid && c->source_pdo[i] != c->stage_pdo[i]) changed = 1;
@@ -273,6 +375,7 @@ static inline void piano_contract_publish(PianoChargeContract *c, uint64_t now_m
     for (i = 0; i != 16; ++i) c->status_raw[i] = c->stage_status_raw[i];
     c->rdo = c->stage_rdo; c->pdos = c->stage_pdos;
     for (i = 0; i != 7; ++i) c->source_pdo[i] = c->stage_pdo[i];
+    c->pdo_origin = valid ? origin : (uint8_t)PIANO_CONTRACT_PDO_NONE;
     c->protocol = valid ? d.protocol : 0; c->object = valid ? d.object : 0;
     c->mv = valid ? d.mv : 0; c->ma = valid ? d.ma : 0; c->source_ma = valid ? d.source_ma : 0;
     c->last_error = valid || !c->stage_pd ? PIANO_CONTRACT_OK : PIANO_CONTRACT_RDO;
@@ -434,6 +537,9 @@ static inline int piano_contract_receive(PianoChargeContract *c, uint64_t now_ms
             }
             next = PianoContractCommit;
         } else {
+            /* A new connection or PD session needs a list read after it. */
+            if (c->status_valid && (c->connected != ((flags >> 19) & 1u) || c->pd != (((flags >> 16) & 7u) == 3u)))
+                piano_contract_drop_offer(c);
             if (c->status_valid && (c->connected != ((flags >> 19) & 1u) ||
                 c->sink != !(flags & (1u << 20)) || c->pd != (((flags >> 16) & 7u) == 3u) || c->rdo != rdo))
                 piano_contract_invalidate(c, PIANO_CONTRACT_CHANGED, 1);
@@ -443,7 +549,8 @@ static inline int piano_contract_receive(PianoChargeContract *c, uint64_t now_ms
             c->stage_connected = (uint8_t)((flags >> 19) & 1u); c->stage_sink = (uint8_t)(!(flags & (1u << 20)));
             c->stage_pd = (uint8_t)(((flags >> 16) & 7u) == 3u);
             c->stage_pdos = 0; piano_contract_zero(c->stage_pdo, (unsigned)sizeof(c->stage_pdo));
-            next = c->stage_connected && c->stage_sink && c->stage_pd && (c->features & 16u) ? PianoContractPdos0 : PianoContractCommit;
+            next = !(c->stage_connected && c->stage_sink && c->stage_pd) ? PianoContractCommit :
+                   (c->features & 16u) ? PianoContractPdos0 : c->pdo_fallback ? PianoContractVerify : PianoContractCommit;
         }
     } else if (c->stage == PianoContractPdos0 || c->stage == PianoContractPdos4) {
         unsigned offset = c->stage == PianoContractPdos0 ? 0 : 4;

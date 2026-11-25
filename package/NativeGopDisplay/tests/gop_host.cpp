@@ -21,6 +21,9 @@
 //     behind the text with black stroke lines through it (the bluish background of 2026-11-12, reproduced).
 //   - the copy's prepare of a surface PianoDpu's window also holds (pianoPrepareSurface against XNU's read-only rule): never refused,
 //     whichever came first and however the other prepared it (the black copies after the first flips of 2026-11-15, reproduced).
+//   - the fixed refresh contract (GopRefresh.h, native-gop-display-120=1): the 32.32 periods against the family's own constants (60 Hz
+//     0x04444444, 24 Hz 0x0aaaaaaa), 120 Hz min = max = 0x02222222 and 8333333 ns, the accepted range, and the VBL tick's absolute
+//     deadlines (phase kept across mid-period re-arms, missed ticks skipped without a burst, a fresh grid after a long stall).
 //   c++ -std=c++20 -Wall -Wextra -Werror -I.. gop_host.cpp -o /tmp/gop_host && /tmp/gop_host
 #include <cmath>
 #include <cstdio>
@@ -33,6 +36,7 @@
 #include <vector>
 #include "../CopyRows.h"
 #include "GopCompose.h"
+#include "GopRefresh.h"
 #include "../PianoDpu/PianoDpuFlipClient.h"           // pianoPrepareSurface: how the copy's kept maps prepare a surface
 #include "../../PianoDpu/tests/prepare_model.h"       // XNU's read-only prepare rule, modelled
 
@@ -1885,8 +1889,49 @@ static void testSharedPrepare()
   CHECK(broken.prepareShared() == pianoPrepareNone && broken.wired == 0);
 }
 
+static void testRefreshContract()
+{
+    using namespace goprefresh;
+    // the family's constants (27.3 get_timing_attributes_gated: movk 0x0444,0x4444 / 0x0aaa,0xaaaa; 1/60 s as 0xfe502a ns)
+    CHECK(periodFixed(60) == 0x04444444ull && periodFixed(24) == 0x0aaaaaaaull && periodNs(60) == 0xfe502aull);
+    CHECK(periodFixed(120) == 0x02222222ull && periodNs(120) == 8333333ull);
+    // 24 MHz timebase (the tablet's): ns * 24 / 1000
+    auto toAbs = [](uint64_t ns) { return ns * 24 / 1000; };
+    uint64_t w[kWords];
+    for (auto &x : w) x = 0xdeadbeef;
+    CHECK(fixedAttributes(120, toAbs, w));
+    CHECK(w[kMinFixed] == 0x02222222ull && w[kMaxFixed] == w[kMinFixed] && w[kMinAbs] == 199999 && w[kMaxAbs] == w[kMinAbs] &&
+          w[kStepFixed] == 0 && w[kStepAbs] == 0);
+    // QuartzCore's heartbeat from displayMinRefreshInterval: value * 2^-32 seconds
+    CHECK(std::fabs(double(w[kMinFixed]) / 4294967296.0 - 1.0 / 120) < 1e-9);
+    CHECK(fixedAttributes(60, toAbs, w) && w[kMinFixed] == 0x04444444ull);
+    CHECK(!fixedAttributes(29, toAbs, w) && !fixedAttributes(241, toAbs, w) && !fixedAttributes(0, toAbs, w));
+    // the VBL tick: P = 200000 ticks (120 Hz at 24 MHz)
+    const uint64_t P = 200000;
+    CHECK(nextDeadline(0, 1000, P) == 1000 + P);                       // none armed
+    CHECK(nextDeadline(5000 + P, 5000 + P / 2, P) == 5000 + P);        // a submission mid-period keeps the phase
+    CHECK(nextDeadline(5000, 5000, P) == 5000 + P);                    // fired on time
+    CHECK(nextDeadline(5000, 5000 + 3000, P) == 5000 + P);             // fired late, same grid
+    CHECK(nextDeadline(5000, 5000 + 3 * P + 7, P) == 5000 + 4 * P);    // three missed: skipped, no burst
+    CHECK(nextDeadline(5000, 5000 + 9 * P, P) == 5000 + 10 * P);       // more than 8 behind: a fresh grid from now (now + P)
+    CHECK(nextDeadline(5000, 5000 + 8 * P, P) == 5000 + 9 * P);        // exactly 8 behind: still the grid
+    CHECK(nextDeadline(7, 7, 0) == 7);
+    // a 10 s run of ticks with a random work-loop latency 0..3 ms: no drift (the 1200th tick at its grid time), never two in a period
+    std::mt19937 rng(120);
+    uint64_t due = nextDeadline(0, 0, P), prev = 0;
+    for (int i = 0; i < 1200; ++i) {
+        const uint64_t fired = due + rng() % 72000;
+        const uint64_t next = nextDeadline(due, fired, P);
+        CHECK(next - due == P && next > fired);
+        prev = due;
+        due = next;
+    }
+    CHECK(prev == P * 1200 && due == P * 1201);
+}
+
 int main()
 {
+    testRefreshContract();
   testGeometry();
   testParallelRows();
   testPixels();

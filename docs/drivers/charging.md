@@ -104,7 +104,7 @@ levels (9 V opt-in), charge current conservative, battery state on the console; 
   re-sends it to stop a DSP crash on dock unplug), float voltage/termination, sleep notifications.
 
 Boot arguments: `piano-power=0|1|2` (default 0: probe declines, nothing mapped), `piano-power-period=S` (30),
-`piano-power-gauge=0`, `piano-power-write=0` (level 2 without writes), `piano-power-hv=1`, `piano-power-b4pd=1` (attended first step: policy + fixed-PDO/PPS/QC3 requests), `piano-power-fw=DIR`,
+`piano-power-gauge=0`, `piano-power-write=0` (level 2 without writes), `piano-power-hv=1`, `piano-power-pdo-mca=1` (with the policy: a PD sink status takes the charger firmware's source list, since this PPM offers no UCSI PDOs; [charging-buck-session.md](charging-buck-session.md)), `piano-power-b4pd=1` (attended first step: policy + fixed-PDO/PPS/QC3 requests), `piano-power-fw=DIR`,
 `piano-power-policy=1` (with `piano-power-rp=1`, `piano-power-ramp=0|1`, `piano-power-rp-max=MA`, `piano-power-write-ms=MS`,
 `piano-power-health=1`, `-health-stop=N`, `-health-resume=N`, `piano-power-kick=0|1`: charging-policy.md §8, §15, §17),
 `piano-power-wdog=0|1|2` (the charger watchdog: read only, pet, pet and clear the bite's charging stop (default); §18), and for the DSP

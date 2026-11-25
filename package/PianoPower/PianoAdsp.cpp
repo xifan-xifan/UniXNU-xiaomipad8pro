@@ -41,9 +41,14 @@
 #include <sys/errno.h>
 #include <pexpert/pexpert.h>
 #include <stdarg.h>
+#include <PianoObserveSysctl.h>
+#include "AdspObserve.h"
+#include "AdspTrace.h"
 #define PIANO_SCM_LOCK_KERNEL 1
 #include <PianoScmLock.h>
 extern "C" {
+void piano_a830_llcc_audit_wait(bool island3);
+void piano_a830_llcc_island4_run(bool ownsStart);
 #include "QcomGlink.h"
 #include "QcomMdt.h"
 #include "QcomQmp.h"
@@ -101,7 +106,7 @@ char gText[96];
 
 void say(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void say(const char *fmt, ...) {
-    char line[200];
+    char line[384];
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(line, sizeof line, fmt, ap);
@@ -147,8 +152,16 @@ QcomRscLayout gLayout;
 volatile uint32_t gPending;
 uint32_t gSliceMs = kBringUpSliceMs;
 bool gDoorbellsOn;
+// Observation bookkeeping only: no reader takes the owner lock, wakes it or changes a protocol decision.
+uint32_t gObserveEpoch, gObservePolls, gObserveReads, gObserveRecv, gObserveLastRecv = kIpccNone;
+uint32_t gObserveClears, gObserveLastClear = kIpccNone, gObserveSends, gObserveLastSend, gObserveEnabled;
+uint64_t gObserveRecvMs, gObserveSendMs;
+struct ObserveWrite {
+    ObserveWrite() {__atomic_add_fetch(&gObserveEpoch,1u,__ATOMIC_ACQ_REL);}
+    ~ObserveWrite() {__atomic_add_fetch(&gObserveEpoch,1u,__ATOMIC_RELEASE);}
+};
 
-struct Message {uint32_t length; uint8_t data[PIANO_ADSP_MAX_MESSAGE];};
+struct Message {uint32_t length, trace_id; uint8_t data[PIANO_ADSP_MAX_MESSAGE];};
 }  // namespace
 
 struct PianoAdspChannel {
@@ -276,6 +289,88 @@ uint32_t replyPollSlice(uint64_t now) {
 }
 void linkChanged() {__atomic_store_n(&gLinkGeneration, gLinkTrack.generation, __ATOMIC_RELEASE);}
 
+// Observation only, enabled by the existing level-4 sensor mode. Start at its first 514, not at an assumed local port number.
+// Each boundary has 64 records per port; edge doorbells have 64 records per direction. No payload/calibration values are printed.
+bool gTraceEnabled;
+uint32_t gIntentGrant;
+uint64_t gIntentSummaryMs;
+uint8_t *allocIntent(uint32_t size) {return static_cast<uint8_t *>(IOMallocData(size));}
+void freeIntent(uint8_t *data, uint32_t size) {IOFreeData(data, size);}
+void intentEvent(void *, const QcomGlinkChannel *c, uint16_t cmd, uint16_t rcid,
+                 uint32_t size, uint32_t granted, const char *reason) {
+    say("[sens-trace3] ev=%s ms=%llu ch=%s lcid=%u rcid=%u asked=%u intent_size=%u granted=%u reason=%s",
+        cmd == QCOM_GLINK_RX_INTENT_REQ ? "intent-req" : "intent-ack", (unsigned long long)nowMs(),
+        c ? c->name : "unknown", c ? c->lcid : 0, rcid, size, c ? c->intent_size : 0, granted, reason);
+}
+void intentSummary(bool force = false) {
+    if (!gTraceEnabled) return;
+    const uint64_t ms = nowMs();
+    if (!force && ms - gIntentSummaryMs < 30000) return;
+    gIntentSummaryMs = ms;
+    const auto &s = gGlink.intents;
+    say("[sens-trace3] ev=summary ms=%llu grant=%u req=%u granted=%u refused=%u ack=%u yes=%u no=%u dyn=%u th=%u tt=%u rh=%u rt=%u",
+        (unsigned long long)ms, gGlink.dynamic_intents, s.requests, s.granted, s.refused,
+        s.acks, s.ack_granted, s.ack_refused, gGlink.dynamic_bytes, *gGlink.tx.head, *gGlink.tx.tail, *gGlink.rx.head, *gGlink.rx.tail);
+    for (const auto &c : gGlink.channel) {
+        if (!c.used) continue;
+        const auto &i = c.intents;
+        say("[sens-trace3] ev=channel ms=%llu ch=%s lcid=%u req=%u granted=%u refused=%u last=%u min=%u max=%u sum=%llu fixed=%u",
+            (unsigned long long)ms, c.name, c.lcid, i.requests, i.granted, i.refused, i.last_size, i.min_size, i.max_size,
+            (unsigned long long)i.size_sum, c.intent_size);
+        say("[sens-trace3] ev=acks ms=%llu ch=%s lcid=%u sent=%u asked=%u ack=%u granted=%u refused=%u",
+            (unsigned long long)ms, c.name, c.lcid, i.requests_tx, i.last_tx_size, i.acks, i.ack_granted, i.ack_refused);
+    }
+}
+volatile uint32_t gTracePort;
+uint32_t gTraceSerial, gTraceCounts[2][5], gTraceBells[2];
+enum {kTraceEnqueue, kTracePublish, kTraceConsume, kTraceRx, kTraceBlocked, kTraceCap = 64};
+struct TraceFlight {uint32_t id, port; uint64_t end; AdspTraceHeader header;};
+TraceFlight gTraceFlight[2 * kTraceCap];
+bool gTraceTailValid;
+uint32_t gTraceTail;
+uint64_t gTraceRead;
+
+int tracePort(const PianoAdspChannel *c, const AdspTraceHeader &h, bool rx) {
+    const uint32_t port = __atomic_load_n(&gTracePort, __ATOMIC_ACQUIRE);
+    if (!port) return -1;
+    if (!strcmp(c->name, "PMIC_RTR_ADSP_APPS")) return 1;
+    return !strcmp(c->name, "IPCRTR") && (rx ? h.dst_port : h.src_port) == port ? 0 : -1;
+}
+void tracePacket(unsigned port, unsigned event, const char *name, uint32_t id, const AdspTraceHeader &h, uint32_t bytes,
+                 uint32_t before, uint64_t end, int rc = 0) {
+    uint32_t &n = gTraceCounts[port][event];
+    if (n >= kTraceCap) return;
+    ++n;
+    // Bypass say's 200-byte stage buffer: all boundary fields must survive in the early console capture.
+    IOLog("PianoPower: adsp: [sens-trace1] ev=%s port=%s id=%u ms=%llu n=%u/64 v=%u type=%u src=%u:%u dst=%u:%u size=%u bytes=%u "
+        "txn=%d qmi=%d msg=%d sns=%d owner=%u op=%u confirm=%u wh=%u th=%u tt=%u rh=%u rt=%u len=%u end=%llu read=%llu rc=%d\n",
+        name, port ? "pmic" : "light", id, (unsigned long long)nowMs(), n, h.version, h.type, h.src_node, h.src_port,
+        h.dst_node, h.dst_port, h.size, bytes, h.txn, h.qmi_type, h.msg, h.sns, h.owner, h.op, h.confirm, before,
+        gGlink.tx.head ? *gGlink.tx.head : 0, gGlink.tx.tail ? *gGlink.tx.tail : 0,
+        gGlink.rx.head ? *gGlink.rx.head : 0, gGlink.rx.tail ? *gGlink.rx.tail : 0, gGlink.tx.length,
+        (unsigned long long)end, (unsigned long long)__atomic_load_n(&gTraceRead, __ATOMIC_RELAXED), rc);
+}
+// Runs on the existing DSP thread's hardware polls and around sends. The remote owns tx.tail; never write an index here.
+void traceConsume() {
+    if (!__atomic_load_n(&gTracePort, __ATOMIC_ACQUIRE) || !gGlinkStarted || !gGlink.tx.tail) return;
+    const uint32_t tail = *gGlink.tx.tail;
+    if (tail >= gGlink.tx.length) return;
+    if (gTraceTailValid) __atomic_add_fetch(&gTraceRead, (uint64_t)atrDistance(gTraceTail, tail, gGlink.tx.length), __ATOMIC_RELAXED);
+    gTraceTail = tail; gTraceTailValid = true;
+    for (auto &f : gTraceFlight) {
+        if (!f.id || gTraceRead < f.end) continue;
+        tracePacket(f.port, kTraceConsume, "consume", f.id, f.header, 0, tail, f.end);
+        f.id = 0;
+    }
+}
+void traceBell(bool rx, uint32_t id) {
+    if (!__atomic_load_n(&gTracePort, __ATOMIC_ACQUIRE) || gTraceBells[rx] >= kTraceCap) return;
+    say("[sens-trace1] ev=doorbell dir=%s port=edge light-port=%u ms=%llu n=%u/64 bell=%u th=%u tt=%u rh=%u rt=%u",
+        rx ? "rx" : "tx", gTracePort, (unsigned long long)nowMs(), ++gTraceBells[rx], id,
+        gGlink.tx.head ? *gGlink.tx.head : 0, gGlink.tx.tail ? *gGlink.tx.tail : 0,
+        gGlink.rx.head ? *gGlink.rx.head : 0, gGlink.rx.tail ? *gGlink.rx.tail : 0);
+}
+
 void wake(uint32_t bits) {
     __atomic_fetch_or(&gPending, bits, __ATOMIC_RELEASE);
     thread_wakeup((event_t)&gPending);
@@ -283,12 +378,18 @@ void wake(uint32_t bits) {
 
 // ---- doorbells, polled: acknowledge, record ----
 uint32_t pollHardware() {
+    ++gObservePolls;
+    traceConsume();
     uint32_t bits = 0;
     if (gDoorbellsOn) {
         for (unsigned n = 0; n < 32; ++n) {
             const uint32_t id = rd(gIpcc, kIpccRecvId);
+            ++gObserveReads;
             if (id == kIpccNone) break;
             wr(gIpcc, kIpccRecvClear, id);
+            ++gObserveRecv; gObserveLastRecv = id; gObserveRecvMs = nowMs();
+            ++gObserveClears; gObserveLastClear = id;
+            if (id == ipccId(kClientLpass, kSignalGlinkQmp)) traceBell(true, id);
             if (id == ipccId(kClientLpass, kSignalSmp2p)) bits |= kEvSmp2p;
             else if (id == ipccId(kClientLpass, kSignalGlinkQmp)) bits |= kEvGlink;
             else if (id == ipccId(kClientAop, kSignalGlinkQmp)) bits |= kEvAop;
@@ -304,6 +405,8 @@ uint32_t waitEvents(uint32_t ms) {
     clock_interval_to_deadline(ms, kMillisecondScale, &deadline);
     for (;;) {
         uint32_t bits = __atomic_exchange_n(&gPending, 0, __ATOMIC_ACQ_REL) | pollHardware();
+        // Observe on the existing polling cadence; do not add service/QRTR ticks or alter event deadlines.
+        if (gGlinkStarted) intentSummary();
         if (bits) return bits;
         if (mach_absolute_time() >= deadline) return 0;
         const uint32_t slice = gSliceMs == kSteadySliceMs ? replyPollSlice(nowMs()) : gSliceMs;
@@ -319,9 +422,12 @@ void ipccWrite(uint32_t at, uint32_t value, const char *what) {
     wr(gIpcc, at, value);
     if (gKnobs.trace) say("ipcc: written %s", what);
 }
-void ring(uint32_t client, uint32_t signal) {wr(gIpcc, kIpccSend, ipccId(client, signal));}
+void ring(uint32_t client, uint32_t signal) {
+    wr(gIpcc, kIpccSend, ipccId(client, signal));
+    ++gObserveSends; gObserveLastSend = ipccId(client, signal); gObserveSendMs = nowMs();
+}
 void kickAop(void *) {ring(kClientAop, kSignalGlinkQmp);}
-void kickGlink(void *) {ring(kClientLpass, kSignalGlinkQmp);}
+void kickGlink(void *) {ring(kClientLpass, kSignalGlinkQmp); traceBell(false, ipccId(kClientLpass, kSignalGlinkQmp));}
 void kickSmp2p() {ring(kClientLpass, kSignalSmp2p);}
 
 // ---- SMEM helpers (allocation under the TCSR hardware mutex) ----
@@ -799,7 +905,9 @@ void serviceGlink() {
         }
     }
     const bool agreed = gGlink.version_agreed;
+    traceConsume();
     qcom_glink_poll(&gGlink);
+    traceConsume();
     if ((gGlink.broken != 0) != (gLinkTrack.broken != 0)) {
         adsp_link_broken(&gLinkTrack, gGlink.broken != 0);
         linkChanged();
@@ -828,6 +936,7 @@ void serviceGlink() {
     if (up && gStage >= PianoAdspGlink && gStage < PianoAdspChannelUp) stage(PianoAdspChannelUp);
 }
 void service(uint32_t bits) {
+    ObserveWrite observing;
     if (bits & kEvAop) qcom_qmp_step(&gQmp);
     if (bits & (kEvSmp2p | kEvGlink)) serviceSmp2p();
     if (bits & (kEvGlink | kEvSend)) {applyClients(); serviceGlink();}
@@ -868,6 +977,11 @@ void clientState(void *context, QcomGlinkChannel *, int up) {
 void clientReceive(void *context, QcomGlinkChannel *, const uint8_t *data, uint32_t length) {
     PianoAdspChannel *c = static_cast<PianoAdspChannel *>(context);
     replyReceived(c, data, length);
+    if (__atomic_load_n(&gTracePort, __ATOMIC_ACQUIRE)) {
+        const AdspTraceHeader h = atrHeader(data, length, !strcmp(c->name, "IPCRTR"), true);
+        const int port = tracePort(c, h, true);
+        if (port >= 0) tracePacket(port, kTraceRx, "rx", 0, h, length, 0, 0);
+    }
     if (c->client.receive) {
         const uint64_t t = nowMs();
         c->client.receive(c->context, data, length);
@@ -897,7 +1011,30 @@ void pumpSends() {
             IOLockUnlock(gClientLock);
             if (!m) continue;
             // Only this thread takes messages off the queue, so m stays valid while the lock is dropped for the send.
-            if (qcom_glink_send(&gGlink, c.glink, m->data, m->length) != QcomGlinkOk) {blocked |= 1u << i; continue;}
+            traceConsume();
+            const uint32_t head = m->trace_id ? *gGlink.tx.head : 0, tail = gTraceTail;
+            const uint64_t read = gTraceRead;
+            const int rc = qcom_glink_send(&gGlink, c.glink, m->data, m->length);
+            if (m->trace_id) {
+                const AdspTraceHeader h = atrHeader(m->data, m->length, !strcmp(c.name, "IPCRTR"), false);
+                const int port = tracePort(&c, h, false);
+                if (port >= 0 && rc == QcomGlinkOk && gTraceCounts[port][kTracePublish] < kTraceCap) {
+                    const uint64_t end = read + atrDistance(tail, head, gGlink.tx.length) + ((16 + m->length + 7) & ~7u);
+                    tracePacket(port, kTracePublish, "publish", m->trace_id, h, m->length, head, end);
+                    for (auto &f : gTraceFlight) if (!f.id) {f = {m->trace_id, (uint32_t)port, end, h}; break;}
+                } else if (port >= 0 && rc != QcomGlinkOk) {
+                    tracePacket(port, kTraceBlocked, "blocked", m->trace_id, h, m->length, head, 0, rc);
+                    if (gTraceCounts[port][kTraceBlocked] < kTraceCap) {
+                        unsigned valid = 0, busy = 0, fit = 0;
+                        for (const auto &r : c.glink->remote) {valid += r.valid; busy += r.valid && r.busy;
+                            fit += r.valid && !r.busy && r.size >= m->length;}
+                        say("[sens-trace1] ev=intents port=%s id=%u valid=%u busy=%u fit=%u asked=%u up=%u broken=%u",
+                            port ? "pmic" : "light", m->trace_id, valid, busy, fit, c.glink->intent_asked, c.glink->up, gGlink.broken);
+                    }
+                }
+            }
+            traceConsume();
+            if (rc != QcomGlinkOk) {blocked |= 1u << i; continue;}
             replySent(&c, m->data, m->length);
             IOLockLock(gClientLock);
             c.head = (c.head + 1) % kQueue;
@@ -913,6 +1050,7 @@ void enableDoorbells() {
     const uint32_t enable[3] = {ipccId(kClientLpass, kSignalSmp2p), ipccId(kClientLpass, kSignalGlinkQmp), ipccId(kClientAop, kSignalGlinkQmp)};
     static const char *const kNames[3] = {"RECV_ENABLE LPASS SMP2P", "RECV_ENABLE LPASS GLINK", "RECV_ENABLE AOP QMP"};
     for (unsigned i = 0; i < 3; ++i) ipccWrite(kIpccRecvEnable, enable[i], kNames[i]);
+    gObserveEnabled = 7; // only records the existing three enable strobes, never a mask readback
     gDoorbellsOn = true;
 }
 
@@ -951,6 +1089,21 @@ void dropVotes() {
 }
 
 bool start() {
+    uint32_t audit = 0;
+    uint32_t island = 0;
+    PE_parse_boot_argn("piano-llcc-island", &island, sizeof island);
+    const bool island3 = island == 3;
+    if (island == 4) {
+        piano_a830_llcc_island4_run(gHavePart && gSlaveBits == -1 && !item(kItemIn, nullptr));
+    } else if (island3 || (PE_parse_boot_argn("piano-llcc-audit", &audit, sizeof audit) && audit == 1)) {
+        if (gHavePart && gSlaveBits == -1 && !item(kItemIn, nullptr)) {
+            piano_a830_llcc_audit_wait(island3);
+        } else if (island3) {
+            say("sens-island3 STOP: ADSP pre-start ownership could not be established");
+        } else {
+            say("sens-trace29 STOP: ADSP pre-start ownership could not be established");
+        }
+    }
     char dir[80] = "";
     const bool chosen = PE_parse_boot_argn("piano-power-fw", dir, sizeof dir) && dir[0];
     char path[112];
@@ -1066,6 +1219,7 @@ bool start() {
 }
 
 bool startGlink() {
+    ObserveWrite observing;
     say("GLINK: SMEM items 478 (descriptor) and 479 (our FIFO, %u bytes); the DSP's FIFO is item 480", kGlinkFifo);
     int rc = allocItem(kItemGlinkDesc, 32);
     if (!rc) rc = allocItem(kItemGlinkTx, kGlinkFifo);
@@ -1076,7 +1230,16 @@ bool startGlink() {
     // Descriptor words: our FIFO's tail and head, then the DSP's FIFO's tail and head.
     const QcomGlinkFifo tx = {&d[1], &d[0], txf, size}, rx = {&d[3], &d[2], nullptr, 0};
     qcom_glink_init(&gGlink, tx, rx, kickGlink, nullptr);
+    gGlink.dynamic_intents = gIntentGrant == 1;
+    gGlink.intent_alloc = allocIntent;
+    gGlink.intent_free = freeIntent;
+    if (gTraceEnabled) gGlink.intent_event = intentEvent;
     gGlinkStarted = true;
+    if (gTraceEnabled) {
+        say("[sens-trace3] ev=armed grant=%u max_intent=%u max_total=%u slots=%u default=off",
+            gGlink.dynamic_intents, QCOM_GLINK_DYNAMIC_INTENT_MAX, QCOM_GLINK_DYNAMIC_TOTAL_MAX, QCOM_GLINK_MAX_LOCAL_INTENTS);
+        intentSummary(true);
+    }
     say("GLINK: our FIFO %u bytes, version sent", size);
     applyClients();
     serviceGlink();
@@ -1107,6 +1270,8 @@ void adspThread(void *, wait_result_t) {
         service(waitEvents(pending ? 1000 : 3600u * 1000u) | (pending ? kEvSend : 0));
     }
 }
+
+#include "AdspObserveKernel.h"
 
 bool gStarted;
 }  // namespace
@@ -1165,6 +1330,21 @@ extern "C" int piano_adsp_send_keep(PianoAdspChannel *c, const void *data, uint3
     Message &m = c->queue[(c->head + c->count) % kQueue];
     memcpy(m.data, data, length);
     m.length = length;
+    m.trace_id = 0;
+    if (__atomic_load_n(&gTraceEnabled, __ATOMIC_ACQUIRE)) {
+        const bool qrtr = !strcmp(c->name, "IPCRTR");
+        const AdspTraceHeader h = atrHeader(m.data, length, qrtr, false);
+        if (qrtr && h.sns == 514 && !__atomic_load_n(&gTracePort, __ATOMIC_ACQUIRE)) {
+            __atomic_store_n(&gTracePort, h.src_port, __ATOMIC_RELEASE);
+            say("[sens-trace1] ev=window port=light local=%u txn=%d ms=%llu cap=64-per-boundary pmic-window=first-514",
+                h.src_port, h.txn, (unsigned long long)nowMs());
+        }
+        const int port = tracePort(c, h, false);
+        if (port >= 0 && gTraceCounts[port][kTraceEnqueue] < kTraceCap) {
+            m.trace_id = ++gTraceSerial;
+            tracePacket(port, kTraceEnqueue, "enqueue", m.trace_id, h, length, 0, 0);
+        }
+    }
     c->count++;
     IOLockUnlock(lock);
     wake(kEvSend);
@@ -1227,6 +1407,12 @@ extern "C" void piano_adsp_start(void) {
     PE_parse_boot_argn("piano-power-trace", &gKnobs.trace, sizeof gKnobs.trace);
     PE_parse_boot_argn("piano-power-map", &gKnobs.map, sizeof gKnobs.map);
     PE_parse_boot_argn("piano-power-load-first", &gKnobs.loadFirst, sizeof gKnobs.loadFirst);
+    PE_parse_boot_argn("piano-glink-intent-grant", &gIntentGrant, sizeof gIntentGrant);
+    uint32_t sensors = 0;
+    PE_parse_boot_argn("piano-sensors", &sensors, sizeof sensors);
+    __atomic_store_n(&gTraceEnabled, sensors == 4, __ATOMIC_RELEASE);
+    if (gTraceEnabled) registerObserve();
+    if (gTraceEnabled) say("[sens-trace1] ev=armed cap=64-per-port-per-boundary doorbells=64-per-direction trigger=first-514");
     if (gKnobs.delay > 600) gKnobs.delay = 600;
     if (gKnobs.map > 2) gKnobs.map = 0;
     say("bring-up: delay %u s, stop before step %u%s, AOSS load_state %s, lcx/lmx votes %s, trace %s, carveouts %s, segments %s",

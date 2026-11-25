@@ -22,7 +22,7 @@
  *     85 degC holds it at 500 mA at most until below 75;
  *   - the Type-C Rp current as the 5 V input limit of a source without a PD contract (opt-in, cfg.rp), within the ceiling; with
  *     cfg.ramp reached in steps from the class row (1.5, 2.0, 2.5, 3.0 A, within cfg.rp_cap_ma), each step held, the bus at 4.65 V
- *     or more and the input used up before the next, and one step back for the rest of the boot when the bus sags under 4.5 V,
+ *     or more and the input used up before the next, and one step back with a 60 s cool-down when the bus sags under 4.5 V,
  *     the source goes within 30 s of a step or the firmware refuses one (the firmware's own input-current limiting reads off);
  *   - the charge current of a source whose Type-C current is trusted above its row: the DCP row's (a 1.5 / 3.0 A Rp is a 1.5 / 3 A
  *     source), within the ceiling and the same derating;
@@ -80,6 +80,7 @@ enum {
 #define PIANO_CHG_ICL_ABS_MAX 2500u   /* stock in_pps at 9 V: no configuration goes above */
 #define PIANO_CHG_FCC_ABS_MAX 3500u   /* stock chg_pps */
 #define PIANO_CHG_RP_ABS_MAX 3000u    /* the Type-C current's 3.0 A at 5 V: no stepped Rp limit goes above (cfg.rp_cap_ma) */
+#define PIANO_CHG_RAMP_RETRY_MS 60000u /* a failed step's ceiling expires; the ordinary held-step/VBUS/demand guards still apply */
 #define PIANO_CHG_ICL_CAP 1600u       /* the default ceilings: what PianoMca's allowlist takes today (docs §7, stage A) */
 #define PIANO_CHG_FCC_CAP 1500u
 #define PIANO_CHG_FV_DEFAULT 4400u    /* the firmware's own float voltage (reads 5200) */
@@ -102,13 +103,27 @@ typedef struct {
                             * connector temperature reads and is below 50 degC, and not after the bus sagged under such a limit */
     uint8_t ramp;          /* with rp: the Rp limit reached in steps from the row (docs §15), within rp_cap_ma instead of icl_cap_ma;
                             * up to 1.5 A without a connector reading (BC 1.2's and the 1.5 A Rp's current, as the DCP row), above it
-                            * only while a connector reads below 50 degC; a sag, a quick detach or a refusal lowers this boot's
-                            * ceiling by one step. 0: the Rp limit at once, within icl_cap_ma, and a sag ends the trust */
+                            * only while a connector reads below 50 degC; a sag, a quick detach or a refusal lowers the ceiling
+                            * by one step for 60 s, then the guarded steps may retry. 0: the Rp limit at once, within icl_cap_ma,
+                            * and a sag ends the trust */
     uint16_t rp_cap_ma;    /* the stepped Rp limit's ceiling (0: icl_cap_ma; at most PIANO_CHG_RP_ABS_MAX); only with ramp */
-    uint8_t strict_contract; /* production buck session: current UCSI contract and safety gates required for HV */
+    uint8_t strict_contract; /* production buck session: current UCSI contract and safety gates required for HV;
+                             * hv=0 with rp+ramp also steps fixed5V PD up to the actual RDO current, within rp_cap_ma */
     uint8_t admin_stop;    /* explicit administrator inhibit; owner bounds its lease, never a synthetic SOC */
     uint8_t kick;          /* the charging restart (piano-power-kick, docs §17): a charger that keeps the battery at 0 mA with input to
                             * spare gets 0x2003 = 0 and then 1 (at most three times per attach, two minutes apart) */
+    /* The Ubuntu port's buck fast-charge set in the strict session (charge/pd1, docs/drivers/charging-policy.md §21), each off by
+     * default (the daily 5 V path), each only ever inside the existing contract, barrier, thermal and battery-health gates: */
+    uint8_t hv_order;      /* piano-power-hv-order: the source's other 9 V object when the mode's own is missing (mode 1: fixed 9 V
+                            * PDO, else a PPS APDO covering 9 V; mode 2: the APDO, else the fixed PDO), as the Ubuntu port orders them */
+    uint8_t hv_caps;       /* piano-power-hv-caps: at a validated 9 V contract the stock 9 V rows instead of the stage A ceilings
+                            * (fixed PD in 1600 / charge 3000, PPS 2500 / 3500, QC3 1600 / 3500, QC2 1200 / 2600 mA; the charge current
+                            * also at most twice the input limit), always within the RDO and the source object */
+    uint8_t qc;            /* piano-power-qc: QC2/QC3 9 V (0x2011) in the strict session: a firmware type 5-8, a fresh UCSI status
+                            * of a connected non-PD sink, the PD session's own gates and barrier; 5 V again (0x2011 = 5000) on any loss */
+    uint8_t fv_hot;        /* piano-power-fv-hot: the warm-cell float voltage in the strict session: 4060 mV from 48 degC (the
+                            * warmest reading) until below 46, the firmware's 4400 otherwise, and charging held while the higher pack
+                            * is within 5 mV of that float (released 150 mV below) */
 } PianoChargeConfig;
 
 /* writes on, hv off, float off, limit off (80/75 kept for when it is turned on), sleep stop, the stage A ceilings, no steps, the
@@ -133,6 +148,7 @@ enum {
     PIANO_CHG_IN_CONTRACT = 1u << 16, PIANO_CHG_IN_SOURCE = 1u << 17,
     PIANO_CHG_IN_AICL = 1u << 15,   /* 0x2029, the input current the firmware holds itself to (it walks to the request, and on the Mac's
                                      * port stopped at 1750-1800 under 2000) */
+    PIANO_CHG_IN_NONPD = 1u << 18,  /* a fresh UCSI status of a connected sink whose operation mode is not PD (cfg.qc's evidence) */
 };
 enum {PIANO_CHG_SAFE_BOARD = 1u, PIANO_CHG_SAFE_CP_OFF = 2u, PIANO_CHG_SAFE_LPD_DRY = 4u,
       PIANO_CHG_SAFE_DTPT = 8u, PIANO_CHG_SAFE_ALL = 15u};
@@ -217,11 +233,12 @@ typedef struct {
     uint32_t contract_generation, contract_restore_generation;
     uint8_t contract_mode, contract_transition, contract_mode_change, contract_recheck;
     uint8_t contract_notify_seen, voltage_observe_hold;
+    uint8_t contract_ok, notify_holds;   /* T-14b: the last decision had a valid contract; notification holds in a row */
     uint64_t contract_notify_since;
     uint32_t transition_ma;
     uint8_t handover_fault;       /* refusal/timeout is not successful hardware handover */
-    /* the float voltage */
-    uint8_t term_hot;
+    /* the float voltage; fv_hold: cfg.fv_hot's hold at the warm float (the higher pack within 5 mV of 4060) */
+    uint8_t term_hot, fv_hold;
     /* the firmware losing a source the PMIC still sees (#18) */
     uint8_t wedge_checks, wedge_resyncs, wedge_reported;
     uint64_t wedge_since_ms;
@@ -230,10 +247,10 @@ typedef struct {
     uint8_t rp_distrust, rp_strikes, rp_noted;
     uint64_t rp_taken_ms;         /* since when an input limit from the Rp is in force (0: none) */
     /* the stepped Rp limit (cfg.ramp): the step wanted now (0: not stepping), the row it starts from, when the step was taken and
-     * the decisions since, when the last step up was planned (a detach within 30 s of it counts against it), this boot's ceiling
-     * (0: none; it only goes down), the last step back, and which wait reasons were logged at this step */
+     * the decisions since, when the last step up was planned (a detach within 30 s of it counts against it), the temporary ceiling
+     * (0: none), its retry deadline (kept across detach, wake and generation), the last step back and the wait reasons logged */
     uint32_t ramp_ma, ramp_row_ma, ramp_ceiling_ma;
-    uint64_t ramp_taken_ms, ramp_step_ms;
+    uint64_t ramp_taken_ms, ramp_step_ms, ramp_retry_ms;
     uint8_t ramp_decisions, ramp_back_why, ramp_waits_shown;
     uint32_t ramp_back_from_ma;
     int32_t ramp_back_mv;
@@ -258,7 +275,7 @@ enum {
     PIANO_CHG_EV_ATTACH = 1u << 0, PIANO_CHG_EV_DETACH = 1u << 1, PIANO_CHG_EV_TYPE = 1u << 2,
     PIANO_CHG_EV_HV_ASKED = 1u << 3, PIANO_CHG_EV_HV_ON = 1u << 4, PIANO_CHG_EV_HV_BLOCKED = 1u << 5, PIANO_CHG_EV_HV_RETRY = 1u << 6,
     PIANO_CHG_EV_LIMIT_STOP = 1u << 7, PIANO_CHG_EV_LIMIT_RESUME = 1u << 8, PIANO_CHG_EV_HOT = 1u << 9, PIANO_CHG_EV_COLD = 1u << 10,
-    PIANO_CHG_EV_SOC_LOST = 1u << 11,      /* repeated gauge failures: conservative stop; known SOC hold remains */
+    PIANO_CHG_EV_SOC_LOST = 1u << 11,      /* repeated gauge failures; a known SOC hold remains */
     PIANO_CHG_EV_STOP_LEAK = 1u << 12,     /* stopped for a minute, 0x2003 reads 0, and the packs still take > 100 mA */
     PIANO_CHG_EV_FW_DISABLED = 1u << 13,   /* 0x2003 reads 0 although the policy never wrote 0: the firmware's own (not overridden) */
     PIANO_CHG_EV_GAVE_UP = 1u << 14,       /* a value refused 3 times in a row: left until the next attach, wake or generation */
@@ -277,7 +294,7 @@ enum {
     PIANO_CHG_EV_CHGR_HOT = 1u << 27,      /* the charger at or above 85 degC: input limit 500 mA at most */
     PIANO_CHG_EV_CHGR_COOL = 1u << 28,     /* the charger reads below 75 degC again */
     PIANO_CHG_EV_RAMP_STEP = 1u << 29,     /* the stepped Rp limit goes up one step (plan.ramp_from_ma -> plan.ramp_ma) */
-    PIANO_CHG_EV_RAMP_BACK = 1u << 30,     /* one step back, this boot's ceiling lowered (plan.ramp_back_*: a sag, a quick detach, a
+    PIANO_CHG_EV_RAMP_BACK = 1u << 30,     /* one step back, temporary ceiling lowered (plan.ramp_back_*: a sag, a quick detach, a
                                             * refusal) */
 };
 /* the steps wait for a reason not yet logged at this step (plan.ramp_wait); bit 31, outside the enum (an int's range before C23) */
@@ -290,7 +307,8 @@ enum {
     PIANO_CHG_RAMP_BUS_LOW,       /* the bus below 4.65 V (or not read) under this step: no higher */
     PIANO_CHG_RAMP_NO_CURRENT,    /* no bus current reading: whether the input is used up is not known */
     PIANO_CHG_RAMP_NOT_USED,      /* the input is not used up (the system and the battery take less than the step) */
-    PIANO_CHG_RAMP_TOP,           /* at the target: the Rp current, the cap or this boot's ceiling */
+    PIANO_CHG_RAMP_TOP,           /* at the target: the Rp current or cap */
+    PIANO_CHG_RAMP_COOLING,       /* failed step's temporary ceiling; retry after 60 s with all the ordinary guards */
 };
 /* why it went one step back (plan.ramp_back_why) */
 enum {PIANO_CHG_BACK_NONE = 0, PIANO_CHG_BACK_SAG, PIANO_CHG_BACK_DETACH, PIANO_CHG_BACK_REFUSED};
@@ -305,9 +323,11 @@ enum {
     PIANO_CHG_KICK_EV_ABANDONED = 1u << 5, /* a write of the restart not answered within a minute: left to the enable's own rules */
 };
 enum {PIANO_CHG_OFF_NONE = 0, PIANO_CHG_OFF_LIMIT, PIANO_CHG_OFF_HOT, PIANO_CHG_OFF_COLD, PIANO_CHG_OFF_SLEEP,
-      PIANO_CHG_OFF_ADMIN, PIANO_CHG_OFF_STALE, PIANO_CHG_OFF_FAULT, PIANO_CHG_OFF_FIRMWARE};
+      PIANO_CHG_OFF_ADMIN, PIANO_CHG_OFF_STALE, PIANO_CHG_OFF_FAULT, PIANO_CHG_OFF_FIRMWARE,
+      PIANO_CHG_OFF_WARM_FV};   /* cfg.fv_hot: 48 degC or more and the higher pack at the 4060 mV warm float */
 /* where the input limit came from (plan.icl_why) */
-enum {PIANO_CHG_ICL_ROW = 0, PIANO_CHG_ICL_RP, PIANO_CHG_ICL_9V, PIANO_CHG_ICL_CONN, PIANO_CHG_ICL_CHGR};
+enum {PIANO_CHG_ICL_ROW = 0, PIANO_CHG_ICL_RP, PIANO_CHG_ICL_9V, PIANO_CHG_ICL_CONN, PIANO_CHG_ICL_CHGR,
+      PIANO_CHG_ICL_CONTRACT_5V};
 
 enum {PIANO_CHG_FALLBACK_NONE = 0, PIANO_CHG_FALLBACK_NO_CONTRACT, PIANO_CHG_FALLBACK_SAFETY,
       PIANO_CHG_FALLBACK_GAUGE, PIANO_CHG_FALLBACK_HEALTH, PIANO_CHG_FALLBACK_MODE,
@@ -328,7 +348,7 @@ typedef struct {
     uint8_t icl_why;       /* PIANO_CHG_ICL_* */
     uint32_t rp_ma;        /* the Rp current the input limit follows (0: not from the Rp) */
     /* the stepped Rp limit (cfg.ramp): the step now (0: not stepping), the step it came from (PIANO_CHG_EV_RAMP_STEP), where it is
-     * heading (the Rp current within the cap and the board holds, before this boot's ceiling), the ceiling (0: none), why it waits,
+     * heading (the source current within the cap and the board holds, before the temporary ceiling), the ceiling (0: none), why it waits,
      * and the last step back (PIANO_CHG_EV_RAMP_BACK: why, from which step, the bus then) */
     uint32_t ramp_ma, ramp_from_ma, ramp_target_ma, ramp_ceiling_ma;
     uint8_t ramp_wait, ramp_back_why;
@@ -367,6 +387,16 @@ uint32_t piano_charge_ramp_back(uint32_t from_ma, uint32_t row_ma);
 uint32_t piano_charge_icl_max(const PianoChargeConfig *c);
 uint32_t piano_charge_icl_9v(int cls, uint32_t source_ma);   /* 0: no 9 V row for the class */
 uint32_t piano_charge_icl_qc3_9v(uint32_t source_ma);        /* HVDCP3 input row, capped at 1600 mA */
+/* cfg.qc: a QC type (HVDCP 5, HVDCP3 6, 3B 7, 3.5 8); its 9 V input row (QC2 1200, QC3 1600) and charge row with cfg.hv_caps (QC2
+ * 2600, QC3 3500); 0 for any other type. */
+int piano_charge_is_qc(int32_t type);
+uint32_t piano_charge_qc_icl_9v(int32_t type);
+uint32_t piano_charge_qc_fcc_9v(int32_t type);
+/* What the session runs on, for the registry and the log (the charge indicator): PIANO_CHG_PATH_*. */
+enum {PIANO_CHG_PATH_NONE = 0, PIANO_CHG_PATH_USB_5V, PIANO_CHG_PATH_PD_5V, PIANO_CHG_PATH_PD_9V, PIANO_CHG_PATH_PPS_9V,
+      PIANO_CHG_PATH_QC_9V, PIANO_CHG_PATH_ASKING};
+int piano_charge_path(const PianoChargeState *s, const PianoChargePlan *p, const PianoChargeInput *in);
+const char *piano_charge_path_name(int path);
 uint32_t piano_charge_fcc_full(int cls, int hv_on);
 uint32_t piano_charge_fcc_thermal(uint32_t full, int t_valid, int32_t t_c);
 /* The lowest current among the PDOs and APDOs whose range covers 5 V, 0 when none. */

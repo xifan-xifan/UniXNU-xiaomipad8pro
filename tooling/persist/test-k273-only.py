@@ -7,6 +7,10 @@ fastboot, no backup disk, and no file of out/ or CRITICAL-BACKUP: every fixture 
    ADT asking for the 13 GiB window, a 24 GiB DBRDISK1 seed): the 27.3 payload and line byte for byte, the fastboot entry, no 27.0.1
    payload, the record's store facts, the same image twice, the -diag entry only under 1000 bytes; refusals (--expect-*, a base
    that is not its record's, a line without a bound store, a store LBA that is not NativeUfs's place for the seed).
+2b. --firmware-dir: a collection pinning two private files and a public one the base lacks; without the option the old refusal; with
+   it the three added byte for byte, the record marking the private ones 'private' (no hash anywhere in the record or the output),
+   the option inert when nothing is missing (the same image and record); refusals (a file missing from DIR, a wrong size, a wrong
+   private hash shown nowhere, a base file that is not the pin's even when DIR has the right one, DIR not a directory).
 3. tablet.sh discard-info / discard / zero on a fake sysfs: the partition guard (never the disk, never another partition).
 4. maint-session.py against test-persist.py's fake tablet, on a made-up GPT (linux_rootfs small, holding the 27.0.1 store header
    place LBA 68119455; linux_data and the ESP where they are), the 27.3 store bound at the end of linux_data, a boot_a v5 stand-in:
@@ -278,6 +282,100 @@ def test_builder(tmp):
         for suffix in ('.img', '.json'):
             (out / (n + suffix)).unlink(missing_ok=True)
     return out, base, inputs, seed273
+
+
+def test_builder_firmware_dir(tmp):
+    """--firmware-dir: pinned files the base lacks, added from DIR/<pin path>; private pins checked against their hash, which is
+    never shown or recorded (the v13.1n case: PianoAudio's speaker-protection pair over a base ESP without it)."""
+    print('== build-k273-esp.py --firmware-dir')
+    out = tmp / 'fw-out'
+    out.mkdir()
+    fw = 'EFI/UniXNU/firmware/'
+    markers = [b'com.unixnu.driver.NativeUfs', b'com.unixnu.driver.NativeRamBlock', b'data-store-lba=%llu',
+               b'piano-boot-guard: healthy after %u s', b'root-part=%s', b'piano-power-rp-max', b'data-store-replace',
+               b'piano-rtc: count %u + offset %u']
+    fsm, old_fw, prot, re25, pub = (os.urandom(n) for n in (4348, 1000, 6780, 64, 500))
+    secrets = [sha(prot), sha(re25)]
+    pins = [pin('PianoAudio/fs19xx.fsm', fsm), pin('PianoAudio/spk-prot.bin', prot, private=True),
+            pin('PianoAudio/spk-re25.bin', re25, private=True), pin('PianoTest/public.bin', pub)]
+    inputs = {'fsm': fsm, 'old_fw': old_fw, 'kc273': make_kc(markers, pins), 'adt273': make_adt(WINDOW13),
+              'trust273': os.urandom(3000), 'seed273': make_seed(24 << 30, 3),
+              'kc': make_kc(markers[:1] + [b'data-store-replace'], [pin('PianoAudio/fs19xx.fsm', fsm), pin('Old/old.bin', old_fw)]),
+              'adt': make_adt(WINDOW13), 'trust': os.urandom(2000), 'seed': make_seed(12 << 30, 2)}
+    make_dual(out, 'esp-dualfw', line_273(), inputs)
+
+    def fwdir(name, **files):
+        d = tmp / name
+        for rel, data in files.items():
+            (d / rel).parent.mkdir(parents=True, exist_ok=True)
+            (d / rel).write_bytes(data)
+        d.mkdir(exist_ok=True)
+        return d
+
+    def no_secret(text):
+        return not any(s in text or s[:16] in text for s in secrets)
+
+    good = fwdir('fw-good', **{'PianoAudio/spk-prot.bin': prot, 'PianoAudio/spk-re25.bin': re25, 'PianoTest/public.bin': pub})
+    rc, log = build(out, 'esp-dualfw', '--name', 'x', expect=1)
+    check(rc != 0 and 'which esp-dualfw.img lacks' in log, f'without --firmware-dir: the old refusal ({log.strip()[-80:]})')
+    rc, log = build(out, 'esp-dualfw', '--firmware-dir', str(good), '--name', 'esp-fw')
+    check(rc == 0 and 'added 3 pinned firmware file(s)' in log and '(2 private)' in log,
+          f'with --firmware-dir: builds, three files added ({log.strip().splitlines()[-1][-90:] if log.strip() else ""})')
+    rec = json.loads((out / 'esp-fw.json').read_text()) if rc == 0 else {}
+    files = common.fat32_read(out / 'esp-fw.img')['files'] if rc == 0 else {}
+    check(files.get(fw + 'PianoAudio/spk-prot.bin') == prot and files.get(fw + 'PianoAudio/spk-re25.bin') == re25 and
+          files.get(fw + 'PianoTest/public.bin') == pub and files.get(fw + 'PianoAudio/fs19xx.fsm') == fsm and
+          fw + 'Old/old.bin' not in files, 'the image: the three added byte for byte, the base\'s pinned file carried, the unpinned dropped')
+    recf = rec.get('files', {})
+    check(recf.get(fw + 'PianoAudio/spk-prot.bin') == 'private' and recf.get(fw + 'PianoAudio/spk-re25.bin') == 'private' and
+          recf.get(fw + 'PianoTest/public.bin') == sha(pub), 'the record\'s files: the private two \'private\', the public one its hash')
+    fwrec = {f['path']: f for f in rec.get('firmware', {}).get('files', [])}
+    check(len(fwrec) == 4 and all(fwrec[fw + n]['private'] and fwrec[fw + n]['sha256'] is None
+                                  for n in ('PianoAudio/spk-prot.bin', 'PianoAudio/spk-re25.bin')) and
+          fwrec[fw + 'PianoTest/public.bin']['sha256'] == sha(pub) and
+          rec.get('firmware', {}).get('added_from_firmware_dir') == sorted(fw + n for n in (
+              'PianoAudio/spk-prot.bin', 'PianoAudio/spk-re25.bin', 'PianoTest/public.bin')),
+          'the record\'s firmware: private pins without a hash, the added paths listed')
+    check(no_secret(log) and no_secret((out / 'esp-fw.json').read_text()), 'no private hash in the output or the record')
+    rc, _ = build(out, 'esp-dualfw', '--firmware-dir', str(good), '--name', 'esp-fw2')
+    check(rc == 0 and json.loads((out / 'esp-fw2.json').read_text())['sha256'] == rec.get('sha256'), 'the same inputs: the same image')
+    # the option is inert when the base lacks nothing: an ESP built from esp-fw (which holds all four) is the same with and without
+    rc1, _ = build(out, 'esp-fw', '--name', 'esp-fw-a')
+    rc2, _ = build(out, 'esp-fw', '--firmware-dir', str(fwdir('fw-other', **{'PianoAudio/spk-prot.bin': os.urandom(6780)})),
+                   '--name', 'esp-fw-b')
+    def comparable(name):   # the record but for the names that carry --name
+        r = json.loads((out / f'{name}.json').read_text())
+        r.pop('image')
+        for e in r['inputs'].values():
+            e['path'] = e['path'].split(':', 1)[1]
+        return r
+    a_, b_ = (comparable('esp-fw-a'), comparable('esp-fw-b')) if rc1 == rc2 == 0 else ({}, {'differ': 1})
+    check(rc1 == rc2 == 0 and a_ == b_ and 'added_from_firmware_dir' not in a_.get('firmware', {}),
+          'nothing missing: the same image and record with and without --firmware-dir (its files never replace the base\'s)')
+    check(recf and json.loads((out / 'esp-fw-a.json').read_text())['files'].get(fw + 'PianoAudio/spk-prot.bin') == 'private',
+          'a base holding a private file: still \'private\' in the next record')
+    # refusals
+    rc, log = build(out, 'esp-dualfw', '--firmware-dir', str(fwdir('fw-miss', **{'PianoAudio/spk-prot.bin': prot,
+                                                                                    'PianoAudio/spk-re25.bin': re25})), '--name', 'x', expect=1)
+    check(rc != 0 and 'PianoTest/public.bin' in log and 'missing' in log, 'a pinned file in neither the base nor DIR: refused')
+    rc, log = build(out, 'esp-dualfw', '--firmware-dir', str(fwdir('fw-size', **{'PianoAudio/spk-prot.bin': prot[:-1],
+                    'PianoAudio/spk-re25.bin': re25, 'PianoTest/public.bin': pub})), '--name', 'x', expect=1)
+    check(rc != 0 and 'spk-prot.bin' in log and '6779 bytes, the pin says 6780' in log and no_secret(log),
+          'a private file of another size: refused, no hash shown')
+    bad = bytes([re25[0] ^ 1]) + re25[1:]
+    rc, log = build(out, 'esp-dualfw', '--firmware-dir', str(fwdir('fw-hash', **{'PianoAudio/spk-prot.bin': prot,
+                    'PianoAudio/spk-re25.bin': bad, 'PianoTest/public.bin': pub})), '--name', 'x', expect=1)
+    check(rc != 0 and 'spk-re25.bin' in log and 'another SHA-256' in log and 'no hash shown' in log and no_secret(log) and
+          sha(bad) not in log and sha(bad)[:16] not in log, 'a private file of another content: refused, no hash shown (neither)')
+    fsm2 = os.urandom(4348)
+    make_dual(out, 'esp-dualfw2', line_273(), dict(inputs, kc273=make_kc(markers, [pin('PianoAudio/fs19xx.fsm', fsm2)])))
+    rc, log = build(out, 'esp-dualfw2', '--firmware-dir', str(fwdir('fw-fsm', **{'PianoAudio/fs19xx.fsm': fsm2})), '--name', 'x',
+                    expect=1)
+    check(rc != 0 and 'the base\'s file is not the one' in log, 'a base file that is not the pin\'s: refused even when DIR has the pin\'s')
+    rc, log = build(out, 'esp-dualfw', '--firmware-dir', str(tmp / 'no-such-dir'), '--name', 'x', expect=1)
+    check(rc != 0 and 'not a directory' in log, '--firmware-dir that is not a directory: refused')
+    check(not (out / 'x.img').exists() and not (out / 'x.json').exists(), 'no refused build left an image or a record')
+    shutil.rmtree(out, ignore_errors=True)
 
 
 def test_tablet_sh(tmp):
@@ -736,6 +834,23 @@ def test_session(tmp, out, dual, seed273, inputs):
     run('map', '--esp', 'esp-k273-v3.img')
     run('rollback', 'esp-final', '--esp', 'esp-k273-v3.img')
     check(esp_region() == v2['sha256'], 'rollback esp-final after esp-delta: v2 again (its image was the backup)')
+
+    # -- check over a stale session state (2026-11-23 18:56, the real case): an older session left esp_written/esp_sha256 of an ESP
+    #    no longer on the tablet (v9, untagged), its build record still here; a --new-backup run that writes no ESP (map backup
+    #    check) must expect the ESP this backup set read before any write (= installed.json's v2), never the stale v9
+    common.write_json(out / 'esp-k273-v9.json', dict(v2, image='esp-k273-v9.img', sha256='99' * 32))
+    st = state()
+    st.update(esp_written='esp-k273-v9.img', esp_sha256='99' * 32)
+    st.pop('esp_set', None)
+    state_path.write_text(json.dumps(st))
+    log = run('map', 'backup', 'check', '--new-backup')
+    tail = log.split('step check')[-1]
+    if 'ESP = esp-k273-v2.img' not in tail:
+        print('\n'.join(x for x in tail.splitlines() if 'ESP' in x or 'installed.json' in x))
+    check('ESP = esp-k273-v2.img' in tail and 'ESP = esp-k273-v9' not in tail and 'esp-k273-v9.img of an older session: not used' in tail
+          and 'installed.json (esp-k273-v2.img' in tail and esp_region() == v2['sha256'],
+          'check after an older session\'s ESP value: expects the ESP this backup set read (v2 = installed.json), not the stale v9')
+    (out / 'esp-k273-v9.json').unlink()
     tp.write_at(lun0, (common.ESP_FIRST + 3) * B, b'not v2')
     log = run('map', 'esp-delta', '--esp', 'esp-k273-v3.img', '--new-backup', expect=3)
     check('the tablet\'s ESP = the installed esp-k273-v2.img' in log and 'FAIL' in log, 'esp-delta refuses an ESP region that is not the installed image')
@@ -750,6 +865,7 @@ def main():
     try:
         test_entry_uses_rootfs()
         out, dual, inputs, seed273 = test_builder(tmp)
+        test_builder_firmware_dir(tmp)
         (tmp / 'sh').mkdir()
         test_tablet_sh(tmp / 'sh')
         test_session(tmp, out, dual, seed273, inputs)

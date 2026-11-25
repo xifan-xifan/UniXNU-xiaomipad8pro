@@ -610,6 +610,57 @@ static void testMicPlan(void)
     CHECK(s.state == ArSeqFailed && s.error == ArSeqErrBuild && s.failed_step == 9);
 }
 
+// duplex-hold1: the held prefix of the VA clocks in its own plan, and the capture plan without it (the rest unchanged, undo included)
+static void testHeldPlans(void)
+{
+    CHECK(ar_hold_valid(0) && ar_hold_valid(1) && ar_hold_valid(3) && !ar_hold_valid(2) && !ar_hold_valid(4) && !ar_hold_valid(7) &&
+          !ar_hold_valid(-1));
+    unsigned count = 99;
+    CHECK(!ar_va_hold_steps(0, &count) && count == 0 && !ar_va_hold_steps(2, &count) && !ar_va_hold_steps(7, &count) && count == 0);
+    const ArStep *steps = ar_va_hold_steps(AR_HOLD_VOTES, &count);
+    static const char *up1[] = {"PRM VOTE 1", "PRM VOTE 2"}, *undo1[] = {"PRM UNVOTE 1", "PRM UNVOTE 2"};
+    const struct PlanCase votes = {up1, undo1, 2};
+    CHECK(steps && count == 2);
+    run_plan(steps, count, 0, AR_PORT_APM, AR_PORT_PRM, &votes);
+    check_ports(steps, count, 0, 0x2001, 2);
+    steps = ar_va_hold_steps(AR_HOLD_VOTES | AR_HOLD_MCLK, &count);
+    static const char *up3[] = {"PRM VOTE 1", "PRM VOTE 2", "PRM REQ 0x30c 19200000"}, *undo3[] = {"PRM UNVOTE 1", "PRM UNVOTE 2", "PRM REL 0x30c"};
+    const struct PlanCase all = {up3, undo3, 3};
+    CHECK(steps && count == 3);
+    run_plan(steps, count, 0, AR_PORT_APM, AR_PORT_PRM, &all);
+    // the capture plan without the held prefix: 0 is the whole plan, 1 starts at the mclk, 3 at the mic graph
+    unsigned full, held;
+    const ArStep *whole = ar_mic_live_steps(&full);
+    CHECK(ar_mic_live_steps_held(0, &held) == whole && held == full);
+    CHECK(ar_mic_live_steps_held(AR_HOLD_VOTES, &held) == whole + 2 && held == full - 2 && !strcmp(whole[2].name, "VA macro mclk 19.2 MHz (TX core mclk)"));
+    CHECK(ar_mic_live_steps_held(AR_HOLD_VOTES | AR_HOLD_MCLK, &held) == whole + 3 && held == full - 3 && !strcmp(whole[3].name, "open mic device graph"));
+    CHECK(!ar_mic_live_steps_held(2, &held) && held == 0);
+    ArMicPlan mp;
+    ar_mic_defaults(&mp);
+    mp.buffer_phys = 0x9da10000ull; mp.buffer_bytes = 8 * 1920;
+    mp.va_on = va_log_on; mp.va_off = va_log_off;
+    steps = ar_mic_live_steps_held(AR_HOLD_VOTES | AR_HOLD_MCLK, &count);
+    ArSeq s;
+    ar_seq_init(&s, steps, count, AR_PORT_APM, AR_PORT_PRM, 0x900, &mp);
+    lines = 0;
+    struct Dsp d = healthy();
+    drive(&s, &d);
+    CHECK(s.state == ArSeqUp && lines == 12 && !strcmp(lg[0], "OPEN 0x4008") && !strcmp(lg[9], "VA ON") && !strcmp(lg[11], "START 0x4003"));
+    ar_seq_stop(&s);
+    drive(&s, &d);
+    CHECK(s.state == ArSeqDown && lines == 18 && !strcmp(lg[14], "VA OFF") && !strcmp(lg[17], "CLOSE 0x4008"));
+    for (unsigned i = 0; i < lines; ++i) CHECK(strncmp(lg[i], "PRM", 3));   // no PRM request or release at all
+    steps = ar_mic_live_steps_held(AR_HOLD_VOTES, &count);
+    ar_seq_init(&s, steps, count, AR_PORT_APM, AR_PORT_PRM, 0x900, &mp);
+    lines = 0;
+    d = healthy();
+    drive(&s, &d);
+    CHECK(s.state == ArSeqUp && lines == 13 && !strcmp(lg[0], "PRM REQ 0x30c 19200000") && !strcmp(lg[1], "OPEN 0x4008"));
+    ar_seq_stop(&s);
+    drive(&s, &d);
+    CHECK(s.state == ArSeqDown && !strcmp(lg[lines - 1], "PRM REL 0x30c") && !strcmp(lg[lines - 2], "CLOSE 0x4008"));
+}
+
 int main(void)
 {
     testUpAndStop();
@@ -626,6 +677,7 @@ int main(void)
     testCapturePump();
     testCaptureValidation();
     testMicLivePlan();
+    testHeldPlans();
     printf("PASS sequence: %u checks\n", checks);
     return 0;
 }

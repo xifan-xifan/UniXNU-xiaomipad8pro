@@ -12,9 +12,16 @@ to the trust cache, and a record of every file's sha256.
     stage.py --plan                                                the manifest, checked, as a table; nothing built
     --gpu-bundle BUNDLE (with any mode, repeatable)                a Metal plugin bundle as one more unit, gpu-<name>: every file of
                                                                    BUNDLE at /Library/GPUBundles/<name>.bundle/..., Mach-Os trusted
-In seed mode GPU bundle files are also put at their final paths before packing. WindowServer can load Metal before the boot
-installer runs; staging an updated executable only beside install.sh would leave its first process using the seed's old binary.
+    --hal-bundle DRIVER (with any mode, repeatable)                a Core Audio HAL plug-in (AudioServerPlugIn) as one more unit,
+                                                                   audio-<name>: every file of DRIVER at
+                                                                   /Library/Audio/Plug-Ins/HAL/<name>.driver/..., Mach-Os trusted
+In seed mode GPU bundle and HAL plug-in files are also put at their final paths before packing. WindowServer can load Metal (and
+coreaudiod its HAL plug-ins) before the boot installer runs; staging an updated executable only beside install.sh would leave its
+first process using the seed's old binary.
 Live mode keeps the existing installer and rollback path.
+PIANO_USERLAND_COMPACT=1 opts into compact-seed's free-space zero fill on the
+copied seed. Its large temporary raw file goes under this worktree's out/; the
+mount point stays under OUT. Only verified-zero raw ranges are made sparse.
 
 The system layer (docs/data-store.md section 9): the files that change are installed on the running system, never staged into the
 seed of an ESP that keeps the owner's Data (that seed is the store's base, tooling/persist/base-seed.py). `stage.py --live DIR
@@ -22,7 +29,7 @@ seed of an ESP that keeps the owner's Data (that seed is the store's base, tooli
 plugin, and the trust cache an ESP takes with --layer DIR. install.sh keeps a copy of every file it replaces that it did not put
 there itself (the base's plugin) and puts it back when the unit goes, so taking the layer out restores the base's files.
 
-Outputs (seed mode, nothing outside --out is written; the input seed and trust cache are only read):
+Outputs (seed mode; the input seed and trust cache are only read):
   OUT/scratch-data.img          the input seed plus STAGING (default /private/var/piano/userland: install.sh, manifest.tsv,
                                 SHA256SUMS, files/<unit>/<name>) and the boot job's extra command `sh STAGING/install.sh --boot`
   OUT/kernel.macho.trustcache   the input trust cache with one more module first (stage-soft-metal.py's trust_bundle) holding the
@@ -49,6 +56,8 @@ flattened (then the seed is not read at all and none of these files reach Data: 
 """
 import argparse
 import contextlib
+import errno
+import fcntl
 import glob
 import hashlib
 import importlib.util
@@ -59,6 +68,8 @@ import plistlib
 import re
 import shlex
 import shutil
+import stat
+import struct
 import subprocess
 import sys
 import tarfile
@@ -70,7 +81,7 @@ D = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(D / 'tooling/persist'))
 import common  # noqa: E402  (tooling/persist/common.py: seed identity, trust cache hashes, the installed seed)
 
-FORMAT = 2   # seed GPU bundles are present before the boot installer runs
+FORMAT = 3   # optional captured camera approval and signed apps exist before launchd
 INSTALLER = D / 'tooling/userland/install.sh'
 DIRS = {'/Library/LaunchDaemons': 'daemon', '/Library/LaunchAgents': 'agent', '/usr/local/bin': 'file', '/usr/local/libexec': 'file',
         '/usr/local/share/piano/wallpaper': 'file'}   # the last: the still wallpaper's data files (unit piano-still-wallpaper)
@@ -78,11 +89,20 @@ DIRS = {'/Library/LaunchDaemons': 'daemon', '/Library/LaunchAgents': 'agent', '/
 # Contents/Info.plist, Contents/MacOS/<file>, Contents/Resources/<file>.
 GPU_BUNDLES = '/Library/GPUBundles'
 GPU_BUNDLE_FILE = re.compile(r'/Library/GPUBundles/[A-Za-z0-9_-]+\.bundle/Contents/(?:Info\.plist|(?:MacOS|Resources)/[A-Za-z0-9_+-][A-Za-z0-9._+-]*)')
+# A Core Audio HAL plug-in's files (coreaudiod's driver service loads <name>.driver from /Library/Audio/Plug-Ins/HAL at its launch;
+# audio/ns4's PianoMicNS.driver, "Mic (noise reduced)"): Contents/Info.plist, Contents/MacOS/<file>, Contents/Resources/<file> and
+# the ad hoc signature's Contents/_CodeSignature/<file> (the driver service refuses a bundle whose seal is missing).
+HAL_PLUGINS = '/Library/Audio/Plug-Ins/HAL'
+HAL_BUNDLE_FILE = re.compile(r'/Library/Audio/Plug-Ins/HAL/[A-Za-z0-9_-]+\.driver/Contents/(?:Info\.plist|(?:MacOS|Resources|_CodeSignature)/[A-Za-z0-9_+-][A-Za-z0-9._+-]*)')
 # Only the explicit external, version-locked Bluetooth runtime may use these Data
 # destinations. Apple bytes never enter this checkout, including its ignored out/.
 BT_ROOT = '/private/var/piano/bluetooth-path1'
 BT_DATA = frozenset(f'{BT_ROOT}/{name}' for name in ('bin/bluetoothd', 'bin/BlueTool',
                     'bin/PianoBluetooth.runtime', 'lib/QcaBTType0.dylib', 'runtime.sha256'))
+CAMERA_BUNDLE_FILE = re.compile(
+    r'/Applications/(?:PianoCamera|PianoCameraCapture)\.app/Contents/'
+    r'(?:Library/SystemExtensions/com\.unixnu\.PianoCamera\.Extension\.systemextension/Contents/)?'
+    r'(?:Info\.plist|MacOS/[A-Za-z0-9._-]+|_CodeSignature/CodeResources)')
 SYSTEM_PROGRAMS = ('/bin/', '/usr/bin/', '/sbin/', '/usr/sbin/', '/usr/libexec/')
 WORD = re.compile(r'[A-Za-z0-9._+@/-]+')
 MODE = re.compile(r'0[0-7]{3}')
@@ -177,7 +197,7 @@ def load_manifest(path, on=(), off=()):
             match[0]['on'] = value
     if problems:
         raise SystemExit(f'{path}:\n  ' + '\n  '.join(problems))
-    return {'path': Path(path), 'staging': staging, 'units': units}
+    return {'path': Path(path), 'staging': staging, 'units': units, 'camera': doc.get('camera_package')}
 
 
 def dest_kind(dest):
@@ -185,7 +205,8 @@ def dest_kind(dest):
     parent, _, base = dest.rpartition('/')
     if not WORD.fullmatch(dest) or not base or base.startswith('.') or '..' in dest.split('/'):
         return None
-    return DIRS.get(parent) or ('file' if GPU_BUNDLE_FILE.fullmatch(dest) or dest in BT_DATA else None)
+    return DIRS.get(parent) or ('file' if GPU_BUNDLE_FILE.fullmatch(dest) or HAL_BUNDLE_FILE.fullmatch(dest) or
+                                CAMERA_BUNDLE_FILE.fullmatch(dest) or dest in BT_DATA else None)
 
 
 def check_file(f, unit, problems):
@@ -199,7 +220,8 @@ def check_file(f, unit, problems):
     kind = dest_kind(dest)
     if not kind:
         problems.append(f'{where}: dest must be a file directly in {", ".join(DIRS)}, or a Metal plugin bundle\'s '
-                        f'({GPU_BUNDLES}/<name>.bundle/Contents/Info.plist, MacOS/<file>, Resources/<file>)')
+                        f'({GPU_BUNDLES}/<name>.bundle/Contents/Info.plist, MacOS/<file>, Resources/<file>), or a HAL plug-in\'s '
+                        f'({HAL_PLUGINS}/<name>.driver/Contents/Info.plist, MacOS/<file>, Resources/<file>, _CodeSignature/<file>)')
         kind = 'file'
     owner, mode = f.get('owner', 'root:wheel'), f.get('mode', '')
     if not OWNER.fullmatch(owner):
@@ -232,40 +254,115 @@ def check_file(f, unit, problems):
             'inputs': list(f.get('inputs', [])), 'trust': f.get('trust', True)}
 
 
-def add_gpu_bundles(plan, bundles):
-    """--gpu-bundle: each Metal plugin bundle as one more unit of PLAN, gpu-<its name in lower case>, without a job (always installed):
-    every file of the bundle at /Library/GPUBundles/<name>.bundle/<its path>, root:wheel, 0755 for a Mach-O or an executable, 0644
-    otherwise, its Mach-Os' CDHashes into the trust cache. Staged as files/<unit>/<its path in the bundle>."""
+BUNDLE_KINDS = {
+    # option, install directory, bundle suffix, unit prefix, what it is
+    'gpu': ('--gpu-bundle', GPU_BUNDLES, '.bundle', 'gpu-', 'the Metal plugin'),
+    'hal': ('--hal-bundle', HAL_PLUGINS, '.driver', 'audio-', 'the Core Audio HAL plug-in'),
+}
+
+
+def add_bundles(plan, bundles, kind):
+    """--gpu-bundle / --hal-bundle: each plugin bundle as one more unit of PLAN, <prefix><its name in lower case>, without a job (always
+    installed): every file of the bundle at <directory>/<name><suffix>/<its path>, root:wheel, 0755 for a Mach-O or an executable,
+    0644 otherwise, its Mach-Os' CDHashes into the trust cache. Staged as files/<unit>/<its path in the bundle>."""
+    option, directory, suffix, prefix, what = BUNDLE_KINDS[kind]
     problems = []
     dests = {f['dest']: u['name'] for u in plan['units'] for f in u['files']}
     for bundle in bundles:
         bundle = Path(bundle).resolve()
-        if not re.fullmatch(r'[A-Za-z0-9_-]+\.bundle', bundle.name) or not (bundle / 'Contents/Info.plist').is_file():
-            raise SystemExit(f'--gpu-bundle {bundle}: not a plugin bundle (<name>.bundle with Contents/Info.plist)')
-        name = 'gpu-' + bundle.stem.lower().replace('_', '-')
+        if not re.fullmatch(r'[A-Za-z0-9_-]+' + re.escape(suffix), bundle.name) or not (bundle / 'Contents/Info.plist').is_file():
+            raise SystemExit(f'{option} {bundle}: not a plugin bundle (<name>{suffix} with Contents/Info.plist)')
+        name = prefix + bundle.stem.lower().replace('_', '-')
         if name in {u['name'] for u in plan['units']}:
-            raise SystemExit(f'--gpu-bundle {bundle}: unit {name} twice')
-        unit = {'name': name, 'about': f'the Metal plugin {bundle.name} in {GPU_BUNDLES} (the system layer, docs/data-store.md section 9)',
+            raise SystemExit(f'{option} {bundle}: unit {name} twice')
+        unit = {'name': name, 'about': f'{what} {bundle.name} in {directory} (the system layer, docs/data-store.md section 9)',
                 'on': True, 'default_on': True, 'planned': False, 'files': []}
         for path in sorted(bundle.rglob('*')):
             if path.is_symlink() or (not path.is_file() and not path.is_dir()):
-                raise SystemExit(f'--gpu-bundle {bundle}: {path.relative_to(bundle)} is neither a file nor a directory')
+                raise SystemExit(f'{option} {bundle}: {path.relative_to(bundle)} is neither a file nor a directory')
             if not path.is_file():
                 continue
             inside = path.relative_to(bundle).as_posix()
             data = path.read_bytes()
             executable = data[:4] == b'\xcf\xfa\xed\xfe' or os.access(path, os.X_OK)
-            f = check_file({'source': str(path), 'build': 'copy', 'dest': f'{GPU_BUNDLES}/{bundle.name}/{inside}',
+            f = check_file({'source': str(path), 'build': 'copy', 'dest': f'{directory}/{bundle.name}/{inside}',
                             'mode': '0755' if executable else '0644', 'staged': f'files/{name}/{inside}'}, unit, problems)
             if f['dest'] in dests:
                 problems.append(f'{f["dest"]}: also unit {dests[f["dest"]]}\'s')
             dests[f['dest']] = name
             unit['files'].append(f)
         if not unit['files']:
-            problems.append(f'--gpu-bundle {bundle}: no files')
+            problems.append(f'{option} {bundle}: no files')
         plan['units'].append(unit)
     if problems:
-        raise SystemExit('--gpu-bundle:\n  ' + '\n  '.join(problems))
+        raise SystemExit(f'{option}:\n  ' + '\n  '.join(problems))
+    return plan
+
+
+def add_gpu_bundles(plan, bundles):
+    """--gpu-bundle: Metal plugin bundles (add_bundles, kind gpu: /Library/GPUBundles/<name>.bundle, unit gpu-<name>)."""
+    return add_bundles(plan, bundles, 'gpu')
+
+
+def add_hal_bundles(plan, bundles):
+    """--hal-bundle: Core Audio HAL plug-ins (add_bundles, kind hal: /Library/Audio/Plug-Ins/HAL/<name>.driver, unit audio-<name>)."""
+    return add_bundles(plan, bundles, 'hal')
+
+def add_camera_package(plan):
+    """Opt-in signed apps from this commit. Copy their files byte for byte."""
+    supplied = os.environ.get('PIANO_CAMERA_PACKAGE')
+    if not supplied:
+        if os.environ.get('PIANO_CAMERA_APPROVAL'):
+            raise SystemExit('PIANO_CAMERA_APPROVAL requires a final signed PIANO_CAMERA_PACKAGE')
+        return plan
+    package = Path(supplied).resolve(strict=True)
+    if not package.is_relative_to(D / 'out'):
+        raise SystemExit('PIANO_CAMERA_PACKAGE must be built under this worktree’s out/')
+    apps = (plan.get('camera') or {}).get('apps')
+    if apps != ['PianoCamera.app', 'PianoCameraCapture.app']:
+        raise SystemExit('The camera package needs both app bundles in the manifest')
+    sh(['python3', '-I', str(D / 'tooling/camera/extension/package-camera.py'), str(package), '--verify'],
+       timeout=60, check=True)
+    record = json.loads((package / 'cdhashes.json').read_text())
+    hashes = {f['path']: f['cdhash'] for f in record['executables']}
+    unit = {'name': 'piano-camera-apps', 'about': 'signed Piano camera publisher and AVFoundation client',
+            'on': True, 'default_on': True, 'planned': False, 'files': []}
+    problems = []
+    dests = {f['dest'] for u in plan['units'] for f in u['files']}
+    found = set()
+    for app in apps:
+        bundle = package / app
+        if bundle.is_symlink():
+            raise SystemExit(f'Camera bundle is a symlink: {app}')
+        for path in sorted(bundle.rglob('*')):
+            inside = path.relative_to(package).as_posix()
+            if path.is_symlink() or not (path.is_file() or path.is_dir()):
+                raise SystemExit(f'Unsupported camera bundle entry: {inside}')
+            if path.is_dir():
+                continue
+            dest = f'/Applications/{inside}'
+            if dest in dests:
+                raise SystemExit(f'Camera bundle destination already staged: {dest}')
+            # The capture app uses ordinary TCC consent, which requires a non-platform identity.
+            file = check_file({'source': str(path), 'dest': dest, 'build': 'copy',
+                               'mode': '0755' if inside in hashes else '0644',
+                               'trust': app == 'PianoCamera.app',
+                               'staged': f'files/{unit["name"]}/{inside}'}, unit, problems)
+            file['verified_cdhash'] = hashes.get(inside)
+            if inside in hashes:
+                found.add(inside)
+            unit['files'].append(file)
+    if problems or found != set(hashes):
+        raise SystemExit('Camera bundle layout:\n  ' + '\n  '.join(problems))
+    plan['units'].append(unit)
+    if os.environ.get('PIANO_CAMERA_APPROVAL'):
+        if (plan.get('camera') or {}).get('approval_env') != 'PIANO_CAMERA_APPROVAL':
+            raise SystemExit('The manifest does not enable the private camera approval input')
+        spec = importlib.util.spec_from_file_location('camera_bake', D / 'tooling/camera/extension/bake-sysext.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        plan['camera_bake'] = module.prepare(os.environ['PIANO_CAMERA_APPROVAL'], package, record)
+        plan['camera_bake_module'] = module
     return plan
 
 
@@ -378,6 +475,7 @@ def build_file(f, build_dir):
         command = ['xcrun', 'clang', '-arch', f['arch'], f'-mmacosx-version-min={f["min_os"]}', '-O2', '-Wall', '-Wextra', '-Werror',
                    *f['cflags'], *f['sources'], *[x for fw in f['frameworks'] for x in ('-framework', fw)], '-o', str(out)]
         inputs = [D / s for s in f['sources']]
+        inputs += sorted({Path(p) for pattern in f['inputs'] for p in glob.glob(str(D / pattern)) if Path(p).is_file()})
     else:
         command = f['command']
         inputs = sorted({Path(p) for pattern in f['inputs'] for p in glob.glob(str(D / pattern)) if Path(p).is_file()})
@@ -420,15 +518,16 @@ def build_all(plan, build_dir):
             f['on'] = unit['on']
             f['path'] = path
             data = path.read_bytes()
-            f['cdhash'] = None
+            cdhash = None
             if data[:4] in (b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca'):
                 if data[:4] != b'\xcf\xfa\xed\xfe':
                     raise SystemExit(f'{f["dest"]}: a fat Mach-O; build one architecture (the trust cache takes a thin file\'s CDHash)')
-                digest = soft_metal().cdhash(path)
-                if f['trust']:
-                    f['cdhash'] = digest.hex()
+                cdhash = soft_metal().cdhash(path).hex()
             elif f['build'] in ('cc', 'script') and f['trust']:
                 raise SystemExit(f'{f["dest"]}: built, but not a Mach-O ({rel(path)})')
+            if 'verified_cdhash' in f and cdhash != f['verified_cdhash']:
+                raise SystemExit(f'{f["dest"]}: signing manifest and staged CodeDirectory differ')
+            f['cdhash'] = cdhash if f['trust'] else None
             built.append((f, data))
     check_jobs(plan, built)
     out = []
@@ -494,14 +593,40 @@ def boot_command(plan):
     return f'sh {plan["staging"]}/install.sh --boot'
 
 
+def boot_wifi_profile(tree, command):
+    """Optional RAM-only fixture, never a manifest/live-layer file or a logged
+    credential. The source must live outside this checkout; only seed mode calls
+    this. Boot fixes ownership before any Wi-Fi LaunchDaemon is loaded."""
+    source = os.environ.get('PIANO_BOOT_WIFI_PROFILE')
+    if not source:
+        return command
+    path = Path(source)
+    if path.is_symlink() or path.resolve().is_relative_to(D):
+        raise SystemExit('boot Wi-Fi profile must be an external private regular file')
+    st = path.stat()
+    if not path.is_file() or st.st_mode & 0o077 or st.st_size > 4096:
+        raise SystemExit('boot Wi-Fi profile must be private and at most 4 KiB')
+    data = path.read_bytes()
+    if not data or not data.endswith(b'\n'):
+        raise SystemExit('boot Wi-Fi profile must be nonempty and newline terminated')
+    tree['boot-wifi-profile'] = (data, 0o600)
+    staging = command.split('/install.sh', 1)[0].removeprefix('sh ')
+    return (f'umask 077; mkdir -p /private/var/db/piano-wifi; '
+            f'chown root:wheel /private/var/db/piano-wifi; chmod 700 /private/var/db/piano-wifi; '
+            f'cp {staging}/boot-wifi-profile /private/var/db/piano-wifi/profile; '
+            f'chown root:wheel /private/var/db/piano-wifi/profile; chmod 600 /private/var/db/piano-wifi/profile; '
+            f'rm -f {staging}/boot-wifi-profile; {command}')
+
+
 def seed_gpu_files(mount, staging, built):
-    """Put GPU files in the loader's paths before the first WindowServer. Retain omitted bundle resources.
+    """Put GPU files (and HAL plug-in files: coreaudiod loads them at its launch) in the loaders' paths before the first WindowServer
+    and coreaudiod. Retain omitted bundle resources.
     Clone from the staged APFS files, so the installer and loader share data extents rather than doubling the RAM image.
     Other userland files still go through the root boot installer; live layers never call this function.
     """
     installed = []
     for f, data in built:
-        if not GPU_BUNDLE_FILE.fullmatch(f['dest']):
+        if not (GPU_BUNDLE_FILE.fullmatch(f['dest']) or HAL_BUNDLE_FILE.fullmatch(f['dest'])):
             continue
         source = mount / staging / (f.get('staged') or f'files/{f["unit"]}/{f["name"]}')
         target = mount / f['dest'].lstrip('/')
@@ -517,6 +642,78 @@ def seed_gpu_files(mount, staging, built):
         sh(['xattr', '-c', str(target)], timeout=60, check=False)
         installed.append(f['dest'])
     return installed
+
+
+def seed_camera_apps(mount, staging, built):
+    """The origin app must exist when sysextd decodes its container at startup."""
+    installed = []
+    applications = mount / 'Applications'
+    for f, _ in built:
+        if f['unit'] != 'piano-camera-apps':
+            continue
+        source = mount / staging / f['staged']
+        target = mount / f['dest'].lstrip('/')
+        parent = target.parent.relative_to(applications)
+        for relative in reversed([parent, *parent.parents]):
+            directory = applications / relative
+            existed = directory.exists()
+            directory.mkdir(exist_ok=True)
+            if not stat.S_ISDIR(directory.lstat().st_mode):
+                raise SystemExit(f'{directory.relative_to(mount)}: expected a camera directory')
+            if directory != applications or not existed:
+                directory.chmod(0o755)
+        if target.is_symlink():
+            raise SystemExit(f'{f["dest"]}: expected a regular camera file')
+        sh(['cp', '-c', str(source), str(target)], timeout=60, check=True)
+        os.chmod(target, int(f['mode'], 8))
+        if sha(target.read_bytes()) != f['sha256']:
+            raise SystemExit('seed camera app differs from final signed package')
+        installed.append(f['dest'])
+    return installed
+
+
+def check_camera_seed_directories(mount, apps):
+    """Verify the public path with ownership enabled, after the metadata writes."""
+    applications = mount / 'Applications'
+    for directory in (applications, *apps, *(p for app in apps for p in app.rglob('*') if p.is_dir())):
+        st = directory.lstat()
+        # The recipe already has a public /Applications with mode 0775.
+        # Preserve its mode while requiring 0755 inside each signed bundle.
+        modes = (0o755, 0o775) if directory == applications else (0o755,)
+        if (not stat.S_ISDIR(st.st_mode) or (st.st_uid, st.st_gid) != (0, 0)
+                or stat.S_IMODE(st.st_mode) not in modes):
+            expected = ' or '.join(f'{mode:04o}' for mode in modes)
+            raise SystemExit(f'{directory.relative_to(mount)}: expected root:wheel camera directory with mode {expected}')
+
+
+def camera_seed_ownership(raw, mount):
+    """Reopen only the temporary seed with ownership enabled; persist real root IDs.
+
+    A noowners mount stores new files as uid 99. sysextd checks its staging
+    area's owner/mode before serving requests, so a late boot chown is a race.
+    The host already supports sudo -n (also used by warm-seed.py); never prompt.
+    """
+    entities = sh(['hdiutil', 'attach', '-imagekey', 'diskimage-class=CRawDiskImage', '-owners', 'on', '-nobrowse',
+                   '-mountpoint', str(mount), '-plist', str(raw)], timeout=120, check=True, capture_output=True).stdout
+    attached = plistlib.loads(entities)['system-entities']
+    whole = min((e['dev-entry'] for e in attached), key=lambda d: (len(d), d))
+    try:
+        if not any(e.get('mount-point') == str(mount.resolve()) for e in attached):
+            raise SystemExit('camera seed ownership: wrong mounted volume')
+        paths = [mount / p for p in ('Library/SystemExtensions', 'Applications/PianoCamera.app',
+                                     'Applications/PianoCameraCapture.app')]
+        # /Applications can also be newly created on a sparse Data seed.
+        sh(['sudo', '-n', 'chown', '0:0', str(mount / 'Applications')], timeout=60, check=True)
+        sh(['sudo', '-n', 'chown', '-R', '0:0', *map(str, paths)], timeout=60, check=True)
+        sh(['sudo', '-n', 'xattr', '-cr', *map(str, paths)], timeout=60, check=True)
+        for root in paths:
+            for path in (root, *root.rglob('*')):
+                st = path.lstat()
+                if path.is_symlink() or (st.st_uid, st.st_gid) != (0, 0):
+                    raise SystemExit('camera seed ownership did not persist as root:wheel')
+        check_camera_seed_directories(mount, paths[1:])
+    finally:
+        sh(['hdiutil', 'detach', whole], timeout=120, check=True, stdout=subprocess.DEVNULL)
 
 
 def add_boot_command(job, command, settime):
@@ -537,6 +734,50 @@ def add_boot_command(job, command, settime):
     return script, True
 
 
+def sparsify_zero_ranges(raw):
+    """Deallocate only ranges read back as entirely zero, before DBRDISK1 scans them.
+
+    F_PUNCHHOLE's layout is the Darwin SDK's fpunchhole_t. File contents and
+    logical size stay unchanged. This operates on our detached temporary raw
+    image, never on the input seed or an attached device.
+    """
+    freed = 0
+    with raw.open('r+b', buffering=0) as stream:
+        for start, end in soft_metal().packed_ramdisk.data_ranges(stream, raw.stat().st_size):
+            for offset in range(start, end, 8 << 20):
+                stream.seek(offset)
+                data = stream.read(min(8 << 20, end - offset))
+                if data and not (offset % 4096 or len(data) % 4096) and data.count(0) == len(data):
+                    fcntl.fcntl(stream.fileno(), 99, struct.pack('=IIqq', 0, 0, offset, len(data)))
+                    freed += len(data)
+        os.fsync(stream.fileno())
+    return freed
+
+
+def zero_seed_free_space(mount):
+    """The existing compact-seed zero-fill method, inside our copied seed mount."""
+    folder = next((mount / p for p in ('private/var/tmp', 'private/tmp')
+                   if (mount / p).is_dir() and os.access(mount / p, os.W_OK)), None)
+    if folder is None:
+        raise SystemExit('seed compaction: no writable temporary directory in the copied volume')
+    fill = folder / '.piano-userland-zero-fill'
+    written = 0
+    try:
+        with fill.open('xb', buffering=0) as stream:
+            zero = bytes(8 << 20)
+            try:
+                while True:
+                    written += stream.write(zero)
+            except OSError as error:
+                if error.errno != errno.ENOSPC:
+                    raise
+            os.fsync(stream.fileno())
+    finally:
+        fill.unlink(missing_ok=True)
+    sh(['sync'], timeout=60, check=True)
+    return written
+
+
 @contextlib.contextmanager
 def mounted_seed(seed, out, result):
     """SEED's Data volume, mounted read-write from a sparse raw copy under OUT; packed again to OUT/scratch-data.img afterwards
@@ -547,8 +788,16 @@ def mounted_seed(seed, out, result):
     boot job would be missing)."""
     ssm = soft_metal()
     logical, extents = ssm.packed_ramdisk.regions(seed.read_bytes())
-    with tempfile.TemporaryDirectory(prefix='seed-', dir=str(out)) as scratch:
-        raw = Path(scratch) / 'seed.raw'
+    compact = os.environ.get('PIANO_USERLAND_COMPACT') == '1'
+    raw_parent = D / 'out' if compact else out
+    raw_parent.mkdir(parents=True, exist_ok=True)
+    if compact and shutil.disk_usage(raw_parent).free < logical + (1 << 30):
+        raise SystemExit('seed compaction: worktree out/ needs the logical seed size plus 1 GiB free')
+    # The mount point remains under OUT (hdiutil's approved local mount path).
+    # The potentially large zero-filled raw file belongs to this worktree's out/.
+    with tempfile.TemporaryDirectory(prefix='seed-', dir=str(out)) as scratch, \
+            tempfile.TemporaryDirectory(prefix='userland-raw-', dir=str(raw_parent)) as raw_scratch:
+        raw = Path(raw_scratch) / 'seed.raw'
         with raw.open('wb') as handle:   # sparse: only the extents are written
             handle.truncate(logical)
             for offset, data in extents:
@@ -571,12 +820,18 @@ def mounted_seed(seed, out, result):
                 raise SystemExit(f'{raw.name}: hdiutil attached the seed but mounted no volume at {mount}; refusing to stage')
             try:
                 yield mount, volume
+                if compact:
+                    result['zero_filled_bytes'] = zero_seed_free_space(mount)
             finally:
                 sh(['hdiutil', 'detach', '/dev/' + whole], timeout=120, check=True, stdout=subprocess.DEVNULL)
                 detached = True
         finally:
             if not detached:   # the refusal above, or a detach that failed: force the image off so nothing is left attached
                 sh(['hdiutil', 'detach', '-force', '/dev/' + whole], timeout=120, check=False, stdout=subprocess.DEVNULL)
+        if result.get('camera_ownership'):
+            camera_seed_ownership(raw, mount)
+        if compact:
+            result['zero_sparsified_bytes'] = sparsify_zero_ranges(raw)
         packed = out / 'scratch-data.img.new'
         packed.unlink(missing_ok=True)
         result.update(ssm.packed_ramdisk.pack(raw, packed))
@@ -634,12 +889,20 @@ def stage_seed(a, plan):
         if not path.is_file():
             raise SystemExit(f'{rel(path)}: no such file')
     out.mkdir(parents=True, exist_ok=True)
+    bake = plan.get('camera_bake')
+    if bake and sh(['sudo', '-n', 'true'], timeout=10, capture_output=True).returncode:
+        raise SystemExit('camera approval bake requires noninteractive sudo for ownership on the copied seed')
     built = build_all(plan, out.parent / 'build')
     tree = staging_tree(plan, built)
-    command = boot_command(plan)
+    command = boot_wifi_profile(tree, boot_command(plan))
     seed_info_in = common.seed_info(seed_in)
     trust_bytes = trust_in.read_bytes()
+    trusted_cdhashes = sorted({f['cdhash'] for f, _ in built if f['cdhash']})
     stamp = sha(json.dumps({'format': FORMAT, 'seed': seed_info_in['file_sha256'], 'trust': sha(trust_bytes), 'boot': command,
+                            'compact_free_space': os.environ.get('PIANO_USERLAND_COMPACT') == '1',
+                            'camera_approval': bake['record'] if bake else None,
+                            **({'camera_directory_mode': '0755'} if bake else {}),
+                            'trusted_cdhashes': trusted_cdhashes,
                             'staging': plan['staging'], 'tree': {k: [sha(v), m] for k, (v, m) in sorted(tree.items())}},
                            sort_keys=True).encode())
     record_path, seed_out, trust_out = out / 'userland.json', out / 'scratch-data.img', out / 'kernel.macho.trustcache'
@@ -655,19 +918,36 @@ def stage_seed(a, plan):
               f'{rel(trust_out)} unchanged')
         return record
 
-    trust_new, added = add_trust(trust_bytes, [f['cdhash'] for f, _ in built if f['cdhash']])
+    trust_new, added = add_trust(trust_bytes, trusted_cdhashes)
     tmp = trust_out.with_name(trust_out.name + '.new')
     tmp.write_bytes(trust_new)
     os.replace(tmp, trust_out)
     print(f'{rel(trust_out)}: ' + (f'+ {len(added)} CDHash(es) {" ".join(added)}' if added else 'the input\'s CDHashes already '
                                      'cover every Mach-O: unchanged'))
 
+    camera_files = [f for f, _ in built if f['unit'] == 'piano-camera-apps']
+    if camera_files:
+        have = common.trust_hashes(trust_out)
+        for f in camera_files:
+            cdhash = f['verified_cdhash']
+            if cdhash and (bytes.fromhex(cdhash) in have) != f['trust']:
+                raise SystemExit(f'{f["dest"]}: camera CDHash has unexpected trust-cache membership')
+
     ssm = soft_metal()
     packed, staging = {}, plan['staging'].lstrip('/')
     (out / 'stamp').unlink(missing_ok=True)   # a run cut short below leaves no stamp: the next one restages
     with mounted_seed(seed_in, out, packed) as (mount, volume):
         written, removed = sync_tree(mount / staging, tree)
+        if camera_files:
+            for f in camera_files:
+                if common.sha(mount / staging / f['staged']) != f['sha256']:
+                    raise SystemExit(f'{f["dest"]}: staged camera bytes differ')
+            print('Camera app seals, staged bytes and trust-cache policy verified')
         gpu_files = seed_gpu_files(mount, staging, built)
+        camera_files = seed_camera_apps(mount, staging, built) if bake else []
+        if bake:
+            plan['camera_bake_module'].seed(mount, bake)
+            packed['camera_ownership'] = True
         script, changed = add_boot_command(mount / ssm.BOOT_JOB, command, ssm.SETTIME)
         listing = sh(['ls', '-lnR', str(mount / staging)], timeout=60, capture_output=True, text=True).stdout
         listing = listing.replace(str(mount), '')
@@ -682,6 +962,9 @@ def stage_seed(a, plan):
                    'trust': {'path': rel(trust_in), 'sha256': sha(trust_bytes)}},
         'files': files_record(built),
         'seed_gpu_files': gpu_files,
+        'seed_camera_files': camera_files,
+        'camera_approval': bake['record'] if bake else None,
+        'compaction': {key: packed[key] for key in ('zero_filled_bytes', 'zero_sparsified_bytes') if key in packed},
         'planned': [u['name'] for u in plan['units'] if u['planned']],
         'outputs': {'seed': {'path': rel(seed_out), **{k: seed_info_out[k] for k in ('file_sha256', 'identity_sha256',
                                                                                      'logical_bytes', 'bytes')}},
@@ -738,6 +1021,8 @@ echo "apply-update.sh: {staging} replaced; install.sh --live runs (pid $!): /pri
 def stage_live(a, plan):
     """The live update's bundle (docs/userland.md section 7): the same staging tree, as a deterministic tar and its apply script,
     and the trust check against the trust cache the running kernel has (the installed ESP's)."""
+    if plan.get('camera_bake'):
+        raise SystemExit('Camera approval baking is seed-only; it cannot modify the installed system through --live')
     out = a.live.resolve()
     out.mkdir(parents=True, exist_ok=True)
     built = build_all(plan, out.parent / 'build')
@@ -803,8 +1088,11 @@ def main():
     p.add_argument('--plan', action='store_true', help='check the manifest and print it; build nothing')
     p.add_argument('--gpu-bundle', action='append', default=[], type=Path, metavar='BUNDLE',
                    help='a Metal plugin bundle as one more unit (/Library/GPUBundles/<name>.bundle), its Mach-Os trusted')
+    p.add_argument('--hal-bundle', action='append', default=[], type=Path, metavar='DRIVER',
+                   help='a Core Audio HAL plug-in as one more unit (/Library/Audio/Plug-Ins/HAL/<name>.driver), its Mach-Os trusted')
     a = p.parse_args()
-    plan = add_bluetooth_runtime(add_gpu_bundles(load_manifest(a.manifest, a.on, a.off), a.gpu_bundle))
+    plan = add_camera_package(add_bluetooth_runtime(add_hal_bundles(add_gpu_bundles(load_manifest(a.manifest, a.on, a.off), a.gpu_bundle),
+                                                                    a.hal_bundle)))
     if a.plan:
         show_plan(plan)
     elif a.live:

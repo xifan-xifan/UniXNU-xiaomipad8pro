@@ -19,7 +19,20 @@ Mesa (MIT): https://github.com/Droid-VM/mesa cecc0e96d7193c72356a31abb0cc589e4fc
   passed go back by a one-shot timer armed only while something is held; cache budgets by the connection's window; a BoAlloc that
   finds no memory asks every GPU process for its cache through the Darwin notification org.unixnu.piano.gpu-reclaim and is tried
   again over about 120 ms)
+  0010-turnip-gen8-tex-line-offset-bits.patch: Mesa 7ea5e51c8a301a15202e28fef114e4c4055bc329 (MR44151), byte pitches in bits;
+  0011-turnip-gen8-multiplane-ubwc-base.patch: Mesa d286f87b1641abce126337f99caa13b11ae8ef5b (MR43965), combined UBWC Y base
+  for gen8 multi-plane descriptors, with actual-plane-count collection and unused V clearing informed by Mesa
+  cbdef9823c88c9daf5f90d0c2ccd0b5ff2c57d7c (MR44145). Upstream: https://gitlab.freedesktop.org/mesa/mesa.
   (MIT, as the files).
+  0012-turnip-darwin-capacity-recovery.patch (ours, MIT, Leo Zhang): one bounded reclaim/retry policy for VA, BO allocation,
+  host import, GPU mapping and heap admission; preserves native cleanup/retirement gates and lost-device status. A cooldown
+  still permits progress after local capacity was returned. Removes a duplicate BO finish on lazy heap refusal. Exports a
+  versioned per-process capacity census for opt-in frontend qualification logging. No VA-window/backing change.
+  0013-turnip-darwin-bo-clear-under-lock.patch (ours, MIT, Leo Zhang, 2026-11-21): darwin_bo_finish clears the BO's struct under the
+  retire lock before its record can reach the ring and the cache (upstream msm's tu_bo_make_zombie order; the late clear wiped a BO
+  another thread had just taken from the cache: WindowServer's handle-0 Submit); piano-tu-bo-clear=early|late (boot line, else
+  /private/var/ngpu/debug/tu-bo-clear) keeps the old order for an A/B; a submit entry with a cleared BO is refused in user space
+  by name; finish/init race lines, inert until they fire.
   Build options: UniXNU-turnip build-turnip-macos-piano.py's, with -Dtu-darwin-abi-dir pointing at the ABI below.
 Kernel ABI (MIT): https://github.com/Shad0w23333/Adreno830 1a1321056ffc5428ae925f4680093718b46ca7c2, NativeAdrenoABI.h
   (sha256 20ac9298bb390d86788c1fc58155e1f9581ffa942e222752efc95c67cb5670d2), or package/PianoA830/NativeAdrenoABI.h when present.
@@ -44,6 +57,19 @@ Frontend (MIT): UniXNU-turnip drivers/AdrenoMetal (NativeMetal fb063de per the V
   context from UniXNU-turnip 527b8b7a31192df14b96d10a70c339845ed2cd12).
   0005-frontend-quartzcore-generic-texcoords.patch (MIT, ours: keep the generic QuartzCore vertex matrix bindings when Metal omits
   the two optional texcoord count constants; context from the same UniXNU-turnip revision).
+  0006-frontend-bounded-import-reclaim.patch (ours, MIT, Leo Zhang): byte/LRU/idle bounds on optional IOSurface import retains,
+  complete runtime backing counts, GPU pressure notification to frontend/runtime, and one capacity-only retry after allocation
+  locks unwind. The opt-in client-mem marker enables periodic frontend/backend census records. Real live ownership, fences,
+  leases and the terminal WindowServer capture failure boundary are unchanged; this is not a terminal-OOM capture fallback.
+  0007-pressure-surface-residency.patch and SurfaceResidency.h (ours, MIT): piano-surface-residency=1 lets pressure drop idle shader-read IOSurface
+  texture generations; the original IOSurface supplies content on the next bind. Commands lease a generation until completion;
+  writes, views, CPU access and indirect handles pin it. The runtime, Turnip retire queue and kernel still own actual BO cleanup.
+  0008-frontend-windowserver-encode-thread.patch (ours, MIT: the WindowServer encode-thread handshake, gfx/ws-encode3).
+  0009-frontend-compiler-additional-arguments.patch (2026-11-22, MIT, ours: the additional compiler arguments a Metal client sets, Core
+  Image's runtime-header definitions among them; the reverted 0006 of 2026-11-18, 3be98315/afe114a5, renumbered) and
+  0010-frontend-function-reflection.patch (2026-11-22, MIT, ours: NBFunction returnType/arguments for visible functions from the
+  function's own AIR, read by tooling/metal/turnip-a830/frontend/AirSignature.h, ours, MIT; nil and one log line when the AIR states
+  none or a type outside the set qualified against Apple's Metal). Context: the same UniXNU-turnip revision.
 Abort reporter (ours, BSD-2-Clause-Patent): tooling/metal/turnip-a830/abort_reporter.mm, linked into the plugin as a third object; it is
   this repository's package/NativeSoftMetal/NativeSoftMetalPlugin.mm reporter (2026-11-11) with chaining to the process's own handlers.
 Bridge (GPL-2.0-or-later OR LGPL-3.0-or-later): macOS-DroidVM out/metal/bridge/libnative_metal_bridge.a

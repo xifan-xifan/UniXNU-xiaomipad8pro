@@ -124,6 +124,28 @@ int main ()
   reset (); ufs_test_slots (1); assert (gSlotCount == 1 && gSlotFree == 1);
   assert (hostRead4k (0, 1, 1, out.data ()) == 0 && m.lastSlot == 0 && gSlotFree == 1);
   gHostPanic = true; assert (hostRead4k (0, 1, 1, out.data ()) == 0 && m.lastSlot == 0);
+  // Tracked Data buffers: the actual transport distinguishes a live caller PRDT
+  // from a completed error, a refusal before ringing and a timeout in the bounce area.
+  uint8_t *stage = memory + ufsSlotDataOffset (2);
+  for (Fault f : { Fault::Timeout, Fault::Fatal, Fault::Residual, Fault::Busy }) {
+    for (bool direct : { false, true }) {
+      for (bool write : { false, true }) {
+        reset (f);
+        if (direct) gTestDmaStage = stage;
+        if (f == Fault::Busy) m.busyLeft = 1000;
+        assert (hostStoreOpen (100, 64));
+        bool live = true;
+        const auto result = write ? hostWrite4k (0, 100, 1, stage, true, &live) : hostRead4k (0, 100, 1, stage, &live);
+        assert (result != kIOReturnSuccess && live == (direct && (f == Fault::Timeout || f == Fault::Fatal)));
+        if (write) assert (m.device[ufsSlotUcdOffset (0) + 17] == 0x08);  // Data and bitmap writes both use FUA.
+        assert (m.doorbells == (f == Fault::Busy ? kBusyRetries + 1 : 1));
+      }
+    }
+  }
+  reset (); assert (hostStoreOpen (100, 64));
+  gTestDmaStage = stage;
+  bool live = true;
+  assert (hostWrite4k (0, 99, 1, stage, true, &live) == kIOReturnBadArgument && !live && !m.doorbells);
   // native-ufs-suspend=0 and native-ufs-ahit absent (today's): nothing here ever held the queue, entered Hibern8 or set AHIT.
   assert (!gHostHeld && gHoldWaits == 0 && m.enterCommands == 0 && reg (0x18) == 0 && gPower.suspends == 0);
   puts ("PASS: command slots: per-slot entry, descriptor, tag and data; pool; busy and task-set-full retries; panic slot; one-slot fallback");

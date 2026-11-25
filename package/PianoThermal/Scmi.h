@@ -184,6 +184,7 @@ struct Level {
   uint32_t value;      // performance level value
   uint32_t khz;        // indicative frequency (v4), else value scaled by sustained kHz / sustained level, else value
   uint32_t latencyUs;  // attributes [15:0]
+  uint32_t power;      // the level's power cost (word 1 of the entry; the firmware's own figure, logged at start)
 };
 
 struct Domain {
@@ -240,6 +241,7 @@ inline int parseLevels(Domain &d, uint32_t version, const uint32_t *out, unsigne
     const uint32_t *e = out + 1 + i * entry;
     Level l{};
     l.value = e[0];
+    l.power = e[1];
     l.latencyUs = e[2] & 0xffff;
     if (entry == 5 && e[3]) l.khz = e[3];
     else if (d.sustainedLevel && d.sustainedKhz) l.khz = uint32_t(uint64_t(e[0]) * d.sustainedKhz / d.sustainedLevel);

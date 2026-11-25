@@ -580,7 +580,9 @@ static int host_send(Sm8750RpmhHost *host, const Sm8750RpmhRequest *request)
 {
     host->request = *request;
     host->sent++;
-    return Sm8750RpmhSend(host->drv2, request, &host->last);
+    const int result=Sm8750RpmhSend(host->drv2, request, &host->last);
+    if(result)host->failures++;
+    return result;
 }
 
 int Sm8750RpmhHostRails(Sm8750RpmhHost *host, int highest)

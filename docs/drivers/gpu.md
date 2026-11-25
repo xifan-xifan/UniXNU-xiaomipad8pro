@@ -450,6 +450,40 @@ replaced it.
 Adreno830, ArmSmmu4K, AdrenoPM4: MIT (their LICENSE files in `package/PianoA830`). Board glue and tooling: BSD-2-Clause-Patent
 (`package/PianoA830/LICENSE`). Linux/KGSL: specification only. Vendor firmware: never in this repository.
 
+### 607 MHz qualification (R3a)
+
+The exact combination `piano-gpu-maxlevel=7 piano-gpu-dcvs-max=607` selects C5 qualification. It requires profile 1,
+speedbin 0 (the 11 public levels), ACD off, HFI 0, host rails 1, boot/floor DDR 11, governor on, minimum 160 and idle 1.
+S0 validates and prints every ARC/GX/dependency/CX/BCM row before any high-frequency permit. BX is conditional on a usable
+cmd-db resource and uses the rounded GX corner in bits 25:20; absent/dummy BX retains the no-constraint bits.
+
+The mode starts at 160 and stays under 342 until two fresh 5-second msm/quiet rounds and all eight GPU sensors are healthy.
+`machdep.piano_gpu_qual607` reads enabled/ready/high/sticky in bits 0..3 and the first exit reason above bit 8. Write 1 once
+to request the permit; write 2 once while the acknowledged level exceeds 342 to schedule at the 600-second boundary the discard of the matching ACK of a real queued
+runtime id 30. Startup M9 and unrelated ACKs are never injected. The normal soak is 600 seconds, with at most 2 seconds for
+the final injection; this absolute permit cannot be renewed. A 2.5-second heartbeat lease also constrains votes and wakes.
+
+Before arming, a hot or invalid sample clears readiness without setting the armed-run fault reason. `R3a TEMP` separately
+reports `inhibit`: bit 0 invalid GPU, bit 1 invalid/stale board, bit 2 GPU at70 C, bit 3 board at its limit, bit 4 awaiting
+two advancing cool rounds. Board freshness allows at most10 seconds; it is independent of the2.5-second heartbeat lease.
+Complete qualification records are available through read-only `machdep.piano_gpu_qual607_log` (`C5LOG-v1`), allocated only
+for this mode. Its8192 bounded records include sequence/length framing and explicit overwrite/rejection information;
+an overwritten or incomplete capture cannot establish qualification. Console and unified-log delivery are supplementary.
+
+Any sampled GPU temperature at70 C, quiet at40 C, msm at65 C, invalid/stale sensor input, expired permit or runtime vote
+failure closes submission and latches a boot ceiling of 342. The driver stops the GMU, verifies CM3 reset, both GX-off/clock
+bits, CFG power-down and RSCC completion, restarts M9 at 160/bus2, and reopens only after CP/secure initialization succeeds.
+Further errors still receive strict shutdown; exhausting the recovery budget does not skip power-off. Cooling below60 C
+can restore 342, and thermal/unknown/external caps can still reduce to 160. The governor and 70/60 hysteresis are unchanged.
+Unconfirmed shutdown or an expired 5-second failure deadline triggers independent native PSCI power-off, then reset if it
+returns; that emergency deliberately bypasses filesystem/IOKit shutdown. Use only volatile qualification images.
+
+Host negative tests cover conditional BX, 11/14 table layouts, applied-but-discarded/late/short/status ACKs, strict stop and
+restart failures, repeat faults, stopped heartbeat, transient hot samples, and sticky thermal/external/park/wake paths.
+`gpu-qualification-load.m` moves its own windows without Automation consent. A separate fresh Metal client clears and reads back 196608 pixels in each phase, including after recovery. The offline checker recomputes the actual
+tables before permit and adjudicates normal/injected phases. Real high-frequency stability, benefit, temperatures and GUI
+recovery remain tablet gates. These operator limits are not OEM skin-safety certification or permission for 734 MHz.
+
 ### User BO fallback without a lifetime kernel mapping (experimental)
 
 `piano-gpu-user-vm=1` selects a prepared, wired named VM object for non-contiguous user BOs that cannot use the shared pool.
@@ -471,3 +505,23 @@ The backing selection is announced on the direct startup IOLog channel, before t
 of newly observed hardware fence seqnos, including completions whose latency stamps aged out, excluding recovery skips and forced
 completions. Repeated waits, display queries and IRQ/DCVS observations do not count a completion twice. This counter starts when
 the accountant starts and is separate from caller WaitFence timeouts (including polls) and display fence deadlines.
+
+The explicit `piano-gpu-r3b=1` switch selects the bounded R3b-607 engineering thermal contract only with the existing
+level-7/607 qualification configuration. One 100 ms eight-channel guard owns the 80 C soft / 75 C continuous-2 s up /
+85 C hard policy, with a 250 ms snapshot lease; normal down steps are at least 500 ms apart and stop at a 342 MHz ceiling.
+Board msm/quiet limits 62/37 C cap at 342; two fresh 60/35 C rounds release that cap. Hard 65/40 C board limits, invalid
+or stale sensors trigger a fresh 160 MHz / bus 2 runtime ACK with submissions temporarily retried and existing work left
+in place. An asleep GPU defers the low vote to its next M9. An unconfirmed low vote or a real fault uses checked strict-off
+and a fresh 160 MHz M9. Both paths latch the 342 MHz ceiling for the boot. The opt-in `piano-gpu-r3b-exit-test=1`
+holds the cool control at 342 MHz and disables high qualification. Root commands 3 and 4 on the existing sysctl
+inject one board-hard predicate at low temperature and then drop one matching fresh 160 MHz runtime ACK.
+105 C invokes the independent unsafe halt. R3b THERM/LIVE/WORK/EVENT records extend the read-only C5LOG export with guard
+peaks, cap changes, cumulative acknowledged residency and queue/service costs. These are experimental parameters,
+not a measured skin-temperature bound or daily qualification; other modes retain their existing thermal policy.
+The guard sequence counts consecutive VALID TSENS register reads; the hardware exposes no conversion sequence here,
+so this is not evidence of an independent ADC conversion per read. DISPLAY period records keep copy/composition costs
+separate from WORK queue residence and service costs.
+
+In R3b with exit-test mode off, `piano-gpu-dcvs-min=607` selects the sustained-residency qualification. The request
+floor follows the effective guard ceiling, including the initial 342 MHz cap. Its absolute 625-second permit includes
+time for the four guarded up-steps and at least 600 seconds of acknowledged level-7 residency when conditions allow.

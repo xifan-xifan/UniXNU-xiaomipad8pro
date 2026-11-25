@@ -15,7 +15,13 @@ static const PasStream *cstream_of(const SsEngine *e, int i) {return i == SS_LIG
 
 int ss_accel_wanted(const SsConditions *c)
 {
-    return c && c->accel_consumer && c->display != 0 && c->attached != 1;
+    return c && !ss_accel_blocker(c);
+}
+
+const char *ss_accel_blocker(const SsConditions *c)
+{
+    return !c || !c->accel_consumer ? "no consumer" : c->display == 0 ? "display off"
+           : c->attached == 1 && !c->accel_with_cover ? "cover attached" : 0;
 }
 
 void ss_defaults(SsConfig *c)
@@ -91,6 +97,11 @@ static void set_edge(SsEngine *e, int edge, uint64_t at)
 static void light_target(SsEngine *e, int32_t target, uint64_t at)
 {
     unsigned changed = 0;
+    if (target >= 0 && (!e->out.light_valid || e->out.light_session != e->light.stream.sessions)) {
+        e->out.light_valid = 1;
+        e->out.light_session = e->light.stream.sessions;
+        changed |= SS_OUT_LIGHT_STATE;
+    }
     if (target >= 0 && target != e->out.target) {
         e->out.target = target;
         changed |= SS_OUT_TARGET;
@@ -103,6 +114,16 @@ static void light_target(SsEngine *e, int32_t target, uint64_t at)
     }
     e->lux_pending = e->light.lux != e->out.lux;
     publish(e, changed);
+}
+
+static void light_invalid(SsEngine *e, int fault)
+{
+    const int changed = e->out.light_valid || (fault && !e->out.light_fault);
+    e->out.light_valid = 0;
+    if (fault) e->out.light_fault = 1;
+    e->lux_pending = 0;
+    e->light.tick_at = 0;
+    if (changed) publish(e, SS_OUT_LIGHT_STATE);
 }
 
 static void leave(SsEngine *e)
@@ -119,12 +140,12 @@ static void apply(SsEngine *e, uint64_t at)
     const char *held = e->off ? "the guard is off" : e->asleep ? "system sleep" : 0;
     const int light = !held && c->light_consumer;
     pal_conditions(&e->light, light, c->display != 0, c->lid, at);
+    if (!e->light.stream.want) light_invalid(e, e->off);
     e->ch[SS_LIGHT].why = held ? held : !c->light_consumer ? "no consumer" : c->display == 0 ? "display off"
                         : c->lid == 0 ? "lid closed" : 0;
     const int accel = !held && ss_accel_wanted(c);
     pas_want(&e->accel, accel, at);
-    e->ch[SS_ACCEL].why = held ? held : !c->accel_consumer ? "no consumer" : c->display == 0 ? "display off"
-                        : c->attached == 1 ? "cover attached" : 0;
+    e->ch[SS_ACCEL].why = held ? held : ss_accel_blocker(c);
     if (!accel) set_edge(e, PS_EDGE_NONE, at);
 }
 
@@ -132,6 +153,9 @@ static void restart(SsEngine *e, int i, uint64_t at)
 {
     SsChannel *ch = &e->ch[i];
     PasStream *s = stream_of(e, i);
+    /* FAILED is for this boot, even if a port/service/SUID is replaced. */
+    if (s->state == PAS_FAILED) return;
+    if (i == SS_LIGHT) light_invalid(e, 0);
     if (s->sessions || s->outstanding != PAS_ACT_NONE) ch->restarts++;
     pas_init(s, &e->cfg.stream);
     ch->timeouts_seen = 0;
@@ -311,6 +335,8 @@ static void observe(SsEngine *e, int i, uint64_t at)
     SsChannel *ch = &e->ch[i];
     PasStream *s = stream_of(e, i);
     SntText t;
+    if (i == SS_LIGHT && (s->state == PAS_FAILED || s->dirty ||
+        (s->state != PAS_ON && s->state != PAS_ENABLING))) light_invalid(e, s->state == PAS_FAILED);
     if (s->timeouts != ch->timeouts_seen) {
         ch->timeouts += s->timeouts - ch->timeouts_seen;
         ch->timeouts_seen = s->timeouts;
@@ -383,6 +409,16 @@ static void send_due(SsEngine *e, int i, uint64_t at)
     ch->ever_sent = 1;
     ch->txn = txn;
     pas_sent(s, action, at);
+    if (i == SS_ACCEL && ch->requests == 1) {
+        SntText t;
+        snt_str(line(e, i, &t), "first request:");
+        snt_kd(&t, "txn", txn);
+        snt_ks(&t, "action", action == PAS_ACT_ENABLE ? "enable" : "disable");
+        snt_kd(&t, "msg", action == PAS_ACT_ENABLE ? SSC_MSG_SENSOR_CONFIG : SSC_MSG_DISABLE_REQ);
+        snt_str(&t, " suid_low="); snt_hex(&t, ch->suid.low);
+        snt_str(&t, " suid_high="); snt_hex(&t, ch->suid.high);
+        emit(e, i, &t, at, 1);   /* one per boot, cannot spend the first-sample log budget */
+    }
     observe(e, i, at);
 }
 
@@ -399,6 +435,15 @@ static void response(SsEngine *e, int i, const SscQmi *m, uint64_t at)
     const int bad = ssc_qmi_response(m, &r);
     const int ok = !bad && ssc_response_ok(&r);
     const int action = s->outstanding;
+    if (i == SS_ACCEL && ch->requests == 1) {
+        SntText t;
+        snt_str(line(e, i, &t), "first response:");
+        snt_kd(&t, "txn", m->transaction);
+        snt_ks(&t, "action", action == PAS_ACT_ENABLE ? "enable" : "disable");
+        snt_kd(&t, "ok", ok);
+        snt_kd(&t, "error", bad ? -1 : (int64_t)r.error);
+        emit(e, i, &t, at, 1);
+    }
     if (ok) {
         ch->responses++;
         if (r.has_client) {
@@ -423,6 +468,7 @@ static void sample(SsEngine *e, int i, const SscSensorEvent *se, uint64_t at)
     SntText t;
     if (i == SS_LIGHT) {
         if (se->count < 1) {ch->malformed++; return;}
+        ch->sample_status = se->status;
         const uint32_t before = e->light.samples;
         const int32_t target = pal_event(&e->light, se->data[0], at);
         if (e->light.samples == before) {ch->dropped++; return;}
@@ -643,6 +689,8 @@ void ss_status(const SsEngine *e, int i, char *out, uint32_t size)
     snt_kd(&t, "unanswered", ch->timeouts);
     snt_kd(&t, "rearmed", s->rearmed);
     snt_kd(&t, "errors", ch->errors);
+    snt_kd(&t, "reports", ch->reports);
+    snt_kd(&t, "physical", ch->physical);
     snt_kd(&t, "samples", ch->samples);
     snt_kd(&t, "dropped", ch->dropped);
     if (ch->unreliable) snt_kd(&t, "unreliable", ch->unreliable);

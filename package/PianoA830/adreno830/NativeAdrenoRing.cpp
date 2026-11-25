@@ -125,6 +125,24 @@ IOReturn NativeAdrenoRing::ibBefore(uint32_t rptr,uint64_t *iova,uint32_t *dword
     *dwords=ring_[(rptr-1)&mask]&0xfffffu;
     return kIOReturnSuccess;
 }
+#ifdef ADRENO830_MACOS
+IOReturn NativeAdrenoRing::ibHolding(uint32_t rptr,uint64_t address,uint64_t *iova,uint32_t *dwords) const
+{
+    if(!ring_ || !iova || !dwords)return kIOReturnBadArgument;
+    *iova=0;*dwords=0;
+    const uint32_t words=(uint32_t)(ring_bytes_/4),mask=words-1;
+    for(uint32_t back=4;back<=words;++back) {
+        const uint32_t at=(rptr-back)&mask,header=ring_[at];
+        if((header>>28)!=7u || ((header>>16)&0x7fu)!=A8XX_PM4_CP_INDIRECT_BUFFER || (header&0x3fffu)!=3)continue;
+        const uint64_t start=(uint64_t)ring_[(at+2)&mask]<<32|ring_[(at+1)&mask];
+        const uint32_t size=ring_[(at+3)&mask]&0xfffffu;
+        if(address<start || address-start>=4ull*size)continue;
+        *iova=start;*dwords=size;
+        return kIOReturnSuccess;
+    }
+    return kIOReturnUnsupported;
+}
+#endif
 IOReturn NativeAdrenoRing::stallState(uint32_t *out)
 {
     if(!out)return kIOReturnBadArgument;
@@ -149,7 +167,7 @@ IOReturn NativeAdrenoRing::kick()
  * bit 0; then the cache flush/invalidate with a wait for idle, both threads and IFPC off around the user words. The thread the
  * user words run on must be BOTH, as Linux selects it (on the Gen8 A840 a BR-only thread stopped Turnip's first submission:
  * tu_init_hw needs BV to see its buffer). Independent of the bring-up profile (A830Profile.h). */
-IOReturn NativeAdrenoRing::emitPrologue(uint32_t at,bool reset,uint32_t *end)
+IOReturn NativeAdrenoRing::emitPrologue(uint32_t at,bool reset,uint32_t waitFor,uint32_t *end)
 {
     const uint32_t mask=(uint32_t)(ring_bytes_/4-1);
     uint32_t words[NativeAdrenoRingPrologueWords+NativeAdrenoRingResetWords]={0};
@@ -159,7 +177,7 @@ IOReturn NativeAdrenoRing::emitPrologue(uint32_t at,bool reset,uint32_t *end)
     size_t n=packet(words,0,RingThreadControl,&br,1);
     if(reset) {
         const uint64_t at4=fence_iova_+A830_MEMPTRS_FENCE;
-        const uint32_t wait[4]={0,(uint32_t)at4,(uint32_t)(at4>>32),seqno_},all=RingResetAll,lrz=RingLrzFlushInvalidate,
+        const uint32_t wait[4]={0,(uint32_t)at4,(uint32_t)(at4>>32),waitFor},all=RingResetAll,lrz=RingLrzFlushInvalidate,
             invalidate=RingCacheInvalidate;
         if(n)n=packet(words,n,RingWaitTimestamp,wait,4);
         if(n)n=packet(words,n,RingThreadControl,&syncBoth,1);
@@ -290,15 +308,31 @@ IOReturn NativeAdrenoRing::submitRaw(const uint32_t *words,size_t word_count,uin
 {
     return submitWords(words,word_count,wptr,RingFenceNone,NativeAdrenoRingSourceKernel);
 }
-IOReturn NativeAdrenoRing::submitWords(const uint32_t *words,size_t word_count,uint32_t *fence,int kind,uint32_t source)
+IOReturn NativeAdrenoRing::replayFramed(const uint32_t *words,size_t word_count,uint32_t fence,uint32_t after,uint32_t source)
+{
+    uint32_t replayed=0;
+    if(!fence)return kIOReturnBadArgument;
+    return submitWords(words,word_count,&replayed,RingFenceFramed,source,fence,after);
+}
+uint32_t NativeAdrenoRing::framedWords(size_t word_count,bool reset)
+{
+    const size_t words=word_count+NativeAdrenoRingPrologueWords+(reset?NativeAdrenoRingResetWords:0)+NativeAdrenoRingFramedFenceWords;
+    return words<UINT32_MAX?uint32_t(words):UINT32_MAX;
+}
+IOReturn NativeAdrenoRing::submitWords(const uint32_t *words,size_t word_count,uint32_t *fence,int kind,uint32_t source,uint32_t replay,
+    uint32_t after)
 {
     if(!fence)return kIOReturnBadArgument;
     *fence=0;
     if(!words || !word_count || word_count>SIZE_MAX/sizeof(uint32_t))return kIOReturnBadArgument;
+    if(replay && kind!=RingFenceFramed)return kIOReturnBadArgument;
     enter();
     IOReturn status=kIOReturnSuccess;
     do {
         if(!attached_ || poisoned_) {status=kIOReturnNotReady;break;}
+        /* A replay takes back a fence this ring issued, after the one it follows: after < replay <= seqno_ (sequence numbers). */
+        if(replay && ((int32_t)(replay-after)<=0 || (int32_t)(seqno_-replay)<0)) {status=kIOReturnBadArgument;break;}
+        const uint32_t seq=replay?replay:seqno_+1,waitFor=replay?after:seqno_;
         const uint32_t size_words=(uint32_t)(ring_bytes_/4),mask=size_words-1;
         const bool framed=kind==RingFenceFramed,reset=framed && reset_pending_;
         const uint32_t extra=kind==RingFenceNone?0:extraWords(framed,reset);
@@ -310,22 +344,27 @@ IOReturn NativeAdrenoRing::submitWords(const uint32_t *words,size_t word_count,u
         const uint32_t used=(next_-rptr)&mask;
         if(word_count+extra+NativeAdrenoRingGapWords>size_words-used) {status=kIOReturnBusy;break;}
         uint32_t at=next_;
-        if(framed && (status=emitPrologue(at,reset,&at)))break;
+        if(framed && (status=emitPrologue(at,reset,waitFor,&at)))break;
         for(size_t i=0;i<word_count;++i)ring_[(at+i)&mask]=words[i];
         at=(at+(uint32_t)word_count)&mask;
         uint32_t end=at;
-        if(kind==RingFenceKernel)status=emitFence(at,seqno_+1,&end);
-        else if(kind==RingFenceFramed)status=emitFramedFence(at,seqno_+1,&end);
+        if(kind==RingFenceKernel)status=emitFence(at,seq,&end);
+        else if(kind==RingFenceFramed)status=emitFramedFence(at,seq,&end);
         if(status)break;
         if((status=publish(next_,end)))break;
         /* The queue meter's stamp (4.13.5) before the barrier: it is in memory before the CP can complete the work. It names whose
-         * work this is and whether it enters a new context (a client switch). */
+         * work this is and whether it enters a new context (a client switch). A replay stamps its fence again (it waits anew). */
         if(kind!=RingFenceNone && waiter_.stamp)
-            waiter_.stamp(waiter_.cookie,seqno_+1,(source&NativeAdrenoRingSourceMask)|(reset?NativeAdrenoRingStampContext:0u));
+            waiter_.stamp(waiter_.cookie,seq,(source&NativeAdrenoRingSourceMask)|(reset?NativeAdrenoRingStampContext:0u));
         if(io_.barrier(io_.cookie)) {status=poison();break;}   /* dsb: every ring word lands before the CP sees WPTR */
         if((status=writeWptr(end)))break;
         next_=end;++submissions_;
         if(kind==RingFenceNone)*fence=end;
+        else if(replay) {
+            ++replays_;
+            *fence=replay;
+            if(reset)reset_pending_=false;
+        }
         else {
             __atomic_store_n(&seqno_,seqno_+1,__ATOMIC_RELEASE);
             *fence=seqno_;
@@ -415,7 +454,7 @@ IOReturn NativeAdrenoRing::waitForSpace(size_t word_count,bool framed,const Nati
         } else if(!clock || !clock->idle || clock->idle(clock->cookie))return kIOReturnTimeout;
     }
 }
-IOReturn NativeAdrenoRing::recover(uint32_t *last)
+IOReturn NativeAdrenoRing::recover(uint32_t *last,const uint32_t *restart)
 {
     if(last)*last=0;
     enter();
@@ -424,12 +463,14 @@ IOReturn NativeAdrenoRing::recover(uint32_t *last)
     else {
         for(size_t i=0;i<ring_bytes_/4;++i)ring_[i]=0;
         const uint32_t issued=seqno_;
+        /* A restart fence past the last one issued is none: every waiter wakes, as without one. */
+        const uint32_t to=restart && (int32_t)(issued-*restart)>=0?*restart:issued;
         fence_[A830_MEMPTRS_RPTR/4]=0;fence_[A830_MEMPTRS_BV_RPTR/4]=0;
-        fence_[A830_MEMPTRS_FENCE/4]=issued;fence_[NativeAdrenoRingFenceBvOffset/4]=issued;
+        fence_[A830_MEMPTRS_FENCE/4]=to;fence_[NativeAdrenoRingFenceBvOffset/4]=to;
         __atomic_thread_fence(__ATOMIC_RELEASE);
         if(io_.barrier(io_.cookie))status=kIOReturnIOError;
         next_=rptr_shadow_=0;
-        noteCompleted(issued);
+        noteCompleted(to);
         poisoned_=false;reset_pending_=true;
         if(last)*last=issued;
     }

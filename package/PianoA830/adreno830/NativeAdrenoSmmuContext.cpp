@@ -25,6 +25,23 @@ IOReturn NativeAdrenoSmmuContext::prepare(NativeAdrenoMemory *tables,unsigned up
     tables_=tables;bank_=bank;poll_budget_=poll_budget;prepared_=true;
     return kIOReturnSuccess;
 }
+IOReturn NativeAdrenoSmmuContext::preparePaged(uint64_t root,uint64_t bytes,size_t leaf_budget,unsigned bank,unsigned asid,
+    unsigned poll_budget,unsigned output_bits,unsigned input_bits)
+{
+    if(prepared_ || poisoned_)return kIOReturnBusy;
+    if(!root || (root&4095) || !bytes || !leaf_budget || leaf_budget>MaxLeaves || bank>63 || !asid || asid>0xffff || !poll_budget ||
+        poll_budget>1048576 || input_bits<32 || input_bits>48 || output_bits<32 || output_bits>48 ||
+        root>=(UINT64_C(1)<<output_bits) || (input_bits<64 && bytes>(UINT64_C(1)<<input_bits)))return kIOReturnBadArgument;
+    /* What the kit's encoder checks: the root is the "pool", one page of it, MAIR 0xff44, the start level of input_bits. */
+    arena_=(ArmSmmu4KLiveArena){{input_bits,output_bits,root,leaf_budget},0,bytes,0,nullptr,0,nullptr,0};
+    state_={};
+    state_.tables=(ArmSmmu4KResult){root,0xff44,1,0,4u-(input_bits-12u+8u)/9u,0};
+    state_.prepared=1;
+    config_=(ArmSmmu4KContextConfig){.lower=&arena_.config,.upper=nullptr,.lower_tables=&state_.tables,.upper_tables=nullptr,.id0=0,.id2=0,
+        .asid=asid,.coherent_walk=1,.stall_on_fault=0,.continue_after_fault=1};
+    tables_=nullptr;bank_=bank;poll_budget_=poll_budget;prepared_=true;
+    return kIOReturnSuccess;
+}
 IOReturn NativeAdrenoSmmuContext::setUpperGuard(uint64_t physical)
 {
     if(!prepared_ || programmed_ || poisoned_)return kIOReturnNotReady;

@@ -4,8 +4,13 @@ piano's video core for native macOS 27: the SM8750 Iris (VPU 3.5) that decodes H
 hardware. **V2 power/PAS is tablet-confirmed** for three cycles in `vid-v2c5`; **V3 INIT/version, ten collapse/resume cycles and legal teardown are tablet-confirmed** in `vid-v3b`.
 V4 is tablet-confirmed in `vid-v4a`: one real 320×240 AVC AU produces the exact active NV12 golden hash and safe teardown.
 V5c is tablet-confirmed: one actual caller AU traverses VT and Iris into an IOSurface-backed golden callback.
-V6 adds bounded persistent AVC streaming; continuous hardware results remain pending.
-`piano-video=6 piano-video-vt=1` publishes the restricted AVC qualification endpoint. Other levels do not publish a decoder inventory. 27.3's guest gate is a registry match for `AppleVideoToolboxParavirtualizationDriver` followed by `IOServiceOpen(type=0)` on `AppleVideoToolboxParavirtualizationUserClient`; it does not require `kern.hv_vmm_present`.
+V7e/V8 are tablet-qualified in stock QuickTime for the owned Main320×240 and High1920×1080 AVC fixtures: 60 native/client frames, zero dropped, optical motion confirmed. V9 adds bounded HEVC Main/Main10 and P010 for qualification; its firmware and playback behaviour remain unqualified.
+`piano-video=6 piano-video-vt=1` publishes the bounded AVC/HEVC qualification endpoint. Other levels do not publish a decoder inventory. 27.3's guest gate is a registry match for `AppleVideoToolboxParavirtualizationDriver` followed by `IOServiceOpen(type=0)` on `AppleVideoToolboxParavirtualizationUserClient`; it does not require `kern.hv_vmm_present`.
+
+General native streaming skips the legacy RAW sentinel fill and redundant per-packet text on its startup path. HFI packets,
+ownership checks, binary error histories and the OPB/output-START/PSC/FBD/publication evidence remain; the single-picture
+golden qualification keeps its sentinel and detailed trace. Synchronous session preparation still precedes readiness.
+First-input elapsed uptime is logged separately from console receipt time; optical startup parity remains unqualified.
 
 - `piano-video=1`: a read-only survey: GCC's four video branches first; VIDEO_CC only with GCC's video AHB on (PLL0, the core
   clock's RCG and dividers with the rate and the OPP it matches, both GDSCs, every branch); the core's controller registers
@@ -33,13 +38,16 @@ V6 adds bounded persistent AVC streaming; continuous hardware results remain pen
   DRAIN/LAST, both STOPs and CLOSE. Five-second transaction, bounded cleanup; unsafe quiesce/detach retains every DMA owner.
   It always tears down, uses no VT consumer and does not repeat the ten V3 resume cycles. No playback support is claimed.
 
-- `piano-video=6 piano-video-vt=1` (V6): one exclusive demand session for bounded 320×240 progressive 8-bit AVC
-  Baseline/Main IP/IBP. Parse actual avcC/SPS/PPS and complete one-picture samples, preserve opaque tokens, use two owned DMA
+- `piano-video=6 piano-video-vt=1`: one exclusive demand session for bounded progressive AVC
+  Baseline/Main/High through1920×1080 or HEVC Main/Main10 through3840×2160. Parse actual parameter sets and complete one-picture samples, preserve opaque tokens, use two owned DMA
   input slots with eight frame credits, and continuously pump HFI while guest replies are pending. RAW slots recycle after
-  checked active-row copies into scoped IOSurface clients; split DPB stays firmware-owned. Finish is a nonterminal
-  ACK+LAST barrier; later input resumes both ports. Invalidation cancels the old epoch and joins before bounded
+  checked active-row NV12/420v or P010/x420 copies into scoped IOSurface clients; split DPB stays firmware-owned. Finish joins
+  pending completions without sending HFI EOS. Invalidation cancels the old epoch and joins before bounded
   STOP/CLOSE/PAS/routes/TLB teardown. Unsafe quiesce retains DMA and poisons future opens.
-  Synchronous flags0, in-place format changes, HEVC, tiles and default app playback remain unsupported.
+  V9 synchronous flags0/2 retain the original reply until frame completion, with an eight-second bound and no receive-thread wait.
+  AVC keeps its256MiB/N16 policy; HEVC backs its complete guarded N10 layout rounded to2MiB, capped at768MiB.
+  At1080p this uses188MiB for Main10 or148MiB for Main8, including both scratch generations and invalid guards.
+  In-place format changes, protected content, other profiles/chroma, concurrent sessions and non-IDR starts remain unsupported.
 
 Levels 2-6 write registers only through `VideoBringup.h`: every (address, value) pair is logged the first time it is written,
 every wait is bounded, V3 cleanup reports unsafe releases and keeps their DMA, and nothing is written below `piano-video=2`. Design, decisions, the
@@ -55,7 +63,7 @@ batched tablet test list with its expected lines and the risks: `docs/drivers/vi
 | `VideoFirmware.h` | portable: V2's pin, the image's place in the carveout, PAS 9 + MP_VIDEO_VAR under the secure-call lock, PAS shutdown |
 | `VideoSmmu.h` | portable: V3's SMMU plan, our table for the UC region, the bank and routes, the teardown |
 | `VideoHfi.h` | portable: V3's queue table and queues, HFI gen2 packets and answers, the boot words |
-| `VideoSession.h`, `VideoBuffers.h`, `VideoArena.h` | portable V4 session, fixed fixture geometry, guarded 64 MiB arena and expanded same-bank tables |
+| `VideoSession.h`, `VideoGeometry.h`, `VideoBuffers.h`, `VideoArena.h` | bounded AVC/HEVC session, codec-specific sizes, guarded arenas and same-bank tables |
 | `VideoFixture.h` | own generated SPS/PPS/IDR; reproduction, SPS inspection and software golden verification in `tests/fixture_host.py` |
 | `tests/session_host.cpp` | asynchronous scripted peer, counts 1/4/7/64, reordered replies, checksum and failure injection (host evidence only) |
 | `VideoBringup.h` | portable: levels 2-6 as one sequence (V1, V2, V3, the idle collapse, resume, unload, failures) |
@@ -78,6 +86,13 @@ V5a tool: `bash tooling/native/build-video-v5a.sh` builds an ordinary signed arm
 checks fixture and active-row hashing without querying VT; `--qualify` requires hardware and paravirtual decoding and
 checks dcan, exactly one IOSurface-backed 420v golden callback, unsupported input, terminal finish and safe invalidate.
 These host tests and implementation claims are not tablet acceptance or general AVC/HEVC playback support.
+Native HEVC admission is limited to1080p/Level4 while the4K cold-reopen stall is investigated. Wider streams are declined
+before a hardware reservation; the full parser and768MiB/N10 layout remain for analysis. Native failure quarantine stays active.
+
+Native StartSession prepares the validated format, core and HFI input port before replying to VT. The first real IDR then
+supplies input for the existing PSC/output setup; preparation never submits a fixture or starts output. An idle prepared
+session is pumped without a picture deadline and closes through input STOP then CLOSE even if no AU arrives. This startup
+ordering is host-checked; its effect on QuickTime's opening transition still needs tablet verification.
 
 V6 qualification: `bash tooling/native/build-video-v6.sh` compiles/signs the tool and audits both owned IP/IBP clips.
 Where private PV helpers are exported, it also runs actual Apple serialization of all 120 samples through the production

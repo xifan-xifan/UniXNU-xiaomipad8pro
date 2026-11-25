@@ -358,15 +358,21 @@ static SsConditions cond;
 
 static void conditions(int light, int accel, int display, int lid, int attached)
 {
-    cond = (SsConditions){light, accel, display, lid, attached};
+    cond = (SsConditions){light, accel, display, lid, attached, 0};
     ss_conditions(&eng, &cond);
 }
 
 static void test_accel_gate_contract(void)
 {
-    SsConditions c = {1, 1, 1, 1, 0};
+    SsConditions c = {1, 1, 1, 1, 0, 0};
     CHECK(ss_accel_wanted(&c));
     c.attached = 1; CHECK(!ss_accel_wanted(&c));
+    CHECK(!strcmp(ss_accel_blocker(&c), "cover attached"));
+    c.accel_with_cover = 1; CHECK(ss_accel_wanted(&c));
+    c.display = 0; CHECK(!ss_accel_wanted(&c) && !strcmp(ss_accel_blocker(&c), "display off"));
+    c.display = 1; c.accel_consumer = 0;
+    CHECK(!ss_accel_wanted(&c) && !strcmp(ss_accel_blocker(&c), "no consumer"));
+    c.accel_consumer = 1; c.accel_with_cover = 0;
     c.attached = 0; c.display = 0; CHECK(!ss_accel_wanted(&c));
     c.display = 1; c.accel_consumer = 0; CHECK(!ss_accel_wanted(&c));
     CHECK(!ss_accel_wanted(NULL));
@@ -546,7 +552,7 @@ static void test_light(void)
     conditions(1, 0, 1, -1, 0);                  // a consumer, the display on, the lid unknown (open)
     run(100);
     CHECK(hub[SS_LIGHT].enables == 1 && hub[SS_ACCEL].requests == 0);
-    CHECK(out.target == 370 && out.lux == 300 && out.seq == 1 && results_ok == 1);   // the first sample at once: 300 lux -> 370
+    CHECK(out.target == 370 && out.lux == 300 && out.seq == 1 && out.light_valid && !out.light_fault && results_ok == 1);   // the first sample at once: 300 lux -> 370
     // brighter: smoothed towards 574 (1000 lux) at most every 250 ms, rising
     set_lux(1000.0f);
     int32_t last = out.target;
@@ -600,7 +606,7 @@ static void test_light_cycles(void)
         run(10);
         hub_sample(SS_LIGHT);                    // a late sample of the old session: dropped
         run(200);
-        CHECK(!hub[SS_LIGHT].enabled);
+        CHECK(!hub[SS_LIGHT].enabled && !out.light_valid);
         hub_lux = rooms[cycle % 10];
         run(5000);                               // asleep: nothing
         const uint64_t seq = out.seq;
@@ -611,7 +617,7 @@ static void test_light_cycles(void)
         if (cycle % 4 == 3) {                    // the lid as well
             conditions(1, 0, 1, 0, 0);
             run(200);
-            CHECK(!hub[SS_LIGHT].enabled);
+            CHECK(!hub[SS_LIGHT].enabled && !out.light_valid);
             conditions(1, 0, 1, 1, 0);
             run(200);
             CHECK(hub[SS_LIGHT].enabled && out.target == (int32_t)ps_als_curve_permille(lux));
@@ -703,6 +709,57 @@ static void test_accel(void)
 }
 
 // ---------------------------------------------------------------- guard and strikes
+static void test_accel_cover_acquisition(void)
+{
+    SsConfig cfg;
+    ss_defaults(&cfg);
+    fresh(&cfg);
+    bring_up(0);
+    conditions(0, 1, 1, 1, 1);
+    run(600);
+    CHECK(hub[SS_ACCEL].requests == 0);         // production cover gate remains the default
+    cond.accel_with_cover = 1;
+    ss_conditions(&eng, &cond);
+    allow = 0;
+    run(600);
+    CHECK(hub[SS_ACCEL].requests == 0);         // diagnostic acquisition still requires a guard token
+    allow = 1;
+    hold_pose(0, 9.81f, 0, 600);
+    CHECK(cond.attached == 1 && eng.cond.attached == 1 && eng.ch[SS_ACCEL].samples > 0);
+    CHECK(hub[SS_ACCEL].enables == 1 && hub[SS_ACCEL].rate_bits == fb(10.0f) && out.edge == PS_EDGE_LEFT);
+    ss_sleep(&eng, 1);
+    run(200);
+    CHECK(!hub[SS_ACCEL].enabled && out.edge == PS_EDGE_NONE && ss_idle(&eng));
+    ss_sleep(&eng, 0);
+    run(600);
+    CHECK(hub[SS_ACCEL].enabled && out.edge == PS_EDGE_LEFT);
+    cond.display = 0;
+    ss_conditions(&eng, &cond);
+    run(200);
+    CHECK(!hub[SS_ACCEL].enabled && out.edge == PS_EDGE_NONE);
+    cond.display = 1; cond.accel_consumer = 0;
+    ss_conditions(&eng, &cond);
+    run(600);
+    CHECK(!hub[SS_ACCEL].enabled);
+    cond.accel_consumer = 1;
+    ss_conditions(&eng, &cond);
+    run(600);
+    CHECK(hub[SS_ACCEL].enabled);
+    cond.accel_with_cover = 0;
+    ss_conditions(&eng, &cond);
+    run(200);
+    CHECK(!hub[SS_ACCEL].enabled && out.edge == PS_EDGE_NONE);
+    cond.accel_with_cover = 1;
+    ss_conditions(&eng, &cond);
+    run(600);
+    ss_off(&eng);
+    const uint32_t sent = hub[SS_ACCEL].requests, samples = eng.ch[SS_ACCEL].samples;
+    run(600);
+    CHECK(hub[SS_ACCEL].requests == sent && eng.ch[SS_ACCEL].samples == samples && out.edge == PS_EDGE_NONE);
+    CHECK(clean() == 0 && results_bad == 0 && hub[SS_LIGHT].requests == 0);
+    printf("PASS attached-cover bench acquisition: real cover retained, 513/1025/edge, default cover gate, guard, sleep, display, consumer and strike\n");
+}
+
 static void test_guard(void)
 {
     SsConfig cfg;
@@ -759,6 +816,11 @@ static void test_guard(void)
     CHECK(eng.light.stream.state == PAS_FAILED && leaves == 1 && hub[SS_LIGHT].enables == enables + 2 + 6);
     run(70000);
     CHECK(hub[SS_LIGHT].enables == enables + 8 && leaves == 1);
+    ss_service(&eng, SS_LIGHT, 1, 3);
+    conditions(0, 0, 0, 0, 0);
+    conditions(1, 0, 1, 1, 0);
+    run(1000);
+    CHECK(eng.light.stream.state == PAS_FAILED && out.light_fault && !out.light_valid && leaves == 1);
     // a strike: nothing more is sent, packets are ignored, the outputs at rest; the ports that carried a request are closed when the
     // glue says the DSP may still be told
     fresh(&cfg);
@@ -768,12 +830,12 @@ static void test_guard(void)
     CHECK(out.edge == PS_EDGE_LEFT && out.target == 370 && hub[0].enabled && hub[1].enabled);
     const uint32_t sent = hub[0].requests + hub[1].requests, s0 = out.seq;
     ss_off(&eng);
-    CHECK(out.edge == PS_EDGE_NONE && leaves == 1 && out.seq == s0 + 1);
+    CHECK(out.edge == PS_EDGE_NONE && leaves == 1 && out.seq == s0 + 2 && !out.light_valid && out.light_fault);
     run(10000);
     set_lux(5000.0f);
     conditions(1, 1, 0, 1, 1);
     run(1000);
-    CHECK(hub[0].requests + hub[1].requests == sent && out.seq == s0 + 1 && out.target == 370 && ss_deadline(&eng) == 0 && ss_idle(&eng));
+    CHECK(hub[0].requests + hub[1].requests == sent && out.seq == s0 + 2 && out.target == 370 && ss_deadline(&eng) == 0 && ss_idle(&eng));
     CHECK(eng.ch[SS_LIGHT].ignored > 0 && eng.ch[SS_ACCEL].ignored > 0);
     ss_close_all(&eng);
     CHECK(closes[SS_LIGHT] == 1 && closes[SS_ACCEL] == 1);
@@ -1052,6 +1114,7 @@ int main(int argc, char **argv)
     test_light_cycles();
     test_accel_gate_contract();
     test_accel();
+    test_accel_cover_acquisition();
     test_guard();
     test_sleep();
     test_service();

@@ -38,7 +38,7 @@ extern "C" {
 #endif
 
 enum {SS_LIGHT = 0, SS_ACCEL = 1, SS_STREAMS = 2};
-enum {SS_OUT_LUX = 1, SS_OUT_TARGET = 2, SS_OUT_EDGE = 4};
+enum {SS_OUT_LUX = 1, SS_OUT_TARGET = 2, SS_OUT_EDGE = 4, SS_OUT_LIGHT_STATE = 8};
 #define SS_ACCEL_HZ 10u                  /* the rotation's rate (sensors.md 5a.5): the lowest that still turns within a second */
 #define SS_LUX_MS 250u                   /* the lux output moves at most this often between targets */
 #define SS_LOG_BURST 8u
@@ -50,6 +50,8 @@ typedef struct {
     int edge;                            /* piano-sensors-edge: PS_EDGE_* (ps_edge_name), PS_EDGE_NONE while the stream is off */
     uint64_t seq;                        /* piano-sensors-seq: moves with every change of the three */
     unsigned changed;                    /* SS_OUT_*: what moved in this publication */
+    int light_valid, light_fault;         /* target belongs to this live session; fault latches for the boot */
+    uint32_t light_session;
 } SsOutputs;
 
 typedef struct {
@@ -85,6 +87,7 @@ typedef struct {
     int display;                         /* NativeGopDisplay's piano-display-power: 1 on, 0 off, -1 unknown (counts as on) */
     int lid;                             /* PianoKeyboard's piano-keyboard-hall: 1 open, 0 closed, -1 unknown (counts as open) */
     int attached;                        /* PianoKeyboard's piano-keyboard-attached: 1 attached, anything else detached */
+    int accel_with_cover;                /* explicit bench acquisition only; the glue requires a forced consumer */
 } SsConditions;
 
 typedef struct {
@@ -114,6 +117,7 @@ typedef struct {
     SsLog log;
     uint32_t requests, refused_port, responses, refused_hub, timeouts, reports, samples, unreliable, physical, errors;
     uint32_t malformed, unexpected, other, dropped, ignored, restarts, closes;
+    int64_t sample_status;               /* SNS accuracy, including 0 (unreliable); not a numeric validity test */
     char line[200];
 } SsChannel;
 
@@ -147,8 +151,10 @@ void ss_sensor(SsEngine *e, int stream, int found, const SscSuid *suid, int64_t 
 void ss_from_list(SsEngine *e, const ScClient *list);
 /* The consumers' and the hardware's state (repeating it is harmless). */
 void ss_conditions(SsEngine *e, const SsConditions *c);
-/* The level-4 accelerometer gate: consumer, display on, and MCU cover detached. */
+/* The level-4 accelerometer gate: consumer, display on, and MCU cover detached (or explicit bench acquisition). */
 int ss_accel_wanted(const SsConditions *c);
+/* The actual condition holding acquisition, or null when wanted. Sleep/guard are applied separately. */
+const char *ss_accel_blocker(const SsConditions *c);
 /* A system sleep begins (1: every stream is disabled) or ended (0). */
 void ss_sleep(SsEngine *e, int asleep);
 /* One QMI message the stream's port received. */

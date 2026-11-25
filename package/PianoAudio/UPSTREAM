@@ -187,3 +187,16 @@ Shared FAT refresh (2026-11-17): UniXNU-piano commit 8f4ce8914c0b,
   package/PianoPower/FatVolume.{c,h}, BSD-2-Clause-Patent. The optional bounded
   prefix API is used by Bluetooth only; default strict mounts are unchanged.
   Local copies retain the existing byte-for-byte owner integrity checks.
+
+Speaker protection (2026-11-21, host-tested; docs/drivers/audio.md section 12):
+
+New code, from facts: AudioSpkProt.{h,c}, the protection paths of AudioLive.c, the private-file loading and the battery voltage read
+  in AudioBoard.cpp, the sysctls in AudioDsp.cpp, tests/spkprot_host.c and the protection runs of tests/live_host.c, and
+  tooling/audio/spk-prot-extract.py. The subgraph, container and module ids, ports, container properties and the control link with
+  its properties are the stock ACDB's graph data (the owner's Mi_acdb_cal.acdb, decoded on the owner's Mac:
+  private/host-checks/20261121-audio-spk/); the payload layouts of Re25 (0x10001fa7), the battery voltage (0x10001fb5) and the live
+  data (0x10001fab) are facts read from the stock libar-pal.so and libfsalgocal.so (disassembly of the owner's copies, facts only).
+  No ACDB byte, calibration value or vendor binary is in this repository; the tool reads the owner's copies at run time.
+Specifications only (BSD-3-Clause-Clear, read as a specification, no code copied): the AudioReach graph services and SPF API
+  (github.com/AudioReach, args: acdb file format, apm_api.h / apm_module_api.h / apm_container_api.h / apm_memmap_api.h): the
+  out-of-band command header, APM_CMD_GET_CFG and its response, the container and control-link properties, the ACDB chunks.

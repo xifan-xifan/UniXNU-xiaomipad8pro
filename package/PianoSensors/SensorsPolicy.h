@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include "SensorsFixed.h"
 #include "SensorsOrient.h"
+#include "../PianoAuto/AndroidBrightness.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -58,6 +59,9 @@ extern const PsCurvePoint ps_als_curve[];
 extern const unsigned ps_als_curve_points;
 /* The curve at lux (piecewise linear between the points, flat beyond the ends). 0 lux is valid darkness (Ubuntu's ambient-zero). */
 uint32_t ps_als_curve_permille(uint32_t lux);
+typedef enum {PS_ALS_LEGACY = 0, PS_ALS_REFERENCE = 1} PsAlsCurve;
+uint32_t ps_als_end_lux(PsAlsCurve curve);
+uint32_t ps_als_target_permille(PsAlsCurve curve, uint16_t floor, uint32_t lux);
 
 #define PS_ALS_HYSTERESIS 30u            /* permille: the goal moves only when the curve differs this much (noise at a corner) */
 #define PS_ALS_STEP 10u                  /* permille: smaller changes of the smoothed value are not published */
@@ -75,6 +79,7 @@ void ps_als_init(PsAls *a);
 /* A sample (lux in thousandths, as sfx_milli gives it; negative is darkness), or a tick without one (have_sample 0: the hub's light
  * stream is on-change, the smoothing goes on between events; call it every PS_ALS_PUBLISH_MS). The target permille to send now, or -1. */
 int32_t ps_als_step(PsAls *a, int have_sample, int32_t milli_lux, uint64_t now_ms);
+int32_t ps_als_step_curve(PsAls *a, PsAlsCurve curve, uint16_t floor, int have_sample, int32_t milli_lux, uint64_t now_ms);
 
 /* ---- accelerometer -> panel edge -> display rotation ---- */
 enum {PS_EDGE_NONE = -1, PS_EDGE_TOP = 0, PS_EDGE_LEFT = 1, PS_EDGE_BOTTOM = 2, PS_EDGE_RIGHT = 3};

@@ -18,6 +18,7 @@
 #include "BoardTemps.h"
 #include "Ntc.h"
 #include "PmicAdc.h"
+#include "Perf.h"
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -661,6 +662,36 @@ static void testBoardTemps()
   CHECK(fillBoardTemps(snapshotOf(b, 30000), m.now, &t) == 0 && t.state == PIANO_BOARD_TEMPS_STOPPED && t.disabled == 0xf);
 }
 
+// gpu/fullopp1: the skin API (piano-thermal-skin-temps) carries the virtual sensor's five inputs in its order plus XO, with the two-period
+// freshness of the GPU API, and the hook adds perf::virtualSkin over the five (the CPU policy's own number).
+static void testSkinTemps()
+{
+  Model m;
+  Board b;
+  CHECK(attach(b, m) == Err::none);
+  piano_skin_temps t{};
+  CHECK(!fillSkinTemps(snapshotOf(b, 5000), m.now, &t) && !fillSkinTemps(snapshotOf(b, 5000), m.now, nullptr));
+  t.version = PIANO_SKIN_TEMPS_VERSION;
+  CHECK(fillSkinTemps(snapshotOf(b, 5000), m.now, &t) && t.state == PIANO_BOARD_TEMPS_STARTING && !t.valid);
+  const char *names[PIANO_SKIN_COUNT] = {"batt", "quiet", "charger", "wifi", "msm", "xo"};
+  const int32_t want[PIANO_SKIN_COUNT] = {30500, 29000, 30000, 31000, 33500, 32000};
+  for (unsigned r = 0; r < PIANO_SKIN_COUNT; ++r) m.temperature[Model::key(kChannels[channelIndex(names[r])])] = want[r];
+  b.round();
+  const Snapshot s = snapshotOf(b, 5000);
+  CHECK(fillSkinTemps(s, m.now, &t) && t.state == PIANO_BOARD_TEMPS_RUNNING && t.period_ms == 5000 && t.rounds == 1);
+  CHECK(t.valid == (1u << PIANO_SKIN_COUNT) - 1u && !t.virtual_valid);
+  for (unsigned r = 0; r < PIANO_SKIN_COUNT; ++r) CHECK(std::abs(t.milli_c[r] - want[r]) <= 20 && t.sample_us[r]);
+  // what hookSkinTemps adds: the stock sum over the five (the 11-20 capture's zones gave 31.0 C; these give about 30.9 C)
+  const perf::Skin v = perf::virtualSkin(t.milli_c, t.valid & 31u);
+  CHECK(v.valid && v.used == 31u && std::abs(v.milliC - 30910) <= 60);
+  // two periods old still counts, a millisecond more does not
+  const uint64_t last = s.atUs[channelIndex("batt")];
+  CHECK(fillSkinTemps(s, last + 10000ull * 1000, &t) && (t.valid & (1u << PIANO_SKIN_BATTERY)));
+  CHECK(fillSkinTemps(s, last + 10001ull * 1000, &t) && !(t.valid & (1u << PIANO_SKIN_BATTERY)));
+  // without the battery the virtual sensor is not the stock one: invalid
+  CHECK(!perf::virtualSkin(t.milli_c, t.valid & 30u).valid);
+}
+
 // The charger thermistor on the firmware's pin (PMIH0108 GPIO 12): counted only while the pin reads high-Z (queue5 P12: 22.6 kOhm,
 // "59.5 C", until the DSP's charger firmware took the pin).
 static void testPinGate()
@@ -756,6 +787,7 @@ int main(int argc, char **argv)
   testAdcErrors();
   testCodes();
   testBoardTemps();
+  testSkinTemps();
   testPinGate();
   if (failures) {
     std::printf("adc_host: %d FAILED\n", failures);

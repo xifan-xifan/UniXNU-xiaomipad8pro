@@ -292,6 +292,7 @@ typedef struct Sm8750RpmhHost {
     uint32_t mx_hlvl, cx_hlvl;              /* while Sm8750RpmhHeldRails */
     uint32_t ddr_kbps;                      /* while Sm8750RpmhHeldDdr (0 = keepalive minimum) */
     uint32_t sent;                          /* TCS transactions attempted */
+    uint32_t failures;                      /* attempted host writes that did not complete/read back */
     Sm8750RpmhRequest request;              /* last request sent */
     Sm8750RpmhResult last;                  /* its TCS evidence */
 } Sm8750RpmhHost;

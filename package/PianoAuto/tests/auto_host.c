@@ -279,8 +279,45 @@ static void test_rotate(void)
            "backoff and giving up, rotations by hand, the lock, observing only, touch retries, deadlines\n");
 }
 
+static void test_android_als(void)
+{
+    const uint32_t lux[] = {2, 4, 6, 8, 10, 15, 20, 25, 30, 82, 771, 1202, 2058, 5100, 8900, 11165};
+    const uint32_t nits[] = {6, 15, 21, 27, 36, 52, 71, 87, 97, 101, 178, 236, 343, 465, 560, 600};
+    for (unsigned i = 0; i < sizeof lux / sizeof lux[0]; ++i)
+        CHECK(ps_als_target_permille(PS_ALS_REFERENCE, 178, lux[i]) == pa_sdr_permille(pa_sdr_code(nits[i] << 16)));
+    CHECK(ps_als_target_permille(PS_ALS_REFERENCE, 921, 0) == pa_sdr_permille(921));   /* never below the lit floor */
+    /* 2026-11-21: 0 lux is Android's 3.5 nits (above the 178 floor's 2.29), 1 lux 4.5; 56 lux halfway between 30 (97) and 82 (101) */
+    CHECK(ps_als_target_permille(PS_ALS_REFERENCE, 178, 0) == pa_sdr_permille(pa_sdr_code(7u << 15)) && pa_sdr_code(7u << 15) > 178);
+    CHECK(ps_als_target_permille(PS_ALS_REFERENCE, 178, 1) == pa_sdr_permille(pa_sdr_code(9u << 15)));
+    CHECK(ps_als_target_permille(PS_ALS_REFERENCE, 178, 56) == pa_sdr_permille(pa_sdr_code(99u << 16)));
+    CHECK(ps_als_target_permille(PS_ALS_REFERENCE, 178, 99999) == pa_sdr_permille(1952));
+    CHECK(ps_als_target_permille(PS_ALS_LEGACY, 921, 200) == ps_als_curve_permille(200));
+
+    PalLight l;
+    PasConfig cfg;
+    pas_defaults(&cfg);
+    pal_init(&l, &cfg);
+    pal_conditions(&l, 1, 1, 1, 0);
+    pas_sent(&l.stream, PAS_ACT_ENABLE, 1);
+    pas_response(&l.stream, 1, 2);
+    CHECK(pal_event(&l, sfx_float_from_ratio(15000, 1), 3) == 1000 && l.lux == 10000);
+    CHECK(pal_select_curve(&l, PS_ALS_REFERENCE, 1, 921));
+    CHECK(l.target == -1 && !l.als.has && l.tick_at == 0);
+    CHECK(pal_event(&l, sfx_float_from_ratio(15000, 1), 4) == -1);
+    CHECK(pas_action(&l.stream, 4) == PAS_ACT_DISABLE);
+    pas_sent(&l.stream, PAS_ACT_DISABLE, 4);
+    pas_response(&l.stream, 1, 5);
+    pas_sent(&l.stream, PAS_ACT_ENABLE, 6);
+    CHECK(pal_event(&l, sfx_float_from_ratio(15000, 1), 7) == (int32_t)pa_sdr_permille(1952) && l.lux == 11165);
+    CHECK(l.stream.sessions == 2 && !pal_select_curve(&l, PS_ALS_REFERENCE, 1, 921));
+    l.stream.state = PAS_FAILED;
+    CHECK(pal_select_curve(&l, PS_ALS_LEGACY, 2, 921) && l.stream.state == PAS_FAILED);
+    CHECK(pal_event(&l, 0, 8) == -1 && pal_tick(&l, 20000) == -1);
+}
+
 int main(void)
 {
+    test_android_als();
     test_touch();
     test_rotate();
     stream_tests();

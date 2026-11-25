@@ -57,4 +57,31 @@ int piano_thermal_board_temps(struct piano_board_temps *t);
 #ifdef __cplusplus
 }
 #endif
+// Separate versioned API: preserve the charging ABI. Board thermistors, not calibrated skin limits.
+#define PIANO_GPU_TEMPS_VERSION 1u
+struct piano_gpu_temps {
+  uint32_t version, state, valid, disabled, period_ms, rounds;
+  int32_t milli_c[2]; // msm, quiet
+  uint32_t age_ms[2];
+  uint64_t sample_us[2];
+};
+// gpu/fullopp1 (private/host-checks/20261122-gpu-fullopp/ANALYSIS.md 3.3): the inputs of Android's virtual skin sensor (mi_thermald's
+// normal scene: battery, quiet, charger, wifi, cpu_therm) and the XO thermistor, for PianoA830's guard. Separate versioned API: the two
+// structures above stay as they are. callPlatformFunction("piano-thermal-skin-temps", false, &t, ...) on PianoThermal; lock-free, the
+// last round's readings, never touches the SPMI bus. Board thermistors, not a calibrated skin bound.
+#define PIANO_SKIN_TEMPS_VERSION 1u
+enum piano_skin_temp_index {
+  PIANO_SKIN_BATTERY = 0, PIANO_SKIN_QUIET = 1, PIANO_SKIN_CHARGER = 2, PIANO_SKIN_WIFI = 3, PIANO_SKIN_MSM = 4, PIANO_SKIN_XO = 5,
+  PIANO_SKIN_COUNT = 6
+};
+struct piano_skin_temps {
+  uint32_t version, state, valid, disabled, period_ms, rounds;   // valid bit i: milli_c[i] read and at most two periods old
+  int32_t milli_c[PIANO_SKIN_COUNT];
+  uint32_t age_ms[PIANO_SKIN_COUNT];
+  uint64_t sample_us[PIANO_SKIN_COUNT];
+  // The virtual skin temperature from the first five (PianoThermal Perf.h virtualSkin, the CPU policy's own number): valid only with
+  // the battery and quiet or cpu_therm; used: bit i = input i was in the sum.
+  int32_t virtual_milli_c;
+  uint32_t virtual_valid, virtual_used;
+};
 #endif

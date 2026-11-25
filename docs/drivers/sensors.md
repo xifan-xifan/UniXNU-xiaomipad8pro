@@ -535,6 +535,7 @@ PianoBacklight told to leave automatic mode: 0x0`, `light: QRTR port 24 closed`.
 | `piano-sensors-delay=S`, `-log=0..2` | 0, 1 | wait first; log volume (2: every SNS line) |
 | `piano-sensors-als=0\|1\|2` (level 4) | 1 | the light stream: 1 while PianoBacklight's automatic mode takes targets (`piano-backlight=2 piano-backlight-auto=1`, not manual by the user's choice); 2 always (lux without a consumer: S4); 0 never |
 | `piano-sensors-rotate=0\|1\|2` (level 4) | 1 | the accelerometer stream: 1 while piano-rotated reads the edge (`piano-rotate>=1`, not `piano-rotate-test=1`); 2 always (S4); 0 never |
+| `piano-sensors-accel-cover=1` (level 4) | 0 | bench acquisition with the cover attached, only with forced `piano-sensors-rotate>=2`; real cover state and the rotation agent's cover lock remain in force; display, system sleep and guard still gate sampling |
 | `piano-sensors-condition-trace=1` | 0 | log each change seen from NativeGopDisplay/PianoKeyboard and the resulting accelerometer gate (`wanted` or its reason) |
 | `piano-sensors-accel-hz=N` (level 4) | 10 | the rate asked (1..100 Hz); the driver runs its nearest at or above (logged) |
 | `piano-sensors-accel-batch=MS` (level 4) | 0 | the hub may hold accelerometer samples this long (`batch_period`; 0: none, as libssc; at most 1000) |
@@ -750,15 +751,28 @@ and `piano_qrtr_close` (§5c). Still open: NativeGopDisplay's transform (R2 only
 
 ### 10.3 Level 4's risks
 
-1. The light's consumer is read from PianoBacklight's boot arguments and properties: a level the user chose before the first target
-   looks like "no target yet" (its published `piano-backlight-auto` is false for both), so the light stream keeps running, its targets
-   refused, until PianoBacklight publishes its last target; bounded, and shown as the consumer in `piano-sensors-streams`.
+1. The light's consumer uses PianoBacklight's explicit automatic-mode request and control state. Its current-session validity is
+   separate from that request: waiting for the first sample must not look like a manual override, and an old target must not survive
+   display off/on as valid input. Both states are published for inspection.
 2. Without PianoKeyboard the cover reads detached and the lid open: the accelerometer streams whenever the agent runs and the display
    is on; the batched test links PianoKeyboard.
 3. Before NativeGopDisplay's first power change `piano-display-power` is absent and the display counts as on (as it is at boot).
 4. The sleep's fallback closes a port (DEL_CLIENT) when a disable is not answered within 800 ms; with PianoPower asking for quiet it
    does not, and the stream stays on through the sleep (logged): the hub's reports then wait in GLINK until the wake.
 5. The edge's axes and the light's placement are inferred (5a.9 risk 7); the rates the hub chooses are logged, not checked.
+6. A fatal-free DSP with an unchanged charger generation can still stop communicating. Check progress of GLINK receive counters
+   and fresh MCA answers alongside the sensor requests; sens-ab1 lost both while its cached health state remained unchanged.
+
+### 10.4 Bounded transport observation
+
+With `piano-sensors=4`, PianoPower arms `[sens-trace1]` diagnostics. The first outgoing SSC 514 identifies the light's local QRTR
+port and starts the shared PMIC comparison window. Each port records at most 64 enqueues, publishes, consumed packets, raw receives
+and blocked sends; shared GLINK doorbells have 64 records per direction. No payload or calibration values are printed.
+An enqueue is a host queue copy. A publish identifies the GLINK write-index interval and packet ID. A consume means the DSP-owned
+read index was observed reaching that packet's end, including FIFO wrap; it does not prove the sensor service handled the request.
+Raw receive headers are logged before router/QMI/client validation. PMIC is a separate GLINK channel, so its QRTR addresses are zero;
+only MCA read/write packets have a sequence, while PAN/UCSI use transaction -1. Missing events after a cap, a lost console line or an
+unobserved full FIFO lap are inconclusive. These diagnostics change no transport decision, retry, deadline or sensor request.
 
 ## 11. Licence note
 
@@ -774,3 +788,34 @@ runtime type encodings, plus exported symbol names that are only cited: no Apple
 client model come from libssc (GPL-3.0) and Android's sensor behaviour (the reporting modes, one client per sensor) as specification
 only, Linux's qrtr and QMI interface (GPL-2.0) for what a gone client means; the RAM image's carrier follows UniXNU's addon layout
 (`scripts/make-gpu-addon.py`, DarwinBoot's `GpuAddon` slot) as a format; the kext inflates it with libkern's own zlib.
+
+### Passive shared-edge snapshots
+
+With `piano-sensors=4`, sens-trace2 registers five root-only, read-only string sysctls under `machdep`:
+`piano_glink_fifo`, `piano_smem_state`, `piano_smem_crash`, `piano_glink_owner`, and `piano_sensors_faults`.
+Each read includes version/start/end uptime and explicit validity. FIFO indices and SMEM443/429/423 are read afresh;
+SMMU stream matches/context/global faults come from the existing mapping, without clearing faults or changing routes.
+The owner copy has a sequence/indices consistency check (three attempts, no wait); failed checks are unavailable evidence.
+Up to 16 pending TX frame boundaries are decoded. Raw bytes stop at protocol headers (FastRPC40B, QRTR/QMI39B or PMIC12B),
+never file data, SUID or calibration; crash text is separately limited to 80 bytes. Each export is capped at 64KiB.
+IPCC reads only CONFIG; counters/last values observe existing receive/clear/send calls. Enable strobes are recorded requests,
+not mask readbacks; remote mask/pending/ACK and independent watchdog state remain unknown. No new doorbell or SMP2P ACK is issued.
+These are diagnostic interfaces, not a repair or evidence that sensors work on the tablet.
+
+### Intent-request diagnostics and bounded A/B
+
+With `piano-sensors=4`, `[sens-trace3]` logs every incoming GLINK RX_INTENT_REQ and INTENT_REQ_ACK, including channel, local/remote
+IDs, requested size, fixed receive size, grant/refusal and reason. Zero-inclusive summaries every 30 seconds include FIFO indices;
+per-channel counters retain request sizes (last/min/max/sum), grants/refusals and replies to our outgoing requests across reopen.
+Pending-frame diagnostics distinguish FastRPC on `fastrpcglink-apps-dsp` from the 24-byte audio GPR header on `adsp_apps`.
+The passive FIFO/owner exports also include intent counters. A grant counter records the host decision; an owed advertisement or
+ACK remains visible as reply debt until published. Console continuity and valid export headers must be checked before treating zero
+requests as evidence. The pending-frame decoder remains available to identify the bytes before the first light request.
+
+`piano-glink-intent-grant=1` enables an experimental requested-size allocation path; its default is off. Each remote request allocates
+a fresh intent of exactly the requested size, with limits of 64KiB per intent, 256KiB for the whole edge and 24 total receive slots per
+channel (including fixed buffers). Zero sizes, exhausted limits and failed allocations are explicitly refused. Advertisements precede
+grant ACKs; FIFO pressure retains both without duplicate allocation/counting. Receives use each slot's actual capacity, and remote
+close/reopen frees dynamic buffers. Linux's allocation behaviour was studied as a specification; no source text was copied.
+The diagnostic comparison keeps one committed KC and changes either this grant switch or `piano-audio=0`, independently.
+These controls have host validation only; their effect on the shared-edge stall needs tablet evidence.

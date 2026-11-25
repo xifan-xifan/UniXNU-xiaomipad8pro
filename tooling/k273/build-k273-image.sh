@@ -15,7 +15,6 @@
 #   K273_ROOT    k273 (default): the 27.3 root image on linux_data (native-ufs-root-part=linux_data), its seed and trust cache from
 #                $K273_INPUTS/root; k27: the installed 27.0.1 root on linux_rootfs with its seed and trust cache (out/inputs), to
 #                test the 27.3 collection and identity without the 27.3 root
-#   K273_ROOT_PART  linux_data (default) or linux_rootfs for the 27.3 root window.
 # The rest is build-native-image.sh's (PIANO_GPU, PIANO_EXTRA_ARGS, PIANO_RESET_AFTER, ...). The Data disk is volatile
 # (PIANO_DATA_PERSIST=0) unless set: no 27.3 image opens the owner's store.
 # This writes the same out/ paths as the 27.0.1 line's builds: run it in its own checkout (worktree), or copy the results away
@@ -46,28 +45,7 @@ case ${K273_ROOT:-k273} in
     export PIANO_ROOT_VOLUME_UUID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["os_volume_uuid"])' "$R/root.json")
     export PIANO_SYSTEMOS_UUID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["systemos_volume_uuid"])' "$R/root.json")
     export PIANO_BASE_SEED=$R/scratch-data.img PIANO_BASE_TRUST=$R/kernel.macho.trustcache
-    ROOT_PART=${K273_ROOT_PART:-linux_data}
-    case $ROOT_PART in
-      linux_data|linux_rootfs) ;;
-      *) echo "K273_ROOT_PART must be linux_data or linux_rootfs" >&2; exit 2 ;;
-    esac
-    if [[ ${PIANO_EXTRA_ARGS:-} =~ (^|[[:space:]])native-ufs-root-part(=|[[:space:]]|$) ]]; then
-      echo "Set the 27.3 root partition with K273_ROOT_PART, not PIANO_EXTRA_ARGS" >&2
-      exit 2
-    fi
-    python3 - "$R/root.json" "$ROOT_PART" <<'CHECK_ROOT_PART'
-import json
-import sys
-
-path, selected = sys.argv[1:]
-with open(path) as source:
-    record = json.load(source)
-for key in ('root_extent', 'write'):
-    placement = record.get(key)
-    if placement is not None and placement.get('partition') != selected:
-        sys.exit(f'{path}: {key} record targets {placement.get("partition")!r}, but K273_ROOT_PART selects {selected!r}')
-CHECK_ROOT_PART
-    export PIANO_EXTRA_ARGS="native-ufs-root-part=$ROOT_PART ${PIANO_EXTRA_ARGS:-}"
+    export PIANO_EXTRA_ARGS="native-ufs-root-part=linux_data ${PIANO_EXTRA_ARGS:-}"
     ;;
   k27)
     # The installed 27.0.1 root's volumes (configs/k27-adt.toml).

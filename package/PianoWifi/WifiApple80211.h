@@ -118,6 +118,7 @@ enum : uint32_t {
   kEvAssocDone = 9,
   kEvScanDone = 10,
   kEvScanCacheUpdated = 15,
+  kEvDriverAvailable = 55,
 };
 
 // Link-changed event4 and GET156: 27.3 airportd/CoreWiFi consume the same 32 bytes.
@@ -133,6 +134,51 @@ struct LinkEvent {
 static_assert(sizeof(LinkEvent) == 32 && __builtin_offsetof(LinkEvent, involuntary) == 0x10 &&
               __builtin_offsetof(LinkEvent, reason) == 0x14 && __builtin_offsetof(LinkEvent, subreason) == 0x18,
               "27.3 link event layout");
+
+constexpr uint32_t kBsdEventHeaderSize = 24, kBsdEventNameSize = 16;
+constexpr uint32_t kBsdEventMaxSize = 288; // MLEN in the pinned 27.3 kernel
+constexpr uint32_t kBsdScanDoneStatus[] = {1, 0}; // diagnostic {version, status}
+static_assert(kBsdEventHeaderSize + kBsdEventNameSize + sizeof(LinkEvent) <= kBsdEventMaxSize, "link kernel event fits");
+static_assert(kBsdEventHeaderSize + kBsdEventNameSize + sizeof(kBsdScanDoneStatus) <= kBsdEventMaxSize, "scan kernel event fits");
+
+struct BsdEventPayload {
+  const void *data;
+  uint32_t size;
+};
+
+// Power/SSID/BSSID are change notices and their values come from GETs.
+// Keep ASSOC_DONE in the BSD sequence as a notice. 27.3 airportd's BSD
+// callback has no event-9 payload parser and reads the join result via GET21.
+struct Power {
+  uint32_t version, radios, state[4];
+};
+static_assert(sizeof(Power) == 24, "power");
+
+// DRIVER_AVAILABLE (BSD event 55). 27.3 airportd's _bsd_80211_event_callback (0x1000723f0) reads the u32 at +8 as `available` (flags at
+// +4, reason at +0x10, subreason at +0x14) into its device node's isDriverAvailable byte; __allowAutoJoinWithTrigger refuses every
+// auto-join ("driver not available", DriverUnavailable) while it is 0, and a node found through interfaceAdded starts at 0 (owner
+// R4, LOCATIOND-AIRPORTD-R4.md). Apple's family posts a 0xf8-byte record; flags stay 0 so no trap/minidump fields are parsed.
+struct DriverAvailability {
+  uint32_t version, flags, available, unused0, reason, subreason;
+  uint8_t unused1[0xf8 - 24];
+};
+static_assert(sizeof(DriverAvailability) == 0xf8 && __builtin_offsetof(DriverAvailability, available) == 8 &&
+              __builtin_offsetof(DriverAvailability, reason) == 0x10 && __builtin_offsetof(DriverAvailability, subreason) == 0x14,
+              "27.3 driver availability layout");
+static_assert(kBsdEventHeaderSize + kBsdEventNameSize + sizeof(DriverAvailability) <= kBsdEventMaxSize,
+              "driver availability kernel event fits");
+
+inline BsdEventPayload bsdEventPayload(uint32_t code, const LinkEvent &link, bool scanStatus, const Power *power = nullptr,
+                                       const DriverAvailability *availability = nullptr)
+{
+  if (code == kEvLinkChanged) return {&link, sizeof link};
+  // POWER_CHANGED keeps the power structure the POWER get answers (24 bytes, well inside the BSD limit). (The v13.1b boot helper's
+  // stall once blamed on its absence was the locationd wait: LOCATIOND-SSID.md.)
+  if (code == kEvPowerChanged && power) return {power, sizeof *power};
+  if (code == kEvDriverAvailable && availability) return {availability, sizeof *availability};
+  if (code == kEvScanDone && scanStatus) return {kBsdScanDoneStatus, sizeof kBsdScanDoneStatus};
+  return {nullptr, 0};
+}
 
 // SET 20 carries one of two fixed association records.  The field meanings and offsets are
 // confirmed by the 27.3 Apple80211Associate2 parser and by the Pad 6 Pro binding (PAD6P0125;
@@ -165,15 +211,6 @@ static_assert(sizeof(AssociateRequestLegacy) == 592 && offsetof(AssociateRequest
               "legacy association layout");
 static_assert(sizeof(AssociateRequest27) == 656 && offsetof(AssociateRequest27, network) == 0x10,
               "modern association layout");
-
-// Modern Apple80211Associate2 completion.  The 27.3 event consumer accepts this 540-byte
-// record; the first attempt slot carries the BSSID, result at 0x214 and validity at 0x218.
-struct AssociateEvent27 {
-  uint8_t attempts[10][52];
-  uint32_t reserved[2], reason, result, has_result;
-};
-static_assert(sizeof(AssociateEvent27) == 540 && offsetof(AssociateEvent27, result) == 0x214 &&
-              offsetof(AssociateEvent27, has_result) == 0x218, "modern association event");
 
 enum : uint32_t {
   kAssociateProblemNone = 0,
@@ -296,6 +333,11 @@ struct ScanResult {
   uint8_t elements[1024];        // 0x8c
 };
 constexpr uint32_t kScanResultBytes27 = 2280;   // what airportd asks with (its SCAN_RESULT and CURRENT_NETWORK buffers)
+// The record's TIMESTAMP: IO80211's __addScanResultToList (0x1c4644e48) puts the u64 at 0x8d0 under "TIMESTAMP"; CoreWiFi's
+// -[NSDictionary(ScanRecord) timestamp] takes it as is and -[CWFScanResult age] is (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) -
+// timestamp) / 1000000 ms, which airportd's auto-join compares with its maxAge (20000 ms). Nanoseconds of mach_continuous_time.
+constexpr uint32_t kScanResultTimestampAt = 0x8d0;
+static_assert(kScanResultTimestampAt + 8 <= kScanResultBytes27, "timestamp inside the record");
 static_assert(sizeof(ScanResult) == 1164 && __builtin_offsetof(ScanResult, rssi) == 0x16 &&
               __builtin_offsetof(ScanResult, bssid) == 0x1c && __builtin_offsetof(ScanResult, ssidLength) == 0x60 &&
               __builtin_offsetof(ScanResult, ageMs) == 0x84 && __builtin_offsetof(ScanResult, elementsLength) == 0x8a &&
@@ -303,10 +345,7 @@ static_assert(sizeof(ScanResult) == 1164 && __builtin_offsetof(ScanResult, rssi)
 
 // POWER: {version, radios, state per radio}; 24 bytes on 27.3 as in sheng's. The set reads state[0]; airportd's set first gets the
 // radio count, so radios must not be 0.
-struct Power {
-  uint32_t version, radios, state[4];
-};
-static_assert(sizeof(Power) == 24, "power");
+
 
 // PHY_MODE: {version, supported modes, the active mode}.
 struct PhyMode {
@@ -419,6 +458,13 @@ inline uint32_t buildElements(const Bss &b, uint8_t *out, uint32_t capacity)
 // user-client paths must return the full record even though our named struct contains only the common 1164-byte prefix.
 inline uint32_t resultBytes(const ScanResult &) { return kScanResultBytes27; }
 
+// The full record's TIMESTAMP (the caller's buffer holds kScanResultBytes27): the time the record is handed out. The list is the
+// last completed scan's (refreshed at every SCAN_REQ from the published list), so its age as airportd counts it starts here.
+inline void stampScanResult(uint8_t *record, uint64_t nowNs)
+{
+  for (unsigned i = 0; i < 8; ++i) record[kScanResultTimestampAt + i] = uint8_t(nowNs >> (8 * i));
+}
+
 inline void fillScanResult(ScanResult &r, const Bss &b)
 {
   uint8_t *raw = reinterpret_cast<uint8_t *>(&r);
@@ -467,7 +513,7 @@ constexpr uint32_t kAcceptDefault = kAcceptInfraEnumerated;
 enum : uint32_t {
   kShengMedium = 0x1,    // SIOCGIFMEDIA answers IEEE 802.11 auto ("the framework lists wireless interfaces by this media
                          // type"): the medium dictionary carries kIOMediumIEEE80211Auto and it is the selected medium
-  kShengEvents = 0x2,    // the event set: SSID_CHANGED and BSSID_CHANGED posted with every LINK_CHANGED (their post_link_down)
+  kShengEvents = 0x2,    // retained boot-argument bit; link and identity events are unconditional
   kShengCaps46 = 0x4,    // CARD_CAPABILITIES bit 46: "the framework's scan waits for the scan-done event, up to 20 s, only
                          // with this bit; without it the results are read the moment the request returns"
   kShengUcKernel = 0x8,  // a user-client request's data rides inside the structure itself (a kernel buffer): byte replies
@@ -492,7 +538,6 @@ constexpr bool useIfnet2Old(uint32_t mode) { return (mode & kIfnet2Old) != 0; }
 struct Association {
   bool associated = false;
   bool authorized = false;
-  bool modern = false;             // the accepted SET 20 used the 656-byte request
   uint8_t ssid[kSsidMax] = {};
   uint8_t ssidLength = 0;
   uint8_t bssid[6] = {};
@@ -505,6 +550,7 @@ struct Association {
   uint8_t cipher = 0;
   uint8_t opMode = kOpModeStation;
   uint32_t result = 0;
+  uint32_t generation = 0;
   uint32_t state = kStateInit;
 };
 
@@ -538,7 +584,29 @@ inline AssociationTransition associationTransition(const Association &old, const
 inline bool associationLinkDownEvent(const Association &old, const Association &next)
 {
   return associationTransition(old, next).disconnected ||
-         (!next.associated && next.result != 0 && old.result != next.result);
+         (!next.associated && next.result != 0 && (old.result != next.result || old.generation != next.generation));
+}
+
+struct AssociationEvents {
+  uint32_t codes[4] = {};
+  unsigned count = 0;
+};
+
+inline AssociationEvents associationEvents(const Association &old, const Association &next, bool voluntary)
+{
+  AssociationEvents events;
+  const auto transition = associationTransition(old, next);
+  const bool down = associationLinkDownEvent(old, next);
+  const bool completion = transition.assocDone ||
+                          ((old.result != next.result || old.generation != next.generation) && next.result &&
+                           (!down || (!voluntary && !old.authorized)));
+  if (completion) events.codes[events.count++] = kEvAssocDone;
+  if (transition.connected || down) {
+    events.codes[events.count++] = kEvLinkChanged;
+    events.codes[events.count++] = kEvSsidChanged;
+    events.codes[events.count++] = kEvBssidChanged;
+  }
+  return events;
 }
 
 // The interface's apple80211 state (one per interface; the kext keeps it under its lock). No pointer in it: the kext keeps it in
@@ -559,6 +627,7 @@ struct State {
   uint32_t accept = kAcceptDefault;   // kAccept*: how requests without a layout of ours are answered (a runtime switch, M1b)
   uint32_t acceptedUnknown = 0;   // requests answered only because of `accept`
   uint32_t sheng = 0;             // kSheng*: the UniXNU-sheng binding bits above (a runtime switch)
+  uint64_t nowNs = 0;             // the request's time (mach_continuous_time in ns): the scan records' TIMESTAMP
 };
 
 // A successful SET19 must notify even when it repeats the boot-on state:
@@ -615,6 +684,7 @@ struct Answer {
   uint32_t wrote = 0;      // bytes copied out (the log line's "wrote")
   bool accepted = false;   // answered by an accept mode, not by a handler of ours
   bool associationProfile = false;  // SET 20 parsed into associationProfileData below
+  bool powerOn = false;            // requested SET19 state, published only by the owner
   uint32_t associationProblem = kAssociateProblemNone;
   uint32_t associationLayout = 0;
   uint32_t associationHeader0 = 0;
@@ -872,7 +942,7 @@ inline Answer handle(State &s, const Identity &id, bool set, Req &rq, const User
       if (rq.length < sizeof p) { a.error = kErrInval; return a; }
       if ((a.error = copyIn(rq, io, &p, sizeof p))) return a;
       if (p.version != 1 || p.radios != 1 || p.state[0] > 1) { a.error = kErrInval; return a; }
-      s.power = p.state[0] != 0;
+      a.powerOn = p.state[0] != 0;
       ++s.powerSets;
       a.effects |= kDoPowerChanged;
       return a;
@@ -895,7 +965,20 @@ inline Answer handle(State &s, const Identity &id, bool set, Req &rq, const User
       s.cursor = 0;
       s.cacheCleared = true;
       return a;
-    case kCountryCode:
+    case kCountryCode: {
+      // Firmware owns the regulatory domain. Never acknowledge an unperformed
+      // change. SET51 is version1 + alpha2/NUL/pad (8 bytes), unlike GET51.
+      uint8_t country[8];
+      if (rq.length != sizeof country) { a.error = kErrInval; return a; }
+      if ((a.error = copyIn(rq, io, country, sizeof country))) return a;
+      if (country[0] != 1 || country[1] || country[2] || country[3] || country[4] < 'A' || country[4] > 'Z' ||
+          country[5] < 'A' || country[5] > 'Z' || country[6]) {
+        a.error = kErrInval;
+        return a;
+      }
+      if (country[4] != uint8_t(s.country[0]) || country[5] != uint8_t(s.country[1])) a.error = kErrUnsupported;
+      return a;
+    }
     case kLocale:
     case kPowerSave:
       return a;   // accepted, nothing to change in M1
@@ -908,7 +991,6 @@ inline Answer handle(State &s, const Identity &id, bool set, Req &rq, const User
       a.associationLayout = rq.length;
       (void)parseAssociate(rq, io, a);
       if (a.associationProfile) {
-        s.association.modern = rq.length == sizeof(AssociateRequest27);
         a.error = 0;
       }
       return a;
@@ -1035,11 +1117,23 @@ inline Answer handle(State &s, const Identity &id, bool set, Req &rq, const User
     return a;
   case kCurrentNetwork:
     if (!s.association.associated) { a.error = kErrNotAssociated; return a; }
-    { Bss b = {}; for (unsigned i = 0; i < 6; ++i) b.bssid[i] = s.association.bssid[i];
+    { Bss b = {};
+      for (uint32_t i = 0; i < s.scan.count; ++i) {
+        const Bss &candidate = s.scan.bss[i];
+        bool same = true;
+        for (unsigned j = 0; j < 6; ++j) same = same && candidate.bssid[j] == s.association.bssid[j];
+        if (same) { b = candidate; break; }
+      }
+      for (unsigned i = 0; i < 6; ++i) b.bssid[i] = s.association.bssid[i];
       b.ssidLength = s.association.ssidLength; for (unsigned i = 0; i < b.ssidLength; ++i) b.ssid[i] = s.association.ssid[i];
       b.channel = s.association.channel; b.freq = s.association.frequency; b.rssi = s.association.rssi;
-      b.rateCount = 1; b.rates[0] = uint8_t(s.association.rate > 127 ? 127 : s.association.rate * 2);
+      if (s.association.authType == 2) b.capability |= 0x11; // ESS + privacy even after cache clear
+      if (!b.rateCount) {
+        b.rateCount = 1;
+        b.rates[0] = uint8_t(s.association.rate > 63 ? 126 : s.association.rate * 2);
+      }
       ScanResult *r = reinterpret_cast<ScanResult *>(scratch); fillScanResult(*r, b);
+      stampScanResult(scratch, s.nowNs);
       a.error = copyOut(rq, io, r, resultBytes(*r), a); }
     return a;
   case kAuthType:
@@ -1095,6 +1189,7 @@ inline Answer handle(State &s, const Identity &id, bool set, Req &rq, const User
     }
     ScanResult *r = reinterpret_cast<ScanResult *>(scratch);
     fillScanResult(*r, s.scan.bss[s.cursor]);
+    stampScanResult(scratch, s.nowNs);
     a.error = copyOut(rq, io, r, resultBytes(*r), a);
     if (a.error) return a;   // the cursor stays where it is: a faulted record is asked for again (review 2026-11-14 F9)
     ++s.cursor;

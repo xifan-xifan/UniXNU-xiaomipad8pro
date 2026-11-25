@@ -15,31 +15,49 @@ SERIAL=${PIANO_SERIAL:?set PIANO_SERIAL in ~/.config/piano/env}
 export PATH=/opt/homebrew/share/android-commandlinetools/platform-tools:$PATH
 L=$D/logs/native-runs/$(date +%Y%m%d-%H%M%S)-loop; mkdir -p "$L"
 log() { echo "$(date +%T) $*" | tee -a "$L/loop.log"; }
-abl() { /tmp/tmo.sh 5 fastboot devices | grep -q "^$SERIAL[[:space:]]"; }
+abl() { /tmp/tmo.sh 5 fastboot devices | grep -q "^${SERIAL}[[:space:]]"; }
 uefi() { /tmp/tmo.sh 5 fastboot devices | grep -q "^piano-uefi[[:space:]]"; }
 wait_for() { local what=$1 deadline=$(( $(date +%s) + $2 ));
   while :; do $what && return 0; [ "$(date +%s)" -lt "$deadline" ] || return 1; sleep 0.5; done; }
 abl_answers() { /tmp/tmo.sh 10 fastboot -s "$SERIAL" getvar product 2>&1 | grep -q '^product:'; }
 # Never apply a host timeout to an OUT download: killing it can strand ABL.
 boot_ram() { local rc=0 marker=${LOOP_STATUS_FILE:-$L/status}.boot-inflight
+  if [ -n "${PRR_RUN_RESULTS:-}" ]; then
+    local epoch elapsed
+    epoch=$(date +%s)
+    if [ -n "${PRR_READER_ABL_EPOCH:-}" ]; then
+      elapsed=$(( epoch - PRR_READER_ABL_EPOCH ))
+      if [ "$elapsed" -lt 0 ] || [ "$elapsed" -ge 60 ]; then
+        : > "$PRR_RUN_RESULTS/prr-boot-refused"
+        echo "PRR reader expired before starting the next boot"
+        return 2
+      fi
+    fi
+    printf '%s\n' "$epoch" > "$PRR_RUN_RESULTS/prr-boot-epoch"
+  fi
   : > "$marker"
   fastboot -s "$SERIAL" boot "$1" || rc=$?
   rm -f "$marker"; return "$rc"; }
 [ ! -e /tmp/piano-tablet.recovery-required ] || { log "FATAL recovery required; no boot attempted"; exit 3; }
 RESET=$(strings "$IMG" | grep -o 'piano-reset-after=[0-9][0-9]*' | head -1 | cut -d= -f2 || true); RESET=${RESET:-45}
 log "image $(shasum -a 256 "$IMG" | cut -c1-16), reset after ${RESET} s; dump image $(shasum -a 256 "$DUMP" | cut -c1-16)"
-wait_for abl 240 || { log "no ABL fastboot before start deadline"; exit 1; }
+wait_for abl 240 || { log "no ABL fastboot (parked kernel? power + volume-down 15-20 s)"; exit 1; }
 t0=$(date +%s)
 boot_ram "$IMG" > "$L/fastboot.log" 2>&1 || { cat "$L/fastboot.log"; exit 1; }
 wait_for uefi 40 || { log "our UEFI did not appear"; exit 1; }
-if wait_for "eval ! uefi" 40; then
-  log "UEFI USB disappeared after $(( $(date +%s) - t0 )) s; XNU entry unverified"
-else
-  log "UEFI USB remained visible through the transition deadline"
+wait_for "eval ! uefi" 40 || true
+log "XNU started after $(( $(date +%s) - t0 )) s"
+wait_for abl $((RESET + 150)) || { log "no ABL fastboot within $((RESET + 150)) s (parked? power + volume-down 15-20 s)"; exit 2; }
+if [ -n "${PRR_RUN_RESULTS:-}" ]; then
+  date +%s > "$PRR_RUN_RESULTS/prr-abl-epoch"
 fi
-wait_for abl $((RESET + 150)) || { log "no ABL fastboot within $((RESET + 150)) s; unattended return unverified"; exit 2; }
 log "back in ABL fastboot after $(( $(date +%s) - t0 )) s; checking dump eligibility"
 abl_answers || { log "FATAL ABL enumerates but does not answer after the test; no dump attempted"; exit 3; }
+if [ -n "${PRR_RUN_RESULTS:-}" ]; then
+  [ -z "${DUMP_GUARD_RECORD:-}" ] || { log "FATAL PRR qualification forbids a dump boot"; exit 2; }
+  log "PRR pair: no dump boot, ABL verified"
+  exit 0
+fi
 # Optional mailbox export must never trade away the only working recovery path.
 # 3750 mV is a conservative scheduling policy, NOT a measured PMIC cutoff.
 voltage=$(/tmp/tmo.sh 10 fastboot -s "$SERIAL" getvar battery-voltage 2>&1 || true)

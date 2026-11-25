@@ -48,7 +48,17 @@
 #include "../PianoDpu/PianoDpuFlipClient.h"   // the zero-copy flip's request (native-gop-display-flip=1)
 #include "../PianoDp/DpFake.h"                 // D6: the second, RAM-backed test display (piano-dp-fake)
 #include "GopCompose.h"                        // the composition and the swap pipeline (portable, tests/gop_host.cpp)
+#include "GopRefresh.h"                        // the fixed refresh contract (native-gop-display-120=1; tests/gop_host.cpp)
 #include "CopyRows.h"
+#include "../include/PianoGpuQualificationDisplay.h"
+static void qualificationDisplay(const PianoGpuQualificationDisplay *evidence) {
+    uint32_t enabled=0;
+    if(!PE_parse_boot_argn("piano-gpu-r3b",&enabled,sizeof enabled) || enabled!=1)return;
+    IOService *gpu=IOService::copyMatchingService(IOService::serviceMatching("PianoA830"));
+    if(!gpu)return;
+    gpu->callPlatformFunction("piano-gpu-qualification-display",false,const_cast<PianoGpuQualificationDisplay *>(evidence),nullptr,nullptr,nullptr);
+    gpu->release();
+}
 
 using gopcompose::Job;
 using gopcompose::Rect;
@@ -143,6 +153,12 @@ static constexpr size_t kSwapLayerSourceRect = 17;
 static constexpr size_t kSwapLayerDestRect = 81;
 static constexpr size_t kSwapNext = 4040;
 static constexpr size_t kSwapPrev = 4048;
+// 2026-11-21 (BRIGHTNESS-SLIDER.md): the swap's brightness in the client's record (27.3 IOMobileFramebuffer kern_SwapSetBrightness
+// 0x1b5ed92d8 stores 1 at ctx+0x3cc and the nits, a double, at ctx+0x3d6; the record starts at ctx+0x18, as SwapDirtyRegion's
+// ctx+0x2f0/+0x344 are the family's rec+0x2d8/+0x32c): flag byte rec+0x3b4, packed double rec+0x3be (s_swap_submit reads rec+0x452).
+static constexpr bool kRecBrightnessKnown = true;
+static constexpr size_t kRecBrightnessSet = 0x3b4;
+static constexpr size_t kRecBrightnessNits = 0x3be;
 static constexpr size_t kNotifyAsyncReference = 24;
 static constexpr size_t kNotifyMask = 120;
 static constexpr size_t kNotifyLastTime = 128;
@@ -192,6 +208,8 @@ static constexpr size_t kSwapLayerSourceRect = 17;
 static constexpr size_t kSwapLayerDestRect = 81;
 static constexpr size_t kSwapNext = 3384;          // TAILQ entry of the queue
 static constexpr size_t kSwapPrev = 3392;
+static constexpr bool kRecBrightnessKnown = false;   // the 27.0.1 record's layout was not read
+static constexpr size_t kRecBrightnessSet = 0, kRecBrightnessNits = 0;
 // IOMFBNotifyRequest
 static constexpr size_t kNotifyAsyncReference = 24;   // OSAsyncReference64 of the user client
 static constexpr size_t kNotifyMask = 120;            // which swap info words the client wants; bit 31: as 32-bit halves
@@ -217,6 +235,10 @@ static inline bool swapInfoHeld(void *display)
 // Kernel interfaces of the collection's kexts with no header here.
 void iomfbUpdateSwapInfoState(IOMobileFramebufferLegacy *, IOMFBSwapIORequest *, uint32_t)
     __asm("__ZN25IOMobileFramebufferLegacy28update_swap_info_state_gatedEP18IOMFBSwapIORequest24IOMFBSwapCompletionState");
+// 27.3 IOMobileFramebufferLegacy::setDisplayRefreshProperties() (0xfffffe000ac329d0, exported, called by no family code): it calls
+// the virtual get_timing_attributes_gated and publishes the six words as the dictionary IOMFBDisplayRefresh (displayMinRefreshInterval,
+// ...MachTime, displayMaxRefreshInterval, ...MachTime, displayRefreshStep, ...MachTime); true when published.
+bool iomfbSetDisplayRefreshProperties(IOMobileFramebufferLegacy *) __asm("__ZN25IOMobileFramebufferLegacy27setDisplayRefreshPropertiesEv");
 void iomfbSwapInfoDispatch(IOMobileFramebufferLegacy *, void *)
     __asm("__ZN25IOMobileFramebufferLegacy31swap_info_notify_dispatch_gatedEPNS_12SwapInfoBlobE");
 IOReturn userClientSendAsyncResult(io_user_reference_t *reference, IOReturn, io_user_reference_t *args, UInt32 count, IOOptionBits)
@@ -283,11 +305,18 @@ public:
     IOReturn notify_crc_ready_gated(unsigned int) override;
     bool are_timings_enabled() const override;
     IOReturn do_power_state_change_gated() override;
+    IOReturn get_timing_attributes_gated(IOMFB::RefreshTimingAttributes *, bool) const override;
 
 private:
     // The timing published (ADT refresh-hz, boot-arg native-gop-display-hz, 30 to 240; default 60). The panel itself keeps the mode
     // ABL set (120 Hz); this is the rate WindowServer is told and the VBL timer runs at.
     uint32_t fRefreshHz;
+    // native-gop-display-120=1 (default 0; GopRefresh.h, docs/drivers/native-gop-display.md "120 Hz"): the panel's own 120 Hz told
+    // through every interface WindowServer reads: the timing element at fRefreshHz (120 unless native-gop-display-hz says otherwise),
+    // get_timing_attributes_gated at one fRefreshHz period (the family's answers 1/60 s whatever the mode), IOMFBDisplayRefresh published
+    // from it before the service registers, and the VBL tick on absolute deadlines. Off: the family's slot and the relative tick, as before.
+    bool fRefreshContract = false;
+    mutable uint32_t fTimingAttributeCalls = 0;
     // The panel's physical size (ADT panel-width-mm / panel-height-mm, boot-arg native-gop-display-mm=WIDTHxHEIGHT; default piano's
     // 239x163 mm, about 340 dpi at 3200x2136). macOS offers its HiDPI ("looks like" half the pixels) modes by the density these give.
     uint32_t fWidthMM, fHeightMM;
@@ -493,6 +522,9 @@ private:
     uint32_t fAuditShown, fAuditWanted, fAuditBad, fAuditCount;
     void publishDisplayPower(bool on);
     void backlightCallout(bool on);
+    void swapBrightness(const uint8_t *rec);   // 2026-11-21: the swap's nits to PianoBacklight
+    int32_t fSwapNitsLast = -1;
+    uint32_t fSwapNitsSent = 0;
     // Zero-copy flips (boot-arg native-gop-display-flip=1, with PianoDpu's piano-dpu=2 piano-dpu-flip=4; docs/drivers/dpu.md §4.1;
     // without the argument nothing of this runs): the copy thread hands a swap's surface, after the GPU fence wait, to PianoDpu's
     // "PianoDpuFlip" (package/PianoDpu/PianoDpuFlipClient.h), found by class like the GPU; refused, it copies the surface as before
@@ -748,6 +780,11 @@ bool NativeGopDisplay::start(IOService *provider)
     GOPLOG("start on %s (ADT %s)\n", provider->getName(), node ? node->getName() : "?");
     uint64_t number = 0;
     fRefreshHz = adtNumber(node, "refresh-hz", &number) ? static_cast<uint32_t>(number) : 60;
+    uint32_t contract = 0;
+    PE_parse_boot_argn("native-gop-display-120", &contract, sizeof(contract));
+    fRefreshContract = contract == 1 && !fExternal;   // D6's second display keeps its own timing (fFake.hz)
+    if (fRefreshContract)
+        fRefreshHz = 120;
     PE_parse_boot_argn("native-gop-display-hz", &fRefreshHz, sizeof(fRefreshHz));
     if (fRefreshHz < 30 || fRefreshHz > 240)
         fRefreshHz = 60;
@@ -1292,6 +1329,12 @@ IOReturn NativeGopDisplay::swap_begin_gated()
               fCopies, fCopies ? fCopyNs / fCopies / 1000 : 0, fCopies ? fPrepareNs / fCopies / 1000 : 0,
               fCopies ? fReadNs / fCopies / 1000 : 0, fCopies ? fConvertNs / fCopies / 1000 : 0, fCopies ? fWriteNs / fCopies / 1000 : 0,
               fCopyMaxNs / 1000, fWaitReleased);
+        uint64_t reportNs=0;
+        absolutetime_to_nanoseconds(reportNow, &reportNs);
+        const PianoGpuQualificationDisplay evidence={reportNs/1000,periodNs/1000,fSubmitted,fFrames,fDropped,fCopies,
+            fCopies?fCopyNs/fCopies/1000:0,fCopyMaxNs/1000,fCopies?fPrepareNs/fCopies/1000:0,
+            fCopies?fReadNs/fCopies/1000:0,fCopies?fConvertNs/fCopies/1000:0,fCopies?fWriteNs/fCopies/1000:0};
+        qualificationDisplay(&evidence);
         if (fCopiesSkipped)
             GOPLOG("%llu copies skipped for newer ones\n", fCopiesSkipped);
         GOPLOG("at most %llu frames in a second\n", fPeakFps);
@@ -1374,6 +1417,10 @@ IOReturn NativeGopDisplay::swap_begin_gated()
     fVblStopped = false;
     uint64_t period;
     nanoseconds_to_absolutetime(1000000000ULL / fRefreshHz, &period);
+    if (fRefreshContract) {   // GopRefresh.h nextDeadline: on a grid one period apart; a submission mid-period keeps the phase
+        fVBLDue = goprefresh::nextDeadline(fVBLDue, mach_absolute_time(), period);
+        return fVBL->wakeAtTime(fVBLDue);
+    }
     fVBLDue = mach_absolute_time() + period;
     return fVBL->setTimeoutUS(1000000 / fRefreshHz);
 }
@@ -1404,6 +1451,8 @@ IOReturn NativeGopDisplay::swap_submit(IOMFBSwapRec *rec, IOUserClient *client, 
 {
     if (rec)
         fSubmitTime[reinterpret_cast<const uint32_t *>(rec)[38] % 16] = mach_absolute_time();
+    if (rec && fBacklightCallout)
+        swapBrightness(reinterpret_cast<const uint8_t *>(rec));
     return IOMobileFramebufferLegacy::swap_submit(rec, client, out);
 }
 
@@ -1475,6 +1524,47 @@ void NativeGopDisplay::publishDisplayPower(bool on)
 
 // piano-backlight=2: every call, with both power states as they are (PianoBacklight logs their raw values, so an intermediate state
 // WindowServer might use for dimming shows up), only records a request there: nothing waits for the backlight's I2C.
+// The double as signed 16.16 with integer operations only (kernel code; the same as PianoBacklight's nitsFixedFromDouble, whose
+// host test covers it): 0 for a negative, zero, NaN or infinite value, saturated at INT32_MAX.
+static inline int32_t swapNitsFixed(uint64_t bits)
+{
+    const uint32_t exponent = uint32_t(bits >> 52) & 0x7ffu;
+    if ((bits >> 63) || exponent == 0 || exponent == 0x7ffu)
+        return 0;
+    const uint64_t mantissa = (bits & ((uint64_t(1) << 52) - 1)) | (uint64_t(1) << 52);
+    const int shift = int(exponent) - 1075 + 16;
+    if (shift >= 0)
+        return shift > 10 ? INT32_MAX : (mantissa << shift) > uint64_t(INT32_MAX) ? INT32_MAX : int32_t(mantissa << shift);
+    return shift <= -64 ? 0 : (mantissa >> -shift) > uint64_t(INT32_MAX) ? INT32_MAX : int32_t(mantissa >> -shift);
+}
+
+// 2026-11-21: a swap that carries WindowServer's brightness (CoreBrightness's slider, keys and ramps) hands the nits, as 16.16,
+// to PianoBacklight, which clamps, tells the user's moves from the ramps and applies them (BRIGHTNESS-SLIDER.md).
+void NativeGopDisplay::swapBrightness(const uint8_t *rec)
+{
+    if (!kRecBrightnessKnown || !(rec[kRecBrightnessSet] & 1))
+        return;
+    uint64_t bits = 0;
+    memcpy(&bits, rec + kRecBrightnessNits, sizeof bits);
+    const int32_t fixed = swapNitsFixed(bits);
+    if (fixed == fSwapNitsLast)
+        return;
+    fSwapNitsLast = fixed;
+    if (!fBacklight) {
+        OSDictionary *match = IOService::serviceMatching("PianoBacklight");
+        IOService *backlight = match ? IOService::copyMatchingService(match) : nullptr;
+        if (match)
+            match->release();
+        if (!backlight)
+            return;
+        fBacklight = backlight;
+    }
+    const IOReturn r = fBacklight->callPlatformFunction("PianoBacklightNits", false, reinterpret_cast<void *>(uintptr_t(uint32_t(fixed))),
+                                                        nullptr, nullptr, nullptr);
+    if (++fSwapNitsSent <= 8 || fSwapNitsSent % 64 == 0)
+        GOPLOG("PianoSwapBrightnessV1 swap brightness 16.16 %d to PianoBacklight: %#x (%u sent)\n", fixed, r, fSwapNitsSent);
+}
+
 void NativeGopDisplay::backlightCallout(bool on)
 {
     if (!fBacklight) {
@@ -2704,6 +2794,22 @@ static OSDictionary *point(uint32_t x, uint32_t y)
 // 8-bit SDR color element. Chromaticities are sRGB's (16.16 fixed point, as a panel's EDID would give them).
 bool NativeGopDisplay::createDisplayAttributes()
 {
+    // native-gop-display-120: IOMFBDisplayRefresh first (start_hardware runs before the family registers us; WindowServer reads it once,
+    // in AppleDisplay::update_display_limits), so a refusal can still fall back to the old 60 Hz contract before any timing is published.
+    if (fRefreshContract) {
+        uint64_t words[goprefresh::kWords] = {};
+        get_timing_attributes_gated(reinterpret_cast<IOMFB::RefreshTimingAttributes *>(words), false);
+        const bool published = iomfbSetDisplayRefreshProperties(this);
+        GOPLOG("refresh contract: %u Hz: timing element %u<<16, IOMFBDisplayRefresh %s (min = max interval %#llx 32.32 s = %llu ns, %llu "
+               "mach ticks; step 0), VBL tick on absolute deadlines\n", fRefreshHz, fRefreshHz, published ? "published" : "NOT published",
+               static_cast<unsigned long long>(words[goprefresh::kMinFixed]),
+               static_cast<unsigned long long>(goprefresh::periodNs(fRefreshHz)), static_cast<unsigned long long>(words[goprefresh::kMinAbs]));
+        if (!published) {   // never a half-told rate: the old contract whole (60 Hz timing, the family's slot, the relative tick)
+            fRefreshContract = false;
+            fRefreshHz = 60;
+            GOPLOG("refresh contract refused: back to 60 Hz\n");
+        }
+    }
     uint32_t width = static_cast<uint32_t>(fVideo.v_width), height = static_cast<uint32_t>(fVideo.v_height);
     bool done = false;
     OSDictionary *attributes = OSDictionary::withCapacity(16), *product = OSDictionary::withCapacity(8);
@@ -2805,6 +2911,23 @@ bool NativeGopDisplay::createDisplayAttributes()
     }
     GOPLOG("layer policy: IOMFBNumLayers MaxNumLayers=1 (32-bit); single composed plane; cursor inputs unchanged; gpuoom-plane1\n");
     return true;
+}
+
+// IOMobileFramebufferLegacy::get_timing_attributes_gated (27.3 slot 423): the refresh interval range. The family's own (kept with the
+// contract off) fills 1/60 s whatever the mode and returns 1, which its callers (setDisplayRefreshProperties, dropDummySwaps_gated)
+// test as true; this one fills fRefreshHz's period as both minimum and maximum (the panel's rate is fixed) and returns the same 1.
+IOReturn NativeGopDisplay::get_timing_attributes_gated(IOMFB::RefreshTimingAttributes *attributes, bool fixed) const
+{
+    if (!fRefreshContract)
+        return IOMobileFramebufferLegacy::get_timing_attributes_gated(attributes, fixed);
+    uint64_t *words = reinterpret_cast<uint64_t *>(attributes);
+    if (!words || !goprefresh::fixedAttributes(fRefreshHz, [](uint64_t ns) {uint64_t abs = 0; nanoseconds_to_absolutetime(ns, &abs); return abs;},
+                                               words))
+        return 0;
+    if (++fTimingAttributeCalls <= 3)
+        GOPLOG("get_timing_attributes_gated(fixed %d): %u Hz, min = max %#llx\n", fixed, fRefreshHz,
+               static_cast<unsigned long long>(words[goprefresh::kMinFixed]));
+    return 1;
 }
 
 // The mode of a color and a timing element (the IDs published above); AppleParavirtDisplay's block takes the timing's active size.

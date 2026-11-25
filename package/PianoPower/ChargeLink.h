@@ -41,6 +41,11 @@ struct LinkOptions {
   bool health = false;             // piano-power-health: stop at stopPct, resume at resumePct
   unsigned stopPct = 80, resumePct = 75;
   bool kick = true;                // piano-power-kick: the charging restart (ChargePolicy cfg.kick, charging-policy.md §17)
+  // charge/pd1 (charging-policy.md §21), strict session only, each off by default:
+  bool hvOrder = false;            // piano-power-hv-order: the other 9 V object when the mode's own is missing (cfg.hv_order)
+  bool hvCaps = false;             // piano-power-hv-caps: the stock 9 V rows at a validated 9 V contract (cfg.hv_caps)
+  bool qc = false;                 // piano-power-qc: QC2/QC3 9 V through 0x2011 (cfg.qc)
+  bool fvHot = false;              // piano-power-fv-hot: 4060 mV from 48 degC and the warm hold (cfg.fv_hot)
 };
 
 // What the owner knows besides the codec, for one decision.
@@ -57,6 +62,7 @@ struct LinkView {
   const piano_board_temps *board = nullptr;   // PianoThermal's last round, or PianoThermal not there
   uint32_t wakes = 0;                         // system wakes so far
   bool willSleep = false, shutdown = false;   // a handover is asked for
+  bool mippsBusy = false;                     // MiPPS runs or owes its 0x21002 = 0: no voltage step (an authentication)
 };
 
 struct LinkReadback {
@@ -119,11 +125,18 @@ class ChargeLink {
     cfg.ramp = o.rp && o.ramp ? 1 : 0;
     cfg.rp_cap_ma = uint16_t(cfg.ramp && o.rpMax ? (o.rpMax > PIANO_CHG_RP_ABS_MAX ? PIANO_CHG_RP_ABS_MAX : o.rpMax) : 0);
     cfg.kick = o.kick ? 1 : 0;
+    cfg.hv_order = o.strictContract && o.hvOrder ? 1 : 0;
+    cfg.hv_caps = o.strictContract && o.hvCaps ? 1 : 0;
+    cfg.qc = o.strictContract && o.qc ? 1 : 0;
+    cfg.fv_hot = o.strictContract && o.fvHot ? 1 : 0;
     healthRefused = o.health && piano_charge_config_limit(&cfg, 1, o.stopPct, o.resumePct) != 0;
     piano_charge_init(&st);
     // 0x2003 = 0 through the codec only for battery health's stop and the charging restart's
-    piano_mca_use_external_policy(&m, cfg.strict_contract || cfg.limit || cfg.kick, cfg.strict_contract || cfg.hv >= 2, cfg.qc3);
+    piano_mca_use_external_policy(&m, cfg.strict_contract || cfg.limit || cfg.kick, cfg.strict_contract || cfg.hv >= 2,
+                                  cfg.qc3 || cfg.qc);
     piano_mca_allow_icl(&m, piano_charge_icl_max(&cfg));   // the codec's bound follows the policy's (1600 unless stepped higher)
+    // charge/pd1: the charge current up to the stock 9 V rows (3500) and the warm float (0x2007 = 4400 / 4060) only with their options
+    piano_mca_allow_fast(&m, cfg.hv_caps, cfg.fv_hot);
   }
 
   // The charger thermistor's reading was taken while charger_pd was up (at or after it came up this time).
@@ -149,6 +162,7 @@ class ChargeLink {
     if (has(McaChargeEnable)) {x.valid |= PIANO_CHG_IN_ENABLE; x.enable = m.value[McaChargeEnable];}
     if (has(McaTermVolt)) {x.valid |= PIANO_CHG_IN_FV; x.fv_raw = m.value[McaTermVolt];}
     if (has(McaVerify)) {x.valid |= PIANO_CHG_IN_VERIFY; x.verify = m.value[McaVerify];}
+    if (v.mippsBusy) {x.valid |= PIANO_CHG_IN_VERIFY; x.verify = 1;}
     if (has(McaTbat)) {x.valid |= PIANO_CHG_IN_TBAT; x.tbat_c = m.value[McaTbat];}
     if (has(McaAiclStatus)) {x.valid |= PIANO_CHG_IN_AICL; x.aicl_ma = m.value[McaAiclStatus];}
     if (has(McaPdos)) {
@@ -161,6 +175,10 @@ class ChargeLink {
       x.contract_notify_pending = v.contract->notify_pending;
       x.contract_notify_ms = v.contract->notify_ms;
     }
+    // cfg.qc's evidence that the partner is no PD source: a fresh status of a connected sink in a non-PD operation mode
+    if (v.contract && piano_contract_status_fresh(v.contract, v.nowMs) && v.contract->connected && v.contract->sink &&
+        !v.contract->pd)
+      x.valid |= PIANO_CHG_IN_NONPD;
     if (v.contract) x.contract_observing = v.contract->linked && !v.contract->quarantined &&
         v.contract->stage != PianoContractIdle &&
         (v.contract->last_error == PIANO_CONTRACT_OK || v.contract->last_error == PIANO_CONTRACT_CHANGED);

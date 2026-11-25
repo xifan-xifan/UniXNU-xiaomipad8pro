@@ -320,6 +320,36 @@ int main()
     CHECK(dp.st.excEntries == 1 && dp.st.lastPushReason == 1 && dp.st.lastErrorCode == 5);
     CHECK(chip.regs[kDpReo2Sw0R2 + 4] == 8);
   }
+  // ---- 2026-11-20 (WIFI-RX-STALL.md): an exception naming one of our MSDU link descriptors gives its receive buffers back
+  {
+    const uint32_t index = 7;
+    uint8_t *link = dp.linkVa + index * kDpLinkDescBytes;
+    std::memset(link, 0, kDpLinkDescBytes);
+    for (uint32_t m = 0; m < 2; ++m) {
+      const uint32_t cookie = 30 + m;
+      uint8_t *info = link + kDpLinkMsduAt + m * kDpLinkMsduBytes;
+      put32(info, uint32_t(rx.refillBus[cookie]));
+      put32(info + 4, (uint32_t(rx.refillBus[cookie] >> 32) & 0xffu) | kDpRbmSw1 << 8 | cookie << 12);
+    }
+    uint8_t *e = dp.reoExc.va + 1 * dp.reoExc.words * 4;
+    const uint64_t bus = dp.linkBus + index * kDpLinkDescBytes;
+    put32(e, uint32_t(bus));
+    put32(e + 4, (uint32_t(bus >> 32) & 0xffu) | kDpRbmIdleDescDev0 << 8 | index << 12);
+    put32(e + 28, kDpReoBufTypeLinkDesc | 2u << kDpReoPushShift);
+    uint8_t *f = dp.reoExc.va + 2 * dp.reoExc.words * 4;   // a foreign link descriptor: counted, nothing taken back
+    put32(f, 0x1000);
+    put32(f + 4, 900u << 12);
+    put32(f + 28, kDpReoBufTypeLinkDesc);
+    uint8_t *g = dp.reoExc.va + 3 * dp.reoExc.words * 4;   // an MSDU buffer itself
+    put32(g, uint32_t(rx.refillBus[33]));
+    put32(g + 4, (uint32_t(rx.refillBus[33] >> 32) & 0xffu) | kDpRbmSw1 << 8 | 33u << 12);
+    put32(g + 28, 0);
+    *dp.reoExc.theirs = 4 * dp.reoExc.words;
+    const uint32_t posted = rx.refillPosted;
+    CHECK(dpPoll(dp, io, deliver) == 3);
+    CHECK(dp.st.excEntries == 4 && dp.st.excLinks == 1 && dp.st.excLinkForeign == 1);
+    CHECK(dp.st.excBufRecycled == 3 && rx.refillPosted == posted + 3);
+  }
 
   // ---- the peer map's search entry (the second and third forms) and the first form's none
   {

@@ -161,7 +161,7 @@ int audio_amps_start(AudioAmps *g, unsigned gain) {return audio_amps_start_cappe
 int audio_amps_start_capped(AudioAmps *g, unsigned gain, unsigned cap)
 {
     if (g->configured != (1u << AUDIO_AMPS) - 1u || g->started) return AudioAmpsErrState;
-    if (cap > FS19XX_GAIN_CAP) cap = FS19XX_GAIN_CAP;
+    if (cap > FS19XX_GAIN_HARD_LIMIT) cap = FS19XX_GAIN_HARD_LIMIT;
     if (gain > cap) gain = cap;
     g->have_first = 0;
     int r = AudioAmpsOk;
@@ -177,7 +177,7 @@ int audio_amps_start_capped(AudioAmps *g, unsigned gain, unsigned cap)
 int audio_amps_gain_slot(AudioAmps *g, unsigned slot, unsigned gain, unsigned cap)
 {
     if (slot >= AUDIO_AMPS || g->started != (1u << AUDIO_AMPS) - 1u) return AudioAmpsErrState;
-    if (cap > FS19XX_GAIN_CAP) cap = FS19XX_GAIN_CAP;
+    if (cap > FS19XX_GAIN_HARD_LIMIT) cap = FS19XX_GAIN_HARD_LIMIT;
     if (gain > cap) gain = cap;
     const int r = fs19xx_write(&g->amp[slot], FS19XX_REG_VOLCTRL, (uint16_t)(gain << 8 | 0x00c0u));
     done(g);

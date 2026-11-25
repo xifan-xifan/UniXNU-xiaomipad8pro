@@ -1297,6 +1297,74 @@ static void testCheckSurface()
   CHECK(std::strcmp(pianoDpuFlipResultName(kPianoDpuFlipUnderrun), "underrun") == 0 && std::strcmp(pianoDpuFlipResultName(99), "?") == 0);
 }
 
+
+// piano-dpu-cadence and piano-dpu-clean-threads' portable parts (DpuCadence.h), then the flipper's cadence on the 120 Hz model.
+static void testCadence()
+{
+  Hist h;
+  CHECK(h.pct(500) == 0 && h.n == 0);
+  for (int i = 0; i < 90; ++i) h.add(8333);
+  for (int i = 0; i < 9; ++i) h.add(16666);
+  h.add(70000);   // overflow bucket
+  CHECK(h.n == 100 && h.maxUs == 70000);
+  CHECK(h.pct(500) == 8500 && h.pct(900) == 8500 && h.pct(950) == 16750 && h.pct(990) == 16750 && h.pct(1000) == 70000);
+  uint64_t band[6];
+  h.bands(band);
+  CHECK(band[0] == 90 && band[1] == 0 && band[2] == 9 && band[3] == 0 && band[4] == 0 && band[5] == 1);
+  CHECK(h.atMost(9500) == 90 && h.atMost(8250) == 0 && h.atMost(8333) == 90);
+  Hist one;
+  one.add(12);
+  CHECK(one.pct(500) == 250 && one.pct(999) == 250);
+  // cleanBand: n bands of whole lines cover [0, bytes) exactly once, in order
+  for (uint64_t bytes : {uint64_t(2136) * 12800, uint64_t(64), uint64_t(65), uint64_t(1) << 20, uint64_t(1000003)})
+    for (unsigned n = 1; n <= 8; ++n) {
+      uint64_t at = 0;
+      bool ok = true;
+      for (unsigned i = 0; i < n; ++i) {
+        const Band b = cleanBand(bytes, i, n, 64);
+        ok = ok && b.begin == at && b.end >= b.begin && (b.begin % 64) == 0 && (i + 1 == n || b.end % 64 == 0);
+        at = b.end;
+      }
+      CHECK(ok && at == bytes);
+    }
+  CHECK(cleanBand(100, 3, 2, 64).end == 0 && cleanBand(100, 0, 0, 64).end == 0);
+  // the flipper: two surfaces in turn, one flip per frame (8333 us), then one flip every 10 ms (each lands a frame later)
+  Rig r;
+  CHECK(r.ready());
+  r.f.cfg.cadenceS = 1;
+  FakeSurface a(0x8d0000000ull, 2136ull * 12800), b(0x8e0000000ull, 2136ull * 12800);
+  for (int i = 0; i < 120; ++i) {
+    PianoDpuFlipRequest q = req(i & 1 ? &b : &a);
+    CHECK(r.f.request(q) == kPianoDpuFlipShown);
+  }
+  CHECK(r.f.cad.flips + r.f.cad.lines > 0);
+  r.f.cadenceReport(true);
+  CHECK(r.hw.said("cadence 1:") || r.hw.said("cadence 2:"));
+  CHECK(r.hw.said("p50 8500 "));
+  CHECK(r.hw.said(" cpu: clean p50 ") && r.hw.said("; arrive p50 "));
+  // each line well under the console's 256-byte line ("PianoDpu: " + the note), the run of gpu-hz120-1 lost the tail of a longer one
+  for (const std::string &n : r.hw.notes)
+    if (n.find("cadence ") != std::string::npos) CHECK(n.size() + 10 < 240);
+  for (int i = 0; i < 60; ++i) {
+    r.hw.advance(10000);
+    PianoDpuFlipRequest q = req(i & 1 ? &b : &a);
+    CHECK(r.f.request(q) == kPianoDpuFlipShown);
+  }
+  r.f.cadenceReport(true);
+  CHECK(r.hw.said("p50 16750 "));
+  // the same surface again is not a new frame: counted as shown again
+  const uint64_t flips = r.f.cad.flips;
+  PianoDpuFlipRequest q = req(r.f.slots.shown == 0 ? &a : &b);
+  r.f.request(q);
+  CHECK(r.f.cad.flips == flips);
+  // off: nothing counted, no line
+  Rig off;
+  CHECK(off.ready());
+  PianoDpuFlipRequest q2 = req(&a);
+  off.f.request(q2);
+  CHECK(off.f.cad.flips == 0 && !off.hw.said("cadence "));
+}
+
 int main(int argc, char **argv)
 {
   if (argc > 1) {   // dpu_flip_host N: step N against the model, its log lines as the kernel prints them (docs/drivers/dpu.md §8)
@@ -1331,6 +1399,7 @@ int main(int argc, char **argv)
   testIrq();
   testSharedPrepare();
   testCheckSurface();
+  testCadence();
   if (failures) {
     std::printf("%d failures\n", failures);
     return 1;

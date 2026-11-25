@@ -38,6 +38,10 @@ extern "C" {
 #define AUDIO_DMA_SPEAKER 0x00000u
 #define AUDIO_DMA_MIC 0x10000u
 #define AUDIO_DMA_BYTES 0x20000u
+/* Speaker protection (AudioSpkProt.h): its out-of-band payloads (the two GRAPH_OPENs, parameters too big for a packet, the live-data
+ * GET) at +32 KiB, after the speaker periods; that plan maps [+0, +64 KiB) as one region, the periods at its start. */
+#define AUDIO_DMA_PARAM 0x08000u
+#define AUDIO_DMA_PARAM_BYTES 0x08000u
 #define AUDIO_LATE_MS 250u                 /* a period out longer than this stops the stream */
 #define AUDIO_ANSWER_MS 2000u              /* each DSP command's answer (sheng's) */
 #define AUDIO_SILENCE_MAX_MS 10000u
@@ -89,6 +93,20 @@ typedef struct {
      * error. May be null (the mic path then fails at that step). */
     int (*va_mic)(void *ctx, int on);
     uint32_t (*clock_ms)(void *ctx);  /* optional diagnostic clock; same domain as tick */
+    /* Levels 8-10, speaker protection (AudioSpkProt.h, piano-audio-spk): the two private files as the firmware loader checked them
+     * against their pins (null: not there, spk_why says why), kept for the boot; the battery's voltage in microvolts (0: unknown).
+     * All may be null: the speaker then plays through the passthrough graph. */
+    const uint8_t *spk_params;
+    uint32_t spk_params_bytes;
+    const uint8_t *spk_re25;
+    uint32_t spk_re25_bytes;
+    const char *spk_why;
+    uint32_t (*battery_uv)(void *ctx);
+    /* MIPLAY (AudioSpkProt.h, piano-audio-miplay): its private file spk-dolby.bin as the loader checked it against its pin (null: not
+     * there, spk_dolby_why says why); without it the protection plan runs without MIPLAY. */
+    const uint8_t *spk_dolby;
+    uint32_t spk_dolby_bytes;
+    const char *spk_dolby_why;
 } AudioSessionOps;
 
 enum {AudioLevelNotRun = 0, AudioLevelPassed = 1, AudioLevelFailed = 2, AudioLevelSkipped = 3};

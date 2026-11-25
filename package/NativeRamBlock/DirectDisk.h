@@ -9,14 +9,14 @@
 //        uint64_t copy(uint64_t at, const void *p, uint64_t n)  bytes into the request buffer (the data of a read)
 //   Store: bool read(block, count, dst); bool write(block, count, src)   (PersistOverlay.h's Ops)
 // `stage` is stagePages * 4096 bytes. Returns the bytes completed; *storeError is set when the store refused or failed (a short
-// copy by the buffer is not a store error). Caller serializes I/O.
+// copy by the buffer is not a store error). The policy selects the presence lookup and how a write is made durable.
 #include "SparseDisk.h"
 #include "SeedDisk.h"
 #include "PersistOverlay.h"
 
-template<class Seed, class Store, class Buf>
-static uint64_t directDiskIO(const Seed &seed, persist::Overlay &ov, Store &store, uint8_t *stage, uint32_t stagePages, bool write,
-                             uint64_t offset, uint64_t length, Buf &buf, bool *storeError)
+template<class Seed, class Store, class Buf, class Policy>
+static uint64_t directDiskIOWithPolicy(const Seed &seed, persist::Overlay &ov, Store &store, uint8_t *stage, uint32_t stagePages, bool write,
+                             uint64_t offset, uint64_t length, Buf &buf, bool *storeError, Policy &policy)
 {
   static const uint8_t zero[4096] = {};
   *storeError = false;
@@ -27,9 +27,9 @@ static uint64_t directDiskIO(const Seed &seed, persist::Overlay &ov, Store &stor
   while (done < length) {
     uint64_t at = offset + done, index = at / 4096, skip = at & 4095;
     if (!write) {
-      if (ov.has(index)) {
+      if (policy.has(index)) {
         uint32_t n = 1;
-        while (n < stagePages && index + n <= lastIndex && ov.has(index + n)) ++n;
+        while (n < stagePages && index + n <= lastIndex && policy.has(index + n)) ++n;
         if (!store.read(persist::pageBlock(ov.pages, index), n, stage)) { *storeError = true; break; }
         uint64_t avail = (uint64_t) n * 4096 - skip;
         if (avail > length - done) avail = length - done;
@@ -50,21 +50,35 @@ static uint64_t directDiskIO(const Seed &seed, persist::Overlay &ov, Store &stor
       uint32_t n = 0;
       while (n < stagePages && (uint64_t) (n + 1) * 4096 <= length - done) ++n;
       if (buf.read(done, stage, (uint64_t) n * 4096) != (uint64_t) n * 4096) break;
-      if (!ov.writeRun(store, index, n, stage)) { *storeError = true; break; }
+      if (!policy.write(index, n, stage)) { *storeError = true; break; }
       done += (uint64_t) n * 4096;
       continue;
     }
     uint64_t n = 4096 - skip;                           // part of a page: read, merge, write back
     if (n > length - done) n = length - done;
-    if (ov.has(index)) {
+    if (policy.has(index)) {
       if (!store.read(persist::pageBlock(ov.pages, index), 1, stage)) { *storeError = true; break; }
     } else {
       const uint8_t *page = ov.selfContained ? nullptr : seed.find(index);
       memcpy(stage, page ? page : zero, 4096);
     }
     if (buf.read(done, stage + skip, n) != n) break;
-    if (!ov.writeRun(store, index, 1, stage)) { *storeError = true; break; }
+    if (!policy.write(index, 1, stage)) { *storeError = true; break; }
     done += n;
   }
   return done;
+}
+
+// The original single-gate path, also used during store setup and by host tests.
+template<class Seed, class Store, class Buf>
+static uint64_t directDiskIO(const Seed &seed, persist::Overlay &ov, Store &store, uint8_t *stage, uint32_t stagePages, bool write,
+                             uint64_t offset, uint64_t length, Buf &buf, bool *storeError)
+{
+  struct Serial {
+    persist::Overlay &overlay;
+    Store &ops;
+    bool has(uint64_t page) const { return overlay.has(page); }
+    bool write(uint64_t first, uint32_t count, const void *data) { return overlay.writeRun(ops, first, count, data); }
+  } serial{ov, store};
+  return directDiskIOWithPolicy(seed, ov, store, stage, stagePages, write, offset, length, buf, storeError, serial);
 }

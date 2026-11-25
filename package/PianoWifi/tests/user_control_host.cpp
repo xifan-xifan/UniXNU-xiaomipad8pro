@@ -11,6 +11,21 @@ int main()
 {
   WifiUserControl u;
   CHECK(u.allowed(u.read()));
+  // Sleep preparation can disconnect without changing logical radio power.
+  // Wake can reapply ON. It cannot bypass teardown or grant a native join.
+  const uint32_t sleepLeave = u.disconnect();
+  CHECK(WifiUserControl::power(u.read()) && !u.allowed(u.read()));
+  u.setPower(true);
+  CHECK(u.pending(sleepLeave) && !u.allowed(u.read()));
+  u.stopped(sleepLeave);
+  CHECK(u.allowed(u.read()));
+  const uint32_t completedLeave = u.disconnect();
+  u.stopped(completedLeave);
+  CHECK(!u.allowed(u.read())); // ordinary leave stays idle until a command
+  const uint32_t wakeOn = u.setPower(true);
+  CHECK(WifiUserControl::serial(wakeOn) == WifiUserControl::serial(completedLeave));
+  CHECK(u.allowed(wakeOn) && !u.radioStop());
+  CHECK(u.setPower(true) == wakeOn); // repeated ON has no further effect
   for (unsigned cycle = 0; cycle < 3; ++cycle) {
     const uint32_t leave = u.disconnect();
     CHECK(!u.allowed(u.read()) && u.pending(leave) && WifiUserControl::power(leave));
@@ -21,13 +36,14 @@ int main()
     CHECK(u.allowed(u.read()));
     const uint32_t off = u.setPower(false);
     CHECK(!u.join() && !u.allowed(u.read()) && u.radioStop());
+    CHECK(!u.radioOffConfirmed(off));
     CHECK(u.setPower(false) == off);
     u.setPower(true);              // quick off/on still physically cycles
     CHECK(u.radioStop() && !u.allowed(u.read()));
     u.stopped(off);                // station down alone is insufficient
-    CHECK(u.radioStop() && !u.allowed(u.read()));
+    CHECK(u.radioStop() && !u.allowed(u.read()) && !u.radioOffConfirmed(off));
     u.radioOff(u.read());          // DMA quiesced and WLAN_EN low
-    CHECK(!u.radioStop() && u.allowed(u.read()));
+    CHECK(!u.radioStop() && u.allowed(u.read()) && u.radioOffConfirmed(off));
   }
   // No-profile/failure park: there is no station left, so the idle worker
   // acknowledges the leave before using the queued SET20 as a restart cue.
@@ -35,6 +51,30 @@ int main()
   CHECK(u.join() && !u.allowed(u.read()));
   u.stopped(idleLeave);
   CHECK(u.allowed(u.read()));
+  // SET20 is one attempt per generation. Neither ON, retained profiles, nor
+  // a late authorization can start or resurrect that attempt.
+  WifiJoinRequest request;
+  CHECK(request.canStart(100)); // RAM-only profile mode
+  request.cancel();
+  CHECK(request.nativeOwner && !request.canStart(100) && request.result(100) == 2);
+  request.accept(10, 100);
+  CHECK(request.canStart(100) && request.result(100) == 0);
+  request.consume();
+  CHECK(!request.canStart(101) && request.result(9599) == 0);
+  CHECK(request.result(9600) == 9 && request.finish(10, 1, 9600));
+  CHECK(request.result(9601) == 9 && !request.canStart(9601));
+  request.accept(11, 9700);
+  CHECK(!request.finish(10, 1, 9700) && request.result(9700) == 0);
+  request.consume();
+  CHECK(request.finish(11, 1, 9701) && request.result(9701) == 1);
+  CHECK(!request.canStart(20000)); // wake/link loss cannot replay it
+  request.cancel();             // SET22, or physical OFF
+  CHECK(request.result(20001) == 2 && !request.canStart(20001));
+  CHECK(!request.finish(11, 1, 20002) && request.result(20002) == 2);
+  request.accept(12, 20003);
+  CHECK(request.canStart(20003) && request.result(20003) == 0);
+  request.consume();
+  CHECK(request.finish(12, 2, 20004) && request.result(20004) == 2);
   const uint32_t first = u.disconnect();
   CHECK(u.join());
   const uint32_t later = u.disconnect();

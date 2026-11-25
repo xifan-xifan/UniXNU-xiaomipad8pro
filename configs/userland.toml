@@ -24,6 +24,77 @@
 format = 1
 staging = "/private/var/piano/userland"
 
+# Explicit opt-in for already verified B-TC code under this worktree's out/.
+# stage.py preserves the seals and installs each bundle under /Applications.
+[camera_package]
+apps = ["PianoCamera.app", "PianoCameraCapture.app"]
+# Optional private capture directory. Used only with PIANO_CAMERA_PACKAGE and
+# PAD_USERLAND=1, on a fresh volatile test seed; never applied by the live installer.
+approval_env = "PIANO_CAMERA_APPROVAL"
+
+[[unit]]
+name = "piano-coreimage-compat"
+about = "RETIRED (cikl1, 2026-11-22: off; piano-coreimage-restore runs its --remove): UID 501 Core Image legacy CIKL path; a legacy CIKL kernel can never render on a Metal context (Preview, Photo Booth effects: SIGSEGV 0x28), the plugin now has the modern CIKL contract; enable only for an experiment, never together with piano-coreimage-restore"
+default_on = false
+
+[[unit.file]]
+source = "tooling/camera/extension/coreimage-compat.m"
+build = "cc"
+arch = "arm64"
+frameworks = ["Foundation"]
+dest = "/usr/local/bin/piano-coreimage-compat"
+mode = "0755"
+
+[[unit.file]]
+source = "tooling/camera/extension/com.unixnu.piano-coreimage-compat.plist"
+build = "copy"
+dest = "/Library/LaunchAgents/com.unixnu.piano-coreimage-compat.plist"
+mode = "0644"
+
+[[unit]]
+name = "piano-coreimage-restore"
+about = "cikl1 (2026-11-22): at each Aqua login piano-coreimage-compat --remove puts back the CI_USE_MTL_DAG_FOR_CIKL_SRC preference and GUI environment the retired legacy policy saved (Core Image's default for every app); without a saved receipt it changes nothing"
+default_on = true
+
+[[unit.file]]
+source = "tooling/camera/extension/com.unixnu.piano-coreimage-restore.plist"
+build = "copy"
+dest = "/Library/LaunchAgents/com.unixnu.piano-coreimage-restore.plist"
+mode = "0644"
+
+[[unit]]
+name = "piano-camera-default"
+about = "one-time choice-preserving front-camera policy for Photo Booth and QuickTime; explicit --set-front and typed --check for fresh previews"
+default_on = true
+
+[[unit.file]]
+source = "tooling/camera/extension/camera-default.m"
+build = "cc"
+arch = "arm64"
+cflags = ["-fobjc-arc"]
+frameworks = ["Foundation", "AVFoundation"]
+dest = "/usr/local/bin/piano-camera-default"
+mode = "0755"
+
+[[unit.file]]
+source = "tooling/camera/extension/com.unixnu.piano-camera-default.plist"
+build = "copy"
+dest = "/Library/LaunchAgents/com.unixnu.piano-camera-default.plist"
+mode = "0644"
+
+[[unit]]
+name = "piano-camera-runtime"
+about = "read-only CS_OPS_CDHASH verification of the running camera extension against its approved staged hash"
+default_on = true
+
+[[unit.file]]
+source = "tooling/camera/extension/runtime-cdhash.c"
+build = "cc"
+arch = "arm64"
+dest = "/usr/local/bin/piano-camera-runtime"
+mode = "0755"
+
+
 [[unit]]
 name = "piano-passd-policy"
 about = "UID 501 passd disable + bootout, with original override restored when the unit is removed; native lacks the AppleKeyStore unlock contract (docs/userland.md)"
@@ -78,7 +149,7 @@ mode = "0644"
 
 [[unit]]
 name = "piano-policy-agent"
-about = "PianoPolicy's agent (docs/policy.md section 4): Low Power Mode into machdep.piano_policy_lpm, display sleep on a cover closed without sleep; event driven"
+about = "PianoPolicy's agent (docs/policy.md section 4): Low Power Mode into machdep.piano_policy_lpm, display sleep on a cover closed without sleep, the power state of background services (section 4.1); event driven"
 default_on = true
 
 [[unit.file]]
@@ -91,6 +162,17 @@ mode = "0755"
 source = "tooling/native/piano-policy-agent/com.unixnu.piano-policy-agent.plist"
 build = "copy"
 dest = "/Library/LaunchDaemons/com.unixnu.piano-policy-agent.plist"
+mode = "0644"
+
+[[unit]]
+name = "piano-slim-session"
+about = "piano-policy-agent's login hook (docs/policy.md section 4.1): an Aqua agent that posts com.unixnu.piano.slim.session once per login, so the agent applies Save to the new session's jobs"
+default_on = true
+
+[[unit.file]]
+source = "tooling/native/piano-policy-agent/com.unixnu.piano-slim-session.plist"
+build = "copy"
+dest = "/Library/LaunchAgents/com.unixnu.piano-slim-session.plist"
 mode = "0644"
 
 [[unit]]
@@ -164,6 +246,23 @@ dest = "/Library/LaunchDaemons/com.unixnu.piano-pmset-defaults.plist"
 mode = "0644"
 
 [[unit]]
+name = "piano-keyboard-type"
+about = "the keyboard cover, the touch screen and the USB debug keyboard known to loginwindow as ANSI (missing keys of /Library/Preferences/com.apple.keyboardtype.plist only), so a Data store without them never opens Keyboard Setup Assistant (2026-11-21)"
+default_on = true
+
+[[unit.file]]
+source = "tooling/userland/piano-keyboard-type.sh"
+build = "copy"
+dest = "/usr/local/libexec/piano-keyboard-type"
+mode = "0755"
+
+[[unit.file]]
+source = "tooling/userland/com.unixnu.piano-keyboard-type.plist"
+build = "copy"
+dest = "/Library/LaunchDaemons/com.unixnu.piano-keyboard-type.plist"
+mode = "0644"
+
+[[unit]]
 name = "piano-login-front"
 about = "once at login, the Finder brought to the front: on the owner's Data the session could start with AccessibilityUIServer frontmost, which keeps the menu bar off the screen (2026-11-13)"
 default_on = true
@@ -225,6 +324,45 @@ dest = "/Library/LaunchDaemons/com.unixnu.piano-still-wallpaper.plist"
 mode = "0644"
 
 [[unit]]
+name = "piano-wifi-controls"
+about = "hands the protected boot-ON radio to ordinary desktop menu policy after stable console login, published AirPort state and raw ON; no power or location-policy override"
+default_on = true
+
+[[unit.file]]
+source = "tooling/native/piano-wifi-controls/piano-wifi-controls.c"
+build = "cc"
+arch = "arm64"
+frameworks = ["CoreFoundation", "SystemConfiguration"]
+dest = "/usr/local/libexec/piano-wifi-controls"
+mode = "0755"
+
+[[unit.file]]
+source = "tooling/native/piano-wifi-controls/com.unixnu.piano-wifi-controls.plist"
+build = "copy"
+dest = "/Library/LaunchDaemons/com.unixnu.piano-wifi-controls.plist"
+mode = "0644"
+
+[[unit]]
+name = "piano-brightness-sync"
+about = "CoreBrightness and PianoBacklight's automatic mode agree (the Control Center slider shows the panel's real brightness): holds the kext's lease, reports the user's moves seen in CoreBrightness's level, syncs CoreBrightness to the settled automatic level; inert unless PianoBacklight is native with automatic brightness"
+default_on = true
+
+[[unit.file]]
+source = "tooling/native/piano-brightness-sync/piano-brightness-sync.m"
+build = "cc"
+arch = "arm64"
+cflags = ["-fobjc-arc"]
+frameworks = ["Foundation", "IOKit"]
+dest = "/usr/local/libexec/piano-brightness-sync"
+mode = "0755"
+
+[[unit.file]]
+source = "tooling/native/piano-brightness-sync/com.unixnu.piano-brightness-sync.plist"
+build = "copy"
+dest = "/Library/LaunchDaemons/com.unixnu.piano-brightness-sync.plist"
+mode = "0644"
+
+[[unit]]
 name = "piano-wifi-supplicant"
 about = "the WPA2-Personal key handshake of PianoWifi's station over its 802.1X port (docs/drivers/wifi.md section 13.7): reads the root-only join profile, answers the four-way and group handshakes, hands the keys to the kext and opens the port; logs states and lengths only"
 default_on = true
@@ -243,12 +381,28 @@ dest = "/Library/LaunchDaemons/com.unixnu.piano-wifi-supplicant.plist"
 mode = "0644"
 
 [[unit]]
-name = "piano-wifi-join"
-about = "hands PianoWifi the join profile once at boot, from the root-only file /private/var/db/piano-wifi/profile (the owner places it; never in a repository) into the root-only sysctl machdep.piano_wifi_join; logs lengths only (docs/drivers/wifi.md section 13.2); exits at once with no profile or no PianoWifi"
+name = "piano-login-readiness"
+about = "fail-closed selected-account and focused secure-field proof for the host login tool; no password values read"
 default_on = true
 
 [[unit.file]]
-source = "tooling/native/piano-wifi-join/piano-wifi-join.c"
+source = "tooling/native/piano-login-readiness.c"
+build = "cc"
+frameworks = ["ApplicationServices"]
+arch = "arm64"
+dest = "/usr/local/libexec/piano-login-readiness"
+mode = "0755"
+
+[[unit]]
+name = "piano-wifi-join"
+about = "native Wi-Fi profile provisioning and one CoreWLAN fallback after airportd adopts the interface; fallback requires a fresh SET20"
+default_on = true
+
+[[unit.file]]
+source = "tooling/native/piano-wifi-join/piano-wifi-join.m"
+frameworks = ["Foundation", "CoreWLAN", "Security", "CoreLocation"]
+cflags = ["-fobjc-arc"]
+inputs = ["tooling/native/piano-wifi-join/BootJoin.h", "package/PianoWifi/WifiProfile.h"]
 build = "cc"
 arch = "arm64"
 dest = "/usr/local/libexec/piano-wifi-join"
@@ -262,7 +416,7 @@ mode = "0644"
 
 [[unit]]
 name = "piano-airportd-kick"
-about = "airportd started (launchctl kickstart, once) when PianoWifi80211 answers the apple80211 requests and launchd's IO80211Controller match has not started it within 10 s (docs/drivers/wifi-menu.md section 5); does nothing without the kernel argument piano-wifi-apple80211=1 (the controller never appears); a script, no Mach-O"
+about = "waits for airportd to adopt PianoWifi80211 on native Wi-Fi boots; kicks the daemon only if adoption stalls, then starts the Wi-Fi helper"
 default_on = true
 
 [[unit.file]]

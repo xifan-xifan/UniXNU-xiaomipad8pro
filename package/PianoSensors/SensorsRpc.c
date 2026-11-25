@@ -2,8 +2,12 @@
 /* Copyright (c) 2026, UniXNU contributors. All rights reserved. */
 /* The FastRPC reverse file service of the sensor PD: see SensorsRpc.h. Single threaded (the service's own thread), except the two
  * entry points the DSP thread calls, which only record. The arena is uncached memory the DSP reads and writes: every access goes through
- * the byte helpers below, nothing assumes alignment. */
+ * the byte helpers below, nothing assumes alignment. PianoSensors (UPSTREAM): on the tablet an unaligned access to the arena faults
+ * (s1b, 2026-11-14), and the compiler merges byte helpers into wide loads; so the arena is touched only through SensorsArena.h, and a
+ * DSP call is copied into normal memory (SsrConfig.shadow), served there and its answer copied back before the next next2. The byte
+ * helpers below are for normal memory only (the messages, the shadow, the bounce buffer). */
 #include "SensorsRpc.h"
+#include "SensorsArena.h"
 #include "SensorsText.h"
 
 enum {
@@ -34,6 +38,7 @@ enum {
     kSummaryMs = 10000,                /* the DSP quiet this long after some work: one summary line */
     kErrorLength = 64,
 };
+_Static_assert(SSR_IN_CAPACITY == kInCapacity && SSR_OUT_CAPACITY == SSR_CALL_BYTES - kOutBlob, "the shadow's halves");
 enum {PhaseChannel, PhasePack, PhaseAttach, PhaseOpen, PhaseRegister, PhaseClose, PhaseInit, PhaseServe, PhaseStopped};
 enum {InvokeOk = 0, InvokeRefused = -1, InvokeTimeout = -2, InvokeLink = -3};
 
@@ -168,17 +173,17 @@ static void metadata(SsrCore *c, const Arg *args, uint32_t n)
 {
     uint8_t *a = c->cfg.arena + kMeta;
     const uint32_t list = n * 16, pages = list + n * 8;
-    clear(a, pages + n * 16 + kFdBytes + kCrcBytes);
+    sar_zero(a, pages + n * 16 + kFdBytes + kCrcBytes);
     for (uint32_t i = 0; i < n; ++i) {
-        put32(a + list + i * 8 + 4, i);
+        sar_put32(a + list + i * 8 + 4, i);
         if (!args[i].length) continue;
         const uint64_t pa = c->cfg.arena_pa + args[i].offset;
         const uint64_t first = pa & ~(uint64_t)(kPage - 1), last = (pa + args[i].length - 1) & ~(uint64_t)(kPage - 1);
-        put64(a + i * 16, pa);
-        put64(a + i * 16 + 8, args[i].length);
-        put32(a + list + i * 8, 1);
-        put64(a + pages + i * 16, bus(c, first));
-        put64(a + pages + i * 16 + 8, last - first + kPage);
+        sar_put64(a + i * 16, pa);
+        sar_put64(a + i * 16 + 8, args[i].length);
+        sar_put32(a + list + i * 8, 1);
+        sar_put64(a + pages + i * 16, bus(c, first));
+        sar_put64(a + pages + i * 16 + 8, last - first + kPage);
     }
 }
 
@@ -729,12 +734,12 @@ static int32_t apps_mem(SsrCore *c, const Call *k)
     }
     uint8_t *a = c->cfg.arena;
     const uint64_t pa = c->cfg.arena_pa + SSR_CALL_BYTES + c->heap_used;
-    clear(a + kPrimIn, 0x80);
-    put32(a + kPrimIn, c->cfg.process);
-    put32(a + kPrimIn + 4, rflags);
-    put32(a + kPrimIn + 16, 16);
-    put64(a + kPrimIn + 32, bus(c, pa));
-    put64(a + kPrimIn + 40, length);
+    sar_zero(a + kPrimIn, 0x80);
+    sar_put32(a + kPrimIn, c->cfg.process);
+    sar_put32(a + kPrimIn + 4, rflags);
+    sar_put32(a + kPrimIn + 16, 16);
+    sar_put64(a + kPrimIn + 32, bus(c, pa));
+    sar_put64(a + kPrimIn + 40, length);
     const Arg args[3] = {{kPrimIn, 24}, {kPrimIn + 32, 16}, {kPrimOut, 8}};
     int32_t value = 0;
     const int rc = invoke(c, 1, kHandleInit, SC(kMethodMmap, 2, 1), args, kInvokeMs, &value);
@@ -748,12 +753,13 @@ static int32_t apps_mem(SsrCore *c, const Call *k)
     c->heap_used += (uint32_t)length;
     c->status.heap_used = c->heap_used;
     put64(k->out[0].p, 0);
-    put64(k->out[0].p + 8, get64(a + kPrimOut) & 0xffffffffu);
+    const uint64_t dsp = sar_get64(a + kPrimOut);
+    put64(k->out[0].p + 8, dsp & 0xffffffffu);
     if (ordinary(c)) {
         begin(c, &t, "apps_mem");
         snt_kx(&t, "bytes", length);
         snt_kx(&t, "pa", pa);
-        snt_kx(&t, "dsp", get64(a + kPrimOut));
+        snt_kx(&t, "dsp", dsp);
         end(c);
     }
     return SSR_OK;
@@ -763,9 +769,10 @@ static int32_t apps_mem(SsrCore *c, const Call *k)
 /* The call's blob, length bytes at the in area: in buffers, then the out lengths; the answer's blob laid out, zeroed. */
 static int32_t unpack(SsrCore *c, uint32_t sc, uint32_t length, Call *k)
 {
-    uint8_t *blob = c->cfg.arena + kInBlob, *out = c->cfg.arena + kOutBlob;
-    const uint32_t capacity = SSR_CALL_BYTES - kOutBlob;
+    uint8_t *blob = c->cfg.shadow, *out = c->cfg.shadow + SSR_IN_CAPACITY;   /* normal memory (UPSTREAM) */
+    const uint32_t capacity = SSR_OUT_CAPACITY;
     uint32_t at = 0, written = 0;
+    sar_read(blob, c->cfg.arena + kInBlob, length);
     k->in_count = (sc >> 16) & 0xff;
     k->out_count = (sc >> 8) & 0xff;
     k->method = (sc >> 24) & 0x1f;
@@ -836,10 +843,11 @@ static int serve_one(SsrCore *c)
     SntText t;
     uint8_t *a = c->cfg.arena;
     int32_t value = 0;
-    put32(a + kPrimIn, c->rctx);
-    put32(a + kPrimIn + 4, (uint32_t)c->result);
-    put32(a + kPrimIn + 8, c->out_length);
-    put32(a + kPrimIn + 12, kInCapacity);
+    if (c->out_length) sar_write(a + kOutBlob, c->cfg.shadow + SSR_IN_CAPACITY, c->out_length);   /* the answer, made in normal memory */
+    sar_put32(a + kPrimIn, c->rctx);
+    sar_put32(a + kPrimIn + 4, (uint32_t)c->result);
+    sar_put32(a + kPrimIn + 8, c->out_length);
+    sar_put32(a + kPrimIn + 12, kInCapacity);
     const Arg args[4] = {{kPrimIn, 16}, {kOutBlob, c->out_length}, {kPrimOut, 16}, {kInBlob, kInCapacity}};
     const int rc = invoke(c, 0, kHandleListener, SC(kMethodNext2, 2, 2), args, 0, &value);
     if (rc == InvokeLink) return 1;
@@ -859,8 +867,8 @@ static int serve_one(SsrCore *c)
         return 1;
     }
     c->next_failures = 0;
-    c->rctx = get32(a + kPrimOut);
-    const uint32_t handle = get32(a + kPrimOut + 4), sc = get32(a + kPrimOut + 8), length = get32(a + kPrimOut + 12);
+    c->rctx = sar_get32(a + kPrimOut);
+    const uint32_t handle = sar_get32(a + kPrimOut + 4), sc = sar_get32(a + kPrimOut + 8), length = sar_get32(a + kPrimOut + 12);
     if (c->status.stage == SsrStListen) {
         c->status.stage = SsrStServing;
         if (ordinary(c)) {
@@ -897,7 +905,7 @@ static void release(SsrCore *c)
         end(c);
         return;
     }
-    put32(c->cfg.arena + kPrimIn, c->cfg.process);
+    sar_put32(c->cfg.arena + kPrimIn, c->cfg.process);
     const Arg arg = {kPrimIn, 4};
     const int rc = invoke(c, 1, kHandleInit, SC(kMethodRelease, 1, 0), &arg, kInvokeMs, &value);
     c->status.release = rc ? SSR_RELEASE_UNANSWERED : value ? SSR_RELEASE_REFUSED : SSR_RELEASE_DONE;
@@ -955,6 +963,7 @@ static void forget_session(SsrCore *c)
 static int attach(SsrCore *c)
 {
     SntText t;
+    if (!c->cfg.shadow) return stop(c, SsrStSmmu, SSR_ENOMEMORY, "no normal memory for the DSP's calls (SsrConfig.shadow)");
     if (!c->prepared) {
         const int error = c->ops->prepare ? c->ops->prepare(CTX) : 0;
         if (error) return stop(c, SsrStSmmu, error, "the sensors PD's stream stays out of pass-through");
@@ -967,7 +976,7 @@ static int attach(SsrCore *c)
         return 1;
     }
     int32_t value = 0;
-    put32(c->cfg.arena + kPrimIn, c->cfg.process);
+    sar_put32(c->cfg.arena + kPrimIn, c->cfg.process);
     const Arg arg = {kPrimIn, 4};
     c->status.attaches++;
     const int rc = invoke(c, 1, kHandleInit, SC(kMethodAttach, 1, 0), &arg, kInvokeMs, &value);
@@ -1008,15 +1017,16 @@ static int open_listener(SsrCore *c)
     SntText t;
     uint8_t *a = c->cfg.arena;
     int32_t value = 0;
-    clear(a + kPrimOut, 16 + kErrorLength);
-    put32(a + kPrimIn, sizeof name);
-    put32(a + kPrimIn + 4, kErrorLength);
-    copy(a + kPrimIn + 16, (const uint8_t *)name, sizeof name);
+    sar_zero(a + kPrimOut, 16 + kErrorLength);
+    sar_put32(a + kPrimIn, sizeof name);
+    sar_put32(a + kPrimIn + 4, kErrorLength);
+    sar_write(a + kPrimIn + 16, (const uint8_t *)name, sizeof name);
     const Arg args[4] = {{kPrimIn, 8}, {kPrimIn + 16, sizeof name}, {kPrimOut, 8}, {kPrimOut + 16, kErrorLength}};
     const int rc = invoke(c, 0, kHandleRemotectl, SC(kMethodOpen, 2, 2), args, kInvokeMs, &value);
     if (rc == InvokeLink) return 1;
-    if (!rc && !value && !get32(a + kPrimOut + 4)) {
-        c->listener_handle = get32(a + kPrimOut);
+    const uint32_t handle = sar_get32(a + kPrimOut), dlerr = sar_get32(a + kPrimOut + 4);
+    if (!rc && !value && !dlerr) {
+        c->listener_handle = handle;
         c->tries = 0;
         c->phase = PhaseRegister;
         return 1;
@@ -1025,9 +1035,11 @@ static int open_listener(SsrCore *c)
     begin(c, &t, "remotectl open failed");
     snt_kd(&t, "rc", rc);
     snt_kd(&t, "value", value);
-    snt_kd(&t, "dlerr", (int32_t)get32(a + kPrimOut + 4));
+    snt_kd(&t, "dlerr", (int32_t)dlerr);
     snt_char(&t, ' ');
-    text_of(&t, a + kPrimOut + 16, kErrorLength);
+    uint8_t error[kErrorLength];
+    sar_read(error, a + kPrimOut + 16, kErrorLength);
+    text_of(&t, error, kErrorLength);
     end(c);
     if (c->tries >= kOpenTries) return stop(c, SsrStRegister, rc ? rc : value, "adsp_default_listener did not open");
     c->ops->wait(CTX, kRetryMs);
@@ -1049,8 +1061,8 @@ static int close_handle(SsrCore *c)
 {
     uint8_t *a = c->cfg.arena;
     int32_t value = 0;
-    put32(a + kPrimIn, c->listener_handle);
-    put32(a + kPrimIn + 4, 0);
+    sar_put32(a + kPrimIn, c->listener_handle);
+    sar_put32(a + kPrimIn + 4, 0);
     const Arg args[3] = {{kPrimIn, 8}, {kPrimOut, 4}, {kPrimOut + 16, 0}};
     const int rc = invoke(c, 0, kHandleRemotectl, SC(kMethodClose, 1, 2), args, kInvokeMs, &value);
     if (rc == InvokeLink) return 1;

@@ -30,6 +30,8 @@ constexpr const char *kServiceClass = "PianoBacklight";
 constexpr const char *kFunctionDisplay = "PianoBacklightDisplay";
 constexpr const char *kFunctionStep = "PianoBacklightStep";
 constexpr const char *kFunctionAmbient = "PianoBacklightAmbient";   // = pianoauto::kFunctionAmbient (AmbientBacklight.h)
+// 2026-11-21: WindowServer's swap brightness (NativeGopDisplay reads it from the IOMFB swap record): param1 = signed 16.16 nits.
+constexpr const char *kFunctionNits = "PianoBacklightNits";
 // PianoSensors' level 4 properties (sensors.md section 5) the automatic mode reads.
 constexpr const char *kSensorsTargetProperty = "piano-sensors-light-target", *kSensorsSeqProperty = "piano-sensors-seq",
                      *kSensorsLuxProperty = "piano-sensors-lux";

@@ -3,6 +3,7 @@
 #define A830_HFI_H
 #include <IOKit/IOTypes.h>
 #include <stdint.h>
+#include "A830ExitTrace.h"
 #include "A830Regs.h"
 #include "A830Votes.h"
 
@@ -121,6 +122,8 @@ struct A830HfiStats {
     uint32_t last_unknown;      /* header of the last unexpected message */
     uint32_t last_err[18];      /* last F2H_MSG_ERR: hdr, code, data[16] */
     uint32_t votes,vote_failures;
+    uint32_t dropped_acks=0,drop_header=0,last_request=0,last_level=0,last_bw=0;
+    uint32_t level_acks[Adreno830LevelMax+1]={},last_ack=0;
     /* drainLate (annibale profile): drains done, rounds polled, messages found (ACKs that came too late, F2H_MSG_ERR), and
      * the last late F2H_MSG_ERR (hdr, code, data[16]). */
     uint32_t late_drains,late_rounds,late_messages,late_acks,late_errors;
@@ -143,6 +146,12 @@ public:
     IOReturn resetQueues();
     /* The GMU is going down (forced off, slumber done): no message until the next resetQueues()/start(). */
     void stop();
+    void qualificationLimiter(void (*limit)(void *,uint8_t &,uint8_t &),void *context) {qualLimit_=limit;qualContext_=context;}
+    void qualification(bool enabled) {qualification_=enabled;}
+    bool armDropAck() {
+        if(!qualification_ || __atomic_exchange_n(&dropUsed_,true,__ATOMIC_ACQ_REL))return false;
+        __atomic_store_n(&dropArmed_,true,__ATOMIC_RELEASE);return true;
+    }
 
     /* One command: payload excludes the header (dwords <= 254); waits for the matching ACK. ack may be null. On an ACK
      * whose status is non-zero the answer is still returned and the result is kIOReturnIOError (reason 15). An acknowledged
@@ -160,6 +169,7 @@ public:
      * bus 1..ddr_levels-1 or 0xFF; level 0 is refused (XO); nothing is sent when both are unchanged. While the HFI is
      * not started (slumber) the vote is only remembered (pending()) and kIOReturnSuccess returned. Without AB the bw word
      * is bus | 0xFFFF0000 (design) or the bus alone (annibale, K/adreno8_hfi.c:553,658: {1, level, bus}). */
+    IOReturn confirmThermalExit(bool dropAck); // always exchange a new runtime 160 MHz / bus 2 vote
     IOReturn perfVote(uint8_t level,uint8_t bus);
     IOReturn perfVote(uint8_t level,uint8_t bus,uint32_t ab_kbps);   /* ab_kbps: A830HfiNoAb = no AB vote */
     /* The same with the bw word built by the caller (A830Dcvs: A830Votes::bwWord): bits [7:0] the bus level (out of range =
@@ -208,13 +218,13 @@ private:
     enum Outcome {Continue,Matched,Fatal};
 
     IOReturn transact(uint8_t id,const uint32_t *payload,uint32_t dwords,A830HfiAck *ack,uint16_t step,unsigned message,
-                      bool tolerate);
+                      bool tolerate,uint32_t timeoutUs=A830_T_HFI_ACK_US,bool dropAck=false,A830ExitVote trace=A830ExitVote::None);
     IOReturn exchange(uint8_t id,const uint32_t *payload,uint32_t dwords,A830HfiAck *ack,uint16_t step,unsigned message,
-                      bool tolerate,bool *pushed);   /* transact without the annibale late drain */
+                      bool tolerate,bool *pushed,uint32_t timeoutUs,bool dropAck,A830ExitVote trace);   /* transact without the annibale late drain */
     uint32_t drainLateLocked(uint32_t microseconds);
     IOReturn startLocked(const A830VoteTables &tables,const A830HfiStartOptions &options);
     IOReturn acdLocked(const A830VoteTables &tables);
-    IOReturn perfVoteLocked(uint8_t level,uint32_t bw,uint16_t step,unsigned message);
+    IOReturn perfVoteLocked(uint8_t level,uint32_t bw,uint16_t step,unsigned message,uint32_t timeoutUs=A830_T_HFI_ACK_US,bool dropAck=false,A830ExitVote trace=A830ExitVote::None);
     IOReturn voteLocked(uint8_t level,uint32_t bw);   /* perfVote/perfVoteBw: pending while stopped, checks, unchanged */
     IOReturn push(uint32_t header,const uint32_t *payload,uint32_t dwords);
     int pop(unsigned queue,Message *message);          /* 1 message, 0 empty, -1 corrupt */
@@ -237,6 +247,9 @@ private:
     uint32_t version_=0;
     bool ready_=false,started_=false,ab_=false,first_ack_=false,pending_=false;
     bool late_done_=false;    /* the last failure was drained already (drainLate) */
+    void (*qualLimit_)(void *,uint8_t &,uint8_t &)=nullptr;
+    void *qualContext_=nullptr;
+    bool qualification_=false,dropUsed_=false,dropArmed_=false;
     uint8_t level_=0,bus_=0,pending_level_=0,pending_bus_=0;
     uint32_t gx_levels_=0;    /* GX entries of the tables start() sent (level bound of perfVote) */
     uint32_t bus_levels_=0;   /* DDR levels (bus bound) */

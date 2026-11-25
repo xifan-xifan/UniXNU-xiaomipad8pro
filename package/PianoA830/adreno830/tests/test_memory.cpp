@@ -508,9 +508,35 @@ static void unmappedBacking()
     discardFixtureAfterQuarantine();
     std::puts("PASS: unmapped VM backing: zero fill, retained CPU view, cache policy, device lifetime, double release, five failure stages, quarantine");
 }
+/* A cleanup or another import must not rewrite the failed object's diagnostic. */
+static void importFailureStages()
+{
+    for(unsigned fail=0;fail<3;++fail) {
+        reset();NativeAdrenoMemory memory;
+        if(fail==0)fixture.allocation_fail=true;
+        if(fail==1)fixture.prepare_fail=true;
+        if(fail==2)fixture.metadata_fail=true;
+        const IOReturn status=memory.importTask(reinterpret_cast<void *>(2),0x200000,8192,36,8192);
+        CHECK(status!=kIOReturnSuccess);
+        const auto failure=memory.lastFailure();
+        const char *stages[]={"import-descriptor-create","import-prepare","import-span-metadata"};
+        CHECK(!std::strcmp(failure.stage,stages[fail]) && failure.status==status);
+        CHECK(!fixture.imports_live && fixture.metadata.empty());
+        CHECK(memory.release()==kIOReturnSuccess);
+        CHECK(!std::strcmp(memory.lastFailure().stage,stages[fail]));
+        fixture.allocation_fail=fixture.prepare_fail=fixture.metadata_fail=false;
+        NativeAdrenoMemory other;
+        CHECK(other.importTask(reinterpret_cast<void *>(2),0x300000,4096,36,4096)==kIOReturnSuccess);
+        CHECK(!other.lastFailure().status && !std::strcmp(other.lastFailure().stage,"none"));
+        CHECK(!std::strcmp(memory.lastFailure().stage,stages[fail]));
+        CHECK(other.release()==kIOReturnSuccess);
+    }
+    std::puts("PASS: per-object import failure stages survive cleanup and a later successful import");
+}
+
 int main()
 {
-    unmappedBacking();
+    unmappedBacking();importFailureStages();
     auto profiles=successes(),failure_controls=failures(),argument_controls=arguments();reset();
     const unsigned scanout=scanoutImports(),pool=bestEffortPool(),threaded=poolThreads(),extents=poolExtents(),runs=maintenanceRuns();
 #ifdef ADRENO830_MACOS

@@ -19,6 +19,11 @@
 #     by stage.py) and is never loaded here; `launchctl enable system/<label>` (an agent: gui/<uid>/<label>) turns it on for good.
 #   - A loaded job whose files changed is restarted (kickstart -k; bootout and bootstrap when its plist changed).
 #   - Agents go to the console user's session; with nobody logged in, the next login window or login loads them.
+#   - A missing directory is made one level at a time, every level 0755 root:wheel (install -d -m 755 a/b/c sets c only; a and b took the
+#     caller's umask: the layer apply runs with 077, which left v13.1y7's PianoMicNS.driver/ at 0700 and the HAL plug-in unreadable for
+#     coreaudiod's driver service). Every directory of a plugin bundle (/Library/GPUBundles/<x>.bundle/..., /Library/Audio/Plug-Ins/HAL/
+#     <x>.driver/...: from the bundle root down to the file) is made 0755 root:wheel when it is not, also on an unchanged file;
+#     --check reports such a directory.
 #   - A file this installer put in place earlier (the receipt) that the manifest no longer lists is removed, its job booted out,
 #     when it is unchanged since; anything else is left alone.
 #   - A file already there that this installer did not put in place (not in its receipt: the base seed's Metal plugin, an owner's
@@ -101,6 +106,42 @@ keep() {
 
 disabled() { launchctl print-disabled "$1" 2> /dev/null | grep -Eq "\"$2\" => (disabled|true)"; }
 
+# mkdirs DIR: DIR and every missing parent, one level at a time, each 0755 (root:wheel)
+mkdirs() {
+  [ -d "$1" ] && return 0
+  mkdirs "$(dirname "$1")" || return 1
+  if [ "$NOCHOWN" = 1 ]; then install -d -m 755 "$1"; else install -d -o root -g wheel -m 755 "$1"; fi
+}
+
+# bundle_dirs DEST: the directories of DEST's plugin bundle, from DEST's parent up to the bundle root (none outside a bundle)
+bundle_dirs() {
+  case "$1" in /Library/GPUBundles/*.bundle/*|/Library/Audio/Plug-Ins/HAL/*.driver/*) ;; *) return 0 ;; esac
+  bd=$(dirname "$1")
+  while [ "$bd" != / ]; do
+    echo "$bd"
+    case "${bd##*/}" in *.bundle|*.driver) return 0 ;; esac
+    bd=$(dirname "$bd")
+  done
+}
+
+# bundle_fix DEST: every directory of DEST's plugin bundle 0755 root:wheel (repaired and logged; --check: reported). 1 when one is not.
+bundle_fix() {
+  bf=0
+  while IFS= read -r bdir; do
+    [ -n "$bdir" ] && [ -d "$R$bdir" ] || continue
+    if [ "$NOCHOWN" = 1 ]; then bnow=$(has "$R$bdir" | cut -d' ' -f2); bexp=0755
+    else bnow=$(has "$R$bdir"); bexp='root:wheel 0755'; fi
+    [ "$bnow" = "$bexp" ] && continue
+    if [ "$MODE" = --check ]; then say "$bdir: $bnow, a plugin bundle directory is $bexp"; bf=1; continue; fi
+    if [ "$NOCHOWN" = 1 ]; then chmod 755 "$R$bdir"; else chown root:wheel "$R$bdir" && chmod 755 "$R$bdir"; fi ||
+      { say "$bdir: could not be made $bexp"; bf=1; continue; }
+    say "$bdir: directory $bnow -> $bexp (a plugin bundle directory)"
+  done <<EOF
+$(bundle_dirs "$1")
+EOF
+  return "$bf"
+}
+
 [ -f "$S/manifest.tsv" ] || { say "no manifest at $S/manifest.tsv"; exit 1; }
 [ "$MODE" = --check ] || mkdir -p "$STATE"
 
@@ -116,6 +157,7 @@ while IFS=$TAB read -r unit kind on mode owner group want staged dest label; do
     if [ "$NOCHOWN" = 1 ]; then now=$(has "$dst" | cut -d' ' -f2); exp=$mode
     else now=$(has "$dst"); exp="$owner:$group $mode"; fi
     [ "$now" = "$exp" ] || { say "$dest: $now, the manifest's $exp ($unit)"; FAILED=1; }
+    bundle_fix "$dest" || FAILED=1
     continue
   fi
   if [ ! -f "$src" ]; then say "$dest: the staged file $staged is missing: $unit not installed"; FAILED=1; continue; fi
@@ -126,9 +168,8 @@ while IFS=$TAB read -r unit kind on mode owner group want staged dest label; do
     continue
   fi
   dir=$(dirname "$dst")
-  if [ ! -d "$dir" ]; then
-    if [ "$NOCHOWN" = 1 ]; then install -d -m 755 "$dir"; else install -d -o root -g wheel -m 755 "$dir"; fi
-  fi
+  mkdirs "$dir" || { say "$dest: its directory could not be made: $unit not installed"; FAILED=1; continue; }
+  bundle_fix "$dest" || FAILED=1
   if [ -f "$dst" ] && cmp -s "$src" "$dst"; then
     keep "$dest" "$dst" || { say "$dest: no copy of the file in place could be kept: not taken over ($unit)"; FAILED=1; continue; }
     if [ "$NOCHOWN" = 1 ]; then now=$(has "$dst" | cut -d' ' -f2); exp=$mode
@@ -206,7 +247,12 @@ if [ -n "$passd_on" ]; then
   elif [ "$passd_on" = 0 ]; then
     if [ "$MODE" != --check ]; then sh "$R$PASSD" --remove || FAILED=1; fi
   elif [ "$MODE" = --check ]; then sh "$R$PASSD" --check || FAILED=1
-  else sh "$R$PASSD" --install || FAILED=1; fi
+  else
+    # The policy drops to UID 501. The boot hook's umask can leave its
+    # parent root-only even when the policy directory itself is owned by 501.
+    if chmod a+x "$STATE"; then sh "$R$PASSD" --install || FAILED=1
+    else say 'passd policy: state parent is not searchable; hook refused'; FAILED=1; fi
+  fi
 fi
 
 # 3. Jobs.

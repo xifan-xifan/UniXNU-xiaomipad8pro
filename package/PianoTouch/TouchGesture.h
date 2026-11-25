@@ -108,6 +108,16 @@ inline void gestureReset(Gesture &g, const GestureConfig &cfg)
   g.cfg = cfg;
 }
 inline bool gestureIdle(const Gesture &g) { return g.mode == GestureMode::idle; }
+// The multitouch path (TouchMt.h) took the touch over: the engine lets go of its fingers without a report (it takes over only an
+// idle engine, one undecided finger or two fingers, none of which holds a button or a modifier); tap history and counts stay.
+inline void gestureAbandon(Gesture &g)
+{
+  g.mode = GestureMode::idle;
+  g.cand = 0;
+  g.candFrames = 0;
+  g.pending = false;
+  g.lifting = false;
+}
 
 namespace detail {
 inline int64_t sq(int64_t v) { return v * v; }

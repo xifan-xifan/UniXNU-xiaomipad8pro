@@ -1,0 +1,376 @@
+--- a/frontend.mm
++++ b/frontend.mm
+@@ -17,6 +17,7 @@
+ #include <algorithm>
+ #include <array>
+ #include <memory>
++#include "SurfaceResidency.h"
+ #include <deque>
+ #include <condition_variable>
+ #include <cmath>
+@@ -1133,8 +1134,24 @@
+ // A surface import's own surface object, which the runtime buffer retains until it is freed (surfaceBuffer); nullptr otherwise.
+ @property(nonatomic) IOSurfaceRef importedSurface;
+ @end
+-@interface NBTexture : NBObject
++struct NBSurfaceGeneration {
++ NmbTexture *handle;
++ NBBuffer *__strong buffer;
++ NBSurfaceGeneration(NmbTexture *texture,NBBuffer *import):handle(texture),buffer(import){}
++ ~NBSurfaceGeneration(){nmb_texture_release(handle);}
++};
++using NBSurfaceLease=std::shared_ptr<NBSurfaceGeneration>;
++using NBSurfaceRestore=NBSurfaceLease (^)(void);
++@interface NBTexture : NBObject {
++ std::unique_ptr<SurfaceResidency<NBSurfaceGeneration>> _residency;
++ NBSurfaceRestore _restore;
++}
+ @property(nonatomic) NmbTexture *handle;
++- (void)allowResidencyEviction:(NBBuffer *)buffer restore:(NBSurfaceRestore)restore;
++- (NBSurfaceLease)readLease;
++- (NBSurfaceLease)residentLease;
++- (BOOL)hasResidency;
++- (BOOL)evictIfIdle;
+ @property(nonatomic,strong) NBAsked *asked;   // its bytes in gAskedBytes[0] while it lives; nil: not counted
+ @property(nonatomic) uint32_t pvrtc;   // the PVRTC format the texture was asked for, decoded into its RGBA8 (0: none)
+ - (void)replacePvrtcRegion:(MTLRegion)r mipmapLevel:(NSUInteger)level slice:(NSUInteger)slice withBytes:(const void *)bytes length:(size_t)length;
+@@ -1148,6 +1165,21 @@
+ @property(nonatomic) BOOL counted;   // its surface counted in use (countUse)
+ - (void)countUse;
+ @end
++static const bool gSurfaceResidency=[](){
++ char args[4096]={};size_t size=sizeof(args)-1;
++ return !sysctlbyname("kern.bootargs",args,&size,nullptr,0) && SurfaceResidencyEnabled(args);}();
++static NSHashTable<NBTexture *> *gResidentTextures;
++static std::mutex gResidentTexturesLock;
++static std::atomic<uint64_t> gResidencyEvicted,gResidencyRestored,gResidencyRefused;
++static void trimIdleSurfaceTextures() {
++ if(!gSurfaceResidency)return;
++ NSArray<NBTexture *> *textures;
++ {
++  std::lock_guard<std::mutex> lock(gResidentTexturesLock);
++  textures=gResidentTextures.allObjects;
++ }
++ for(NBTexture *texture in textures)if([texture evictIfIdle])gResidencyEvicted++;
++}
+ // The render server counts the surfaces it textures in use while the textures live (countUse).
+ static const bool gCountsSurfaceUse=!strcmp(getprogname(),"backboardd");
+ // A no-copy import keeps its pages until the runtime frees it, which can be after the buffer object goes (a command buffer still using
+@@ -1290,6 +1321,7 @@
+  size_t blocks=0;
+  if(gDevice)blocks+=nmb_device_hold_back_memory(gDevice,true);
+  trimHeldImports(true);
++ trimIdleSurfaceTextures();
+  if(gDevice){const uint32_t trimmed=nmb_device_trim_memory(gDevice,0);gTrimmedBlocks+=trimmed;
+   blocks+=trimmed;blocks+=nmb_device_release_kept_memory(gDevice);}
+  const uint64_t after=runtimeAllocatedBytes(),freed=before>after?before-after:0;
+@@ -1300,6 +1332,8 @@
+   (unsigned long long)gGpuReclaimRuns.load(),(unsigned long long)freed,(unsigned long long)blocks,
+   (unsigned long long)held,(unsigned long long)gHeldImportBytes.load(),(unsigned long long)gSurfaceImportsMade.load(),
+   (unsigned long long)gSurfaceImportsReleased.load(),(unsigned long long)gCapacityFailures.load());
++ if(gSurfaceResidency)NBNOTE(@"native-metal: surface-residency evicted=%llu restored=%llu refused=%llu",
++  (unsigned long long)gResidencyEvicted.load(),(unsigned long long)gResidencyRestored.load(),(unsigned long long)gResidencyRefused.load());
+ }
+ static void watchImportPressure() {
+  static dispatch_once_t once;
+@@ -1332,6 +1366,7 @@
+    const bool raised=gImportPressure.active(nowUs());
+    if(gNoHoldImports.load() && !raised){if(gDevice)(void)nmb_device_hold_back_memory(gDevice,false);gNoHoldImports=false;}
+    trimHeldImports(false);
++   if(raised)trimIdleSurfaceTextures();
+    if(gDevice)gTrimmedBlocks+=nmb_device_trim_memory(gDevice,raised?0:2000);
+    // Opt-in every-process census, toggled live by the qualification spec. The
+    // unified log keeps the full record; stderr's ordinary rate limit still applies.
+@@ -1557,11 +1592,36 @@
+  return true;
+ }
+ @implementation NBTexture
+-- (void)dealloc {nmb_texture_release(_handle);if(_surface){if(_counted)IOSurfaceDecrementUseCount(_surface);CFRelease(_surface);}}
++@synthesize handle=_handle;
++- (void)allowResidencyEviction:(NBBuffer *)buffer restore:(NBSurfaceRestore)restore {
++ _residency=std::make_unique<SurfaceResidency<NBSurfaceGeneration>>(std::make_shared<NBSurfaceGeneration>(_handle,buffer));
++ _handle=nullptr;_buffer=nil;_restore=[restore copy];
++ std::lock_guard<std::mutex> lock(gResidentTexturesLock);
++ if(!gResidentTextures)gResidentTextures=[NSHashTable weakObjectsHashTable];
++ [gResidentTextures addObject:self];
++}
++- (NBSurfaceLease)acquireResidency:(BOOL)pin {
++ return _residency->acquire(pin,[&]{
++  auto lease=_restore();
++  if(lease)gResidencyRestored++;
++  else gResidencyRefused++;
++  return lease;
++ });
++}
++- (NBSurfaceLease)readLease {return [self acquireResidency:NO];}
++- (NBSurfaceLease)residentLease {return _residency?_residency->borrowResident():NBSurfaceLease{};}
++- (BOOL)hasResidency {return _residency!=nullptr;}
++- (BOOL)evictIfIdle {return _residency && _residency->evictIdle();}
++- (NmbTexture *)handle {
++ if(!_residency)return _handle;
++ auto lease=[self acquireResidency:YES];
++ return lease?lease->handle:nullptr;
++}
++- (void)dealloc {_residency.reset();nmb_texture_release(_handle);if(_surface){if(_counted)IOSurfaceDecrementUseCount(_surface);CFRelease(_surface);}}
+ - (void)countUse {if(_surface && !_counted && gCountsSurfaceUse){IOSurfaceIncrementUseCount(_surface);_counted=YES;}}
+ - (MTLTextureType)textureType {return (MTLTextureType)_descriptor.type;}
+ // The word an argument buffer holds for the texture (MTLArgumentEncoder writes the same); a view has its own.
+-- (MTLResourceID)gpuResourceID {MTLResourceID id_;id_._impl=nmb_texture_resource_id(_handle);return id_;}
++- (MTLResourceID)gpuResourceID {MTLResourceID id_;id_._impl=nmb_texture_resource_id(self.handle);return id_;}
+ - (MTLPixelFormat)pixelFormat {return (MTLPixelFormat)(_pvrtc?_pvrtc:_descriptor.format);}
+ - (NSUInteger)width {return _descriptor.width;}
+ - (NSUInteger)height {return _descriptor.height;}
+@@ -1583,7 +1643,7 @@
+ - (id<MTLTexture>)parentTexture {return _parent;}
+ - (NSUInteger)rotation {return _descriptor.rotation;}
+ - (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state {
+- const uint64_t answer=nmb_texture_set_purgeable_state(_handle,state);
++ const uint64_t answer=nmb_texture_set_purgeable_state(self.handle,state);
+  if(!answer)NBLOG(@"native-metal: texture setPurgeableState refused: %@",lastError());
+  return (MTLPurgeableState)answer;
+ }
+@@ -1597,12 +1657,12 @@
+ }
+ - (id<MTLTexture>)newTextureViewWithPixelFormat:(MTLPixelFormat)format {
+  if(isPvrtc(format))format=(MTLPixelFormat)pvrtcCarrier(format);
+- return [self view:nmb_texture_new_view(_handle,format,0,nullptr,nullptr,true)];
++ return [self view:nmb_texture_new_view(self.handle,format,0,nullptr,nullptr,true)];
+ }
+ - (id<MTLTexture>)newTextureViewWithPixelFormat:(MTLPixelFormat)format textureType:(MTLTextureType)type levels:(NSRange)levels slices:(NSRange)slices {
+  const uint64_t l[2]={levels.location,levels.length},s[2]={slices.location,slices.length};
+  if(isPvrtc(format))format=(MTLPixelFormat)pvrtcCarrier(format);
+- return [self view:nmb_texture_new_view(_handle,format,type,l,s,false)];
++ return [self view:nmb_texture_new_view(self.handle,format,type,l,s,false)];
+ }
+ // WebKit's WebGPU makes these for a texture view's swizzle (and to read a depth/stencil texture's one aspect).
+ - (id<MTLTexture>)newTextureViewWithPixelFormat:(MTLPixelFormat)format textureType:(MTLTextureType)type levels:(NSRange)levels slices:(NSRange)slices
+@@ -1610,7 +1670,7 @@
+  const uint64_t l[2]={levels.location,levels.length},s[2]={slices.location,slices.length};
+  if(isPvrtc(format))format=(MTLPixelFormat)pvrtcCarrier(format);
+  const uint32_t channels=(uint32_t)swizzle.red|(uint32_t)swizzle.green<<8|(uint32_t)swizzle.blue<<16|(uint32_t)swizzle.alpha<<24;
+- return [self view:nmb_texture_new_view_swizzle(_handle,format,type,l,s,channels)];
++ return [self view:nmb_texture_new_view_swizzle(self.handle,format,type,l,s,channels)];
+ }
+ - (void)replaceRegion:(MTLRegion)r mipmapLevel:(NSUInteger)level slice:(NSUInteger)slice withBytes:(const void *)bytes bytesPerRow:(NSUInteger)row bytesPerImage:(NSUInteger)image {
+  const uint64_t region[6]={r.origin.x,r.origin.y,r.origin.z,r.size.width,r.size.height,r.size.depth};
+@@ -1626,7 +1686,7 @@
+    _pvrtc==160 || _pvrtc==161 || _pvrtc==164 || _pvrtc==165)];
+   return;
+  }
+- if(!nmb_texture_replace(_handle,region,level,slice,bytes,row,image,length))NBLOG(@"native-metal: replaceRegion refused: %@",lastError());
++ if(!nmb_texture_replace(self.handle,region,level,slice,bytes,row,image,length))NBLOG(@"native-metal: replaceRegion refused: %@",lastError());
+ }
+ - (void)replacePvrtcRegion:(MTLRegion)r mipmapLevel:(NSUInteger)level slice:(NSUInteger)slice withBytes:(const void *)bytes length:(size_t)length {
+  const bool twoBit=_pvrtc==160 || _pvrtc==161 || _pvrtc==164 || _pvrtc==165,alpha=_pvrtc>=164;
+@@ -1635,7 +1695,7 @@
+  std::vector<uint8_t> rgba((size_t)width*height*4);
+  pvrtcDecode((const uint8_t *)bytes,length,width,height,twoBit,alpha,rgba.data());
+  const uint64_t region[6]={r.origin.x,r.origin.y,r.origin.z,width,height,1};
+- if(!nmb_texture_replace(_handle,region,level,slice,rgba.data(),(uint64_t)width*4,(uint64_t)width*4*height,rgba.size()))
++ if(!nmb_texture_replace(self.handle,region,level,slice,rgba.data(),(uint64_t)width*4,(uint64_t)width*4*height,rgba.size()))
+   NBLOG(@"native-metal: PVRTC replaceRegion refused: %@",lastError());
+ }
+ - (void)replaceRegion:(MTLRegion)r mipmapLevel:(NSUInteger)level withBytes:(const void *)bytes bytesPerRow:(NSUInteger)row {
+@@ -1644,7 +1704,7 @@
+ - (void)getBytes:(void *)bytes bytesPerRow:(NSUInteger)row bytesPerImage:(NSUInteger)image fromRegion:(MTLRegion)r mipmapLevel:(NSUInteger)level slice:(NSUInteger)slice {
+  const uint64_t region[6]={r.origin.x,r.origin.y,r.origin.z,r.size.width,r.size.height,r.size.depth};
+  const uint64_t length=(r.size.depth>1?image*(r.size.depth-1):0)+row*r.size.height;
+- if(!nmb_texture_get_bytes(_handle,bytes,row,image,length,region,level,slice))NBLOG(@"native-metal: getBytes refused: %@",lastError());
++ if(!nmb_texture_get_bytes(self.handle,bytes,row,image,length,region,level,slice))NBLOG(@"native-metal: getBytes refused: %@",lastError());
+ }
+ - (void)getBytes:(void *)bytes bytesPerRow:(NSUInteger)row fromRegion:(MTLRegion)r mipmapLevel:(NSUInteger)level {
+  [self getBytes:bytes bytesPerRow:row bytesPerImage:row*r.size.height fromRegion:r mipmapLevel:level slice:0];
+@@ -1707,16 +1767,24 @@
+ // A texture over a two-plane surface: the runtime reads plane 1 from the surface's own layout (two-plane RGB and YCbCr formats).
+ // UniXNU-piano (0003): no fixed cap for the two-plane YCbCr formats (noteSurfaceTexture), and a refusal is said by the caller, with the
+ // surface's geometry.
+-static NBTexture *textureOnSurface(NBBuffer *buffer,MTLTextureDescriptor *d,IOSurfaceRef surface,NSUInteger plane,NSUInteger offset,NSUInteger row) {
+- NmbTextureDescriptor descriptor;if(!buffer || !textureDescriptor(d,&descriptor))return nil;
++static NmbTexture *surfaceTextureHandle(NBBuffer *buffer,const NmbTextureDescriptor &descriptor,IOSurfaceRef surface,
++                                       NSUInteger plane,NSUInteger offset,NSUInteger row) {
++ if(!buffer)return nullptr;
++ if(IOSurfaceGetPlaneCount(surface)<2)return nmb_texture_new_on_buffer(buffer.handle,&descriptor,offset,row,true);
+  const uint64_t base=(uintptr_t)IOSurfaceGetBaseAddress(surface),chroma=(uintptr_t)IOSurfaceGetBaseAddressOfPlane(surface,1);
+  uint64_t chromaOffset=chroma>=base?chroma-base:0,chromaRow=IOSurfaceGetBytesPerRowOfPlane(surface,1);
+  size_t computed[4];   // myron: a 'b3a8' surface without plane rows
+  if(!chromaRow && b3a8Planes(surface,IOSurfaceGetAllocSize(surface),computed)){chromaOffset=computed[2];chromaRow=computed[3];}
+- NmbTexture *handle=allocationWithReclaim("texture over surface",[&]{return nmb_texture_new_on_surface(buffer.handle,&descriptor,offset,row,IOSurfaceGetPixelFormat(surface),plane,
+-  IOSurfaceGetWidth(surface),IOSurfaceGetHeight(surface),chromaOffset,chromaRow);});
++ return nmb_texture_new_on_surface(buffer.handle,&descriptor,offset,row,IOSurfaceGetPixelFormat(surface),plane,
++  IOSurfaceGetWidth(surface),IOSurfaceGetHeight(surface),chromaOffset,chromaRow);
++}
++static NBTexture *textureOnSurface(NBBuffer *buffer,const NmbTextureDescriptor &descriptor,IOSurfaceRef surface,
++                                   NSUInteger plane,NSUInteger offset,NSUInteger row) {
++ const char *kind=IOSurfaceGetPlaneCount(surface)<2?"texture over buffer":"texture over surface";
++ NmbTexture *handle=allocationWithReclaim(kind,[&]{return surfaceTextureHandle(buffer,descriptor,surface,plane,offset,row);});
+  if(!handle)return nil;
+- NBTexture *texture=[NBTexture new];texture.handle=handle;nmb_texture_describe(handle,&descriptor);texture.descriptor=descriptor;
++ NBTexture *texture=[NBTexture new];texture.handle=handle;NmbTextureDescriptor actual;
++ nmb_texture_describe(handle,&actual);texture.descriptor=actual;
+  texture.buffer=buffer;texture.offset=offset;texture.rowBytes=row;return texture;
+ }
+ // Textures over host pages whose rows or offset are not whole 64-byte steps, which no linear image of this GPU lays out (fd6_layout: a
+@@ -2166,7 +2234,8 @@
+ }
+ - (void)setTexture:(id<MTLTexture>)t atIndex:(NSUInteger)i {
+  if(t && ![(id)t isKindOfClass:[NBTexture class]]){[self foreign:"setTexture"];return;}
+- if(!nmb_argument_encoder_set_texture(_handle,t?[(NBTexture *)t handle]:nullptr,(uint32_t)i))[self refused:"setTexture"];
++ NmbTexture *handle=[(NBTexture *)t handle];
++ if((t && !handle) || !nmb_argument_encoder_set_texture(_handle,handle,(uint32_t)i))[self refused:"setTexture"];
+ }
+ - (void)setTextures:(const id<MTLTexture> __unsafe_unretained [])t withRange:(NSRange)r {
+  for(NSUInteger k=0;k<r.length;k++)[self setTexture:t[k] atIndex:r.location+k];
+@@ -2331,6 +2400,7 @@
+  if(manifest)fclose(manifest);
+ }
+ @interface NBCommandBuffer : NBObject {
++ std::vector<NBSurfaceLease> surfaceReadLeases;
+ @public
+  EncodedWork encodedWork;   // the command buffer's single encoder thread, not global counter deltas
+  uint64_t createdUs;
+@@ -2358,6 +2428,7 @@
+ // The sampled sources watched for a rewrite while the GPU could read them (gWatchSources), kept alive until completion.
+ @property(nonatomic,strong) NSMutableSet *sampled;
+ - (void)watchTexture:(NBTexture *)texture;
++- (NmbTexture *)readTexture:(NBTexture *)texture;
+ @property(nonatomic,strong) dispatch_group_t handlers;
+ @property(nonatomic,strong) dispatch_group_t schedulingHandlers;
+ @property(nonatomic) BOOL schedulingDelivered;
+@@ -2766,7 +2837,12 @@
+   {
+    std::lock_guard<std::mutex> guard(gRuntimeHandleLock);
+    if([resource isKindOfClass:[NBBuffer class]])dependency=nmb_command_buffer_uses_buffer(commandBuffer.handle,[(NBBuffer *)resource handle]);
+-   else if([resource isKindOfClass:[NBTexture class]])dependency=nmb_command_buffer_uses_texture(commandBuffer.handle,[(NBTexture *)resource handle]);
++   else if([resource isKindOfClass:[NBTexture class]]) {
++    NBTexture *texture=(NBTexture *)resource;
++    auto lease=[texture residentLease];
++    auto handle=lease?lease->handle:[texture hasResidency]?nullptr:texture.handle;
++    if(handle)dependency=nmb_command_buffer_uses_texture(commandBuffer.handle,handle);
++   }
+   }
+   gResourceChecks++;
+   // An unknown result retains the old conservative wait. False means no matching storage
+@@ -2924,16 +3000,17 @@
+   if(texture.usage&MTLTextureUsageShaderWrite)[_commandBuffer.writtenSurfaces addObject:texture];
+  }
+  if(texture && gWatchSources)[_commandBuffer watchTexture:(NBTexture *)texture];
+- ENCODE([self check:nmb_encoder_set_texture(self->_handle,stage,texture?[(NBTexture *)texture handle]:nullptr,(uint32_t)index) what:"setTexture"]);
++ ENCODE(NmbTexture *handle=[self.commandBuffer readTexture:(NBTexture *)texture];
++  if(!texture || handle)[self check:nmb_encoder_set_texture(self->_handle,stage,handle,(uint32_t)index) what:"setTexture"]);
+ }
+ // useResource:usage:(stages:): a buffer or texture the encoder's later work reaches through an argument buffer (WebGPU's bind groups,
+ // an app's argument buffers), made resident by the runtime and kept alive with the command buffer as a bound one is.
+ - (void)use:(id<MTLResource>)resource usage:(MTLResourceUsage)usage stages:(uint64_t)stages {
+  if(!resource)return;
+- NmbBuffer *buffer=nullptr;NmbTexture *texture=nullptr;
++ NmbBuffer *buffer=nullptr;NBTexture *target=nil;
+  if([(id)resource isKindOfClass:[NBBuffer class]])buffer=[(NBBuffer *)resource handle];
+  else if([(id)resource isKindOfClass:[NBTexture class]]) {
+-  texture=[(NBTexture *)resource handle];
++  target=(NBTexture *)resource;
+   if([(NBTexture *)resource surface]) {
+    [_commandBuffer.surfaces addObject:resource];
+    if(usage&MTLResourceUsageWrite)[_commandBuffer.writtenSurfaces addObject:resource];
+@@ -2941,7 +3018,9 @@
+  } else {[_commandBuffer refuse:@"foreign resource in useResource"];return;}
+  [_commandBuffer.resourceOwners addObject:resource];
+  const uint64_t u=(uint64_t)usage;
+- ENCODE([self check:nmb_encoder_use_resource(self->_handle,buffer,texture,u,stages) what:"useResource"]);
++ ENCODE(NmbTexture *texture=(usage&MTLResourceUsageWrite)?target.handle:[self.commandBuffer readTexture:target];
++  if(target && !texture)[self.commandBuffer refuse:@"useResource texture could not become resident"];
++  else [self check:nmb_encoder_use_resource(self->_handle,buffer,texture,u,stages) what:"useResource"]);
+ }
+ - (void)useHeap:(id<MTLHeap>)heap stagesRaw:(uint64_t)stages {
+  if(!heap)return;
+@@ -3381,8 +3460,9 @@
+            (unsigned long)ss,(unsigned long)sl,(unsigned long)so.x,(unsigned long)so.y,(unsigned long)z.width,(unsigned long)z.height,dumpName(d),
+            (unsigned long)ds,(unsigned long)dl,(unsigned long)dO.x,(unsigned long)dO.y]);
+  const std::array<uint64_t,3> a={so.x,so.y,so.z},size={z.width,z.height,z.depth},b={dO.x,dO.y,dO.z};
+- ENCODE([self check:nmb_blit_copy_texture(self.handle,[(NBTexture *)s handle],ss,sl,a.data(),size.data(),[(NBTexture *)d handle],ds,dl,b.data())
+-                what:"copyFromTexture:toTexture:"]);
++ ENCODE(NmbTexture *source=[self.commandBuffer readTexture:(NBTexture *)s];
++  if(source)[self check:nmb_blit_copy_texture(self.handle,source,ss,sl,a.data(),size.data(),[(NBTexture *)d handle],ds,dl,b.data())
++                    what:"copyFromTexture:toTexture:"]);
+ }
+ - (void)copyFromTexture:(id<MTLTexture>)s toTexture:(id<MTLTexture>)d {
+  if(![self textures:NB_OBJECTS(s,d) count:2])return;
+@@ -3444,8 +3524,9 @@
+            (unsigned long)o]);
+  const std::array<uint64_t,3> a={so.x,so.y,so.z},size={z.width,z.height,z.depth};
+  const uint64_t opts=(uint64_t)options;
+- ENCODE([self check:nmb_blit_texture_to_buffer(self.handle,[(NBTexture *)s handle],slice,level,a.data(),size.data(),[(NBBuffer *)d handle],o,row,image,
+-                                               opts) what:"copyFromTexture:toBuffer:"]);
++ ENCODE(NmbTexture *source=[self.commandBuffer readTexture:(NBTexture *)s];
++  if(source)[self check:nmb_blit_texture_to_buffer(self.handle,source,slice,level,a.data(),size.data(),[(NBBuffer *)d handle],o,row,image,
++                     opts) what:"copyFromTexture:toBuffer:"]);
+ }
+ - (void)generateMipmapsForTexture:(id<MTLTexture>)t {
+  if(![self textures:NB_OBJECTS(t) count:1])return;
+@@ -3624,4 +3705,13 @@
+ @implementation NBCommandBuffer
++- (NmbTexture *)readTexture:(NBTexture *)texture {
++ if(![texture hasResidency])return texture.handle;
++ auto lease=[texture readLease];
++ if(!lease){[self refuse:@"IOSurface texture could not become resident"];return nullptr;}
++ auto handle=lease->handle;
++ if(std::find(surfaceReadLeases.begin(),surfaceReadLeases.end(),lease)==surfaceReadLeases.end())
++  surfaceReadLeases.push_back(std::move(lease));
++ return handle;
++}
+ // IOGPUMetalCommandBuffer's userDictionary: a mutable dictionary per command buffer, which MPS keeps its per-buffer state in (nil lost it).
+ static char kUserDictionaryKey;
+ - (id)userDictionary {
+@@ -3805,11 +3895,13 @@
+   NBTexture *texture=(NBTexture *)a.texture;if(texture.surface){[_surfaces addObject:texture];[_writtenSurfaces addObject:texture];}
+   [_resourceOwners addObject:texture];
+   out.texture=texture.handle;out.level=a.level;out.slice=a.slice;out.depth_plane=a.depthPlane;out.load=a.loadAction;out.store=a.storeAction;
++  if(!out.texture)return false;
+   if(a.resolveTexture) {
+    if(![(id)a.resolveTexture isKindOfClass:[NBTexture class]])return false;
+    NBTexture *resolve=(NBTexture *)a.resolveTexture;
+    [_resourceOwners addObject:resolve];if(resolve.surface){[_surfaces addObject:resolve];[_writtenSurfaces addObject:resolve];}
+    out.resolve_texture=resolve.handle;out.resolve_level=a.resolveLevel;
++   if(!out.resolve_texture)return false;
+    out.resolve_slice=a.resolveSlice;out.resolve_depth_plane=a.resolveDepthPlane;
+   }
+   return true;
+@@ -3896,6 +3988,7 @@
+   NmbCommandBuffer *handle=_handle;_handle=nullptr;
+   nmb_command_buffer_release(handle);
+  }
++ surfaceReadLeases.clear();
+  NSArray *completedHandlers;
+  @synchronized(self){
+   // A frontend refusal or a failed submission never scheduled. Unblock its waiter without inventing a scheduled event.
+@@ -4991,7 +5084,9 @@
+  if(!buffer){
+   refuseSurface(4,surface,d,plane,start-(uintptr_t)base,row);
+   noteSurfaceTexture(false,4,d,surface,plane,start-(uintptr_t)base,row,0,[@"import: " stringByAppendingString:importError?:@"unknown"]);return nil;}
+- NBTexture *texture=planes>=2?textureOnSurface(buffer,d,surface,plane,start-(uintptr_t)base,row):textureOnBuffer(buffer,d,start-(uintptr_t)base,row,true);
++ NmbTextureDescriptor recipe;
++ const size_t offset=start-(uintptr_t)base;
++ NBTexture *texture=textureDescriptor(d,&recipe)?textureOnSurface(buffer,recipe,surface,plane,offset,row):nil;
+  const uint64_t after=runtimeAllocatedBytes(),made=after>before?after-before:0;
+  if(!texture){
+   refuseSurface(5,surface,d,plane,start-(uintptr_t)base,row);
+@@ -4999,7 +5094,19 @@
+  if(made>=kLargeAllocationBytes || allocation>=kLargeAllocationBytes*4 || (ycbcrFormatName(d.pixelFormat) && (uint64_t)d.width*d.height>1024*1024))
+   noteSurfaceTexture(true,0,d,surface,plane,start-(uintptr_t)base,row,made,nil);
+  if(gLogTextures)logTexture("iosurface",d,surface,plane,base,start-(uintptr_t)base,row,texture!=nil);
+- gSurfaceTextures++;texture.surface=(IOSurfaceRef)CFRetain(surface);[texture countUse];return (id<MTLTexture>)texture;
++ gSurfaceTextures++;texture.surface=(IOSurfaceRef)CFRetain(surface);[texture countUse];
++ if(gSurfaceResidency && recipe.usage==MTLTextureUsageShaderRead && texture.usage==MTLTextureUsageShaderRead &&
++    !recipe.is_drawable && !recipe.framebuffer_only && !isPvrtc(d.pixelFormat)) {
++  [texture allowResidencyEviction:buffer restore:^NBSurfaceLease{
++   if(IOSurfaceGetBaseAddress(surface)!=base || IOSurfaceGetAllocSize(surface)!=allocation)return {};
++   NBBuffer *backing=surfaceBuffer(surface,base,bytes);
++   if(!backing)return {};
++   NmbTexture *handle=allocationWithReclaim("surface remap",[&]{return surfaceTextureHandle(backing,recipe,surface,plane,offset,row);});
++   if(!handle)return {};
++   return std::make_shared<NBSurfaceGeneration>(handle,backing);
++  }];
++ }
++ return (id<MTLTexture>)texture;
+ }
+ // One L line per library made (its source, size and function names), and with /private/var/ngpu/debug/dump-libraries each library made
+ // from data written beside the journal (libs/<size>-<hash>.metallib): RenderBox links a function of a library it builds at run time

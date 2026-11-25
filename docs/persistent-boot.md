@@ -33,7 +33,7 @@ LUN 0 has 4096-byte LBAs (124552192 blocks). The partition numbers are the GPT's
 Not written: `vendor_boot_a` (`50f70e36…`, Ubuntu's: its DTB is `out/inputs/piano-boot.dtb`) and `init_boot_a` (`bbebc3d1…`) stay;
 ABL pairs them with the new `boot_a` exactly as it did with Ubuntu's kernel. `boot_b`, `userdata`, `linux_data`, `super`,
 `metadata` and every firmware partition are untouched. Slot A's attribute bits are not touched (`dd`, not `fastboot flash`), unless
-`slot-success` is needed (§5).
+`slot-success-crc` is needed (§5).
 
 The new GPT differs from the current one in exactly 100 bytes (`out/persistent/gpt-diff.txt`): entry 35's EndingLBA, entry 37,
 and the entries/header CRCs of both copies. `tooling/persist/build-gpt.py` refuses to write its output if any other byte differs.
@@ -178,7 +178,7 @@ python3 $P ram-esp-test         # boot-piano-esp-test-v2.img: UEFI log "config: 
 python3 $P ram-v4-signed        # the exact boot_a bytes; ABL takes vendor_boot_a/init_boot_a from the partitions
 python3 $P ram-precedence       # out/ram-precedence (patched FD, data-persist=0): "config: volume VenHw(A9C6827C-…)", its own payload wins
 # session 3, maintenance RAM image:
-python3 $P maint-boot map backup boot-a check maint-exit     # + esp-final for daily use (default macos), + slot-success if needed
+python3 $P maint-boot map backup boot-a check maint-exit     # + esp-final for daily use (default macos), + slot-success-crc if needed
 # ABL fastboot:
 python3 $P abl-final reboot     # a, yes, no; then slot A boots macOS. Last test: power off, unplug, power on.
 ```
@@ -198,8 +198,14 @@ What the steps check, besides the backups and read-backs:
   `ANDROID!`.
 - `check`: root manifest, `boot_b`, `vendor_boot_a`, `init_boot_a` unchanged; GPT = the new tables; `sgdisk -v` clean; ESP = the
   image written; the store header in place.
-- `slot-success` (only if `abl-check` shows `slot-successful:a: no`): bit 54 of `boot_a`'s GPT entry, after backups of both GPT
-  copies of its LUN; the read-back may differ from the backup only in that entry's attributes and the two CRCs. Never `set_active`.
+- `slot-success-crc` (only if `abl-check` shows `slot-successful:a: no`): bit 54 of `boot_a`'s GPT entry and the CRCs of both LUN 4
+  GPT copies, after backups of both copies; the read-back may differ from the backup only in that entry's attributes and the two
+  CRCs; `sgdisk -v` clean. Never `set_active`. The older `slot-success` (`sgdisk -A`) is retired and refuses: sgdisk rewrote LUN 4's
+  protective MBR, and its rollback missed the backup entry array (2026-11-20).
+- `check` expects the ESP this run (or this backup set) wrote; with no ESP write in the set, the ESP region as the set's `backup` read
+  it before any write, which `out/persistent/installed.json` must name too. A value an older session left in `session/state.json` is
+  never used (2026-11-23: a stale `esp-k273-v9.img` failed `check` over the installed ESP after a slot-success-crc run that wrote no
+  ESP).
 
 If ABL refuses the v4 image for `fastboot boot` (`ram-v4-signed`: our UEFI never appears, or `Load Error`): `fastboot reboot
 bootloader`, and either treat the v4 container as tested by its Ubuntu twin or write the signed v2 test image instead:
@@ -225,7 +231,7 @@ installed. The `fastboot` menu entry also resets into ABL fastboot.
 |---|---|
 | Undo one step | `python3 tooling/persist/maint-session.py rollback boot-a` / `esp` / `store` / `gpt` (in the maintenance image; each streams its verified backup back and reads it back). Order for a full undo: `boot-a`, `esp`, `store`, `gpt`. |
 | Ubuntu | Ubuntu's root is gone, so: maintenance image, `rollback esp store gpt boot-a` (old tables, old `boot_a` = Ubuntu `389d4271…`); then restore `linux_rootfs` from the 2026-11-10 partition backup (the local restore notes of 2026-11-10, `RESTORE-20261110.md`, not published, scenario B: stream `35-linux_rootfs.img.zst` decompressed onto the partition, check its sha256). `vendor_boot_a`/`init_boot_a` are Ubuntu's already; `linux_data` (`/home`) is never touched. Keep the macOS root image (OS/SystemOS windows) for a later reinstall. |
-| Android (charges) | ABL fastboot: `python3 $REPO/tools/piano-switch.py --serial $PIANO_SERIAL --images ~/Downloads/XiaomiPad8Pro-Ubuntu/CRITICAL-BACKUP/android-set --rollback out/persistent/macos-set`, then `fastboot -s $PIANO_SERIAL reboot` (`$REPO` = the Ubuntu release tree). `userdata`, `super` and `metadata` are untouched; Android marks the slot itself. Back to macOS: `piano-switch.py --serial $PIANO_SERIAL --images out/persistent/macos-set --rollback ~/Downloads/XiaomiPad8Pro-Ubuntu/CRITICAL-BACKUP/android-set` (all three, since `vendor_boot_a`/`init_boot_a` are Android's then), then `maint-session.py --new-backup abl-check maint-boot map backup slot-success check maint-exit` (a flash clears bit 54 and macOS does not set it; `abl-check` records the slot state `slot-success` acts on). |
+| Android (charges) | ABL fastboot: `python3 $REPO/tools/piano-switch.py --serial $PIANO_SERIAL --images ~/Downloads/XiaomiPad8Pro-Ubuntu/CRITICAL-BACKUP/android-set --rollback out/persistent/macos-set-v5`, then `fastboot -s $PIANO_SERIAL reboot` (`$REPO` = the Ubuntu release tree). `userdata`, `super` and `metadata` are untouched; Android marks the slot itself. Back to macOS, from the checkout and in an attached terminal (a detached python loses the USB network to Local Network privacy): `piano-switch.py --serial $PIANO_SERIAL --images out/persistent/macos-set-v5 --rollback ~/Downloads/XiaomiPad8Pro-Ubuntu/CRITICAL-BACKUP/android-set` (all three, since `vendor_boot_a`/`init_boot_a` are Android's then), then `PIANO_V110=$PWD/private/v1.1.0 python3 tooling/persist/maint-session.py --new-backup abl-check maint-boot map backup slot-success-crc check maint-exit` (a flash clears bit 54 and macOS does not set it; `abl-check` records the slot state `slot-success-crc` acts on). `maint-boot` takes the first maintenance image that hashes to its pin (`54001a50…`): `$PIANO_V110`'s, each `PIANO_V110` of `~/.config/piano/env`, then `private/v1.1.0`; naming it in the command keeps the run independent of the shell. |
 | Factory | `CRITICAL-BACKUP/NAS-README.zh-CN.md` (original GPT `backup-meta/gpt/sda-*.bin`, the OS3.0.303 package; never `flash_all_lock`). |
 
 ## 8. Charging caveat

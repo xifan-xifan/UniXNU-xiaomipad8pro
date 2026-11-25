@@ -320,18 +320,22 @@ IOReturn A830Hfi::drainLocked(unsigned queue,uint16_t step)
 /* ---- one command ---------------------------------------------------------------------------------------------------- */
 
 IOReturn A830Hfi::transact(uint8_t id,const uint32_t *payload,uint32_t dwords,A830HfiAck *ack,uint16_t step,
-                           unsigned message,bool tolerate)
+                           unsigned message,bool tolerate,uint32_t timeoutUs,bool dropAck,A830ExitVote trace)
 {
     bool pushed=false;
-    const IOReturn result=exchange(id,payload,dwords,ack,step,message,tolerate,&pushed);
+    const IOReturn result=exchange(id,payload,dwords,ack,step,message,tolerate,&pushed,timeoutUs,dropAck,trace);
+    if(trace!=A830ExitVote::None)
+        a830ExitTrace.add(A830ExitStage::VoteResult,uint32_t(result),uint32_t(trace),
+                         result?failure_.hdr:0,result?failure_.reason:0,result?failure_.value:0);
     /* annibale: a command that reached the queue and failed is followed by the late drain before the caller reports it
      * (field-notes 9-1). failure() is the command's own. */
-    if(result!=kIOReturnSuccess && pushed && adreno830_annibale())(void)drainLateLocked(A830HfiLateDrainUs);
+    if(result!=kIOReturnSuccess && pushed && adreno830_annibale() && !qualLimit_ && !(qualification_ && !message && id==A830_HFI_H2F_GX_BW_PERF_VOTE))
+        (void)drainLateLocked(A830HfiLateDrainUs);
     return result;
 }
 
 IOReturn A830Hfi::exchange(uint8_t id,const uint32_t *payload,uint32_t dwords,A830HfiAck *ack,uint16_t step,
-                           unsigned message,bool tolerate,bool *pushed)
+                           unsigned message,bool tolerate,bool *pushed,uint32_t timeoutUs,bool dropAck,A830ExitVote trace)
 {
     late_done_=false;
     if(!ready_ || !shared_)return fail(step,A830ReasonUnexpectedState,kIOReturnNotReady,0,0);
@@ -340,14 +344,29 @@ IOReturn A830Hfi::exchange(uint8_t id,const uint32_t *payload,uint32_t dwords,A8
     seq_=(seq_+1)&0xfffu;
     const uint32_t header=A830_HFI_HDR(id,A830_HFI_MSG_CMD,dwords+1,seq_);
     if(message && message<A830HfiMessages)headers_[message]=header;
+    if(trace!=A830ExitVote::None)
+        a830ExitTrace.add(A830ExitStage::EnqueueBegin,uint32_t(trace),header,payload[1],payload[2]&255u);
     *pushed=true;
     IOReturn result=push(header,payload,dwords);
     if(result!=kIOReturnSuccess)return result;
+    if(trace!=A830ExitVote::None)
+        a830ExitTrace.add(A830ExitStage::Enqueued,uint32_t(trace),header,payload[1],payload[2]&255u);
+    if(!message && id==A830_HFI_H2F_GX_BW_PERF_VOTE) {
+        stats_.last_request=header;stats_.last_level=dwords>1?payload[1]:0;stats_.last_bw=dwords>2?payload[2]:0;
+    }
+    // Arm only after this runtime command has really entered the queue and rung the doorbell.
+    const bool drop=qualification_ && !message && id==A830_HFI_H2F_GX_BW_PERF_VOTE &&
+                    (dropAck || __atomic_exchange_n(&dropArmed_,false,__ATOMIC_ACQ_REL));
+    if(drop)stats_.drop_header=header;
     A830HfiAck local;
     A830HfiAck *answer=ack?ack:&local;
-    const uint64_t deadline=io_.now(io_.context)+A830_T_HFI_ACK_US;
+    const uint64_t deadline=io_.now(io_.context)+timeoutUs;
     bool matched=false,bit23=false;
     for(;;) {
+        if(timeoutUs<A830_T_HFI_ACK_US && io_.now(io_.context)>=deadline) {
+            ++stats_.timeouts;
+            return fail(step,A830ReasonTimeout,kIOReturnTimeout,header,stats_.last_info,0);
+        }
         const uint32_t info=rd(A8XX_GMUCX_GMU2HOST_INTR_INFO);
         stats_.last_info=info;
         if((info&A830_GMU2HOST_CM3_FAULT_LINUX) && !bit23) {bit23=true;++stats_.info_bit23;}   /* record only */
@@ -359,6 +378,10 @@ IOReturn A830Hfi::exchange(uint8_t id,const uint32_t *payload,uint32_t dwords,A8
         Message incoming;
         int popped;
         while((popped=pop(A830_HFI_QUEUE_ID_MSG,&incoming))>0) {
+            if(drop && A830_HFI_HDR_TYPE(incoming.words[0])==A830_HFI_MSG_ACK && incoming.dwords>=2 &&
+               (incoming.words[1]&~A830_HFI_HDR_RECORD)==(header&~A830_HFI_HDR_RECORD)) {
+                ++stats_.dropped_acks;continue; // consume matching ACK and every duplicate; let the real deadline fail
+            }
             const Outcome outcome=handle(incoming,header,answer,step);
             if(outcome==Fatal)return failure_.ior;
             if(outcome==Matched)matched=true;
@@ -389,6 +412,8 @@ IOReturn A830Hfi::exchange(uint8_t id,const uint32_t *payload,uint32_t dwords,A8
     }
     /* KGSL treats a non-zero FEATURE_CTRL/SET_VALUE value as a failure too; GET_VALUE's value is the answer. */
     uint32_t status=answer->error?answer->error:(answer->v5 && id!=A830_HFI_H2F_GET_VALUE?answer->value:0);
+    if(trace!=A830ExitVote::None)
+        a830ExitTrace.add(A830ExitStage::MatchingAck,uint32_t(trace),header,answer->words[1],status,answer->dwords);
     if(annibale) {
         /* annibale (K/adreno8_hfi.c:193-220, section 14 row 26): a short ACK fails; FEATURE_CTRL is read as data, error
          * whatever the HFI version and passes only with both 0 (K90: all five FEATURE_CTRL answered 0/0). */
@@ -429,14 +454,27 @@ IOReturn A830Hfi::acdLocked(const A830VoteTables &tables)
     return transact(A830_HFI_H2F_ACD_TBL,tables.acd+1,A830_HFI_ACD_TABLE_DWORDS-1,nullptr,step,A830HfiM3Acd,false);
 }
 
-IOReturn A830Hfi::perfVoteLocked(uint8_t level,uint32_t bw,uint16_t step,unsigned message)
+IOReturn A830Hfi::perfVoteLocked(uint8_t level,uint32_t bw,uint16_t step,unsigned message,uint32_t timeoutUs,bool dropAck,A830ExitVote trace)
 {
+    if(qualLimit_) {
+        uint8_t boundedLevel=level==A830HfiNoVote?level_:level,boundedBus=uint8_t(bw);
+        qualLimit_(qualContext_,boundedLevel,boundedBus); // after M1..M8 / mutex wait, immediately before enqueue
+        level=boundedLevel;bw=(bw&~255u)|boundedBus;
+    }
+    if(qualLimit_ && trace==A830ExitVote::None) {
+        if(message==A830HfiM9Vote && a830ExitTrace.tracking())trace=A830ExitVote::RestartM9;
+        else if(!message && a830ExitTrace.boardDown(level_,level))trace=A830ExitVote::BoardHold;
+        else if(!message && a830ExitTrace.recoveryVote(level))trace=A830ExitVote::Recovery342;
+    }
     const uint32_t payload[3]={A830_HFI_GX_BW_PERF_ACK_BLOCK,level,bw};
-    const IOReturn result=transact(A830_HFI_H2F_GX_BW_PERF_VOTE,payload,3,nullptr,step,message,false);
+    const IOReturn result=transact(A830_HFI_H2F_GX_BW_PERF_VOTE,payload,3,nullptr,step,message,false,timeoutUs,dropAck,trace);
     if(result!=kIOReturnSuccess) {++stats_.vote_failures;return result;}
     ++stats_.votes;
+    if(level<=Adreno830LevelMax)++stats_.level_acks[level];
+    stats_.last_ack=message?headers_[message]:stats_.last_request;
     if(level!=A830HfiNoVote)level_=level;
     if((bw&0xffu)!=A830HfiNoVote)bus_=uint8_t(bw&0xffu);
+    if(qualLimit_)a830ExitTrace.noteAck(uint64_t(stats_.last_ack)|uint64_t(level_)<<32|uint64_t(bus_)<<40);
     pending_=false;
     return kIOReturnSuccess;
 }
@@ -542,6 +580,22 @@ IOReturn A830Hfi::sendStart()
 }
 
 /* ---- run time ------------------------------------------------------------------------------------------------------ */
+
+IOReturn A830Hfi::confirmThermalExit(bool dropAck)
+{
+    const auto trace=a830ExitTrace.tracking()?A830ExitVote::Low160:A830ExitVote::None;
+    a830ExitTrace.stage(A830ExitStage::HfiWait);
+    lock();
+    a830ExitTrace.stage(A830ExitStage::HfiLocked);
+    IOReturn result=kIOReturnNotReady;
+    if(qualification_ && ready_ && started_ && gx_levels_>1 && bus_levels_>2) {
+        // Shorter than the submission retry window. The strict restart keeps the normal HFI deadline.
+        result=perfVoteLocked(1,noAbBits()|2,A830_HFI_H2F_GX_BW_PERF_VOTE,0,100000,dropAck,trace);
+        if(result==kIOReturnSuccess && (level_!=1 || bus_!=2))result=kIOReturnIOError;
+    }
+    unlock();
+    return result;
+}
 
 IOReturn A830Hfi::voteLocked(uint8_t level,uint32_t bw)
 {

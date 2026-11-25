@@ -18,6 +18,12 @@
 //   power key short press            -> display on (or not known): sleep now; display off: display wake; no system sleep, a long
 //                                       press, level 1: macOS's own power key (PianoInput's HID usage, as today)
 //   Low Power Mode or not on AC      -> Power Saver (PianoThermal's battery caps, the GPU ceiling); on AC without it -> Balanced
+//   piano-policy-profile=2 (2026-11-22, the owner: Low Power Mode is the ONE performance switch): Low Power Mode -> Power Saver,
+//                                       without it Balanced on battery too (PianoThermal's profile 2; no GPU ceiling)
+//   macOS High Power Mode (2026-11-22, Energy Mode step E2: machdep.piano_policy_hpm, the agent mirrors
+//   com.apple.system.highpowermode)     -> High Power (PianoThermal's profile 3, whatever the power source; no GPU ceiling) when
+//                                       PianoThermal says it takes mode 3 (its piano-thermal-profiles), else Balanced; Low Power
+//                                       Mode wins when both read 1 (powerd keeps them exclusive, a transient can show both)
 #ifndef PIANO_POLICY_POLICY_H
 #define PIANO_POLICY_POLICY_H
 
@@ -28,7 +34,7 @@ namespace pianopolicy {
 enum class Lid : uint8_t { unknown, open, closed };
 enum class Power : uint8_t { unknown, battery, external };
 enum class Screen : uint8_t { unknown, on, off };
-enum class Profile : uint8_t { saver, balanced };
+enum class Profile : uint8_t { saver, balanced, performance };
 enum class Close : uint8_t { none, sleep, lock };        // what closing the cover does (none: the cover part is off)
 enum class Thermal : int8_t { unknown = -1, normal = 0, warm = 1, passive = 2, critical = 3 };   // PianoThermal's Policy.h State
 enum class Key : uint8_t { passThrough, sleep, wakeDisplay };   // the power key's short press
@@ -40,8 +46,12 @@ constexpr uint32_t kWakePowerKey = 1, kWakeLid = 2, kWakeUsb = 4, kWakeVolumeDow
 constexpr uint32_t kSleepNow = 1u << 0, kClamshellClosed = 1u << 4, kDisableClamshell = 1u << 6, kEnableClamshell = 1u << 7,
                    kClamshellOpened = 1u << 10, kSetValue = 1u << 16, kSetAcAdaptorConnected = 1u << 18;
 
-// PianoThermal's profile call ("piano-thermal-profile", docs/policy.md 5.2): 0 by the power source (as today), 1 Power Saver.
-constexpr uint32_t kThermalAuto = 0, kThermalSaver = 1;
+// PianoThermal's profile call ("piano-thermal-profile", docs/policy.md 5.2): 0 by the power source (as today), 1 Power Saver,
+// 2 Balanced, 3 High Power (Energy Mode, docs/policy.md 12); PianoThermal publishes the highest mode it takes as
+// piano-thermal-profiles (absent before mode 3 existed: 2).
+constexpr uint32_t kThermalAuto = 0, kThermalSaver = 1, kThermalBalanced = 2, kThermalPerformance = 3;
+constexpr const char *kThermalProfilesKey = "piano-thermal-profiles";
+inline uint32_t thermalProfiles(int property) { return property >= 0 ? uint32_t(property) : kThermalBalanced; }
 // PianoA830's ceiling slots (docs/policy.md 5.3, package/PianoA830/board/PianoGpuCeiling.h): a PianoA830 that publishes
 // piano-gpu-ceiling-clients >= 2 keeps one slot per caller and runs the GPU at the lowest; the power profile's is client 1, so
 // PianoThermal's passive ceiling (client 0) stays in force whatever is written here: no breadcrumb read, no tick, no put-back.
@@ -62,6 +72,7 @@ struct Config {
   bool lidSleepAC = false;       // opted-in demand sleep on a real AC close; never falsify AC or clear powerd masks
   bool lidConflict = false;      // piano-keyboard-lid != 0: PianoKeyboard already tells IOPMrootDomain the clamshell
   bool profile = true;           // piano-policy-profile (0: no PianoThermal profile, no GPU ceiling)
+  bool lpmOnly = false;          // piano-policy-profile=2: Low Power Mode is the only switch (Balanced on battery without it)
   uint32_t gpuKhz = 342000;      // piano-policy-gpu-mhz: Power Saver's GPU ceiling (Ubuntu's Power Saver: 342 MHz); 0 none
   bool gpuNeeded = false;        // PianoA830's own maximum is above gpuKhz (piano-gpu-dcvs-max / -maxlevel given); else a no-op
   bool thermalOwnsGpu = false;   // PianoThermal at level 2: it writes the same single GPU ceiling slot at its passive trip
@@ -79,6 +90,8 @@ struct Inputs {
   Screen screen = Screen::unknown;   // NativeGopDisplay piano-display-power (always since 2026-11-11; before: piano-backlight=2)
   bool displayEvents = false;    // the display found messages each change of it (its piano-display-power-messages, or one seen)
   bool lpm = false;              // machdep.piano_policy_lpm
+  bool hpm = false;              // machdep.piano_policy_hpm (macOS High Power Mode; Energy Mode step E2)
+  uint32_t thermalProfiles = kThermalBalanced;   // PianoThermal's piano-thermal-profiles: the highest profile mode it takes
   bool lidSleepArmed = true;    // explicit runtime safety gate while physical polarity awaits observation
   bool sleepOn = false;          // machdep.piano_sleep begins with "on" (k27 0062 and piano-sleep=1)
   uint32_t wakeMask = 0;         // its "wake mask"
@@ -121,7 +134,16 @@ inline View view(const Config &c, const Inputs &in, bool seenOpen)
   }
   if (in.lpm) {
     v.profile = Profile::saver;
-    v.profileWhy = "Low Power Mode";
+    v.profileWhy = in.hpm ? "Low Power Mode (High Power Mode also read: Low Power wins)" : "Low Power Mode";
+  } else if (in.hpm && in.thermalProfiles >= kThermalPerformance) {
+    v.profile = Profile::performance;
+    v.profileWhy = "High Power Mode (whatever the power source)";
+  } else if (in.hpm) {
+    v.profile = Profile::balanced;
+    v.profileWhy = "High Power Mode, but PianoThermal takes no High Power profile: Balanced";
+  } else if (c.lpmOnly) {
+    v.profile = Profile::balanced;
+    v.profileWhy = "Low Power Mode off (the only switch: whatever the power source)";
   } else if (in.power == Power::external) {
     v.profile = Profile::balanced;
     v.profileWhy = "on external power";
@@ -212,10 +234,14 @@ class Engine {
     if (demand && !acDemand_) out.add(Kind::root, kSleepNow, "AC lid demand-sleep opted in");
     acDemand_ = demand;
     if (c_.profile) {
-      const uint32_t mode = in.lpm ? kThermalSaver : kThermalAuto;
+      const bool high = !in.lpm && in.hpm && in.thermalProfiles >= kThermalPerformance;
+      const uint32_t mode = in.lpm ? kThermalSaver : high ? kThermalPerformance : c_.lpmOnly || in.hpm ? kThermalBalanced : kThermalAuto;
       if (!profileUnsupported_ && mode != profileSent_)
         out.add(Kind::thermalProfile, mode, in.lpm ? "Low Power Mode: Power Saver whatever the power source"
-                                                    : "PianoThermal's own choice by the power source");
+                                            : high ? "High Power Mode: High Power whatever the power source"
+                                            : in.hpm ? "High Power Mode without PianoThermal's High Power profile: Balanced"
+                                            : c_.lpmOnly ? "Low Power Mode off: Balanced whatever the power source"
+                                                         : "PianoThermal's own choice by the power source");
       gpu(out, in, v.gpuKhz);
     }
     return out;
@@ -399,7 +425,10 @@ inline const char *lidName(Lid l) { return l == Lid::open ? "open" : l == Lid::c
 inline const char *powerName(Power p) { return p == Power::external ? "external power" : p == Power::battery ? "battery" : "unknown"; }
 inline const char *screenName(Screen s) { return s == Screen::on ? "on" : s == Screen::off ? "off" : "unknown"; }
 inline const char *closeName(Close c) { return c == Close::sleep ? "sleep" : c == Close::lock ? "lock" : "none"; }
-inline const char *profileName(Profile p) { return p == Profile::saver ? "Power Saver" : "Balanced"; }
+inline const char *profileName(Profile p)
+{
+  return p == Profile::saver ? "Power Saver" : p == Profile::performance ? "High Power" : "Balanced";
+}
 inline const char *thermalName(Thermal t)
 {
   return t == Thermal::normal ? "normal" : t == Thermal::warm ? "warm" : t == Thermal::passive ? "PASSIVE" : t == Thermal::critical ? "CRITICAL" : "unknown";

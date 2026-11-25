@@ -249,6 +249,16 @@ const ArStep *ar_va_steps(unsigned *count)
     return kVa;
 }
 
+int ar_hold_valid(int mask) {return mask == 0 || mask == (int)AR_HOLD_VOTES || mask == (int)(AR_HOLD_VOTES | AR_HOLD_MCLK);}
+/* the number of ar_va_steps' leading steps a valid nonzero mask holds */
+static unsigned held_steps(unsigned mask) {return mask == AR_HOLD_VOTES ? 2u : mask == (AR_HOLD_VOTES | AR_HOLD_MCLK) ? 3u : 0u;}
+
+const ArStep *ar_va_hold_steps(unsigned mask, unsigned *count)
+{
+    *count = held_steps(mask);
+    return *count ? kVa : 0;
+}
+
 /* ------------------------------------------------------------------------------------------------- the microphone plan */
 static const ArMicPlan *mic(const ArSeq *s) {return (const ArMicPlan *)s->context;}
 static uint32_t open_mic(const ArSeq *s, uint8_t *o, uint32_t c, uint32_t t) {return ar_open_mic_device(o, c, s->port, t);}
@@ -292,7 +302,7 @@ static int va_off(const ArSeq *s) {const ArMicPlan *p = mic(s); return p->va_off
 static const ArStep kMicLive[] = {
     VA_STEPS,
     MIC_DEVICE_STEPS,
-    {"VA macro DMIC0/DMIC2 into DEC0/DEC1", 0, 0, 0, va_on, 0, 0, 0, va_off, 0},
+    {"VA macro DMIC route into DEC0/DEC1", 0, 0, 0, va_on, 0, 0, 0, va_off, 0},
     MIC_START_STEPS,
 };
 
@@ -300,6 +310,16 @@ const ArStep *ar_mic_live_steps(unsigned *count)
 {
     *count = sizeof kMicLive / sizeof kMicLive[0];
     return kMicLive;
+}
+
+/* kMicLive starts with VA_STEPS: a held prefix is skipped, the rest (and its undo) unchanged */
+_Static_assert(sizeof kVa / sizeof kVa[0] == 3, "VA_STEPS: the two votes, then the mclk");
+const ArStep *ar_mic_live_steps_held(unsigned mask, unsigned *count)
+{
+    if (!ar_hold_valid((int)mask)) {*count = 0; return 0;}
+    const unsigned skip = held_steps(mask);
+    *count = sizeof kMicLive / sizeof kMicLive[0] - skip;
+    return kMicLive + skip;
 }
 
 static const ArStep kMic[] = {

@@ -80,14 +80,19 @@ static void test_modes()
   a.configure(true, 128, false, 12);
   CHECK(a.target(500, 400) && a.code() == 1024 && a.step(-1) && a.code() == 813);
   a.manual();
-  CHECK(a.mode() == Mode::manual && !a.target(600, 600) && !a.step(1) && a.lastTarget() == 600);
-  CHECK(a.setAutomatic(true) && a.automatic() && a.code() == Ambient::shift(Ambient::codeForPermille(600, 128), -1, 128, false));
+  CHECK(a.mode() == Mode::manual && !a.target(600, 600) && !a.step(1) && a.lastTarget() == -1 && !a.requested());
+  CHECK(!a.setAutomatic(true) && a.requested() && !a.valid());
+  CHECK(a.target(600, 600) && a.automatic() && a.code() == Ambient::shift(Ambient::codeForPermille(600, 128), -1, 128, false));
   CHECK(!a.setAutomatic(false) && !a.target(700, 700) && a.mode() == Mode::manual);
-  CHECK(a.setAutomatic(true) && a.automatic());
+  CHECK(!a.setAutomatic(true) && a.requested() && !a.valid());
+  CHECK(a.target(700, 700) && a.automatic());
   // the sensor leaves (-1): manual with the code as it is; its next target returns to automatic
   CHECK(!a.target(-1, 0) && a.mode() == Mode::manual && a.lastTarget() == -1 && !a.step(1));
   CHECK(!a.setAutomatic(true) && a.mode() == Mode::manual);       // nothing to apply until a target comes
   CHECK(a.target(450, 500) && a.automatic());
+  a.invalidate(true);
+  CHECK(a.requested() && !a.valid() && a.faulted());
+  CHECK(!a.setAutomatic(true) && !a.target(900, 5000) && !a.automatic());
   // exponential mapping: 1/16 of the range per press
   a.configure(true, 128, true, 16);
   CHECK(a.target(500, 400) && a.step(1) && a.code() == 1024 + 120);
@@ -156,11 +161,72 @@ static void test_chain()
   std::printf("PASS chain: lux to codes through the light policy, the offset kept, display off/on with the room's level at wake\n");
 }
 
+// 2026-11-22 (AUTO-BRIGHT.md): the user's slider level while automatic mode is requested: automatic mode stays and the level is the
+// curve's trim (exponential: codes added, bounded by the range; linear: a ratio); kept across invalidation, manual and re-entry;
+// a level before the session's first target waits for it; nothing while not requested or faulted.
+static void test_trim()
+{
+  Ambient a;
+  a.configure(true, PA_SDR_MIN_CODE, true, 16, PA_SDR_MAX_CODE);   // the bounded SDR adapter of the installed system
+  CHECK(!a.adjust(1000) && a.pendingLevel() == 1000 && a.trim() == 0);   // requested, no target yet: waits
+  CHECK(a.target(651, 27) && a.automatic() && a.trim() == 1000 - 1333 && a.code() == 1000 && a.pendingLevel() == 0);
+  CHECK(a.adjust(1216) && a.automatic() && a.code() == 1216 && a.trim() == 1216 - 1333);
+  CHECK(a.target(450, 3) && a.code() == Ambient::codeForPermille(450, PA_SDR_MIN_CODE) + (1216 - 1333));
+  CHECK(a.target(1000, 11165) && a.code() == PA_SDR_MAX_CODE + (1216 - 1333));   // daylight: the ceiling, the trim under it
+  CHECK(a.target(40, 0) && a.code() == PA_SDR_MIN_CODE);                         // the floor holds
+  CHECK(a.adjust(PA_SDR_MAX_CODE) && a.code() == PA_SDR_MAX_CODE && a.trim() == PA_SDR_MAX_CODE - PA_SDR_MIN_CODE);   // bounded
+  CHECK(a.target(651, 27) && a.code() == PA_SDR_MAX_CODE);
+  CHECK(a.adjust(5000) && a.code() == PA_SDR_MAX_CODE && a.adjust(0) && a.code() == PA_SDR_MIN_CODE);   // clamped levels
+  CHECK(a.trim() == PA_SDR_MIN_CODE - 1333);
+  // the keys' offset and the trim add up (one press is still a visible step)
+  CHECK(a.adjust(1200) && a.step(1) && a.offset() == 1 && a.code() > 1200);
+  CHECK(a.step(-1) && a.offset() == 0 && a.code() == 1200);
+  // kept: invalidation (display off, a new session), a manual level and re-entry
+  const int trim = a.trim();
+  a.invalidate();
+  CHECK(a.requested() && !a.valid() && a.trim() == trim && a.target(651, 27) && a.code() == 1200);
+  a.manual();
+  CHECK(!a.adjust(1500) && a.pendingLevel() == 0 && a.trim() == trim);   // not requested: the caller's manual level
+  CHECK(!a.setAutomatic(true) && a.target(651, 27) && a.code() == 1200);
+  a.invalidate();
+  CHECK(!a.adjust(700) && a.pendingLevel() == 700);
+  a.manual();                                                             // a pending level does not outlive the user's manual word
+  CHECK(a.pendingLevel() == 0 && !a.setAutomatic(true) && a.target(651, 27) && a.code() == 1200);
+  a.invalidate(true);                                                     // a latched fault: nothing
+  CHECK(!a.adjust(900) && a.pendingLevel() == 0 && a.trim() == trim);
+  // the linear mapping: a ratio
+  Ambient l;
+  l.configure(true, 128, false, 12);
+  CHECK(l.target(500, 400) && l.code() == 1024 && l.adjust(512) && l.trim() == -512 && l.code() == 512);
+  CHECK(l.target(1000, 10000) && l.code() == 1024 && l.target(250, 50) && l.code() == 256 && l.target(40, 0) && l.code() == 128);
+  CHECK(l.target(500, 400) && l.adjust(2047) && l.code() == 2047 && l.target(250, 50) && l.code() == 1024);
+  // off: nothing
+  Ambient off;
+  off.configure(false, 128, false, 12);
+  CHECK(!off.adjust(500) && off.pendingLevel() == 0 && off.trim() == 0);
+  std::printf("PASS trim: the user's level keeps automatic mode as the curve's trim (exponential codes, linear ratio, bounds, keys, "
+              "kept across invalidation and re-entry, pending before a target, none while manual, faulted or off)\n");
+}
+
 int main()
 {
   test_ladder();
   test_modes();
   test_chain();
+  test_trim();
+  const pianoauto::AmbientVersion oldCurve{42, 1, PS_ALS_REFERENCE}, current{43, 2, PS_ALS_LEGACY};
+  CHECK(!oldCurve.newer(2, PS_ALS_LEGACY, 0));
+  CHECK(!current.newer(2, PS_ALS_REFERENCE, 0));
+  CHECK(current.newer(2, PS_ALS_LEGACY, 42));
+  CHECK(!current.newer(2, PS_ALS_LEGACY, 43));  // the poll and callback share one applied sequence
+  Ambient bounded;
+  bounded.configure(true, 921, true, 16, PA_SDR_MAX_CODE);
+  CHECK(bounded.target(pa_sdr_permille(1952), 11165) && bounded.code() == 1952);
+  bounded.manual();
+  CHECK(!bounded.target(450, 0) && !bounded.requested());
+  CHECK(!bounded.setAutomatic(true) && !bounded.valid());
+  bounded.invalidate(true);
+  CHECK(!bounded.target(950, 11165) && bounded.faulted());
   std::printf("PASS AmbientBacklight host tests (%u checks)\n", checks);
   return 0;
 }

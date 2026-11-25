@@ -11,7 +11,9 @@
               the system layer: a Metal plugin bundle already in place (the base's) taken over with a copy kept, given back when its
               unit goes, never taken over when that copy cannot be made
 3. pmset      piano-pmset-defaults.sh with a pmset stand-in: both sources, keys this model lacks, a battery that appears later,
-              the owner's timers first, the owner's change after a partial run, once and only once
+              the owner's timers first, the owner's change after a partial run, once and only once;
+              piano-keyboard-type.sh with the real defaults(1): the four keys into an absent file, nothing on the second run, the
+              owner's other keyboards and an owner's own type for one of ours kept, a non-dictionary refused and left as it was
 4. trust      add_trust: one module first with the missing CDHashes only; none when all are there (byte for byte the input)
 5. cdhash     stage-soft-metal.py's cdhash against codesign's CDHash for a fresh ad hoc (linker-signed) binary
 6. seed       stage.py on a 64 MiB APFS image made here with hdiutil (packed as a DBRDISK1 seed): the staged files, modes and
@@ -122,7 +124,9 @@ def manifest_tests(tmp):
           'piano-still-wallpaper: the script, its job and its three data files (0644, no CDHash)')
     check(names['piano-wifi']['planned'] and not any(u['planned'] for n, u in names.items() if n != 'piano-wifi'),
           'piano-wifi is the one planned unit')
-    check(all(u['on'] for u in plan['units']), 'every unit is on in the installed profile')
+    # cikl1 (2026-11-22): the legacy CIKL policy is retired (off; its binary stays for piano-coreimage-restore's --remove)
+    check(all(u['on'] for u in plan['units'] if u['name'] != 'piano-coreimage-compat') and not names['piano-coreimage-compat']['on']
+          and names['piano-coreimage-restore']['on'], 'every unit is on in the installed profile but the retired piano-coreimage-compat')
     dests = [f['dest'] for u in plan['units'] for f in u['files']]
     check(len(dests) == len(set(dests)) and all(d.rsplit('/', 1)[0] in stage.DIRS for d in dests), 'destinations unique, in the allowed directories')
     out = io.StringIO()
@@ -201,6 +205,38 @@ def manifest_tests(tmp):
     os.symlink('T', b / 'Contents/MacOS/link')
     check(refused(stage.add_gpu_bundles, load(unit_toml('a', [good_tool])), [b], match='neither a file'), 'refused: a symlink in the bundle')
     (b / 'Contents/MacOS/link').unlink()
+    # --hal-bundle (audio/ns4: PianoMicNS.driver, "Mic (noise reduced)"): a Core Audio HAL plug-in as one more unit, its signature seal
+    # included (Contents/_CodeSignature/CodeResources)
+    h = tmp / 'h/T_x.driver'
+    write(h / 'Contents/Info.plist', plistlib.dumps({'CFBundleExecutable': 'T'}))
+    write(h / 'Contents/MacOS/T', b'\xcf\xfa\xed\xfe' + bytes(60), 0o644)
+    write(h / 'Contents/_CodeSignature/CodeResources', plistlib.dumps({'files': {}}))
+    plan = stage.add_hal_bundles(load(unit_toml('a', [good_tool])), [h])
+    unit = plan['units'][-1]
+    files = {f['dest']: f for f in unit['files']}
+    hroot = '/Library/Audio/Plug-Ins/HAL/T_x.driver/Contents'
+    check(unit['name'] == 'audio-t-x' and unit['on'] and
+          sorted(files) == [f'{hroot}/Info.plist', f'{hroot}/MacOS/T', f'{hroot}/_CodeSignature/CodeResources'],
+          '--hal-bundle: one unit, every file of the driver at /Library/Audio/Plug-Ins/HAL, its seal included')
+    check(files[f'{hroot}/Info.plist']['mode'] == '0644' and files[f'{hroot}/MacOS/T']['mode'] == '0755' and
+          files[f'{hroot}/_CodeSignature/CodeResources']['mode'] == '0644' and
+          files[f'{hroot}/MacOS/T']['staged'] == 'files/audio-t-x/Contents/MacOS/T' and
+          all(f['trust'] and f['kind'] == 'file' and f['owner'] == 'root:wheel' for f in files.values()),
+          '--hal-bundle: root:wheel, 0755 the Mach-O and 0644 the rest, staged below the unit, trusted, no job')
+    plan = stage.add_hal_bundles(stage.add_gpu_bundles(load(unit_toml('a', [good_tool])), [b]), [h])
+    check([u['name'] for u in plan['units']][-2:] == ['gpu-t-x', 'audio-t-x'], '--gpu-bundle and --hal-bundle together: two units')
+    check(refused(stage.add_hal_bundles, load(unit_toml('a', [good_tool])), [b], match='not a plugin bundle'),
+          'refused: --hal-bundle of a .bundle (a HAL plug-in is <name>.driver)')
+    check(refused(stage.add_hal_bundles, load(unit_toml('a', [good_tool])), [h, h], match='twice'), 'refused: the same driver twice')
+    os.symlink('T', h / 'Contents/MacOS/link')
+    check(refused(stage.add_hal_bundles, load(unit_toml('a', [good_tool])), [h], match='neither a file'), 'refused: a symlink in the driver')
+    (h / 'Contents/MacOS/link').unlink()
+    hok = [f'{hroot}/Info.plist', f'{hroot}/MacOS/T', f'{hroot}/Resources/x.dat', f'{hroot}/_CodeSignature/CodeResources']
+    hno = ['/Library/Audio/Plug-Ins/HAL/T_x.driver/Info.plist', '/Library/Audio/Plug-Ins/HAL/T_x.bundle/Contents/Info.plist',
+           f'{hroot}/MacOS/sub/x', f'{hroot}/MacOS/../../x', f'{hroot}/_CodeSignature/.hidden', '/Library/Audio/Plug-Ins/HAL/x',
+           '/Library/GPUBundles/A.bundle/Contents/_CodeSignature/CodeResources', f'{hroot}/Other/x']
+    check(all(stage.dest_kind(d) == 'file' for d in hok) and not any(stage.dest_kind(d) for d in hno),
+          'dest_kind: a HAL plug-in\'s Contents/Info.plist, MacOS/, Resources/ and _CodeSignature/ files only')
     ok = ['/Library/GPUBundles/A.bundle/Contents/Info.plist', '/Library/GPUBundles/A.bundle/Contents/MacOS/A',
           '/Library/GPUBundles/A.bundle/Contents/Resources/x.metallib', '/usr/local/bin/x', '/usr/local/share/piano/wallpaper/x.png']
     no = ['/Library/GPUBundles/A.bundle/Info.plist', '/Library/GPUBundles/A.bundle/Contents/MacOS/../../x',
@@ -406,6 +442,39 @@ def layer_tests(tmp, shell, tag):
     code, out = rig.run('--live')
     check(rig.root(f'{c}/MacOS/libx.dylib').read_bytes() == b'the owner\'s own' and (prev / c.lstrip('/') / 'MacOS/libx.dylib').is_file() and
           'changed since it was installed: left' in out, f'{tag}: layer: a file changed after the take-over is left, its copy kept')
+    # a HAL plug-in (--hal-bundle) as a layer unit on a root that has no such driver: the bundle's directories made, root:wheel
+    # modes as staged, nothing of the base to keep; taking the unit out takes its files out again
+    rig = Rig(tmp / f'{tag}-layer-hal', shell)
+    hc = '/Library/Audio/Plug-Ins/HAL/T.driver/Contents'
+    hal = ('audio-t', True, [(f'{hc}/Info.plist', '0644', b'<plist/>'), (f'{hc}/MacOS/T', '0755', b'exe'),
+                             (f'{hc}/_CodeSignature/CodeResources', '0644', b'<plist>seal</plist>')])
+    rig.files([cli, hal])
+    old_umask = os.umask(0o077)   # the layer apply's umask (layer-common.sh)
+    try:
+        code, out = rig.run('--live')
+    finally:
+        os.umask(old_umask)
+    check(code == 0 and rig.root(f'{hc}/MacOS/T').read_bytes() == b'exe' and
+          rig.root(f'{hc}/_CodeSignature/CodeResources').read_bytes() == b'<plist>seal</plist>' and
+          oct(rig.root(f'{hc}/MacOS/T').stat().st_mode & 0o777) == '0o755' and
+          oct(rig.root(f'{hc}/Info.plist').stat().st_mode & 0o777) == '0o644' and 'was not installed by this installer' not in out,
+          f'{tag}: HAL layer: the driver installed into new directories with its modes, nothing taken over')
+    # v13.1y8 (INSTALLED-CLASSIFY.md 1): the layer apply runs install.sh under umask 077; every directory it makes is 0755 at every level
+    # (v13.1y7's install -d left PianoMicNS.driver/ at 0700: the HAL plug-in unreadable for coreaudiod's driver service)
+    dmode = lambda p: oct(rig.root(p).stat().st_mode & 0o777)
+    hdirs = ['/Library/Audio/Plug-Ins/HAL/T.driver', '/Library/Audio/Plug-Ins/HAL/T.driver/Contents', f'{hc}/MacOS', f'{hc}/_CodeSignature']
+    check(all(dmode(d) == '0o755' for d in hdirs), f'{tag}: HAL layer under umask 077: every new bundle directory 0755 ({[dmode(d) for d in hdirs]})')
+    rig.root('/Library/Audio/Plug-Ins/HAL/T.driver').chmod(0o700)   # as v13.1y7's installer left it
+    code, out = rig.run('--check')
+    check(code == 1 and 'a plugin bundle directory is 0755' in out, f'{tag}: HAL layer: --check reports a 0700 bundle directory')
+    code, out = rig.run('--live')
+    check(code == 0 and dmode('/Library/Audio/Plug-Ins/HAL/T.driver') == '0o755' and 'directory 0700 -> 0755 (a plugin bundle directory)' in out and
+          'changed:)' in out, f'{tag}: HAL layer: --live repairs the bundle directory with no file change, and logs it')
+    code, out = rig.run('--check')
+    check(code == 0, f'{tag}: HAL layer: --check passes after the repair')
+    rig.files([cli])
+    code, out = rig.run('--live')
+    check(code == 0 and not any(rig.root(d).exists() for d, _, _ in hal[2]), f'{tag}: HAL layer taken out: its files gone')
     rig = Rig(tmp / f'{tag}-layer2', shell)
     for dest, (data, mode) in base.items():
         write(rig.root(dest), data, mode)
@@ -491,6 +560,63 @@ def pmset_tests(tmp):
         code, out, calls = run(base, env)
         check(calls == [] and 'the owner\'s timers are set' in out and prefs(base, 'Battery Power', 'Display Sleep Timer') == '7',
               f'{tag}: the owner\'s change after a partial run is kept')
+
+
+KEYBOARDS = ('20555-6900-0', '20564-6900-0', '20565-6900-0', '4178-6900-0')
+
+
+def keyboard_tests(tmp):
+    print('3b. keyboard types')
+    script = HERE / 'piano-keyboard-type.sh'
+    # under /tmp: this Mac's cfprefsd accepts a write to a path in the per-user temporary directory (/var/folders) and drops it
+    tmp = Path(tempfile.mkdtemp(prefix='userland-kb-', dir='/tmp'))
+    for shell in SHELLS:
+        tag = Path(shell).name
+        case = 0
+
+        def rig(plist=None):
+            nonlocal case
+            case += 1   # a fresh path per case: cfprefsd caches a domain by its path
+            base = tmp / f'kb-{tag}-{case}'
+            write(base / 'bin/logger', '#!/bin/sh\nexit 0\n', 0o755)
+            prefs = base / 'root/Library/Preferences/com.apple.keyboardtype.plist'
+            prefs.parent.mkdir(parents=True)
+            if plist is not None:
+                prefs.write_bytes(plistlib.dumps(plist))
+            env = {**os.environ, 'PATH': f'{base / "bin"}:{os.environ["PATH"]}', 'PIANO_USERLAND_ROOT': str(base / 'root')}
+            return prefs, env
+
+        def run(env):
+            r = sh([shell, str(script)], timeout=120, env=env, capture_output=True, text=True)
+            return r.returncode, r.stdout
+
+        def types(prefs):
+            r = sh(['defaults', 'read', str(prefs.with_suffix('')), 'keyboardtype'], timeout=60, capture_output=True, text=True)
+            return dict(re.findall(r'"?([0-9-]+)"? = ([0-9]+);', r.stdout)) if r.returncode == 0 else None
+
+        prefs, env = rig()
+        code, out = run(env)
+        check(code == 0 and types(prefs) == {k: '40' for k in KEYBOARDS} and 'added ' + ' '.join(KEYBOARDS) in out,
+              f'{tag}: no file: the four keyboards added as 40 (ANSI)')
+        before = types(prefs)
+        code, out = run(env)
+        check(code == 0 and 'all four keyboards known already' in out and types(prefs) == before, f'{tag}: the second run changes nothing')
+        prefs, env = rig({'keyboardtype': {'1452-591-0': 41, '20555-6900-0': 43}, 'other': 'kept'})
+        code, out = run(env)
+        got = types(prefs)
+        check(code == 0 and got == {'1452-591-0': '41', '20555-6900-0': '43', **{k: '40' for k in KEYBOARDS[1:]}} and
+              'already known: 20555-6900-0' in out, f'{tag}: the owner\'s other keyboard and own type for the cover kept, three added')
+        r = sh(['defaults', 'read', str(prefs.with_suffix('')), 'other'], timeout=60, capture_output=True, text=True)
+        check(r.stdout.strip() == 'kept', f'{tag}: every other key of the file kept')
+        prefs, env = rig({'keyboardtype': 'not a dictionary'})
+        original = prefs.read_bytes()
+        code, out = run(env)
+        check(code == 1 and 'could not be added' in out and prefs.read_bytes() == original, f'{tag}: a non-dictionary refused, file unchanged')
+        prefs, env = rig()
+        shutil.rmtree(prefs.parent)
+        code, out = run(env)
+        check(code == 1 and 'nothing written' in out and not prefs.exists(), f'{tag}: no Library/Preferences: refused, nothing written')
+    shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ---- 4-7: trust cache, cdhash, seed, live ------------------------------------------------------------------------------------
@@ -778,11 +904,11 @@ def live_tests(tmp):
                 'system/com.unixnu.piano-still-wallpaper', 'system/com.unixnu.piano-wifi-join', 'system/com.unixnu.piano-camera-grab',
                 'system/com.unixnu.piano-wifi-supplicant', 'system/com.unixnu.piano-airportd-kick', 'system/com.unixnu.piano-usbnet-address',
                 f'gui/{rig.uid}/com.unixnu.piano-rotated', f'gui/{rig.uid}/com.unixnu.piano-login-front',
-                f'gui/{rig.uid}/com.unixnu.piano-passd-policy'}
+                f'gui/{rig.uid}/com.unixnu.piano-passd-policy', f'gui/{rig.uid}/com.unixnu.piano-slim-session'}
         check(code == 0 and rig.loaded() == want and rig.root('/usr/local/bin/piano-torch').is_file() and
               rig.root('/usr/local/share/piano/wallpaper/still.png').read_bytes()[:8] == b'\x89PNG\r\n\x1a\n',
               f'the real staging installed on a scratch root ({sorted(rig.loaded() ^ want) or "as wanted"}): nine daemons (the '
-              'airportd-kick of 88f4171e counted) and the three agents loaded, piano-torch in /usr/local/bin, '
+              'airportd-kick of 88f4171e counted) and the four agents loaded (the slim session poster counted), piano-torch in /usr/local/bin, '
               'the still picture in /usr/local/share/piano/wallpaper')
         code, out = rig.run('--check')
         check(code == 0, 'and --check passes on it')
@@ -819,6 +945,7 @@ def main():
         manifest_tests(tmp / 'm1')
         installer_tests(tmp / 'i')
         pmset_tests(tmp / 'p')
+        keyboard_tests(tmp / 'k')
         if quick:
             print('(--quick: parts 4-7 skipped)')
         elif k27_tree(required=False) is None:

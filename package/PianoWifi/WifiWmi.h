@@ -473,11 +473,19 @@ struct ScanEntry {
   // first two bytes, the VHT operation's first three), and whether the network speaks WMM (QoS: HT needs it)
   uint8_t htCap[26] = {}, htOp[2] = {}, vhtCap[12] = {}, vhtOp[3] = {};
   bool htCapSeen = false, htOpSeen = false, vhtCapSeen = false, vhtOpSeen = false, wmm = false;
+  uint32_t heardRound = 0;          // the list's round when a frame of the network last came (scanExpire)
 };
 
 struct ScanList {
   ScanEntry entries[kScanEntriesMax];
   uint32_t count = 0;
+  // 2026-11-23 (scanExpire): the full scan rounds since the list began, and the frames the current round put in
+  uint32_t round = 0, roundFrames = 0;
+  // 2026-11-23 (T-18, office): the network the station is on (never evicted from a full list), and how many entries a full
+  // list gave up for a newer network
+  uint8_t keepBssid[6] = {};
+  bool keepSet = false;
+  uint32_t evicted = 0;
   // dropped: no room left in the list. badFrames: the firmware's own checks failed on the frame.
   uint32_t frames = 0, beacons = 0, probes = 0, ignored = 0, dropped = 0, badFrames = 0;
 };
@@ -669,6 +677,8 @@ inline ScanEntry *scanAdd(ScanList &list, const WmiMgmtRx &rx)
   found.freq = named ? named : rx.freq;
   found.offChannel = named && rx.freq && rx.freq != named;
   found.rssi = rx.signalDbm;
+  found.heardRound = list.round;
+  ++list.roundFrames;
   if (isProbe) ++list.probes;
   else ++list.beacons;
   for (uint32_t i = 0; i < list.count; ++i) {
@@ -676,7 +686,9 @@ inline ScanEntry *scanAdd(ScanList &list, const WmiMgmtRx &rx)
     bool same = true;
     for (unsigned k = 0; k < 6; ++k) same = same && have.bssid[k] == found.bssid[k];
     if (!same) continue;
-    if (found.rssi > have.rssi) have.rssi = found.rssi;
+    // T-18 (office, many access points of one network): the signal is this round's strongest, not the best ever heard: a
+    // far access point heard strong an hour ago must not win the rejoin over the one next to the tablet now
+    if (have.heardRound != list.round || found.rssi > have.rssi) have.rssi = found.rssi;
     if (found.ssidLength && !found.hidden && (!have.ssidLength || have.hidden)) {
       have.ssidLength = found.ssidLength;
       for (unsigned k = 0; k <= kSsidMax; ++k) have.ssid[k] = found.ssid[k];
@@ -720,19 +732,78 @@ inline ScanEntry *scanAdd(ScanList &list, const WmiMgmtRx &rx)
       have.vhtOpSeen = true;
     }
     have.wmm = have.wmm || found.wmm;
+    have.heardRound = found.heardRound;
     if (isProbe) ++have.probes;
     else ++have.beacons;
     return &have;
   }
+  ScanEntry *slot = nullptr;
   if (list.count == kScanEntriesMax) {
-    ++list.dropped;
-    return nullptr;
+    // T-18 (office: more than 32 networks in the air): a full list gives up its stalest entry (heard in the oldest round,
+    // then the weakest) for a network heard now, when that entry was not heard in this round or is weaker than the new one;
+    // the network the station is on is never given up. Before, a full list dropped every newer network for good, so the
+    // access point next to the tablet could be missing from every rejoin.
+    ScanEntry *victim = nullptr;
+    for (uint32_t i = 0; i < list.count; ++i) {
+      ScanEntry &e = list.entries[i];
+      bool keep = list.keepSet;
+      for (unsigned k = 0; keep && k < 6; ++k) keep = e.bssid[k] == list.keepBssid[k];
+      if (keep) continue;
+      if (!victim || e.heardRound < victim->heardRound || (e.heardRound == victim->heardRound && e.rssi < victim->rssi)) victim = &e;
+    }
+    if (!victim || (victim->heardRound >= list.round && victim->rssi >= found.rssi)) {
+      ++list.dropped;
+      return nullptr;
+    }
+    ++list.evicted;
+    slot = victim;
+  } else {
+    slot = &list.entries[list.count++];
   }
-  ScanEntry &entry = list.entries[list.count++];
+  ScanEntry &entry = *slot;
   entry = found;
   entry.beacons = isProbe ? 0 : 1;
   entry.probes = isProbe ? 1 : 0;
   return &entry;
+}
+
+// 2026-11-23 (private/host-checks/20261123-wifi-rejoin/ANALYSIS.md): the list forgets. Before it, a network stayed in the list,
+// and in every SCAN_RESULT airportd read (stamped with the time of the read), long after it was gone: a hotspot switched off
+// was offered to auto-join again and again, every join of it failed, and the list's 32 places filled for good. A full scan
+// begins a round (scanRoundBegin); at its end scanExpire removes every entry not heard in the last `keep` rounds (two:
+// wpa_supplicant's bss_expiration_scan_count), and `suspect` (the access point an association just lost by itself) as soon as
+// one round has not heard it. A round that heard no frame at all removes nothing (a deaf radio is not an empty sky), and
+// `keepBssid` (the network the station is on) is never removed. Returns how many entries went.
+inline void scanRoundBegin(ScanList &list)
+{
+  ++list.round;
+  list.roundFrames = 0;
+}
+
+inline uint32_t scanExpire(ScanList &list, uint32_t keep, const uint8_t *suspect, const uint8_t *keepBssid)
+{
+  if (!list.round || !list.roundFrames || !keep) return 0;
+  auto same = [](const uint8_t *a, const uint8_t *b) {
+    if (!a || !b) return false;
+    for (unsigned k = 0; k < 6; ++k)
+      if (a[k] != b[k]) return false;
+    return true;
+  };
+  uint32_t kept = 0, removed = 0;
+  for (uint32_t i = 0; i < list.count; ++i) {
+    const ScanEntry &e = list.entries[i];
+    // an entry stamped by an earlier list (a restart's seeded network) counts as heard now
+    const uint32_t missed = e.heardRound <= list.round ? list.round - e.heardRound : 0;
+    const bool gone = !same(e.bssid, keepBssid) && (missed >= keep || (missed >= 1 && same(e.bssid, suspect)));
+    if (gone) {
+      ++removed;
+      continue;
+    }
+    if (kept != i) list.entries[kept] = e;
+    ++kept;
+  }
+  list.count = kept;   // every reader stops at count; scanAdd writes a new entry whole
+  return removed;
 }
 
 // The address of a network as a line may carry it: masked to its first three bytes unless the owner asked for all of it, so

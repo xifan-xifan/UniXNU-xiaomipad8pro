@@ -352,6 +352,12 @@ static void testPowerFaults()
     CHECK(p.step == -kStepRailVote);
     CHECK(m.last(kWinTlmm, kPins[kPinWlanEn].gpio * kTlmmStride + 4) != nullptr);   // safeOff still drove the pins
     checkSafeOff(m);
+    CHECK(wifiOffPins(hw));
+    const uint32_t wlanIo = kPins[kPinWlanEn].gpio * kTlmmStride + 4;
+    hw.write(hw.ctx, kWinTlmm, wlanIo, 2, "stuck high");
+    CHECK(!wifiOffPins(hw));
+    safeOff(hw, p, opt);
+    CHECK(wifiOffPins(hw));
     for (const Model::VrmCall &c : m.vrm) CHECK(c.resource != "smpi7" && c.resource != "smpg3");   // nothing after it
   }
   {   // a rail that reads above what the chip needs is kept there, never lowered

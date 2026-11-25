@@ -4,3 +4,7 @@ vma2 collection's IOMobileGraphicsFamily (NativeGopDisplay's family) and the kex
 UsbCableKeys.cpp: UniXNU-piano's own (BSD-2-Clause-Patent), compiled in only with PIANO_USBHOST_STACK=1 (tooling/k27/build-native-standin.sh):
 AppleARMPlatform's eleven gAppleARMUSBCable* keys, which Apple's USB host stack refers to; names from the KC link report, values inferred
 (docs/drivers/usb-host.md section 5.2). The default build is unchanged (ARMPlatformStandIn.cpp untouched, the same objects).
+DiagnosticDataStandIn.cpp: UniXNU-piano's own (BSD-2-Clause-Patent), 2026-11-22: AppleDiagnosticDataAccess and its subclass
+AppleDiagnosticDataAccessReadOnly, one object matched on IOResources with an erased 24-byte AppleDiagnosticDataSysCfg, so that
+libMobileGestalt's 5 s wait for that service ends at once in daemons whose sandbox denies IOKit property reads (docs/identity.md
+section 9). Class names and the property name from 27.3's userland strings and kernelcache Info.plist; no Apple code.

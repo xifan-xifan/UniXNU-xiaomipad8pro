@@ -80,6 +80,12 @@ struct A830DcvsTable {
 };
 
 struct A830DcvsConfig {
+    bool qualificationR3b=false;
+    bool qualification607=false;
+    /* gpu/fullopp1 (private/host-checks/20261122-gpu-fullopp/ANALYSIS.md 3.2): KGSL's open constants (pagani-gpu-governor=2): the window
+     * on the timer only (no TE windows), the race to the top without needing the input floor. Adreno830Start sets windowMs 10, idleMs
+     * 80 and sustainKhz 0 with it. */
+    bool kgsl=false;
     /* boot knobs (ARCHITECTURE 3.6) */
     bool governor=true;                 /* pagani-gpu-dcvs (1); 0 = fixed at fixedLevel */
     uint32_t minMhz=160,maxMhz=734;     /* pagani-gpu-dcvs-min / -max */
@@ -100,6 +106,17 @@ struct A830DcvsConfig {
     uint16_t upBusyPermille=900,upJump=2,upBoostPermille=1250,upMarginPermille=1100;
     uint16_t downMarginPermille=850,downWindows=4,downWindowsAfterUp=6;
     uint32_t idleMs=64;
+    /* input floor (gpu-daily2, GPU-ANDROID.md 5): every submission holds >= inputFloorKhz until inputHoldMs after it (0 = off):
+     * a stream of composed frames (a gesture, a scroll, an animation) never starts at the floor; an idle desktop still falls to
+     * it once the idle rule (idleMs) fires. Ceilings (knob, guard, external slots such as Low Power Mode) win over it.
+     * gpu-boost342c (BOOST342.md): the hold is Android's 80 ms idle timer (KGSL), and the first submission after a hold ran out wakes
+     * the thread, so a burst's first frame gets the floor at once. */
+    uint32_t inputFloorKhz=0,inputHoldMs=80;
+    /* Android's race to the top (msm-adreno-tz CEILING, GPU-ANDROID.md): while the input floor is set, sustained work whose GPU busy
+     * time adds up to burstTopMs goes to the top level at once; the sustain limit and every ceiling still win. 0 = off. Our 16 ms
+     * windows never hold 50 ms alone, so the busy time adds up over windows in a row at or above the target busy (75 %); a lighter
+     * or idle window starts again (a light frame stream stays where demand puts it). */
+    uint32_t burstTopMs=50;
     uint32_t wakeBoostKhz=525000,wakeBoostMs=50;
     uint32_t touchBoostKhz=525000,touchHoldMs=300;
     uint16_t lateBusyPermille=500;
@@ -146,15 +163,28 @@ struct A830DcvsOps {
      * in flight and no holder; lastSubmitNs: the newest submission. Returns the next time it needs a look (ns), 0 for none. May be null. */
     uint64_t (*idleTick)(void *context,uint64_t now,bool quiet,uint64_t lastSubmitNs);
 #endif
+    void (*qualificationFault)(void *context,uint8_t requested,uint8_t bus,IOReturn error)=nullptr;
+    void (*qualificationService)(void *context,uint64_t now)=nullptr;
+    void (*qualificationAck)(void *,uint8_t &,uint8_t &)=nullptr;
+    uint64_t (*qualificationThermal)(void *context)=nullptr; // R3b atomic guard snapshot
+    void (*qualificationSample)(void *context,uint64_t now,const Sm8750TsensSample *)=nullptr;
 };
 
 struct A830DcvsStats {
     uint32_t windows,votes,voteFailures,wakeBoosts,touchBoosts,lateBoosts,lateFrames,thermalCaps,busMaxEntries,floorRaises;
+    uint32_t boostRequests;             /* requestBoost calls (piano-gpu-boost: input kexts, the CPU agent) */
+    /* gpu-boost342c (machdep.piano_gpu_busy): bursts begun (a submission after the input hold ran out), submissions inside a burst
+     * while the lowest level was voted, bursts sent to the top (burstTopMs); GPU busy time in all and at the lowest level (each
+     * window's busy time counted at the level voted when the window closes: off by at most the vote latency of a burst's start). */
+    uint32_t burstStarts,lowSubmits,burstTops;
+    uint64_t busyNs,lowBusyNs;
     uint32_t sustainHolds;              /* windows whose rules asked for more than the sustain limit */
     uint32_t touches,vsyncs,underruns;
     uint8_t level,bus,floor,ceiling,thermalCeiling,zone;
     uint16_t busyPermille;              /* last status period */
     int32_t tempDeci;                   /* hottest GPU sensor, last valid read */
+    uint64_t residencyHighLongestNs,residency607LongestNs;
+    uint64_t residencyTotalNs[Adreno830LevelMax + 1];
     uint32_t residency[Adreno830LevelMax + 1];   /* permille of the last residency window, by GMU level */
     bool annibale;                      /* the annibale profile was in effect at init() */
     bool thermalHot;                    /* annibale: held at 160 MHz by the 70/60 C rule */
@@ -179,8 +209,18 @@ public:
 
     /* Hooks (lock-free, interrupt-safe). */
     void noteSubmit();                  /* every submission (wake boost, idle clock) */
+    void forceQualificationVote() {__atomic_store_n(&forceVote_,true,__ATOMIC_RELEASE);env_.wake(env_.context);}
     void noteVsync();                   /* a display TE */
     void noteLateFrame(uint32_t lateUs);/* a swap after its target TE */
+    void setInputFloor(uint32_t khz) {__atomic_store_n(&inputFloorKhz_,khz,__ATOMIC_RELEASE);env_.wake(env_.context);}
+    /* A boost floor of khz (0: the touch boost's level) for holdMs (0: the touch hold), from any thread (piano-gpu-boost). Requests
+     * combine: the highest floor until the latest end; every ceiling (knob, thermal, guard, external slots, Low Power Mode) wins. */
+    void requestBoost(uint32_t khz,uint32_t holdMs,uint32_t capKhz=0);
+    /* gpu/fullopp1: a boost's cap (Android's launch hint: max_pwrlevel 2 = 967 MHz for the launch), in force until the boost ends;
+     * 0 = none. The lowest cap of overlapping requests wins. */
+    uint32_t boostCap(uint64_t now) const;
+    uint32_t inputFloor() const {return __atomic_load_n(&inputFloorKhz_,__ATOMIC_ACQUIRE);}
+    uint32_t submissions() const {return __atomic_load_n(&submits_,__ATOMIC_RELAXED);}
     void noteUnderruns(uint32_t total); /* MDP INTF1 underrun count (cumulative) */
     void park();                        /* a reset is coming: hold the lowest level and its bus from the next tick on */
     void setAcd(bool running);          /* ACD came up or went away (ceiling) */
@@ -235,6 +275,7 @@ private:
     Sm8750Thermal thermal_{};
     A830DcvsStats stats_{};
     bool initialized_=false,started_=false;
+    bool forceVote_=false;
     bool annibale_=false,hot_=false,stopped_=false;   /* the profile at init(); annibale thermal hold; votes ended */
     /* levels */
     uint8_t level_=0,bus_=0,floor_=1,knobCeiling_=1,thermalCeiling_=1;
@@ -253,9 +294,13 @@ private:
     uint8_t sustainLevel_=1;            /* the highest level a burst reaches (A830DcvsConfig::sustainKhz) */
     uint16_t down_=0,saturated_=0;      /* qualifying windows in a row: down rule, sustain rule */
     bool raisedLast_=false,idle_=false;
+    uint32_t boostKhz_=0;uint64_t boostUntilNs_=0;   /* requestBoost: the floor and its end */
+    uint32_t boostCapKhz_=0;uint64_t boostCapUntilNs_=0;   /* gpu/fullopp1: a boost's cap and its end */
+    uint32_t inputFloorKhz_=0;            /* the input floor in force (config, then machdep.piano_gpu_input_floor) */
     uint64_t wakeUntil_=0,touchUntil_=0,lateUntil_=0,retryAt_=0;
     uint8_t lateLevel_=0;
     uint32_t lastBusyPermille_=0;
+    uint64_t windowBusyNs_=0,burstBusyNs_=0;   /* the last window's busy time; the burst's so far (burstTopMs) */
     /* hooks */
     uint32_t submits_=0,seenSubmits_=0,windowSubmits_=0,vsyncs_=0,windowVsyncs_=0,late_=0,seenLate_=0,underrunTotal_=0,
              seenUnderruns_=0;
@@ -268,6 +313,7 @@ private:
 #endif
     /* periodic */
     uint64_t nextStatus_=0,nextWatchdog_=0,residencyStart_=0,statusStart_=0,statusBusyNs_=0,statusNs_=0,lastAccount_=0;
+    uint64_t highStreakNs_=0,l7StreakNs_=0;
     uint64_t residencyNs_[Adreno830LevelMax + 1]={};
     /* underruns */
     uint32_t underrunStreak_=0;
@@ -279,7 +325,18 @@ extern "C" {
 /* The display's hooks (PD NativeLegacyDisplay / DpuProbe call them; the display carries weak empty defaults so it links
  * without this driver). All are interrupt-safe and do nothing before S10. */
 void adreno830_dcvs_vsync(void);                   /* each panel TE */
-void adreno830_dcvs_late_frame(uint32_t late_us);  /* a swap that missed its target TE by late_us */
+void adreno830_dcvs_late_frame(uint32_t late_us);
+int adreno830_dcvs_set_input_floor(uint32_t mhz);   /* 0 off, else 160..1100 MHz; -1 before the DCVS runs */
+uint32_t adreno830_dcvs_input_floor(void);           /* MHz in force, 0 off */
+/* piano-gpu-boost (PianoGpuBoost.h): mhzOrLevel 0 = the touch boost's level, 1..16 a GMU level, else MHz; holdMs 0 = the touch
+ * hold, at most 5000. -1 before the DCVS runs. */
+int adreno830_dcvs_boost(uint32_t mhz_or_level,uint32_t hold_ms);
+/* gpu/fullopp1: the same with a cap in MHz for the hold (0 none; Android's launch cap 967). */
+int adreno830_dcvs_boost_capped(uint32_t mhz_or_level,uint32_t hold_ms,uint32_t cap_mhz);
+uint32_t adreno830_dcvs_boost_requests(void);
+/* gpu-boost342c: out[0] GPU busy ns, out[1] busy ns at the lowest level, out[2] submissions, out[3] bursts begun, out[4] submissions
+ * inside a burst at the lowest level, out[5] bursts sent to the top. 0 before the DCVS runs (out zeroed). */
+int adreno830_dcvs_busy(uint64_t out[6]);  /* a swap that missed its target TE by late_us */
 void adreno830_dcvs_underruns(uint32_t total);     /* cumulative MDP INTF1 underruns (INTR_STATUS bit 26) */
 /* The submit path (NativeAdrenoUserClient/Submit): one call per submission, lock-free. */
 void adreno830_dcvs_submit(void);

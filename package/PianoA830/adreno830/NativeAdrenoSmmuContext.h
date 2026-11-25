@@ -85,8 +85,8 @@ public:
     NativeAdrenoSmmuContext(const NativeAdrenoSmmuContext &)=delete;
     NativeAdrenoSmmuContext &operator=(const NativeAdrenoSmmuContext &)=delete;
     /* A 16 GiB lower aperture (the GPU's by default, ARCHITECTURE 4.6.1) is 4194304 leaves, the 4 GiB one (pagani-gpu-va=4) 1048576;
-     * the GMU's 2 GiB is 524288. */
-    enum : size_t {MaxLeaves=size_t(1)<<22};
+     * the GMU's 2 GiB is 524288. UniXNU-piano: the 64 GiB one (pagani-gpu-va=64) 16777216. */
+    enum : size_t {MaxLeaves=size_t(1)<<24};
     enum : size_t {MaxStreams=8};
     /* iova/bytes describe the aperture in the chosen region; the pool must be contiguous.
      * output_bits: the context's output size, at most the SMMU's ID2.OAS (Linux uses OAS for stage 1). input_bits: the context's
@@ -94,6 +94,11 @@ public:
      * below 2^input_bits. */
     IOReturn prepare(NativeAdrenoMemory *tables,unsigned upper,uint64_t iova,size_t bytes,
         size_t leaf_budget,unsigned bank,unsigned asid,unsigned poll_budget,unsigned output_bits=40,unsigned input_bits=32);
+    /* UniXNU-piano (2026-11-23, GPU-PAGED P1, private P1-GATE.md): a lower context whose tables are built on demand
+     * (NativeAdrenoVm::preparePaged): no table pool, TTBR0 = root_physical, the one zeroed and published root page of an
+     * ArmSmmu4KPagedSpace with this input size. The image is encoded as for prepare (MAIR 0xff44, start level from input_bits). */
+    IOReturn preparePaged(uint64_t root_physical,uint64_t bytes,size_t leaf_budget,unsigned bank,unsigned asid,unsigned poll_budget,
+        unsigned output_bits,unsigned input_bits);
     /* The TTBR1 guard of a lower context (CB0, ARCHITECTURE 4.5.4 step 9): the physical address of one zeroed, published,
      * 4 KiB-aligned table page below 2^output_bits. Only after prepare and before program; 0 keeps TTBR1 = 0 (CB2). */
     IOReturn setUpperGuard(uint64_t physical);

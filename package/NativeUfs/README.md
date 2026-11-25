@@ -71,7 +71,7 @@ ShengUfs b11de87 (`UPSTREAM`) with the piano/SM8750 deltas, built as a k27 nativ
 - SM8750 register facts from the SoC layer: `GccUfs.h` and `SmmuTakeover.h` include `UniXNU-sm8750-common/kits/Sm8750Platform`
   (`NATIVE_UFS_SM8750=1`), the 1 MiB apps-SMMU window and the TLB sync after the stream bypass (as the SM8750 UniXNU ports).
 - Root partition `UFS_ROOT_PARTITION` = `linux_rootfs` (SHNGROOT manifest, `tooling/native/make-root-manifest.py`).
-- The standard image recipe compiles with `NATIVE_UFS_UNVERIFIED_ROOT=1`. It can open aligned root windows writable in place.
+- Development build: no `NATIVE_VERIFIED_BLOCK` (windows published read-only without owner-signed block policies).
 - `NATIVE_UFS_POLL_ONLY=1`: k27's ArmCpu has no `armcpu_spi_attach`; completion by polling.
 - `gScratch` allocated at start (the KC has no gap for a 128 KiB `__bss`).
 - Power (`RootPower.h`, opt-in): `native-ufs-suspend=1` puts the link into Hibern8 for a system sleep and undoes everything on any

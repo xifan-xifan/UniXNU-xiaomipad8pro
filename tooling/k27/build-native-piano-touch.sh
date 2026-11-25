@@ -3,7 +3,9 @@
 # matrix decoder, the contacts and their gestures; a HID pointer for macOS) as a k27 native kext: the host tests first
 # (tests/geni_spi_host.c: GeniSpi.c against its register model; tests/touch_host.cpp: the protocol against an NT36532E model, the
 # staged images downloaded into it, the decoder, the tracker, palms and every gesture on synthetic frames, the HID descriptor and
-# reports, the clock decoding, the frame pace), then the panel images staged and embedded, then the objects in
+# reports, the clock decoding, the frame pace; tests/touch_mt_host.cpp: the multitouch device, its routing and the test injection;
+# tests/touch_native_host.cpp: the native touch screen), then
+# the panel images staged and embedded, then the objects in
 # out/native-kexts/PianoTouch for tooling/k27/kext/PianoTouch.json. Prints out/k27/kext/PianoTouch.json (resolved) last.
 # Inert without the boot argument piano-touch (package/PianoTouch/PianoTouch.cpp, docs/drivers/touch.md).
 #   environment: PIANO_K27_TREE (the k27 tree, read only: compile recipes, out/x12377/inc-hid), K27_OBJ (default k27-native-obj),
@@ -67,6 +69,14 @@ python3 "$D/tooling/k27/gen-touch-calibration.py" --out "$O/host-tests/Synthetic
   -DPIANO_TOUCH_SYNTHETIC_HEADER='"SyntheticCalibration.h"' -DPIANO_TOUCH_UNIT_HEADER='"PianoTouchCalibration.h"' \
   "$P/tests/touch_host.cpp" -o "$O/host-tests/touch_host"
 "$O/host-tests/touch_host" ${STAGED[@]+"${STAGED[@]}"} >&2 || { echo "Error: PianoTouch host tests failed" >&2; exit 1; }
+# The multitouch path (piano-touch-mt=1) and the test-only injection: MtHid.h's descriptor, feature answers and frames, TouchMt.h's
+# routing through the tracker, TouchInject.h's scripts (tests/touch_mt_host.cpp).
+"${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -I "$P" "$P/tests/touch_mt_host.cpp" -o "$O/host-tests/touch_mt_host"
+"$O/host-tests/touch_mt_host" >&2 || { echo "Error: PianoTouch multitouch host tests failed" >&2; exit 1; }
+# The native touch screen (piano-touch-native=1|2): TouchScreenHid.h's descriptor against an independent parser and the SDK's usage
+# constants, TouchNative.h through the tracker and a model of IOHIDEventDriver's digitizer rules (tests/touch_native_host.cpp).
+"${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -I "$P" "$P/tests/touch_native_host.cpp" -o "$O/host-tests/touch_native_host"
+"$O/host-tests/touch_native_host" >&2 || { echo "Error: PianoTouch native touch screen host tests failed" >&2; exit 1; }
 KERNEL=${K27_KERNEL:-$K/out/k27/kernel-k27-0059-native.macho}
 # The CPU latency hold of a read burst (k27 0061's piano_cpuidle_latency_hold, docs/power.md §2) is compiled in only when the kernel
 # the KC links exports it: the KC linker takes no weak imports, so a call into a kernel without it would not link.

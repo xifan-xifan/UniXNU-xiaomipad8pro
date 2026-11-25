@@ -70,6 +70,28 @@
 //                            the idle period + 50 ms, the display off every 200 ms; 25..200). Default 0: never (TouchPace.h)
 //   piano-wake-log=S         the "idle: N wakeups" line every S seconds (default 60, 0 none; shared with the other drivers)
 //   piano-touch-trace=1      more frame headers, and contact positions at level 2
+//   (lead/v131y8: piano-touch-mt is refused, the multitouch trackpad below is left out of the daily line; touch.md section 17)
+//   piano-touch-mt=1         two or more fingers to macOS's multitouch stack (TouchMt.h, MtHid.h: a second HID device, a trackpad of
+//                            Apple's multitouch family; pinch, rotate, swipes, scrolling with momentum) instead of the Wheel and the
+//                            pinch's Command + Wheel; one finger stays the pointer. Default 0: nothing published, as before
+//   piano-touch-mt-scale=PCT the size the surface declares, percent of the panel's (default 100: 1:1 in millimetres; 25..400)
+//   piano-touch-mt-tap=0     no right click from a two-finger tap on the multitouch path (default 1, as without it)
+//   piano-touch-mt-trace=1   every multitouch frame summarised in the log (default: the first 40 and the gestures)
+//   piano-touch-inject=1     TEST ONLY: root may play scripted frames (TouchInject.h) through machdep.piano_touch_inject; a frame
+//                            period of piano-touch-inject-ms (default 8; 4..50). Never in a daily profile
+//   piano-touch-native=N     the panel as macOS's native touch screen (TouchScreenHid.h, TouchNative.h: a second HID device, a HID
+//                            multi-touch Touch Screen that IOHIDEventDriver takes and WindowServer turns into direct touches; private
+//                            host-checks 20261122-touch NATIVE-TOUCH.md): 1 every finger is a touch of it instead of the pointer
+//                            gestures; 2 published, the pointer gestures stay until root writes "on" to machdep.piano_touch_native
+//                            ("off" back; A/B on one boot). Default 0: nothing published, as before
+//   piano-touch-native-axes=0 its positions in the rotated desktop's axes (default 1: the panel's own; BackBoard applies the display's
+//                            rotation to a digitizer's positions itself, touch-native2's 90-degree taps; also "axes=panel|desktop" there)
+//   piano-touch-native-uuid=U the display UUID (8-4-4-4-12 hex) the touch screen's event service carries as "displayUUID"; default: the
+//                            panel's own, NativeGopDisplay's IOMFBUUID (the instance without D6's piano-dp-fake role), read at start or,
+//                            until it is there, by the frame thread (the touch screen is published once it has it, at most 60 s late).
+//                            WindowServer's hit test and its touch-capable display need it (BackBoard files a digitizer without one under
+//                            "<main>", which WindowServer's render space cannot resolve: no touch reaches an app; NATIVE-TOUCH.md
+//                            sections 8-9). Root may give it at run time too ("uuid=U": the touch screen is published again with it)
 //   piano-touch-rotate=1     follow the display's rotation (package/PianoAuto/TouchRotation.h, docs/drivers/sensors.md 5a.3): the
 //                            platform function "PianoTouchRotation" (param1 = degrees) and the property "piano-touch-rotation"
 //                            (0/90/180/270; root or the console user: piano-rotated) are taken, and each contact is mapped into the
@@ -79,10 +101,14 @@
 #include <IOKit/IOService.h>
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/IOLib.h>
+#include <PianoGpuBoost.h>   // boost342: each report handed to macOS asks PianoA830 for its input boost (50 ms apart)
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOUserClient.h>
 #include <IOKit/hid/IOHIDDevice.h>
+#include <IOKit/IOLocks.h>
+#include <sys/sysctl.h>
+#include <sys/errno.h>
 #ifndef kIOClientPrivilegeConsoleUser
 #define kIOClientPrivilegeConsoleUser "console"   // xnu IOKitKeysPrivate.h: the caller's user has the session on the console
 #endif
@@ -99,6 +125,10 @@
 #include "TouchTrack.h"
 #include "TouchGesture.h"
 #include "TouchHid.h"
+#include "TouchMt.h"
+#include "TouchInject.h"
+#include "TouchScreenHid.h"
+#include "TouchNative.h"
 #include "Se2Bus.h"
 #include "PianoTouchCalibration.h"   // generated (tooling/k27/gen-touch-calibration.py) into the ignored out/ tree
 #include "SmmuStream.h"
@@ -110,6 +140,8 @@
 // tooling/k27/build-native-piano-touch.sh sets it to 1 when the kernel the KC links (K27_KERNEL) exports
 // piano_cpuidle_latency_hold (k27 0061); the KC linker takes no weak imports, so without it the call is not compiled in.
 #include <PianoPowerContract.h>
+#include <PianoPerfInput.h>   // the input boost's event to PianoThermal (2026-11-22)
+namespace { pianoperf::InputNotifier gPerfInput; }   // PianoThermal's input boost (PianoPerfInput.h)
 #ifndef PIANO_TOUCH_LATENCY_HOLD
 #define PIANO_TOUCH_LATENCY_HOLD 0
 #endif
@@ -137,6 +169,9 @@ struct Args {
   uint32_t gestures, holdMs, slopPx, dragDelayMs, scrollPx, scrollRes, scrollInvert, pinch, palmNodes, confirm, fastPeak, cpuHoldUs,
       noEdgeMs;
   uint32_t pm, display;
+  uint32_t mt, mtRefused, mtScale, mtTap, mtTrace, inject, injectMs;
+  uint32_t native, nativeAxes;
+  char nativeUuid[40];
 };
 Args gArgs;
 
@@ -194,6 +229,22 @@ void readArgs()
   // The power contract (TouchPower.h): the power tree (system sleep, restart), and the display's state.
   gArgs.pm = bootArg("piano-touch-pm", 1);
   gArgs.display = bootArg("piano-touch-display", 1);
+  // lead/v131y8 (the daily line): the multitouch trackpad (piano-touch-mt, TouchMt.h, MtHid.h) is left out; the cover touchpad comes
+  // later. Its argument is refused (logged at start) and PianoTouch.json carries no personality for it: nothing of it is published,
+  // and its router stays idle exactly as in touch-native3 (piano-touch-mt unset). The native touch screen does not use it.
+  gArgs.mtRefused = bootArg("piano-touch-mt", 0) ? 1 : 0;
+  gArgs.mt = 0;
+  gArgs.mtScale = clampArg(bootArg("piano-touch-mt-scale", 100), 25, 400);
+  gArgs.mtTap = bootArg("piano-touch-mt-tap", 1);
+  gArgs.mtTrace = bootArg("piano-touch-mt-trace", 0);
+  gArgs.inject = bootArg("piano-touch-inject", 0) ? 1 : 0;
+  gArgs.injectMs = clampArg(bootArg("piano-touch-inject-ms", 8), 4, 50);
+  gArgs.native = clampArg(bootArg("piano-touch-native", 0), 0, 2);
+  gArgs.nativeAxes = bootArg("piano-touch-native-axes", 1) ? 1 : 0;
+  // a string boot argument: the display UUID (checked before use: screenUuidValid)
+  memset(gArgs.nativeUuid, 0, sizeof gArgs.nativeUuid);
+  if (!PE_parse_boot_argn("piano-touch-native-uuid", gArgs.nativeUuid, sizeof gArgs.nativeUuid - 1) || !screenUuidValid(gArgs.nativeUuid))
+    gArgs.nativeUuid[0] = 0;
 }
 
 TrackConfig trackConfig()
@@ -203,6 +254,16 @@ TrackConfig trackConfig()
   c.fastPeak = int32_t(gArgs.fastPeak);
   c.palmNodes = gArgs.palmNodes;
   c.palmPeaks = gArgs.palmNodes ? 3 : 0;
+  return c;
+}
+MtConfig mtConfig()
+{
+  MtConfig c;
+  c.enabled = gArgs.mt != 0 && gArgs.gestures != 0;
+  c.minFrames = 2;
+  c.slopPx = int32_t(gArgs.slopPx);
+  c.twoTapRight = gArgs.mtTap != 0;
+  c.scalePct = gArgs.mtScale;
   return c;
 }
 GestureConfig gestureConfig()
@@ -366,6 +427,34 @@ uint32_t smmuRead(uint32_t off) { return rd32(gSmmu.va + off); }
 
 }  // namespace
 
+// The panel's display UUID: NativeGopDisplay's IOMFBUUID on the instance that drives the panel (not D6's, whose personality carries the
+// role piano-dp-fake): the UUID WindowServer gives that display (CGDisplayCreateUUIDFromDisplayID; touch-native2 read the same string).
+namespace {
+bool panelDisplayUuid(char *out, size_t size)
+{
+  bool found = false;
+  OSDictionary *match = IOService::serviceMatching("NativeGopDisplay");
+  if (!match) return false;
+  if (OSIterator *it = IOService::getMatchingServices(match)) {
+    while (OSObject *o = it->getNextObject()) {
+      IOService *svc = OSDynamicCast(IOService, o);
+      if (!svc) continue;
+      const OSString *role = OSDynamicCast(OSString, svc->getProperty("NativeGopDisplayRole"));
+      if (role && role->isEqualTo("piano-dp-fake")) continue;
+      const OSString *u = OSDynamicCast(OSString, svc->getProperty("IOMFBUUID"));
+      if (u && screenUuidValid(u->getCStringNoCopy())) {
+        strlcpy(out, u->getCStringNoCopy(), size);
+        found = true;
+        break;
+      }
+    }
+    it->release();
+  }
+  match->release();
+  return found;
+}
+}  // namespace
+
 // --------------------------------------------------------------------------------------------------------------- the HID device
 // The IOHIDDevice subclass of package/PianoInput's PianoHIDDevice and PianoKeyboard's PianoKeyboardHID (UPSTREAM) with the
 // pointer descriptor of TouchHid.h (made for the scroll resolution and the pinch's modifiers before start).
@@ -393,6 +482,112 @@ IOReturn PianoTouchHID::newReportDescriptor(IOMemoryDescriptor **descriptor) con
   return *descriptor ? kIOReturnSuccess : kIOReturnNoMemory;
 }
 
+// ---------------------------------------------------------------------------------------------- the multitouch device (piano-touch-mt=1)
+// MtHid.h's trackpad: its descriptor, identity and feature answers. AppleMultitouchDriver's AppleMultitouchHIDEventDriverV2 takes it
+// (PianoTouch.json "PianoTouchMultitouch", matched on our location ID), builds an AppleMultitouchDevice from the answers, and the
+// MultitouchHID plug-in turns the frames into gestures. Every report asked for is counted (machdep.piano_touch_mt) and the first
+// ones logged: the boot shows the handshake as macOS ran it.
+class PianoTouchMT : public IOHIDDevice {
+  OSDeclareDefaultStructors(PianoTouchMT)
+
+public:
+  MtSurface fSurface = {23680, 23680};
+  volatile uint8_t fAsked = 0;          // the report a setReport 0x01 asked about
+  volatile uint32_t fGets = 0, fSets = 0, fUnknown = 0, fLogged = 0;
+  uint32_t fGetsBy[16] = {};            // by MtHid.h report: 00 01 02 D1 D3 D0 A1 D9 7F C8 DB, other
+  static unsigned slot(uint8_t id);
+  IOReturn newReportDescriptor(IOMemoryDescriptor **descriptor) const override;
+  IOReturn getReport(IOMemoryDescriptor *report, IOHIDReportType reportType, IOOptionBits options) override;
+  IOReturn setReport(IOMemoryDescriptor *report, IOHIDReportType reportType, IOOptionBits options) override;
+  OSString *newTransportString() const override { return OSString::withCString("I2C"); }
+  OSString *newManufacturerString() const override { return OSString::withCString("Apple Inc."); }
+  OSString *newProductString() const override { return OSString::withCString("Piano Touch Multitouch"); }
+  OSString *newSerialNumberString() const override { return OSString::withCString("PianoTouchMT"); }
+  OSNumber *newVendorIDNumber() const override { return OSNumber::withNumber(kMtVendorId, 32); }
+  OSNumber *newProductIDNumber() const override { return OSNumber::withNumber(kMtProductId, 32); }
+  OSNumber *newVersionNumber() const override { return OSNumber::withNumber(kMtVersion, 32); }
+  OSNumber *newLocationIDNumber() const override { return OSNumber::withNumber(kMtLocationId, 32); }
+  OSNumber *newPrimaryUsagePageNumber() const override { return OSNumber::withNumber(0x01, 32); }
+  OSNumber *newPrimaryUsageNumber() const override { return OSNumber::withNumber(0x02, 32); }
+};
+
+OSDefineMetaClassAndStructors(PianoTouchMT, IOHIDDevice)
+
+unsigned PianoTouchMT::slot(uint8_t id)
+{
+  static const uint8_t kIds[11] = {0x00, 0x01, 0x02, 0xd1, 0xd3, 0xd0, 0xa1, 0xd9, 0x7f, 0xc8, 0xdb};
+  for (unsigned i = 0; i < 11; ++i)
+    if (kIds[i] == id) return i;
+  return 11;
+}
+
+IOReturn PianoTouchMT::newReportDescriptor(IOMemoryDescriptor **descriptor) const
+{
+  *descriptor = IOBufferMemoryDescriptor::withBytes(kMtDescriptor.bytes, kMtDescriptor.length, kIODirectionNone);
+  return *descriptor ? kIOReturnSuccess : kIOReturnNoMemory;
+}
+
+// A feature (or any) report asked for: MtHid.h's answer; a report this device does not have is answered with nothing (success), as
+// the trackpads the answers come from do.
+IOReturn PianoTouchMT::getReport(IOMemoryDescriptor *report, IOHIDReportType reportType, IOOptionBits options)
+{
+  const uint8_t id = uint8_t(options & 0xff);
+  uint8_t b[96];
+  const unsigned n = mtFeature(id, fAsked, fSurface, b, sizeof b);
+  const unsigned room = report ? unsigned(report->getLength()) : 0;
+  if (report && n) report->writeBytes(0, b, n < room ? n : room);
+  __atomic_add_fetch(&fGets, 1, __ATOMIC_RELAXED);
+  ++fGetsBy[slot(id)];
+  if (!n) __atomic_add_fetch(&fUnknown, 1, __ATOMIC_RELAXED);
+  if (__atomic_add_fetch(&fLogged, 1, __ATOMIC_RELAXED) <= 64)
+    IOLog("PianoTouch: mt: getReport type %u id %#04x%s -> %u bytes (buffer %u)\n", unsigned(reportType), id,
+          id == 0x01 ? (fAsked ? " (the size of the asked report)" : " (nothing asked)") : "", n, room);
+  return kIOReturnSuccess;
+}
+
+IOReturn PianoTouchMT::setReport(IOMemoryDescriptor *report, IOHIDReportType reportType, IOOptionBits options)
+{
+  const uint8_t id = uint8_t(options & 0xff);
+  uint8_t b[8] = {};
+  const unsigned len = report ? unsigned(report->getLength()) : 0;
+  if (report) report->readBytes(0, b, len < sizeof b ? len : sizeof b);
+  if (id == 0x01 && len >= 2) fAsked = b[1];
+  __atomic_add_fetch(&fSets, 1, __ATOMIC_RELAXED);
+  if (__atomic_add_fetch(&fLogged, 1, __ATOMIC_RELAXED) <= 64)
+    IOLog("PianoTouch: mt: setReport type %u id %#04x, %u bytes: %02x %02x %02x %02x\n", unsigned(reportType), id, len, b[0], b[1],
+          b[2], b[3]);
+  return kIOReturnSuccess;
+}
+
+// ---------------------------------------------------------------------------------- the native touch screen (piano-touch-native=1|2)
+// TouchScreenHid.h's HID multi-touch Touch Screen. IOHIDEventDriver takes it (PianoTouch.json "PianoTouchScreenEventDriver"):
+// IOHIDEventService marks the service DisplayIntegrated for its Touch Screen usage, the Untouch usage makes the driver dispatch one
+// collection event per report, and WindowServer turns the digitizer events of a service conforming to Digitizer / Touch Screen into
+// direct touches (NATIVE-TOUCH.md section 2). Our vendor and manufacturer: never Apple's (AppleMultitouchHIDService would take it).
+class PianoTouchScreen : public IOHIDDevice {
+  OSDeclareDefaultStructors(PianoTouchScreen)
+
+public:
+  IOReturn newReportDescriptor(IOMemoryDescriptor **descriptor) const override;
+  OSString *newTransportString() const override { return OSString::withCString("SPI"); }
+  OSString *newManufacturerString() const override { return OSString::withCString("UniXNU"); }
+  OSString *newProductString() const override { return OSString::withCString("Piano Touch Screen (native)"); }
+  OSString *newSerialNumberString() const override { return OSString::withCString("PianoTouchScreen"); }
+  OSNumber *newVendorIDNumber() const override { return OSNumber::withNumber(kScreenVendorId, 32); }
+  OSNumber *newProductIDNumber() const override { return OSNumber::withNumber(kScreenProductId, 32); }
+  OSNumber *newLocationIDNumber() const override { return OSNumber::withNumber(kScreenLocationId, 32); }
+  OSNumber *newPrimaryUsagePageNumber() const override { return OSNumber::withNumber(kPageDigitizer, 32); }
+  OSNumber *newPrimaryUsageNumber() const override { return OSNumber::withNumber(kUsageTouchScreen, 32); }
+};
+
+OSDefineMetaClassAndStructors(PianoTouchScreen, IOHIDDevice)
+
+IOReturn PianoTouchScreen::newReportDescriptor(IOMemoryDescriptor **descriptor) const
+{
+  *descriptor = IOBufferMemoryDescriptor::withBytes(kScreenDescriptor.bytes, kScreenDescriptor.length, kIODirectionNone);
+  return *descriptor ? kIOReturnSuccess : kIOReturnNoMemory;
+}
+
 // --------------------------------------------------------------------------------------------------------------------- the service
 class PianoTouch : public IOService {
   OSDeclareDefaultStructors(PianoTouch)
@@ -400,6 +595,40 @@ class PianoTouch : public IOService {
   enum class BusKind : uint8_t { none, geni, gpio };
   PianoTouchHID *fHid = nullptr;
   IONotifier *fPublished = nullptr;
+  // The multitouch path (piano-touch-mt=1, TouchMt.h): its device, the driver macOS gave it, its frames.
+  PianoTouchMT *fMtHid = nullptr;
+  IONotifier *fAmdPublished = nullptr;
+  MtRouter fMt;
+  uint64_t fMtEpochMs = 0;
+  uint32_t fMtLines = 0;
+  volatile uint32_t fMtSent = 0, fMtSendErrors = 0;
+  const char *volatile fMtDriver = "none";
+  volatile bool fMtAmd = false;
+  // The test-only injection (piano-touch-inject=1, TouchInject.h): a script written by root, played by the frame thread.
+  IOLock *fInjectLock = nullptr;
+  InjectScript *fInjectNext = nullptr, *fInjectPlay = nullptr;
+  volatile bool fInjectPending = false;
+  uint32_t fInjectPlayed = 0, fInjectRefused = 0;
+  char fInjectStatus[160] = "none";
+  // The native touch screen (piano-touch-native=1|2, TouchNative.h): its device, the driver macOS gave it, the mode, its reports. A mode
+  // or axes switch root asks for (machdep.piano_touch_native) is taken by the frame thread when no contact is active.
+  PianoTouchScreen *fScreen = nullptr;
+  NativeRouter fNative;
+  volatile bool fNativeOn = false;
+  volatile int fNativeWant = -1, fAxesWant = -1;
+  volatile uint32_t fNativeSent = 0, fNativeErrors = 0, fNativeSwitches = 0;
+  uint32_t fNativeLines = 0;
+  const char *volatile fNativeDriver = "none";
+  volatile int fNativeDispInt = -1, fNativeBuiltIn = -1, fNativeCollection = -1;
+  volatile uint32_t fNativePage = 0, fNativeUsage = 0;
+  // The display UUID the event service carries (piano-touch-native-uuid, or root's "uuid=" word: the touch screen published again);
+  // fScreenLock guards fScreen against that swap while the frame thread hands reports in.
+  char fNativeUuid[40] = {};
+  IOLock *fScreenLock = nullptr;
+  volatile int fNativeUuidOnService = -1;
+  volatile uint32_t fNativeRepublishes = 0, fNativeDropped = 0;
+  const char *volatile fNativeUuidSource = "none";
+  uint64_t fNativeDeferredMs = 0, fNativeDeferredTryMs = 0;   // the touch screen waits for the panel's display UUID (frame thread)
   BusKind fBus = BusKind::none;
   geni_spi fSpi = {};
   IOBufferMemoryDescriptor *fDma = nullptr;
@@ -492,6 +721,16 @@ class PianoTouch : public IOService {
   void clearLatch();
   void armIrq();
   bool publish();
+  bool publishMt();
+  void sendMt(const MtFrameOut &f, uint64_t now);
+  void deliverMt(const MtOut &o, uint64_t now);
+  void playInject(const MatrixConfig &mc);
+  static bool amdPublished(void *target, void *refCon, IOService *service, IONotifier *notifier);
+  bool publishNative(bool first);
+  int republishNative(const char *uuid);
+  void nativeDeferred(uint64_t now);
+  void deliverNative(const NativeOut &o);
+  void nativeSwitch();
   void serve();
   void frame(uint32_t readUs);
   void contacts(uint64_t now);
@@ -508,6 +747,10 @@ class PianoTouch : public IOService {
   void stats(uint64_t now);
 
 public:
+  int injectWrite(const char *text, unsigned len);
+  void mtStatus(char *out, size_t size);
+  int nativeWrite(const char *text, unsigned len);
+  void nativeStatus(char *out, size_t size);
   using IOService::callPlatformFunction;
   IOService *probe(IOService *provider, SInt32 *score) override;
   bool start(IOService *provider) override;
@@ -517,6 +760,11 @@ public:
 };
 
 OSDefineMetaClassAndStructors(PianoTouch, IOService)
+
+SYSCTL_DECL(_machdep);
+namespace {
+void registerTouchSysctls(PianoTouch *t);
+}
 
 IOService *PianoTouch::probe(IOService *provider, SInt32 *score)
 {
@@ -593,6 +841,36 @@ bool PianoTouch::start(IOService *provider)
   }
   // The HID device from start, as PianoInput and PianoDwc3 publish theirs; it sends nothing until a contact comes.
   if (gArgs.level >= 2 && !publish()) return true;
+  // The multitouch device (piano-touch-mt=1) and the sysctls (machdep.piano_touch_mt, with piano-touch-inject=1 the injection).
+  if (gArgs.mt && gArgs.level >= 2 && gArgs.gestures) publishMt();
+  else if (gArgs.mt) note("mt: piano-touch-mt=1 needs piano-touch=2 and the gestures: no multitouch device");
+  if (gArgs.mtRefused) note("mt: piano-touch-mt is not part of this line (the cover touchpad comes later): no multitouch device");
+  // The native touch screen (piano-touch-native=1|2; machdep.piano_touch_native).
+  if (gArgs.native && gArgs.level >= 2) {
+    fScreenLock = IOLockAlloc();
+    if (gArgs.nativeUuid[0]) {
+      strlcpy(fNativeUuid, gArgs.nativeUuid, sizeof fNativeUuid);
+      fNativeUuidSource = "piano-touch-native-uuid";
+    } else if (panelDisplayUuid(fNativeUuid, sizeof fNativeUuid)) {
+      fNativeUuidSource = "NativeGopDisplay";
+    }
+    if (!fScreenLock) note("native: FAILED: no lock: no touch screen");
+    else if (fNativeUuid[0]) publishNative(true);
+    else {
+      fNativeDeferredMs = nowMs();
+      note("native: the panel's display UUID (NativeGopDisplay IOMFBUUID) is not there yet: the touch screen waits for it (at most 60 s)");
+    }
+  }
+  else if (gArgs.native) note("native: piano-touch-native=%u needs piano-touch=2: no touch screen", gArgs.native);
+  if (gArgs.inject) {
+    fInjectLock = IOLockAlloc();
+    fInjectNext = static_cast<InjectScript *>(IOMallocZeroData(sizeof(InjectScript)));
+    fInjectPlay = static_cast<InjectScript *>(IOMallocZeroData(sizeof(InjectScript)));
+    if (!fInjectLock || !fInjectNext || !fInjectPlay) note("inject: no memory: no injection");
+    else note("inject: TEST ONLY (piano-touch-inject=1): root plays scripted frames through machdep.piano_touch_inject, one every %u ms",
+              gArgs.injectMs);
+  }
+  registerTouchSysctls(this);
   fChip.txBytes = 63 * 1024 + 8;
   fChip.rxBytes = kMaxFrame + 8;
   fChip.tx = static_cast<uint8_t *>(IOMallocData(fChip.txBytes));
@@ -1179,13 +1457,106 @@ bool PianoTouch::publish()
   return true;
 }
 
-bool PianoTouch::eventServicePublished(void *, void *, IOService *service, IONotifier *)
+bool PianoTouch::eventServicePublished(void *target, void *, IOService *service, IONotifier *)
 {
-  for (IOService *provider = service->getProvider(); provider; provider = provider->getProvider())
+  PianoTouch *self = static_cast<PianoTouch *>(target);
+  for (IOService *provider = service->getProvider(); provider; provider = provider->getProvider()) {
     if (OSDynamicCast(PianoTouchHID, provider)) {
       note("event service %s published on the touch screen: macOS has it", service->getMetaClass()->getClassName());
       break;
     }
+    if (OSDynamicCast(PianoTouchScreen, provider)) {
+      auto flag = [service](const char *key) {
+        const OSObject *o = service->getProperty(key);
+        return o == kOSBooleanTrue ? 1 : o == kOSBooleanFalse ? 0 : -1;
+      };
+      self->fNativeDriver = service->getMetaClass()->getClassName();
+      self->fNativeDispInt = flag("DisplayIntegrated");
+      self->fNativeBuiltIn = flag("Built-In");
+      const OSDictionary *dig = OSDynamicCast(OSDictionary, service->getProperty("Digitizer"));
+      const OSObject *cd = dig ? dig->getObject("collectionDispatch") : nullptr;
+      self->fNativeCollection = cd == kOSBooleanTrue ? 1 : cd == kOSBooleanFalse ? 0 : -1;
+      const OSNumber *pg = OSDynamicCast(OSNumber, service->getProperty("PrimaryUsagePage"));
+      const OSNumber *us = OSDynamicCast(OSNumber, service->getProperty("PrimaryUsage"));
+      self->fNativePage = pg ? pg->unsigned32BitValue() : 0;
+      self->fNativeUsage = us ? us->unsigned32BitValue() : 0;
+      // The display binding: the device's displayUUID onto the event service, here, in the first-publish notification: before the HID
+      // event system (and with it WindowServer and BackBoard) reads the service's properties at its first-match notification.
+      if (OSString *uuid = OSDynamicCast(OSString, provider->getProperty("displayUUID"))) {
+        service->setProperty("displayUUID", uuid);
+        self->fNativeUuidOnService = OSDynamicCast(OSString, service->getProperty("displayUUID")) ? 1 : 0;
+      } else {
+        self->fNativeUuidOnService = 0;
+      }
+      note("native: event service %s published on the touch screen: DisplayIntegrated %d, Built-In %d, collection dispatch %d, primary "
+           "usage %#x/%#x, displayUUID %s", self->fNativeDriver, self->fNativeDispInt, self->fNativeBuiltIn, self->fNativeCollection,
+           self->fNativePage, self->fNativeUsage, self->fNativeUuidOnService == 1 ? self->fNativeUuid : "none");
+      break;
+    }
+    if (OSDynamicCast(PianoTouchMT, provider)) {
+      self->fMtDriver = service->getMetaClass()->getClassName();
+      note("mt: event service %s published on the multitouch device (MTEventSource %s): macOS's multitouch driver has it",
+           self->fMtDriver, service->getProperty("MTEventSource") == kOSBooleanTrue ? "yes" : "no");
+      break;
+    }
+  }
+  return true;
+}
+
+// The AppleMultitouchDevice macOS built from the multitouch device's answers (MultitouchHID reads its frames from it).
+bool PianoTouch::amdPublished(void *target, void *, IOService *service, IONotifier *)
+{
+  PianoTouch *self = static_cast<PianoTouch *>(target);
+  for (IOService *provider = service->getProvider(); provider; provider = provider->getProvider())
+    if (OSDynamicCast(PianoTouchMT, provider)) {
+      self->fMtAmd = true;
+      const OSNumber *family = OSDynamicCast(OSNumber, service->getProperty("Family ID"));
+      const OSNumber *parser = OSDynamicCast(OSNumber, service->getProperty("parser-type"));
+      const OSNumber *w = OSDynamicCast(OSNumber, service->getProperty("Sensor Surface Width"));
+      const OSNumber *h = OSDynamicCast(OSNumber, service->getProperty("Sensor Surface Height"));
+      note("mt: AppleMultitouchDevice %s published on the multitouch device: family %lld, parser-type %lld, surface %lld x %lld "
+           "(0.01 mm), HIDServiceSupport %s, MultitouchHID plug-in %s", service->getMetaClass()->getClassName(),
+           family ? (long long)family->unsigned64BitValue() : -1LL, parser ? (long long)parser->unsigned64BitValue() : -1LL,
+           w ? (long long)w->unsigned64BitValue() : -1LL, h ? (long long)h->unsigned64BitValue() : -1LL,
+           service->getProperty("HIDServiceSupport") == kOSBooleanTrue ? "yes" : "no",
+           service->getProperty("IOCFPlugInTypes") ? "named" : "not named");
+      break;
+    }
+  return true;
+}
+
+bool PianoTouch::publishMt()
+{
+  PianoTouchMT *mt = OSTypeAlloc(PianoTouchMT);
+  if (!mt || !mt->init(nullptr)) {
+    OSSafeReleaseNULL(mt);
+    note("mt: FAILED: the multitouch device's init");
+    return false;
+  }
+  mt->fSurface = mtSurface(mtConfig());
+  mt->setProperty(kIOHIDBuiltInKey, true);
+  if (!mt->attach(this)) {
+    OSSafeReleaseNULL(mt);
+    note("mt: FAILED: the multitouch device's attach");
+    return false;
+  }
+  if (!mt->start(this)) {
+    mt->detach(this);
+    OSSafeReleaseNULL(mt);
+    note("mt: FAILED: the multitouch device's IOHIDDevice::start");
+    return false;
+  }
+  fMtHid = mt;
+  mtReset(fMt, mtConfig());
+  fMtEpochMs = nowMs();
+  note("mt: multitouch device published (piano-touch-mt=1): vendor %#x product %#x location %#x, %u-byte descriptor, surface %u x %u "
+       "(0.01 mm, scale %u %%), registry ID %#llx; two or more fingers go to macOS's multitouch stack, one finger stays the pointer; "
+       "two-finger tap %s", kMtVendorId, kMtProductId, kMtLocationId, kMtDescriptor.length, mt->fSurface.width, mt->fSurface.height,
+       gArgs.mtScale, mt->getRegistryEntryID(), gArgs.mtTap ? "= right click" : "= nothing of ours");
+  if (OSDictionary *matching = IOService::serviceMatching("AppleMultitouchDevice")) {
+    fAmdPublished = IOService::addMatchingNotification(gIOFirstPublishNotification, matching, amdPublished, this, nullptr);
+    matching->release();
+  }
   return true;
 }
 
@@ -1220,12 +1591,16 @@ IOReturn PianoTouch::setProperties(OSObject *properties)
   return kIOReturnSuccess;
 }
 
+static pianogpuboost::InputBoostSender gGpuBoost;   // zero-initialised: PianoA830's piano-gpu-boost (PianoGpuBoost.h)
+
 void PianoTouch::sendBytes(const uint8_t *bytes, unsigned length)
 {
+  gPerfInput.notify(pianoperf::kTouch);
   IOBufferMemoryDescriptor *report = IOBufferMemoryDescriptor::withBytes(bytes, length, kIODirectionNone);
   const IOReturn rc = report ? fHid->handleReport(report) : kIOReturnNoMemory;
   OSSafeReleaseNULL(report);
   ++fSent;
+  if (rc == kIOReturnSuccess) gGpuBoost.note();
   if (rc != kIOReturnSuccess && (++fSendErrors <= 5 || fSendErrors % 1000 == 0)) note("HID: handleReport %#x (%u failures)", rc, fSendErrors);
 }
 
@@ -1280,7 +1655,11 @@ void PianoTouch::contacts(uint64_t now)
 // middle of one), the engine, then the reports and the notes.
 void PianoTouch::gestures(uint64_t now)
 {
-  if (gArgs.rotate && gestureIdle(fGesture) && trackerActive(fTracker, true)) {
+  // A mode or axes switch (machdep.piano_touch_native) when no contact is active: never in the middle of a touch.
+  if (fScreen && (fNativeWant >= 0 || fAxesWant >= 0) && !trackerActive(fTracker, false) && gestureIdle(fGesture) && mtIdle(fMt) &&
+      nativeIdle(fNative))
+    nativeSwitch();
+  if (gArgs.rotate && gestureIdle(fGesture) && nativeIdle(fNative) && trackerActive(fTracker, true)) {
     const uint32_t was = fRotation.shown;
     if (pat_latch(&fRotation, 1) != was) {
       note("rotation: %u degrees from this touch on (was %u; from %s, change %u)", fRotation.shown, was, fRotationSource,
@@ -1298,9 +1677,259 @@ void PianoTouch::gestures(uint64_t now)
     finger = finger || !t.palm;
   }
   if (finger) __atomic_store_n(&fLastContactMs, now, __ATOMIC_RELEASE);
+  // The native touch screen (piano-touch-native, on): every contact is its; the pointer and multitouch paths get nothing.
+  if (fScreen && fNativeOn) {
+    const PatPoint desktop = pat_rotate(fRotation.shown, 0, 0, kPanelW, kPanelH);
+    NativeContact nc[kMaxTracks];
+    unsigned k = 0;
+    for (const Track &t : fTracker.t) {
+      if (t.state != TrackState::active) continue;
+      const PatPoint p = pat_rotate(fRotation.shown, t.x, t.y, kPanelW, kPanelH);
+      nc[k++] = NativeContact{t.id, t.palm, p.x, p.y, t.x, t.y};
+    }
+    NativeOut no;
+    nativeUpdate(fNative, nc, k, desktop.width, desktop.height, kPanelW, kPanelH, no);
+    deliverNative(no);
+    return;
+  }
+  // The multitouch path first (piano-touch-mt=1): two or more fingers are its; the pointer engine gets the frame otherwise.
+  if (fMtHid) {
+    const PatPoint desktop = pat_rotate(fRotation.shown, 0, 0, kPanelW, kPanelH);
+    MtOut mo;
+    mtUpdate(fMt, fGesture, c, n, desktop.width, desktop.height, now, mo);
+    if (mo.abandon) gestureAbandon(fGesture);
+    deliverMt(mo, now);
+    if (mo.claimed) return;
+  }
   GestureOut out;
   gestureUpdate(fGesture, c, n, now, out);
   deliver(out);
+}
+
+// One multitouch frame to macOS (MtHid.h), its timestamp in ms since the device was published.
+void PianoTouch::sendMt(const MtFrameOut &f, uint64_t now)
+{
+  uint8_t b[kMtMaxReport];
+  const unsigned len = mtFrame(f.f, f.n, 0, uint32_t(now + f.dtMs - fMtEpochMs), b);
+  gPerfInput.notify(pianoperf::kTouch);
+  IOBufferMemoryDescriptor *report = IOBufferMemoryDescriptor::withBytes(b, len, kIODirectionNone);
+  const IOReturn rc = report ? fMtHid->handleReport(report) : kIOReturnNoMemory;
+  OSSafeReleaseNULL(report);
+  __atomic_add_fetch(&fMtSent, 1, __ATOMIC_RELAXED);
+  if (rc == kIOReturnSuccess) gGpuBoost.note();
+  else if (__atomic_add_fetch(&fMtSendErrors, 1, __ATOMIC_RELAXED) <= 5) note("mt: handleReport %#x", rc);
+  if (gArgs.mtTrace || fMtSent <= 40) {
+    char line[200] = "";
+    size_t used = 0;
+    for (unsigned i = 0; i < f.n && i < 5; ++i)
+      append(line, sizeof line, used, " [%u %s %d,%d]", f.f[i].id, f.f[i].state == kMtStateStart ? "start" : f.f[i].state == kMtStateTouching
+             ? "on" : f.f[i].state == kMtStateLift ? "lift" : "gone", f.f[i].x, f.f[i].y);
+    note("mt: frame %u, %u bytes, %u fingers%s", fMtSent, len, f.n, line);
+  }
+}
+
+// What the multitouch path made of a frame: the pointer to the fingers' middle first, the frames, a two-finger tap's right click, the
+// notes (the first 200 lines, then every 20th gesture).
+void PianoTouch::deliverMt(const MtOut &o, uint64_t now)
+{
+  if (o.warp) send(PointerReport{0, o.wx, o.wy, 0, 0, 0});
+  for (unsigned i = 0; i < o.frameCount; ++i) sendMt(o.frames[i], now);
+  if (o.rightClick) {
+    send(PointerReport{kButtonRight, o.rx, o.ry, 0, 0, 0});
+    send(PointerReport{0, o.rx, o.ry, 0, 0, 0});
+  }
+  const bool show = gArgs.level < 2 || gArgs.trace;
+  for (unsigned i = 0; i < o.noteCount; ++i) {
+    const MtNote &m = o.notes[i];
+    if (fMtLines >= 200 && fMt.gestures % 20) continue;
+    ++fMtLines;
+    char at[40] = "";
+    if (show) snprintf(at, sizeof at, " at (%d, %d)", m.x, m.y);
+    switch (m.kind) {
+    case MtNoteKind::start: note("mt: gesture %u starts with %d fingers%s: the pointer there, the frames to macOS", fMt.gestures, m.a, at); break;
+    case MtNoteKind::join: note("mt: a finger joins: %d fingers (%u ms)", m.a, m.ms); break;
+    case MtNoteKind::leave: note("mt: a finger leaves: %d fingers stay (%u ms)", m.a, m.ms); break;
+    case MtNoteKind::end: note("mt: gesture ends after %u ms: %d frames, %d fingers at most", m.ms, m.a, m.b); break;
+    case MtNoteKind::palm: note("mt: a palm: the gesture ends, nothing until every finger is up (%u ms)", m.ms); break;
+    case MtNoteKind::twoTap: note("mt: two-finger tap%s -> right click (%u ms, middle moved %d px, spread %d px)", at, m.ms, m.a, m.b); break;
+    }
+  }
+}
+
+// ------------------------------------------------------------------------------------------- the native touch screen's reports
+bool PianoTouch::publishNative(bool first)
+{
+  PianoTouchScreen *s = OSTypeAlloc(PianoTouchScreen);
+  if (!s || !s->init(nullptr)) {
+    OSSafeReleaseNULL(s);
+    note("native: FAILED: the touch screen's init");
+    return false;
+  }
+  s->setProperty(kIOHIDBuiltInKey, true);
+  s->setProperty("DisplayIntegrated", true);
+  s->setProperty("DigitizerCollectionDispatch", true);
+  if (fNativeUuid[0]) s->setProperty("displayUUID", fNativeUuid);
+  if (!s->attach(this)) {
+    OSSafeReleaseNULL(s);
+    note("native: FAILED: the touch screen's attach");
+    return false;
+  }
+  if (!s->start(this)) {
+    s->detach(this);
+    OSSafeReleaseNULL(s);
+    note("native: FAILED: the touch screen's IOHIDDevice::start");
+    return false;
+  }
+  IOLockLock(fScreenLock);
+  fScreen = s;
+  IOLockUnlock(fScreenLock);
+  if (first) {
+    nativeReset(fNative, gArgs.nativeAxes != 0);
+    fNativeOn = gArgs.native == 1;
+  }
+  note("native: touch screen %s (piano-touch-native=%u): vendor %#x product %#x location %#x, %u-byte descriptor (Digitizer / "
+       "Touch Screen, %u fingers), %u-byte reports, registry ID %#llx; %s; axes %s; displayUUID %s", first ? "published" : "published again",
+       gArgs.native, kScreenVendorId, kScreenProductId, kScreenLocationId, kScreenDescriptor.length, kScreenSlots, kScreenReportBytes,
+       s->getRegistryEntryID(), fNativeOn ? "ON: every finger is a touch of it" : "the pointer gestures until machdep.piano_touch_native = on",
+       fNative.panelAxes ? "the panel's" : "the rotated desktop's", fNativeUuid[0] ? fNativeUuid : "none");
+  note("native: displayUUID from %s", fNativeUuidSource);
+  return true;
+}
+
+// The frame thread while the touch screen waits for the panel's display UUID: a look every 500 ms; after 60 s it is published without one
+// (touch-native1's state: WindowServer then delivers no touch; logged).
+void PianoTouch::nativeDeferred(uint64_t now)
+{
+  if (now - fNativeDeferredTryMs < 500) return;
+  fNativeDeferredTryMs = now;
+  if (panelDisplayUuid(fNativeUuid, sizeof fNativeUuid)) {
+    fNativeUuidSource = "NativeGopDisplay";
+    note("native: the panel's display UUID is there after %llu ms", (unsigned long long)(now - fNativeDeferredMs));
+  } else if (now - fNativeDeferredMs < 60000) {
+    return;
+  } else {
+    note("native: no display UUID of the panel after 60 s: the touch screen is published without one (no touch will reach an app)");
+  }
+  fNativeDeferredMs = 0;
+  publishNative(true);
+}
+
+// Root's "uuid=U": the touch screen published again with the display UUID (WindowServer and BackBoard read a service's displayUUID
+// when it appears, never later). Only with no contact and no touch going on; the old device is terminated and its clients given up to
+// 3 s to let go before the new one appears (BackBoard then acquires the new one as the main display's digitizer).
+int PianoTouch::republishNative(const char *uuid)
+{
+  if (!fScreenLock || !fScreen) return ENOENT;
+  if (trackerLive(fTracker) || !nativeIdle(fNative)) return EBUSY;
+  IOLockLock(fScreenLock);
+  PianoTouchScreen *old = fScreen;
+  fScreen = nullptr;
+  strlcpy(fNativeUuid, uuid, sizeof fNativeUuid);
+  fNativeUuidSource = "uuid=";
+  IOLockUnlock(fScreenLock);
+  fNativeUuidOnService = -1;
+  fNativeDriver = "none";
+  old->terminate();
+  unsigned waitedMs = 0;
+  while (old->getClient() && waitedMs < 3000) {
+    IOSleep(50);
+    waitedMs += 50;
+  }
+  note("native: the touch screen terminated for displayUUID %s (its clients %s after %u ms)", fNativeUuid, old->getClient() ? "still there" :
+       "gone", waitedMs);
+  old->release();
+  __atomic_add_fetch(&fNativeRepublishes, 1, __ATOMIC_RELAXED);
+  return publishNative(false) ? 0 : EIO;
+}
+
+void PianoTouch::deliverNative(const NativeOut &o)
+{
+  for (unsigned i = 0; i < o.count; ++i) {
+    gPerfInput.notify(pianoperf::kTouch);
+    IOBufferMemoryDescriptor *report = IOBufferMemoryDescriptor::withBytes(o.report[i], kScreenReportBytes, kIODirectionNone);
+    IOLockLock(fScreenLock);
+    PianoTouchScreen *screen = fScreen;
+    const IOReturn rc = !report ? kIOReturnNoMemory : screen ? screen->handleReport(report) : kIOReturnOffline;
+    IOLockUnlock(fScreenLock);
+    OSSafeReleaseNULL(report);
+    if (rc == kIOReturnOffline) {   // between two devices (a republish): the report is dropped, counted
+      __atomic_add_fetch(&fNativeDropped, 1, __ATOMIC_RELAXED);
+      continue;
+    }
+    __atomic_add_fetch(&fNativeSent, 1, __ATOMIC_RELAXED);
+    if (rc == kIOReturnSuccess) gGpuBoost.note();
+    else if (__atomic_add_fetch(&fNativeErrors, 1, __ATOMIC_RELAXED) <= 5) note("native: handleReport %#x", rc);
+  }
+  const bool show = gArgs.level < 2 || gArgs.trace;   // positions only as for the pointer (a password on an on-screen keyboard)
+  for (unsigned i = 0; i < o.noteCount; ++i) {
+    const NativeNote &m = o.notes[i];
+    if (fNativeLines >= 200 && fNative.downs % 20) continue;
+    ++fNativeLines;
+    char at[48] = "";
+    if (show) snprintf(at, sizeof at, " at (%u, %u) of 32767", unsigned(m.x), unsigned(m.y));
+    switch (m.kind) {
+    case NativeNoteKind::down: note("native: contact %u down as touch %u%s", m.track, m.slot + 1u, at); break;
+    case NativeNoteKind::up: note("native: touch %u (contact %u) up%s", m.slot + 1u, m.track, at); break;
+    case NativeNoteKind::cancel: note("native: touch %u (contact %u) cancelled", m.slot + 1u, m.track); break;
+    case NativeNoteKind::palm: note("native: contact %u turned palm: every touch cancelled, nothing until every contact is up", m.track); break;
+    case NativeNoteKind::full: note("native: contact %u: all %u touches in use, not sent", m.track, kScreenSlots); break;
+    }
+  }
+}
+
+// The frame thread, no contact active: the mode and the axes root asked for.
+void PianoTouch::nativeSwitch()
+{
+  const int want = __atomic_exchange_n(&fNativeWant, -1, __ATOMIC_ACQ_REL);
+  const int axes = __atomic_exchange_n(&fAxesWant, -1, __ATOMIC_ACQ_REL);
+  if (axes >= 0 && (axes != 0) != fNative.panelAxes) {
+    fNative.panelAxes = axes != 0;
+    note("native: axes: %s from this touch on", fNative.panelAxes ? "the panel's" : "the rotated desktop's");
+  }
+  if (want >= 0 && (want != 0) != fNativeOn) {
+    fNativeOn = want != 0;
+    __atomic_add_fetch(&fNativeSwitches, 1, __ATOMIC_RELAXED);
+    note("native: %s from this touch on (switch %u)", fNativeOn ? "ON: every finger is a touch of the touch screen" : "OFF: the pointer gestures again",
+         fNativeSwitches);
+  }
+}
+
+// Root's word (machdep.piano_touch_native): on, off, axes=panel, axes=desktop. Taken by the frame thread when no contact is active.
+int PianoTouch::nativeWrite(const char *text, unsigned len)
+{
+  if (!fScreen) return ENOENT;
+  char w[64] = {};
+  unsigned n = 0;
+  for (unsigned i = 0; i < len && text[i] && n + 1 < sizeof w; ++i)
+    if (text[i] > ' ') w[n++] = text[i];
+  if (!strcmp(w, "on")) __atomic_store_n(&fNativeWant, 1, __ATOMIC_RELEASE);
+  else if (!strcmp(w, "off")) __atomic_store_n(&fNativeWant, 0, __ATOMIC_RELEASE);
+  else if (!strcmp(w, "axes=panel")) __atomic_store_n(&fAxesWant, 1, __ATOMIC_RELEASE);
+  else if (!strcmp(w, "axes=desktop")) __atomic_store_n(&fAxesWant, 0, __ATOMIC_RELEASE);
+  else if (!strncmp(w, "uuid=", 5)) {
+    if (!screenUuidValid(w + 5)) return EINVAL;
+    note("native: \"uuid=\" asked: the touch screen is published again with displayUUID %s", w + 5);
+    return republishNative(w + 5);
+  }
+  else return EINVAL;
+  note("native: \"%s\" asked (now %s, axes %s): taken when no contact is active", w, fNativeOn ? "on" : "off",
+       fNative.panelAxes ? "panel" : "desktop");
+  fWake.kick();
+  return 0;
+}
+
+void PianoTouch::nativeStatus(char *out, size_t size)
+{
+  size_t used = 0;
+  out[0] = 0;
+  append(out, size, used, "native=%u published=%u driver=%s on=%u want=%d axes=%s displayintegrated=%d builtin=%d collection=%d "
+         "primary=%#x/%#x", gArgs.native, fScreen ? 1u : 0u, fNativeDriver, fNativeOn ? 1u : 0u, fNativeWant,
+         fNative.panelAxes ? "panel" : "desktop", fNativeDispInt, fNativeBuiltIn, fNativeCollection, fNativePage, fNativeUsage);
+  append(out, size, used, " reports=%u errors=%u downs=%u ups=%u cancels=%u palms=%u full=%u maxfingers=%u switches=%u pointer=%u taps=%u "
+         "rotation=%u", fNativeSent, fNativeErrors, fNative.downs, fNative.ups, fNative.cancels, fNative.palms, fNative.full,
+         fNative.maxFingers, fNativeSwitches, fSent, fGesture.taps, fRotation.shown);
+  append(out, size, used, " uuid=%s uuidsrc=%s uuidservice=%d republishes=%u dropped=%u deferred=%u", fNativeUuid[0] ? fNativeUuid : "none",
+         fNativeUuidSource, fNativeUuidOnService, fNativeRepublishes, fNativeDropped, fNativeDeferredMs ? 1u : 0u);
 }
 
 // Frames lost (a read error, the watchdog): every contact ends, a held button or modifier is released.
@@ -1308,6 +1937,16 @@ void PianoTouch::lost(uint64_t now)
 {
   trackerCancel(fTracker);
   contacts(now);
+  if (fScreen) {
+    NativeOut no;
+    nativeCancel(fNative, no);
+    deliverNative(no);
+  }
+  if (fMtHid) {
+    MtOut mo;
+    mtCancel(fMt, now, mo);
+    deliverMt(mo, now);
+  }
   GestureOut out;
   gestureCancel(fGesture, out, now);
   deliver(out);
@@ -1638,9 +2277,15 @@ void PianoTouch::serve()
     const uint64_t now = nowMs();
     // The power states (TouchPower.h): the system's (setPowerState; a suspend parks the thread in powerStep) and the display's.
     powerStep(fPower.step(__atomic_load_n(&fSystemOff, __ATOMIC_ACQUIRE), displayState(now)), mc, now);
+    if (fNativeDeferredMs) nativeDeferred(now);
     if (fFramesStopped) {   // a controller that did not come back after a resume: no reads until the next one
       const uint32_t seen = fWake.now();
       if (!__atomic_load_n(&fSystemOff, __ATOMIC_ACQUIRE)) fWake.wait(seen, 1000);
+      continue;
+    }
+    // A script to play (piano-touch-inject=1, test only): its frames instead of the panel's until it ends.
+    if (__atomic_load_n(&fInjectPending, __ATOMIC_ACQUIRE)) {
+      playInject(mc);
       continue;
     }
     // gpio162's latch (TouchPace.h): an edge is a frame the controller announced and waits with; it is taken here, never dropped.
@@ -1823,3 +2468,179 @@ void PianoTouch::serve()
     wakes.count(pianoirq::Woke::timeout);
   }
 }
+
+// ------------------------------------------------------------------------------------------ the test-only injection and the status
+// A script from root (machdep.piano_touch_inject): parsed here, played by the frame thread at its next pass.
+int PianoTouch::injectWrite(const char *text, unsigned len)
+{
+  if (!fInjectLock || !fInjectNext) return ENOTSUP;
+  IOLockLock(fInjectLock);
+  const unsigned err = injectParse(text, len, *fInjectNext);
+  if (!err) __atomic_store_n(&fInjectPending, true, __ATOMIC_RELEASE);
+  const unsigned segments = fInjectNext->count, ms = fInjectNext->totalMs;
+  IOLockUnlock(fInjectLock);
+  if (err) {
+    snprintf(fInjectStatus, sizeof fInjectStatus, "parse error at character %u", err);
+    note("inject: script refused: %s", fInjectStatus);
+    return EINVAL;
+  }
+  note("inject: script of %u segments, %u ms queued", segments, ms);
+  fWake.kick();
+  return 0;
+}
+
+// The script's frames, one every piano-touch-inject-ms, as decoded panel frames: the tracker, the gestures, the multitouch path.
+void PianoTouch::playInject(const MatrixConfig &mc)
+{
+  IOLockLock(fInjectLock);
+  *fInjectPlay = *fInjectNext;
+  __atomic_store_n(&fInjectPending, false, __ATOMIC_RELEASE);
+  IOLockUnlock(fInjectLock);
+  const InjectScript &sc = *fInjectPlay;
+  const char *why = !fPower.reporting() ? "the display is off or touch is muted" : trackerLive(fTracker) ? "a finger is on the panel"
+                    : !gestureIdle(fGesture) || !mtIdle(fMt) || !nativeIdle(fNative) ? "a gesture is going on" : nullptr;
+  if (why) {
+    ++fInjectRefused;
+    snprintf(fInjectStatus, sizeof fInjectStatus, "refused %u: %s", fInjectRefused, why);
+    note("inject: %s", fInjectStatus);
+    return;
+  }
+  const uint32_t taps = fGesture.taps, rights = fGesture.rights, drags = fGesture.drags, mtg = fMt.gestures, palms = fTracker.palms;
+  const uint32_t sentBefore = fSent, mtBefore = fMtSent, nativeBefore = fNativeSent;
+  note("inject: playing %u segments, %u ms, a frame every %u ms (rotation %u)", sc.count, sc.totalMs, gArgs.injectMs, fRotation.shown);
+  MatrixPoint pts[kInjectMaxContacts];
+  const uint64_t t0 = nowMs();
+  uint32_t frames = 0;
+  for (uint32_t t = 0;; t += gArgs.injectMs) {
+    if (t > sc.totalMs) t = sc.totalMs;
+    const unsigned n = injectAt(sc, t, mc.threshold, pts);
+    const uint64_t now = nowMs();
+    trackerUpdate(fTracker, pts, n, now);
+    contacts(now);
+    gestures(now);
+    fLastReadMs = now;
+    ++frames;
+    if (t >= sc.totalMs) break;
+    const uint64_t due = t0 + t + gArgs.injectMs, cur = nowMs();
+    if (due > cur) IOSleep(uint32_t(due - cur));
+  }
+  // every contact up: empty frames until the tracker and the gestures have let go (at most 10)
+  for (unsigned k = 0; k < 10 && (trackerLive(fTracker) || !gestureIdle(fGesture) || !mtIdle(fMt) || !nativeIdle(fNative)); ++k) {
+    IOSleep(gArgs.injectMs);
+    const uint64_t now = nowMs();
+    trackerUpdate(fTracker, nullptr, 0, now);
+    contacts(now);
+    gestures(now);
+    fLastReadMs = now;
+    ++frames;
+  }
+  ++fInjectPlayed;
+  snprintf(fInjectStatus, sizeof fInjectStatus, "played %u: %u frames in %llu ms; taps %u, right clicks %u, drags %u, palms %u, mt gestures %u, "
+           "pointer reports %u, mt frames %u, native reports %u", fInjectPlayed, frames, (unsigned long long)(nowMs() - t0),
+           fGesture.taps - taps, fGesture.rights - rights, fGesture.drags - drags, fTracker.palms - palms, fMt.gestures - mtg,
+           fSent - sentBefore, fMtSent - mtBefore, fNativeSent - nativeBefore);
+  note("inject: %s", fInjectStatus);
+}
+
+void PianoTouch::mtStatus(char *out, size_t size)
+{
+  size_t used = 0;
+  out[0] = 0;
+  append(out, size, used, "mt=%u published=%u driver=%s amd=%u", gArgs.mt, fMtHid ? 1u : 0u, fMtDriver, fMtAmd ? 1u : 0u);
+  if (fMtHid) {
+    const uint32_t *g = fMtHid->fGetsBy;
+    append(out, size, used, " gets=%u sets=%u unknown=%u by=00:%u,01:%u,02:%u,d1:%u,d3:%u,d0:%u,a1:%u,d9:%u,7f:%u,c8:%u,db:%u,other:%u",
+           fMtHid->fGets, fMtHid->fSets, fMtHid->fUnknown, g[0], g[1], g[2], g[3], g[4], g[5], g[6], g[7], g[8], g[9], g[10], g[11]);
+    append(out, size, used, " surface=%ux%u", fMtHid->fSurface.width, fMtHid->fSurface.height);
+  }
+  append(out, size, used, " frames=%u errors=%u gestures=%u palms=%u twotaps=%u joins=%u pointer=%u taps=%u rights=%u drags=%u "
+         "rotation=%u inject=%u played=%u refused=%u last=\"%s\"", fMtSent, fMtSendErrors, fMt.gestures, fMt.palms, fMt.twoTaps,
+         fMt.joins, fSent, fGesture.taps, fGesture.rights, fGesture.drags, fRotation.shown, gArgs.inject, fInjectPlayed, fInjectRefused,
+         fInjectStatus);
+}
+
+namespace {
+PianoTouch *gTouch = nullptr;
+struct sysctl_oid gOidTouchMt, gOidTouchInject, gOidTouchNative;
+
+int sysctlTouchMt(struct sysctl_oid *, void *, int, struct sysctl_req *req)
+{
+  if (req->newptr) return EPERM;
+  char line[600];
+  if (gTouch) gTouch->mtStatus(line, sizeof line);
+  else snprintf(line, sizeof line, "none");
+  return SYSCTL_OUT(req, line, strlen(line) + 1);
+}
+// Reads the status; a write (root: no CTLFLAG_ANYBODY) is a script.
+int sysctlTouchInject(struct sysctl_oid *, void *, int, struct sysctl_req *req)
+{
+  PianoTouch *t = gTouch;
+  if (!t) return ENOENT;
+  char line[600];
+  t->mtStatus(line, sizeof line);
+  int e = SYSCTL_OUT(req, line, strlen(line) + 1);
+  if (e || !req->newptr) return e;
+  const size_t len = req->newlen;
+  if (!len || len >= kInjectMaxText) return EINVAL;
+  char *text = static_cast<char *>(IOMallocZeroData(kInjectMaxText));
+  if (!text) return ENOMEM;
+  e = SYSCTL_IN(req, text, len);
+  if (!e) e = t->injectWrite(text, unsigned(len));
+  IOFreeData(text, kInjectMaxText);
+  return e;
+}
+
+// Reads the native touch screen's status; a write (root) is a word: on, off, axes=panel, axes=desktop.
+int sysctlTouchNative(struct sysctl_oid *, void *, int, struct sysctl_req *req)
+{
+  PianoTouch *t = gTouch;
+  if (!t) return ENOENT;
+  char line[600];
+  t->nativeStatus(line, sizeof line);
+  int e = SYSCTL_OUT(req, line, strlen(line) + 1);
+  if (e || !req->newptr) return e;
+  const size_t len = req->newlen;
+  if (!len || len >= 64) return EINVAL;
+  char text[64] = {};
+  e = SYSCTL_IN(req, text, len);
+  if (!e) e = t->nativeWrite(text, unsigned(len));
+  return e;
+}
+
+void registerOid(struct sysctl_oid &oid, const char *name, int kind, int (*handler)(struct sysctl_oid *, void *, int, struct sysctl_req *),
+                 const char *descr)
+{
+  oid.oid_parent = &sysctl__machdep_children;
+  oid.oid_number = OID_AUTO;
+  oid.oid_kind = kind;
+  oid.oid_arg1 = nullptr;
+  oid.oid_arg2 = 0;
+  oid.oid_name = name;
+  oid.oid_handler = handler;
+  oid.oid_fmt = "A";
+  oid.oid_descr = descr;
+  oid.oid_version = SYSCTL_OID_VERSION;
+  oid.oid_refcnt = 0;
+  sysctl_register_oid(&oid);
+}
+
+void registerTouchSysctls(PianoTouch *t)
+{
+  if (!gArgs.mt && !gArgs.inject && !gArgs.native) return;
+  gTouch = t;
+  if (gArgs.native)
+    registerOid(gOidTouchNative, "piano_touch_native", int(CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_OID2), sysctlTouchNative,
+                "PianoTouch's native touch screen (piano-touch-native): its driver, mode and reports; root writes on, off, axes=panel|desktop, uuid=U");
+  if (!gArgs.mt && !gArgs.inject) {
+    note("sysctl: machdep.piano_touch_native (root: on, off, axes=panel|desktop)");
+    return;
+  }
+  registerOid(gOidTouchMt, "piano_touch_mt", int(CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_OID2), sysctlTouchMt,
+              "PianoTouch's multitouch path: the device, the driver macOS gave it, the reports it asked for, frames and gestures");
+  if (gArgs.inject)
+    registerOid(gOidTouchInject, "piano_touch_inject", int(CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_OID2), sysctlTouchInject,
+                "TEST ONLY (piano-touch-inject=1): root writes a script of touch frames (TouchInject.h); reads the status");
+  note("sysctl: machdep.piano_touch_mt%s%s", gArgs.inject ? " and machdep.piano_touch_inject (root writes a script)" : "",
+       gArgs.native ? "; machdep.piano_touch_native (root: on, off, axes=panel|desktop)" : "");
+}
+}  // namespace

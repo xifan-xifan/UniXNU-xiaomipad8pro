@@ -50,8 +50,9 @@ IOReturn A830Dcvs::init(const A830DcvsConfig &config,const A830DcvsTable &table,
     if(!config.windowMs || !config.targetBusyPermille || config.initialLevel<1 || config.initialLevel>table.count ||
        config.initialBus>=table.ddrLevels || config.underrunFloorLevel>=table.ddrLevels)
         return kIOReturnBadArgument;
+    if(config.qualification607 && (!recovery || !adreno830_annibale()))return kIOReturnBadArgument;
     config_=config;table_=table;io_=io;env_=env;ops_=ops;power_=power;recovery_=recovery;tsens_=tsens;
-    stats_={};
+    stats_={};forceVote_=false;highStreakNs_=l7StreakNs_=0;
     annibale_=adreno830_annibale();hot_=false;stopped_=false;
     stats_.annibale=annibale_;
     Sm8750ThermalInit(&thermal_);
@@ -70,9 +71,10 @@ IOReturn A830Dcvs::init(const A830DcvsConfig &config,const A830DcvsTable &table,
     __atomic_store_n(&published_,0u,__ATOMIC_RELEASE);
     policy_=level_;
     haveSample_=false;down_=saturated_=0;raisedLast_=false;idle_=false;
-    wakeUntil_=touchUntil_=lateUntil_=retryAt_=0;lateLevel_=0;lastBusyPermille_=0;
+    wakeUntil_=touchUntil_=lateUntil_=retryAt_=0;lateLevel_=0;lastBusyPermille_=0;windowBusyNs_=burstBusyNs_=0;
     submits_=seenSubmits_=vsyncs_=windowVsyncs_=late_=seenLate_=underrunTotal_=seenUnderruns_=0;
     lastSubmitNs_=lastVsyncNs_=lastWindow_=0;touchPrimed_=false;
+    inputFloorKhz_=config.inputFloorKhz;boostKhz_=0;boostUntilNs_=0;
     seenSeqno_=power->submittedSeqno();hookedSubmits_=0;
     nextStatus_=nextWatchdog_=0;residencyStart_=statusStart_=lastAccount_=0;statusBusyNs_=statusNs_=0;
     for(auto &ns:residencyNs_)ns=0;
@@ -82,6 +84,7 @@ IOReturn A830Dcvs::init(const A830DcvsConfig &config,const A830DcvsTable &table,
     {
         const uint32_t khz=__atomic_load_n(&gExternalCeilingKhz,__ATOMIC_ACQUIRE);
         externalCeiling_=khz?levelAtMost(khz):0;
+        if(config.qualification607)power_->setQualificationExternal(externalCeiling_,busOf(externalCeiling_));
     }
 #endif
     power_->setTarget(level_,bus_);
@@ -166,9 +169,12 @@ uint8_t A830Dcvs::ceiling() const
     uint8_t ceiling=min8(knobCeiling_,thermalCeiling_);
     if(externalCeiling_)ceiling=min8(ceiling,externalCeiling_);
 #else
-    const uint8_t ceiling=min8(knobCeiling_,thermalCeiling_);
+    uint8_t ceiling=min8(knobCeiling_,thermalCeiling_);
 #endif
-    return ceiling?ceiling:1;
+    if(const uint32_t cap=boostCap(env_.nowNs(env_.context)))ceiling=min8(ceiling,levelAtMost(cap));   /* gpu/fullopp1: a boost's cap */
+    uint8_t limited=ceiling,bus=busOf(ceiling);
+    power_->limitQualification(limited,bus,A830ExitContext::Dcvs);
+    return limited?limited:1;
 }
 
 uint8_t A830Dcvs::fixedLevel() const
@@ -203,10 +209,17 @@ void A830Dcvs::updateWakeTargets()
 
 void A830Dcvs::noteSubmit()
 {
+    const uint64_t now=env_.nowNs(env_.context);
     __atomic_fetch_add(&submits_,1u,__ATOMIC_RELAXED);
-    __atomic_store_n(&lastSubmitNs_,env_.nowNs(env_.context),__ATOMIC_RELEASE);
-    /* First work after idle: let the thread apply the wake boost now instead of at the next window. */
-    if(__atomic_load_n(&idle_,__ATOMIC_ACQUIRE))env_.wake(env_.context);
+    const uint64_t previous=__atomic_exchange_n(&lastSubmitNs_,now,__ATOMIC_ACQ_REL);
+    /* gpu-boost342c: a submission after the input hold ran out begins a burst; one inside a burst at the lowest level is a frame the
+     * floor did not cover (machdep.piano_gpu_busy). */
+    const bool burst=now-previous>=ms(config_.inputHoldMs);
+    if(burst)__atomic_fetch_add(&stats_.burstStarts,1u,__ATOMIC_RELAXED);
+    else if(__atomic_load_n(&level_,__ATOMIC_ACQUIRE)<=1)__atomic_fetch_add(&stats_.lowSubmits,1u,__ATOMIC_RELAXED);
+    /* First work after idle, or (input floor) the first after its hold ran out while the idle rule had not fired yet: let the thread
+     * apply the wake boost and the floor now instead of at the next window. */
+    if(__atomic_load_n(&idle_,__ATOMIC_ACQUIRE) || (burst && __atomic_load_n(&inputFloorKhz_,__ATOMIC_ACQUIRE)))env_.wake(env_.context);
 }
 
 void A830Dcvs::noteVsync()
@@ -222,15 +235,50 @@ void A830Dcvs::noteVsync()
 
 void A830Dcvs::noteLateFrame(uint32_t) {__atomic_fetch_add(&late_,1u,__ATOMIC_RELAXED);}
 
+uint32_t A830Dcvs::boostCap(uint64_t now) const
+{
+    const uint32_t cap=__atomic_load_n(&boostCapKhz_,__ATOMIC_ACQUIRE);
+    return cap && now<__atomic_load_n(&boostCapUntilNs_,__ATOMIC_ACQUIRE)?cap:0;
+}
+
+void A830Dcvs::requestBoost(uint32_t khz,uint32_t holdMs,uint32_t capKhz)
+{
+    if(!khz)khz=config_.touchBoostKhz;
+    if(!holdMs)holdMs=config_.touchHoldMs;
+    if(holdMs>5000)holdMs=5000;
+    const uint64_t now=env_.nowNs(env_.context),until=now+ms(holdMs);
+    if(capKhz) {
+        /* gpu/fullopp1: the lowest cap of the caps in force, until the latest of their ends */
+        const uint32_t held=boostCap(now);
+        __atomic_store_n(&boostCapKhz_,held && held<capKhz?held:capKhz,__ATOMIC_RELEASE);
+        if(until>__atomic_load_n(&boostCapUntilNs_,__ATOMIC_ACQUIRE))__atomic_store_n(&boostCapUntilNs_,until,__ATOMIC_RELEASE);
+    }
+    /* Racing callers are benign: at worst a request's floor is the other's for its hold. */
+    const uint64_t end=__atomic_load_n(&boostUntilNs_,__ATOMIC_ACQUIRE);
+    const uint32_t floor=__atomic_load_n(&boostKhz_,__ATOMIC_ACQUIRE);
+    __atomic_store_n(&boostKhz_,now>=end?khz:(khz>floor?khz:floor),__ATOMIC_RELEASE);
+    if(until>end)__atomic_store_n(&boostUntilNs_,until,__ATOMIC_RELEASE);
+    __atomic_fetch_add(&stats_.boostRequests,1u,__ATOMIC_RELAXED);
+    env_.wake(env_.context);
+}
+
 void A830Dcvs::noteUnderruns(uint32_t total) {__atomic_store_n(&underrunTotal_,total,__ATOMIC_RELAXED);}
 
 void A830Dcvs::park()
 {
+    if(config_.qualificationR3b)power_->parkQualification();
     if(!__atomic_exchange_n(&parked_,1u,__ATOMIC_ACQ_REL))env_.wake(env_.context);
 }
 
 #ifdef ADRENO830_MACOS
-void A830Dcvs::noteCeiling() {env_.wake(env_.context);}   /* UniXNU-piano */
+void A830Dcvs::noteCeiling() {
+    if(config_.qualification607) {
+        const uint32_t khz=__atomic_load_n(&gExternalCeilingKhz,__ATOMIC_ACQUIRE);
+        const uint8_t level=khz?levelAtMost(khz):0;
+        power_->setQualificationExternal(level,busOf(level));
+    }
+    env_.wake(env_.context);
+}
 #endif
 
 /* ---- service thread ------------------------------------------------------------------------------------------------ */
@@ -238,6 +286,8 @@ void A830Dcvs::noteCeiling() {env_.wake(env_.context);}   /* UniXNU-piano */
 uint64_t A830Dcvs::serviceTick(uint64_t now)
 {
     if(!initialized_)return now+ms(1000);
+    if(ops_.qualificationService)ops_.qualificationService(ops_.context,now);
+    if(config_.qualificationR3b)sampleThermal(now);
     /* 1. A pending recovery first: nothing else may touch the GPU meanwhile. */
     if(recovery_ && recovery_->pending()) {
         recovery_->runPending();
@@ -290,7 +340,7 @@ uint64_t A830Dcvs::serviceTick(uint64_t now)
             level_=power_->votedLevel();bus_=power_->votedBus();
         }
         /* 4. Window: two TEs when the display reports them, else the timer. */
-        const bool teMode=__atomic_load_n(&vsyncs_,__ATOMIC_ACQUIRE) &&
+        const bool teMode=!config_.kgsl && __atomic_load_n(&vsyncs_,__ATOMIC_ACQUIRE) &&
                           now-__atomic_load_n(&lastVsyncNs_,__ATOMIC_ACQUIRE)<ms(config_.teTimeoutMs);
         const uint32_t vsyncs=__atomic_load_n(&vsyncs_,__ATOMIC_ACQUIRE);
 #ifdef ADRENO830_MACOS
@@ -314,6 +364,15 @@ uint64_t A830Dcvs::serviceTick(uint64_t now)
         const uint64_t windowNext=lastWindow_+ms(teMode?config_.teTimeoutMs:config_.windowMs);
 #endif
         if(windowNext<next)next=windowNext;
+#ifdef ADRENO830_MACOS
+        /* gpu-boost342c: the input hold and a boost end on time, not at the stretched idle window (up to 250 ms later). */
+        if(__atomic_load_n(&inputFloorKhz_,__ATOMIC_ACQUIRE)) {
+            const uint64_t holdEnd=__atomic_load_n(&lastSubmitNs_,__ATOMIC_ACQUIRE)+ms(config_.inputHoldMs);
+            if(holdEnd>now && holdEnd<next)next=holdEnd;
+        }
+        const uint64_t boostEnd=__atomic_load_n(&boostUntilNs_,__ATOMIC_ACQUIRE);
+        if(boostEnd>now && boostEnd<next)next=boostEnd;
+#endif
     } else {
         /* Asleep (or being recovered): no register, no vote. The GPU is idle, so the governor sits at the floor and
          * the next GMU start (HFI M9) gets the floor or a boost still running (A830PowerState adds its wake boosts). */
@@ -382,6 +441,11 @@ void A830Dcvs::account(uint64_t now)
     if(now<=lastAccount_) {lastAccount_=now;return;}
     const uint8_t at=power_->phase()==A830PowerActive?level_:0;
     residencyNs_[at<=Adreno830LevelMax?at:0]+=now-lastAccount_;
+    stats_.residencyTotalNs[at<=Adreno830LevelMax?at:0]+=now-lastAccount_;
+    highStreakNs_=at>3?highStreakNs_+now-lastAccount_:0;
+    l7StreakNs_=at==7?l7StreakNs_+now-lastAccount_:0;
+    if(highStreakNs_>stats_.residencyHighLongestNs)stats_.residencyHighLongestNs=highStreakNs_;
+    if(l7StreakNs_>stats_.residency607LongestNs)stats_.residency607LongestNs=l7StreakNs_;
     lastAccount_=now;
 }
 
@@ -401,6 +465,9 @@ void A830Dcvs::window(uint64_t now)
     if(busyNs>span)busyNs=span;
     const uint32_t busy=uint32_t(busyNs*1000/span);
     lastTicks_=ticks;lastSample_=lastWindow_=now;windowVsyncs_=vsyncs;
+    windowBusyNs_=busyNs;
+    __atomic_store_n(&stats_.busyNs,stats_.busyNs+busyNs,__ATOMIC_RELAXED);
+    if(level_<=1)__atomic_store_n(&stats_.lowBusyNs,stats_.lowBusyNs+busyNs,__ATOMIC_RELAXED);
     statusBusyNs_+=busyNs;statusNs_+=span;
     lastBusyPermille_=busy;
     ++stats_.windows;
@@ -458,6 +525,14 @@ uint8_t A830Dcvs::decide(uint64_t now,uint32_t busyPermille,bool active)
     } else {
         down_=0;
     }
+    /* gpu-boost342c, Android's race to the top (A830DcvsConfig::burstTopMs): with the input floor set, a burst whose busy time adds up
+     * to 50 ms over windows at or above the target busy goes to the top level; the sustain limit below and every ceiling still win. */
+    if(active && busyPermille>=config_.targetBusyPermille)burstBusyNs_+=windowBusyNs_;
+    else burstBusyNs_=0;
+    if(config_.burstTopMs && (config_.kgsl || __atomic_load_n(&inputFloorKhz_,__ATOMIC_ACQUIRE)) && burstBusyNs_>=ms(config_.burstTopMs)) {
+        if(policy<table_.count) {policy=table_.count;raised=true;++stats_.burstTops;}
+        burstBusyNs_=0;
+    }
     if(raised) {raisedLast_=true;down_=0;}
     /* Sustain: a burst stops at sustainLevel_; beyond it, or beyond the level reached so far, one level per sustainWindows windows
      * saturated in a row. What is already reached stays for the down rule to take back. */
@@ -469,7 +544,7 @@ uint8_t A830Dcvs::decide(uint64_t now,uint32_t busyPermille,bool active)
     /* Idle: 64 ms without a submission and nothing in flight -> the floor. */
     const uint64_t lastSubmit=__atomic_load_n(&lastSubmitNs_,__ATOMIC_ACQUIRE);
     if(!active && now-lastSubmit>=ms(config_.idleMs)) {
-        policy=floor_;down_=saturated_=0;raisedLast_=false;
+        policy=floor_;down_=saturated_=0;raisedLast_=false;burstBusyNs_=0;
         __atomic_store_n(&idle_,true,__ATOMIC_RELEASE);
     }
     if(policy<floor_)policy=floor_;
@@ -500,6 +575,9 @@ uint8_t A830Dcvs::wanted(uint64_t now) const
     if(now<wakeUntil_)level=max8(level,levelAtLeast(config_.wakeBoostKhz));
     if(now<touchUntil_)level=max8(level,levelAtLeast(config_.touchBoostKhz));
     if(now<lateUntil_)level=max8(level,lateLevel_);
+    if(now<__atomic_load_n(&boostUntilNs_,__ATOMIC_ACQUIRE))level=max8(level,levelAtLeast(__atomic_load_n(&boostKhz_,__ATOMIC_ACQUIRE)));
+    const uint32_t input=__atomic_load_n(&inputFloorKhz_,__ATOMIC_ACQUIRE);
+    if(input && now-__atomic_load_n(&lastSubmitNs_,__ATOMIC_ACQUIRE)<ms(config_.inputHoldMs))level=max8(level,levelAtLeast(input));
     level=max8(level,floor_);
     /* The ceilings win over every boost. */
     return level>ceiling()?ceiling():level;
@@ -507,10 +585,12 @@ uint8_t A830Dcvs::wanted(uint64_t now) const
 
 void A830Dcvs::vote(uint64_t now,uint8_t level,uint8_t bus,uint32_t busyPermille)
 {
+    power_->limitQualification(level,bus,A830ExitContext::Dcvs);
     if(!level || level>table_.count)return;
     if(stopped_)return;              /* annibale: an unacknowledged vote ended the changes (the target stays level_) */
     power_->setTarget(level,bus);    /* sent as HFI M9 if the GMU starts before this vote goes out */
-    if(level==level_ && bus==bus_)return;
+    const bool force=config_.qualification607 && __atomic_exchange_n(&forceVote_,false,__ATOMIC_ACQ_REL);
+    if(level==level_ && bus==bus_ && !force)return;
     if(now<retryAt_)return;
     /* bw: the bus level under KGSL's no-AB mark 0xFFFF0000 (design), or alone (annibale, section 14 row 24); the AB vote
      * replaces the mark when the GMU takes one. */
@@ -522,14 +602,44 @@ void A830Dcvs::vote(uint64_t now,uint8_t level,uint8_t bus,uint32_t busyPermille
     power_->lock();
     IOReturn result=A830ReturnNotResponding;
     /* Under the mutex no power transition runs; only an Active GMU takes a vote (asleep: target recorded above). */
-    const bool active=power_->phase()==A830PowerActive;
-    if(active)result=ops_.perfVote(ops_.context,level,bw);
-    if(active && result==kIOReturnSuccess)power_->noteVoted(level,bus);
+    const bool active=power_->phase()==A830PowerActive && !power_->qualificationBlocked();
+    if(active) {
+        // Recheck the independent heartbeat's cap after acquiring the mutex.
+        uint8_t boundedBus=bus;
+        power_->limitQualification(level,boundedBus,A830ExitContext::Dcvs);
+        if(boundedBus!=bus) {bus=boundedBus;bw=annibale_?uint32_t(bus):bus|A830_HFI_BW_NO_AB;}
+        if(!power_->qualificationBlocked())result=ops_.perfVote(ops_.context,level,bw);
+        else {power_->unlock();return;}
+    }
+    if(active && result==kIOReturnSuccess) {
+        if(config_.qualificationR3b && ops_.qualificationAck)ops_.qualificationAck(ops_.context,level,bus);
+        power_->noteVoted(level,bus);
+    }
     power_->unlock();
     if(!active)return;
+    if(config_.qualification607 && result==kIOReturnSuccess && recovery_->pending()) {
+        account(env_.nowNs(env_.context));level_=0;bus_=0;
+        recovery_->runPending();haveSample_=false;
+        if(!recovery_->lost()) {level_=power_->votedLevel();bus_=power_->votedBus();policy_=level_;}
+        lastAccount_=env_.nowNs(env_.context);return;
+    }
     if(result!=kIOReturnSuccess) {
         ++stats_.voteFailures;
         adreno830_status_add32(&adreno830_status.vote_failures,1);
+        if(config_.qualification607) {
+            const uint64_t failed=env_.nowNs(env_.context);
+            account(failed);level_=0;bus_=0; // hardware frequency is UNKNOWN until strict off + a fresh M9 succeeds
+            power_->latchQualification();
+            updateWakeTargets();power_->setTarget(1,2);
+            if(ops_.qualificationFault)ops_.qualificationFault(ops_.context,level,bus,result);
+            else {recovery_->closeQualification();recovery_->report(A830FaultHfi,uint32_t(result));}
+            // HFI and power locks are both released. Do not wait for another service/status tick.
+            recovery_->runPending();
+            haveSample_=false;
+            if(!recovery_->lost()) {level_=power_->votedLevel();bus_=power_->votedBus();policy_=level_;}
+            lastAccount_=env_.nowNs(env_.context);
+            return;
+        }
         if(annibale_) {
             /* annibale (kernel-sequences 13): a vote the GMU did not acknowledge ends the frequency changes for this boot;
              * the GPU keeps the level it acknowledged last, and so does the next GMU start (HFI M9 of the target). */
@@ -548,8 +658,20 @@ void A830Dcvs::vote(uint64_t now,uint8_t level,uint8_t bus,uint32_t busyPermille
 
 void A830Dcvs::sampleThermal(uint64_t now)
 {
+    if(config_.qualificationR3b) {
+        const uint64_t s=ops_.qualificationThermal?ops_.qualificationThermal(ops_.context):0;
+        thermalCeiling_=(s&(1ull<<40))?uint8_t(s):1;
+        hot_=false;stats_.thermalHot=false;
+        stats_.tempDeci=int16_t(s>>8);stats_.filteredDeci=int16_t(s>>24);
+        stats_.thermalCeiling=thermalCeiling_;stats_.limiting=thermalCeiling_<knobCeiling_;
+        thermal_.last_deci=stats_.tempDeci;thermal_.ever_valid=(s&(1ull<<40))!=0;
+        thermal_.zone=thermal_.ever_valid?Sm8750ThermalNormal:Sm8750ThermalUnknown;
+        if(stats_.tempDeci>thermal_.peak_deci)thermal_.peak_deci=stats_.tempDeci;
+        stats_.zone=uint8_t(thermal_.zone);publishThermal(true);return;
+    }
     Sm8750TsensSample sample;
     const int read=Sm8750TsensReadGpu(tsens_,&sample);
+    if(ops_.qualificationSample)ops_.qualificationSample(ops_.context,now,&sample);
     Sm8750ThermalUpdate(&thermal_,read,&sample);   /* the zone (Unknown, Critical) and the last usable reading */
     if(thermal_.ever_valid)stats_.tempDeci=thermal_.last_deci;
     stats_.zone=uint8_t(thermal_.zone);
@@ -731,6 +853,62 @@ extern "C" void adreno830_dcvs_vsync(void)
 extern "C" void adreno830_dcvs_late_frame(uint32_t late_us)
 {
     if(A830Dcvs *dcvs=__atomic_load_n(&gDcvs,__ATOMIC_ACQUIRE))dcvs->noteLateFrame(late_us);
+}
+
+extern "C" int adreno830_dcvs_set_input_floor(uint32_t mhz)
+{
+    if(mhz && (mhz<160 || mhz>1100))return -2;
+    A830Dcvs *dcvs=__atomic_load_n(&gDcvs,__ATOMIC_ACQUIRE);
+    if(!dcvs)return -1;
+    dcvs->setInputFloor(mhz*1000u);
+    return 0;
+}
+
+extern "C" int adreno830_dcvs_boost(uint32_t mhz_or_level,uint32_t hold_ms)
+{
+    A830Dcvs *dcvs=__atomic_load_n(&gDcvs,__ATOMIC_ACQUIRE);
+    if(!dcvs)return -1;
+    uint32_t khz=0;
+    if(mhz_or_level && mhz_or_level<=Adreno830LevelMax)khz=dcvs->khz(uint8_t(mhz_or_level));
+    else if(mhz_or_level)khz=mhz_or_level*1000u;
+    dcvs->requestBoost(khz,hold_ms);
+    return 0;
+}
+
+extern "C" int adreno830_dcvs_boost_capped(uint32_t mhz_or_level,uint32_t hold_ms,uint32_t cap_mhz)
+{
+    A830Dcvs *dcvs=__atomic_load_n(&gDcvs,__ATOMIC_ACQUIRE);
+    if(!dcvs)return -1;
+    if(cap_mhz && (cap_mhz<160 || cap_mhz>1100))return -2;
+    uint32_t khz=0;
+    if(mhz_or_level && mhz_or_level<=Adreno830LevelMax)khz=dcvs->khz(uint8_t(mhz_or_level));
+    else if(mhz_or_level)khz=mhz_or_level*1000u;
+    dcvs->requestBoost(khz,hold_ms,cap_mhz*1000u);
+    return 0;
+}
+
+extern "C" uint32_t adreno830_dcvs_boost_requests(void)
+{
+    A830Dcvs *dcvs=__atomic_load_n(&gDcvs,__ATOMIC_ACQUIRE);
+    return dcvs?__atomic_load_n(&dcvs->stats().boostRequests,__ATOMIC_RELAXED):0;
+}
+
+extern "C" int adreno830_dcvs_busy(uint64_t out[6])
+{
+    for(unsigned i=0;i<6;++i)out[i]=0;
+    A830Dcvs *dcvs=__atomic_load_n(&gDcvs,__ATOMIC_ACQUIRE);
+    if(!dcvs)return -1;
+    const A830DcvsStats &s=dcvs->stats();
+    out[0]=__atomic_load_n(&s.busyNs,__ATOMIC_RELAXED);out[1]=__atomic_load_n(&s.lowBusyNs,__ATOMIC_RELAXED);
+    out[2]=dcvs->submissions();out[3]=__atomic_load_n(&s.burstStarts,__ATOMIC_RELAXED);
+    out[4]=__atomic_load_n(&s.lowSubmits,__ATOMIC_RELAXED);out[5]=__atomic_load_n(&s.burstTops,__ATOMIC_RELAXED);
+    return 0;
+}
+
+extern "C" uint32_t adreno830_dcvs_input_floor(void)
+{
+    A830Dcvs *dcvs=__atomic_load_n(&gDcvs,__ATOMIC_ACQUIRE);
+    return dcvs?dcvs->inputFloor()/1000u:0;
 }
 
 extern "C" void adreno830_dcvs_underruns(uint32_t total)

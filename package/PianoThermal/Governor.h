@@ -38,17 +38,55 @@ inline const char *powerName(PowerSource p)
 
 // PianoPolicy's power profile (docs/policy.md 5.2, the platform function "piano-thermal-profile"): 0 the caps by the power source
 // (as without PianoPolicy), 1 Power Saver whatever the source (the battery caps, -bat0/-bat1), 2 Balanced whatever the source (the
-// external-power caps, -ac0/-ac1). The governor (mode 3) is handed profilePower() instead of the measured source; the fixed level
-// (mode 2) has no power caps and so ignores it.
-enum class Profile : uint8_t { bySource = 0, saver = 1, balanced = 2 };
-inline bool profileValid(uintptr_t mode) { return mode <= 2; }
+// external-power caps, -ac0/-ac1), 3 High Power (macOS Energy Mode's High Power, docs/policy.md 12: the external-power caps whatever
+// the source, and with the perf policy >= 1 the clusters' top levels as the perf cap, no skin table, over sustained allowed:
+// perf::highPowerCap; the thermal limit on top as always). The governor (mode 3) is handed profilePower() instead of the measured
+// source; the fixed level (mode 2) has no power caps and so ignores it. kProfileMax is published as piano-thermal-profiles.
+enum class Profile : uint8_t { bySource = 0, saver = 1, balanced = 2, performance = 3 };
+constexpr uint32_t kProfileMax = 3;
+inline bool profileValid(uintptr_t mode) { return mode <= kProfileMax; }
 inline PowerSource profilePower(PowerSource measured, Profile p)
 {
-  return p == Profile::saver ? PowerSource::battery : p == Profile::balanced ? PowerSource::external : measured;
+  return p == Profile::saver ? PowerSource::battery
+         : p == Profile::balanced || p == Profile::performance ? PowerSource::external
+                                                                : measured;
 }
 inline const char *profileName(Profile p)
 {
-  return p == Profile::saver ? "Power Saver" : p == Profile::balanced ? "Balanced" : "by the power source";
+  return p == Profile::saver ? "Power Saver" : p == Profile::balanced ? "Balanced" : p == Profile::performance ? "High Power"
+                                                                                                                : "by the power source";
+}
+
+constexpr uint32_t kAndroidBaseKhz[] = {2400000, 2438400};
+constexpr uint32_t kAndroidNextKhz[] = {2745600, 2649600};
+
+inline bool androidCpuArmed(CpuMode mode, uint32_t cap0Mhz, uint32_t cap1Mhz)
+{
+  return mode == CpuMode::govern && cap0Mhz == 2400 && cap1Mhz == 2438;
+}
+
+inline bool androidCpuRequestValid(int value) { return value == 0 || value == 1; }
+inline int androidCpuLpmValue(unsigned bits, uint64_t value) { return bits == 32 && value <= 1 ? int(value) : -1; }
+
+struct AndroidCpuInput {
+  bool armed, requested, domains, valid, boost, sleeping;
+  PowerSource source;
+  Profile profile;
+  int lpm;   // -1: unavailable or invalid PianoPolicy property
+};
+
+struct AndroidCpuSelection {
+  bool enabled;
+  PowerSource power;
+};
+
+inline AndroidCpuSelection androidCpuSelection(const AndroidCpuInput &in)
+{
+  PowerSource power = profilePower(in.source, in.profile);
+  if (in.armed && (in.source != PowerSource::external || in.lpm == 1)) power = PowerSource::battery;
+  const bool enabled = in.armed && in.requested && in.domains && in.valid && !in.boost && !in.sleeping &&
+      in.source == PowerSource::external && power == PowerSource::external && in.lpm == 0;
+  return {enabled, power};
 }
 
 // A system sleep (docs/power.md 4, PianoPowerContract.h): off parks the thread (no SCMI request, no TSENS read in flight) and, with
@@ -108,6 +146,7 @@ struct GovernorConfig {
 struct TickInput {
   uint32_t busyPermille;   // governor only
   PowerSource power;
+  uint32_t demandKhz = 0;  // the WALT-like demand (Perf.h WaltCore; kHz-equivalent work): when set, the need is demand / target
 };
 
 // The cluster's temperature against its trips (Cluster.h computes it from a poll).
@@ -125,6 +164,10 @@ class Governor {
   {
     mode_ = mode;
     config_ = config;
+    androidCapKhz_ = 0;
+    hardSet_ = above_ = false;
+    hardKhz_ = perfKhz_ = boostFloorKhz_ = 0;
+    rawWant_ = 0;
     count_ = uint8_t(count > kMax ? kMax : count ? count : 1);
     for (unsigned i = 0; i < count_; ++i) khz_[i] = khz[i];
     sustained_ = uint8_t(sustained < count_ ? sustained : count_ - 1u);
@@ -176,13 +219,15 @@ class Governor {
       return level_;
     }
     if (mode_ != CpuMode::govern) return level_;
-    const uint64_t need = uint64_t(khz_[level_]) * in.busyPermille / (config_.targetPermille ? config_.targetPermille : 800);
+    const uint32_t target = config_.targetPermille ? config_.targetPermille : 800;
+    const uint64_t need = in.demandKhz ? uint64_t(in.demandKhz) * 1000u / target : uint64_t(khz_[level_]) * in.busyPermille / target;
     unsigned want = slowestAtLeast(uint32_t(need > 0xffffffffu ? 0xffffffffu : need));
     if (in.busyPermille >= config_.hispeedPermille && config_.hispeedKhz) {
       const unsigned hs = slowestAtLeast(config_.hispeedKhz);
       if (want < hs) want = hs;
     }
     if (want < bottom) want = bottom;
+    rawWant_ = uint8_t(want);   // before the ceiling: the perf burst's "wanted more" (Perf.h)
     if (want > top) want = top;
     if (want > level_) {
       level_ = uint8_t(want);
@@ -211,23 +256,57 @@ class Governor {
     if (mode_ != CpuMode::govern) return level_;
     const unsigned top = ceiling(power);
     if (level_ > top) level_ = uint8_t(top);
+    if (boostFloorKhz_) {   // a boost floor applies at once, not at the next load decision (never above the ceiling)
+      const unsigned b = floorLevel() < top ? floorLevel() : top;
+      if (level_ < b) {
+        level_ = uint8_t(b);
+        lowTicks_ = 0;
+        pending_ = 0;
+      }
+    }
     return level_;
   }
 
-  unsigned ceiling(PowerSource power) const
+  unsigned ceiling(PowerSource power) const { return ceilingFor(power, perfKhz_); }
+  // The ceiling with perfKhz as the perf cap (0: none): sustained, the hard cap (the runtime one when set, else piano-cpufreq-cap0/1),
+  // the power cap, the perf cap (Perf.h: the skin step table or the burst), the thermal limit.
+  unsigned ceilingFor(PowerSource power, uint32_t perfKhz) const
   {
-    unsigned top = sustained_;
+    unsigned top = above_ && perfKhz > khz_[sustained_] ? count_ - 1u : sustained_;   // above sustained only for mode 2's burst
     auto clampTo = [&](uint32_t khz) {
       if (!khz) return;
       const unsigned l = fastestAtMost(khz);
       if (l < top) top = l;
     };
-    clampTo(config_.capKhz);
+    clampTo(androidCapKhz_ ? androidCapKhz_ : hardSet_ ? hardKhz_ : config_.capKhz);
     if (mode_ == CpuMode::govern) clampTo(power == PowerSource::external ? config_.externalKhz : config_.batteryKhz);
+    if (mode_ == CpuMode::govern) clampTo(perfKhz);
     if (limit_ < top) top = limit_;
     return top;
   }
-  unsigned floorLevel() const { return config_.floorKhz ? slowestAtLeast(config_.floorKhz) : 0; }
+  // machdep.piano_cpufreq_perf (PianoThermal.cpp): hardSet replaces the boot cap with hardKhz (0: none); perfKhz the perf cap.
+  // aboveSustained: the perf cap may lift the ceiling over the firmware's sustained level (machdep.piano_cpufreq_perf=2's burst).
+  void setRuntimeCaps(bool hardSet, uint32_t hardKhz, uint32_t perfKhz, bool aboveSustained = false)
+  {
+    hardSet_ = hardSet;
+    hardKhz_ = hardKhz;
+    perfKhz_ = mode_ == CpuMode::govern ? perfKhz : 0;
+    above_ = mode_ == CpuMode::govern && aboveSustained;
+  }
+  void setDownTicks(uint32_t n) { config_.downTicks = n ? n : 1; }
+  // the thermal limit's release rate (one level up per riseMs under the release point; the full table's Android rule: faster)
+  void setRiseMs(uint32_t ms) { config_.riseMs = ms ? ms : 1; }
+  unsigned rawWant() const { return rawWant_; }
+  uint32_t perfKhz() const { return perfKhz_; }
+  unsigned floorLevel() const
+  {
+    const unsigned f = config_.floorKhz ? slowestAtLeast(config_.floorKhz) : 0;
+    const unsigned b = boostFloorKhz_ ? slowestAtLeast(boostFloorKhz_) : 0;
+    return b > f ? b : f;
+  }
+  // The launch / input boost's floor (Perf.h; kHz, 0 none): the slowest level at or above it, under the ceiling.
+  void setBoostFloor(uint32_t khz) { boostFloorKhz_ = mode_ == CpuMode::govern ? khz : 0; }
+  uint32_t boostFloorKhz() const { return boostFloorKhz_; }
   // piano-cpufreq-boost=S (2026-11-14, boot time): the level while the boot boost lasts, in every mode (report included): the
   // sustained level, or the fastest at or under capKhz when one is given (piano-cpufreq-boost-cap), never above the thermal limit
   // nor the boost's own sticky thermal cap maxLevel (the back-off below; count() - 1 = none).
@@ -249,6 +328,8 @@ class Governor {
   uint32_t khz(unsigned i) const { return i < count_ ? khz_[i] : 0; }
   CpuMode mode() const { return mode_; }
   const GovernorConfig &config() const { return config_; }
+  // The caller has checked the paired opt-in gate. Preserve thermal and load history.
+  void selectAndroidCap(uint32_t khz) { androidCapKhz_ = mode_ == CpuMode::govern ? khz : 0; }
   // Force the bookkeeping to what the domain really is at (a refused or failed LEVEL_SET, a LEVEL_GET that disagrees).
   void setLevel(unsigned i)
   {
@@ -273,8 +354,11 @@ class Governor {
   static constexpr unsigned kMax = 32;
   CpuMode mode_ = CpuMode::off;
   GovernorConfig config_{};
+  uint32_t androidCapKhz_ = 0;
+  bool hardSet_ = false, above_ = false;
+  uint32_t hardKhz_ = 0, perfKhz_ = 0, boostFloorKhz_ = 0;
   uint32_t khz_[kMax] = {};
-  uint8_t count_ = 1, sustained_ = 0, level_ = 0, limit_ = 0, pending_ = 0;
+  uint8_t count_ = 1, sustained_ = 0, level_ = 0, limit_ = 0, pending_ = 0, rawWant_ = 0;
   uint32_t lowTicks_ = 0;
   uint64_t downAtMs_ = 0, upAtMs_ = 0, coolSinceMs_ = 0;
   bool cooling_ = false;

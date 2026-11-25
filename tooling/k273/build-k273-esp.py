@@ -3,6 +3,7 @@
 
   build-k273-esp.py [--base ESP.json] [--entry macos-27.3] [--name esp-k273-only] [--out out/persistent]
                     [--expect-seed HEX] [--expect-store-lba N] [--expect-store-part NAME] [--diag-reset-after SECS]
+                    [--firmware-dir DIR]
 
 The base is an ESP build record (default: the installed one, OUT/installed.json's image; normally esp-dual33d-k273d.json of
 tooling/k273/build-dual-esp.py) and its image beside it. Its 27.3 entry (--entry) is carried over byte for byte: the entry's four
@@ -22,6 +23,12 @@ payload file and the line must be the base's, byte for byte, and no entry may us
 opens a store without native-ufs-root-part names linux_rootfs by default). The record (OUT/NAME.json) is a build-esp.py-style
 record whose seed and store are the 27.3 store's: maint-session.py checks the store on that partition at that LBA (bound to it,
 of that seed) before it writes the ESP, and rootfs-clear accepts only an ESP of such a record on the tablet.
+
+A firmware file the collection pins and the base lacks is refused, unless --firmware-dir DIR (out/firmware's layout: DIR/<pin path>,
+e.g. out/firmware/PianoAudio/spk-prot.bin) holds it: then it is added from there, its size and SHA-256 checked against the pin. A
+private pin's file (this unit's own data) is checked against the pin's hash all the same, which is never printed or recorded: the
+record marks it 'private' as it marks a private base file. Only missing files are added; a base file that is not the pin's stays a
+refusal, and without --firmware-dir nothing changes.
 
 A base entry whose line is already split (piano-boot-args=SET, k27 0066: its piano-* arguments live in the base ADT's
 /chosen/piano-boot-args-SET) is reassembled before anything else: the whole arguments are the base's line without the selector plus
@@ -103,10 +110,6 @@ def main():
     p.add_argument('--name', default='esp-k273-only')
     p.add_argument('--out', type=Path, default=common.DEVICE / 'out/persistent')
     p.add_argument('--expect-seed', metavar='HEX', help='refuse unless the entry\'s seed identity starts with HEX (8+ hex digits)')
-    p.add_argument('--esp-first-lba', type=int, default=common.ESP_FIRST,
-                   help='first 4 KiB LUN 0 LBA of the 1 GiB ESP (default: historical layout)')
-    p.add_argument('--data-extent', type=int, nargs=2, metavar=('FIRST', 'LAST'),
-                   help='inclusive 4 KiB LUN 0 LBAs of the target linux_data partition')
     p.add_argument('--expect-store-lba', type=int, metavar='N', help='refuse unless the line binds the store to LBA N')
     p.add_argument('--expect-store-part', metavar='NAME', help='refuse unless the line puts root and store on partition NAME')
     p.add_argument('--kc', type=Path, help='a new kernel collection for the entry (a 27.3 build: tooling/k273/build-k273-image.sh)')
@@ -120,13 +123,12 @@ def main():
     p.add_argument('--split', action='store_true', help='move the piano-* arguments into the ADT (k27 0066) even when the line fits')
     p.add_argument('--diag-reset-after', type=int, default=240, metavar='SECS',
                    help='the -diag entry\'s reset (only built when its line stays under 1000 bytes)')
+    p.add_argument('--firmware-dir', type=Path, metavar='DIR',
+                   help='pinned firmware the base lacks, added from DIR/<pin path> (out/firmware\'s layout), size and SHA-256 '
+                        'checked against the pin (a private pin\'s hash checked, never shown or recorded)')
     a = p.parse_args()
-
-    esp_first = a.esp_first_lba
-    if not 0 < esp_first < 2**32 or esp_first % 256:
-        p.error('--esp-first-lba must fit the FAT32 hidden-sector field and be 1 MiB aligned')
-    if a.data_extent and esp_first <= a.data_extent[1] and esp_first + common.ESP_BLOCKS - 1 >= a.data_extent[0]:
-        p.error('ESP overlaps --data-extent')
+    if a.firmware_dir is not None and not a.firmware_dir.is_dir():
+        raise SystemExit(f'--firmware-dir {a.firmware_dir}: not a directory')
 
     out = a.out
     if a.base:
@@ -232,11 +234,7 @@ def main():
                           'full_bytes': len(' '.join(whole)), 'from': 'the base line + the base ADT tail, reassembled'}
             line = ' '.join(whole)
 
-        edits = list(a.arg)
-        if a.data_extent is not None:
-            edits.append(f'data-store-lba={common.data_store_lba(seed, a.data_extent)}')
-        elif a.seed:
-            edits.append(f'data-store-lba={common.k273_store_first(seed)}')
+        edits = list(a.arg) + ([f'data-store-lba={common.k273_store_first(seed)}'] if a.seed else [])
         if a.root_part:
             if a.root_part not in ('linux_data', 'linux_rootfs'):
                 raise SystemExit('--root-part: linux_data or linux_rootfs')
@@ -258,7 +256,7 @@ def main():
             raise SystemExit(f'{a.entry}: its line does not mount a root of its own (native-ufs-root-part={part}): not the 27.3 line')
         if lba is None or named.get('data-persist') != '2':
             raise SystemExit(f'{a.entry}: its line has no bound read-write store (data-store-lba, data-persist=2)')
-        common.check_store_size(seed, args, data_extent=a.data_extent)
+        common.check_store_size(seed, args)
         if a.expect_seed and not seed['identity_sha256'].startswith(a.expect_seed.lower()):
             raise SystemExit(f'{a.entry}\'s seed is {seed["identity_sha256"][:16]}, not {a.expect_seed}')
         if a.expect_store_lba is not None and lba != a.expect_store_lba:
@@ -269,11 +267,8 @@ def main():
                  'bound': True, 'reserve_blocks': common.RESERVE_BLOCKS,
                  'from': f'the {a.entry} line (native-ufs-root-part, data-store-lba) and its seed (store_blocks)'}
         old_k = (base.get('k273') or {}).get('store') or {}
-        if old_k and (old_k.get('first_lba'), old_k.get('partition')) != (lba, part) and a.data_extent is None:
-            raise SystemExit(f'{base_json.name}: its k273 store ({old_k.get("partition")} LBA {old_k.get("first_lba")}) is not the line\'s; '
-                             'an explicit --data-extent is required to replace that layout')
-        if a.data_extent is not None:
-            store['from'] = 'explicit --data-extent (inclusive LUN 0 LBAs) and seed store_blocks'
+        if old_k and (old_k.get('first_lba'), old_k.get('partition')) != (lba, part):
+            raise SystemExit(f'{base_json.name}: its k273 store ({old_k.get("partition")} LBA {old_k.get("first_lba")}) is not the line\'s')
 
         # -- the arguments past DarwinBoot's line: the ADT's /chosen/piano-boot-args-macos (k27 0066) -----------------------------
         split = None
@@ -289,10 +284,20 @@ def main():
         # -- firmware the 27.3 collection pins; other non-payload files stay; the 27.0.1 payload goes --------------------------
         # non-payload files only: the payload is staged above (with --kc/--adt/--trust/--seed and the ADT tail) and must not be
         # overwritten by the base's (2026-11-14: esp-k273-v2 573187af... was built so: the base's payload under the new line)
-        carried, dropped, fw = {}, [], []
+        carried, dropped, fw, added = {}, [], [], {}
         pins = firmware.kc_pins(kc)
         pinned = {f'{firmware.ESP_DIR}/{pin["path"]}': pin for pin in pins}
         for path, pin in pinned.items():
+            if path not in files and a.firmware_dir is not None:
+                # --firmware-dir: the missing pinned file from DIR/<pin path>, checked as the RAM image builder checks a staged
+                # copy (firmware.staged: size, then the pin's SHA-256, a private pin's too; no hash in any message)
+                found, why = firmware.staged([pin], a.firmware_dir)
+                if why:
+                    raise SystemExit(f'{a.entry}\'s collection pins {path}, which {base_img.name} lacks; in --firmware-dir: '
+                                     f'{why[0][1]}' + (' (a private pin: no hash shown)' if pin['private'] else ''))
+                added[path] = found[0][1]
+                fw.append(pin)
+                continue
             if path not in files:
                 raise SystemExit(f'{a.entry}\'s collection pins {path}, which {base_img.name} lacks')
             if not pin['private'] and (len(files[path]) != pin['size'] or h(files[path]) != pin['sha256']):
@@ -310,6 +315,9 @@ def main():
         for path in carried.values():
             (stage / path).parent.mkdir(parents=True, exist_ok=True)
             (stage / path).write_bytes(files[path])
+        for path, data in added.items():   # --firmware-dir: never over a base file (only paths the base lacks)
+            (stage / path).parent.mkdir(parents=True, exist_ok=True)
+            (stage / path).write_bytes(data)
 
         # -- the menu ------------------------------------------------------------------------------------------------------
         k_entry = {k: entry[k] for k in ('id', 'title', 'type', 'path', 'initrd', 'args')}
@@ -345,7 +353,7 @@ def main():
         out.mkdir(parents=True, exist_ok=True)
         image.unlink(missing_ok=True)
         build_esp.mtools('mformat', '-C', '-F', '-S', '5', '-M', '4096', '-T', str(common.ESP_BLOCKS), '-h', '1', '-s', '1', '-c', '1',
-                         '-H', str(esp_first), '-v', build_esp.LABEL, '-N', build_esp.SERIAL, '-i', str(image), '::')
+                         '-H', str(common.ESP_FIRST), '-v', build_esp.LABEL, '-N', build_esp.SERIAL, '-i', str(image), '::')
         build_esp.mtools('mcopy', '-i', str(image), '-s', '-Q', '-m', str(stage / 'EFI'), '::/')
         minfo = build_esp.mtools('minfo', '-i', str(image), '::').stdout
         back = scratch / 'back'
@@ -361,7 +369,7 @@ def main():
         problems.append('image size')
     if new['sector_bytes'] != 4096 or new['sectors_per_cluster'] != 1 or new['total_sectors'] != common.ESP_BLOCKS:
         problems.append('geometry')
-    if new['hidden_sectors'] != esp_first or new['label'] != build_esp.LABEL or new['serial'] != build_esp.SERIAL:
+    if new['hidden_sectors'] != common.ESP_FIRST or new['label'] != build_esp.LABEL or new['serial'] != build_esp.SERIAL:
         problems.append('hidden sectors, label or serial')
     if got != want or mback != want:
         problems.append('read back differs from the stage')
@@ -373,6 +381,9 @@ def main():
     for path in carried.values():
         if new['files'].get(path) != files[path]:
             problems.append(f'{path} changed')
+    for path, data in added.items():
+        if new['files'].get(path) != data:
+            problems.append(f'{path} is not the file checked in --firmware-dir byte for byte')
     for role, given in overrides.items():   # the image holds what was given (the ADT: plus the tail when split)
         if role == 'adt' and split:
             continue
@@ -394,8 +405,8 @@ def main():
     record = {
         'status': 'OFFLINE_BUILD_NOT_DEVICE_TESTED', 'kind': 'k273-only', 'image': image.name, 'bytes': image.stat().st_size,
         'sha256': common.sha(image),
-        'partition': {'lun': 0, 'index': common.ESP_INDEX + 1, 'first_lba': esp_first, 'blocks': common.ESP_BLOCKS,
-                      'dd': f'bs=1M seek={esp_first * common.LBA >> 20} count={common.ESP_BLOCKS * common.LBA >> 20}'},
+        'partition': {'lun': 0, 'index': common.ESP_INDEX + 1, 'first_lba': common.ESP_FIRST, 'blocks': common.ESP_BLOCKS,
+                      'dd': f'bs=1M seek={common.ESP_FIRST * common.LBA >> 20} count={common.ESP_BLOCKS * common.LBA >> 20}'},
         'about': f'macOS 27.3 only: the {a.entry} entry of {base["image"]} (payload and line byte for byte), fastboot, the actions '
                  '(tooling/k273/build-k273-esp.py)',
         'base_esp': {'image': base['image'], 'sha256': base['sha256'], 'record': base_json.name, 'entry': a.entry},
@@ -411,7 +422,9 @@ def main():
         'overrides': overrides, 'arg_edits': {'add': edits, 'drop': list(a.drop_arg)}, 'boot_args_split': split,
         'base_split_rebuilt': base_split,
         'firmware': {'files': [{'path': f'{firmware.ESP_DIR}/{pin["path"]}', 'bytes': pin['size'], 'private': pin['private'],
-                                'sha256': None if pin['private'] else pin['sha256'], 'placed': True, 'problem': None} for pin in fw]},
+                                'sha256': None if pin['private'] else pin['sha256'], 'placed': True, 'problem': None} for pin in fw],
+                     # only with --firmware-dir: the pinned files the base lacked, added from there (checked against their pins)
+                     **({'added_from_firmware_dir': sorted(added)} if added else {})},
         'seed': seed,
         'store': store,
         'data_store': {'seed': seed['identity_sha256'], 'partition': part, 'first_lba': lba, 'bound': True, 'replace': None,
@@ -429,7 +442,9 @@ def main():
           f'{seed["identity_sha256"][:16]}; entries {[e["id"] for e in entries]} + actions'
           + ('' if diag_info['included'] else f'; no -diag entry ({diag_info["why"]})')
           + ('' if not base_split else f'; the split base reassembled ({base_split["full_bytes"]} B) and split again')
-          + f'; dropped {len(dropped)} files of the base (the other payloads)')
+          + f'; dropped {len(dropped)} files of the base (the other payloads)'
+          + ('' if not added else f'; added {len(added)} pinned firmware file(s) the base lacks from --firmware-dir '
+             f'({sum(1 for path in added if pinned[path]["private"])} private)'))
 
 
 if __name__ == '__main__':

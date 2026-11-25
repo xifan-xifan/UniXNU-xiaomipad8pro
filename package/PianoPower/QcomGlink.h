@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: BSD-2-Clause-Patent */
 /* GLINK over shared memory: the native GLINK protocol (version handshake, channel open/close, receive intents, data, done) on a pair of
- * SMEM FIFOs. Event driven and allocation free: the owner calls qcom_glink_poll whenever the remote rings the GLINK doorbell (and after
+ * SMEM FIFOs. Event driven (allocation free unless the owner enables bounded requested-size intents): the owner calls qcom_glink_poll whenever the remote rings the GLINK doorbell (and after
  * sending), every call does a bounded amount of work, and nothing here waits. A send that cannot go out yet (no remote intent, no FIFO
  * room) returns QcomGlinkAgain and the owner tries again on the next event; an intent is asked for once per pending send. */
 #ifndef QCOM_GLINK_H
@@ -17,6 +17,8 @@ extern "C" {
 #define QCOM_GLINK_NAME 32u
 #define QCOM_GLINK_FEATURE_INTENT_REUSE 1u
 #define QCOM_GLINK_MAX_PENDING_OPENS 4u     /* the remote's opens of channels nobody registered yet (UniXNU-piano addition) */
+#define QCOM_GLINK_DYNAMIC_INTENT_MAX (64u * 1024u)
+#define QCOM_GLINK_DYNAMIC_TOTAL_MAX (256u * 1024u)
 
 enum {
     QCOM_GLINK_VERSION = 0, QCOM_GLINK_VERSION_ACK = 1, QCOM_GLINK_OPEN = 2, QCOM_GLINK_CLOSE = 3, QCOM_GLINK_OPEN_ACK = 4,
@@ -43,6 +45,12 @@ typedef struct {
 } QcomGlinkFifo;
 
 typedef struct QcomGlinkChannel QcomGlinkChannel;
+/* Lifetime counters survive channel close/reopen. Every request's exact size is also emitted by intent_event. */
+typedef struct {
+    uint32_t requests, granted, refused, last_size, min_size, max_size;
+    uint64_t size_sum;
+    uint32_t requests_tx, last_tx_size, acks, ack_granted, ack_refused;
+} QcomGlinkIntentStats;
 typedef struct {
     void (*state)(void *context, QcomGlinkChannel *channel, int up);
     /* A complete message; data stays valid for the duration of the call only. */
@@ -58,8 +66,9 @@ struct QcomGlinkChannel {
     void *context;
     /* Our receive intents: count buffers of size bytes in storage (count * size). */
     uint8_t *storage;
-    uint32_t intent_size, intent_count;
-    struct {uint32_t fill; uint8_t advertised, busy, done_due;} local[QCOM_GLINK_MAX_LOCAL_INTENTS];
+    uint32_t intent_size, intent_count, fixed_intent_count;
+    struct {uint8_t *data; uint32_t size, fill; uint8_t advertised, busy, done_due;} local[QCOM_GLINK_MAX_LOCAL_INTENTS];
+    QcomGlinkIntentStats intents;
     /* The remote's intents we may send into. */
     struct {uint32_t id, size; uint8_t valid, busy;} remote[QCOM_GLINK_MAX_REMOTE_INTENTS];
 };
@@ -85,6 +94,16 @@ typedef struct {
     uint16_t reply_cmd, reply_cid;
     uint32_t reply_value;
     uint32_t done_deferred, done_retried, reply_deferred, reply_retried, tx_blocked;
+    uint32_t reply_offer; /* local iid: advertise this before the deferred grant ACK; 0 means no offer owed */
+    QcomGlinkIntentStats intents; /* totals include requests/ACKs for unknown channels */
+    uint32_t dynamic_bytes;
+    uint8_t dynamic_intents;
+    /* Optional owner hooks. Configure once after init, before polling; all run on that same owner. */
+    uint8_t *(*intent_alloc)(uint32_t size);
+    void (*intent_free)(uint8_t *data, uint32_t size);
+    void (*intent_event)(void *context, const QcomGlinkChannel *channel, uint16_t cmd, uint16_t rcid,
+                         uint32_t size, uint32_t granted, const char *reason);
+    void *intent_context;
 } QcomGlink;
 
 /* Sets up the link on its FIFOs (rx may have no data yet: the remote makes its FIFO later) and resets the indices we own. */

@@ -2,16 +2,28 @@
 /* XPC bootstrap adapter. HCI, pairing, keys and profiles stay in bluetoothd. */
 #include <dispatch/dispatch.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <os/log.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/sysctl.h>
+#include <time.h>
+#include <unistd.h>
 #include <xpc/xpc.h>
 /* Present in the target's BlueTool imports; the public app SDK hides listeners. */
 extern xpc_connection_t qbt_xpc_listener(const char *,dispatch_queue_t,uint64_t)
     __asm__("_xpc_connection_create_mach_service");
 
 static os_log_t logger;
+static int trace_console = -1;
+static void trace_script(const char *script, const char *phase, int error)
+{
+    if(trace_console<0)return;
+    uint64_t ms=clock_gettime_nsec_np(CLOCK_UPTIME_RAW)/1000000;
+    (void)dprintf(trace_console,"PianoBluetooth: BlueTool script=%s phase=%s error=%d [uptime_ms=%llu]\n",
+                  script,phase,error,(unsigned long long)ms);
+}
 static int power_on(void) {
     int result=EIO;size_t length=sizeof(result);
     /* A denied request is not a controller failure: UART.SK connect also starts it. */
@@ -31,7 +43,11 @@ static void handle(xpc_object_t message) {
     if(id && !strcmp(id,"RunBuiltinScript")) {
         xpc_object_t args=xpc_dictionary_get_value(message,"kMsgArgs");
         const char *script=args && xpc_get_type(args)==XPC_TYPE_DICTIONARY?xpc_dictionary_get_string(args,"script"):NULL;
-        if(script && (!strcmp(script,"boot") || !strcmp(script,"init")))error=power_on();
+        if(script && (!strcmp(script,"boot") || !strcmp(script,"init"))) {
+            trace_script(script,"begin",0);
+            error=power_on();
+            trace_script(script,"end",error);
+        }
         else if(script && !strcmp(script,"deepsleep")){error=state();if(error==ENETDOWN||error==EPERM)error=0;}
         else error=EINVAL;
         os_log(logger,"script %{public}s result %d",script?script:"missing",error);
@@ -50,6 +66,9 @@ static void handle(xpc_object_t message) {
 }
 int main(void) {
     logger=os_log_create("org.unixnu.bluetooth","BlueTool");
+    uint64_t uptime=0;size_t length=sizeof uptime;
+    if(!sysctlbyname("machdep.piano_bt_uptime_ms",&uptime,&length,NULL,0))
+        trace_console=open("/dev/console",O_WRONLY|O_CLOEXEC|O_NONBLOCK|O_NOCTTY);
     dispatch_queue_t queue=dispatch_queue_create("org.unixnu.bluetooth.bootstrap",DISPATCH_QUEUE_SERIAL);
     xpc_connection_t listener=qbt_xpc_listener("com.apple.BlueTool",queue,XPC_CONNECTION_MACH_SERVICE_LISTENER);
     if(!listener)return 1;

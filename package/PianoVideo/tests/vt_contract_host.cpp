@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Copyright (c) 2026 Leo Zhang.
 #include "PianoVideoVTContract.h"
+#include "HEVCFixture.h"
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -48,12 +49,12 @@ static void appendNal(std::vector<uint8_t> &out,const std::vector<uint8_t> &nal)
 static void appendAtom(std::vector<uint8_t> &out,uint32_t kind,const void *p,uint32_t n) {
   const auto at=out.size();out.resize(at+8+n);vtwire::put32(out.data()+at,8+n);vtwire::put32(out.data()+at+4,kind);if(n)memcpy(out.data()+at+8,p,n);
 }
-static std::vector<uint8_t> frameRequest(const std::vector<uint8_t> &sample,uint32_t flags=1,unsigned count=1,unsigned sizeDelta=0,unsigned timingBytes=72) {
+static std::vector<uint8_t> frameRequest(const std::vector<uint8_t> &sample,uint32_t flags=1,unsigned count=1,unsigned sizeDelta=0,unsigned timingBytes=72,const std::vector<uint8_t> *format=nullptr) {
   using namespace vtwire;
   uint8_t uuid[16]={},head[256]={};Writer w(head,sizeof head);w.header(cc("dfrm"),FlagRequest,uuid,23);w.s64(cc(",frm"),124);w.u32(cc(",dfl"),flags);
   std::vector<uint8_t> body;uint32_t bytes=uint32_t(sample.size())+sizeDelta;uint8_t timing[80]={};
   uint32_t scale=90000,valid=1;memcpy(timing+24+8,&scale,4);memcpy(timing+24+12,&valid,4);
-  appendAtom(body,cc("nsmp"),&count,4);appendAtom(body,cc("ssiz"),&bytes,4);appendAtom(body,cc("stia"),timing,timingBytes);appendAtom(body,cc("sdat"),sample.data(),uint32_t(sample.size()));
+  appendAtom(body,cc("nsmp"),&count,4);appendAtom(body,cc("ssiz"),&bytes,4);appendAtom(body,cc("stia"),timing,timingBytes);if(format)appendAtom(body,cc("fdsc"),format->data(),uint32_t(format->size()));appendAtom(body,cc("sdat"),sample.data(),uint32_t(sample.size()));
   std::vector<uint8_t> sbuf;appendAtom(sbuf,cc("sbuf"),body.data(),uint32_t(body.size()));
   std::vector<uint8_t> request(head,head+w.size());const auto at=request.size();request.resize(at+16+sbuf.size());
   put32(request.data()+at,uint32_t(16+sbuf.size()));put32(request.data()+at+4,cc("para"));put32(request.data()+at+8,cc(",sbf"));put32(request.data()+at+12,cc("=sbf"));memcpy(request.data()+at+16,sbuf.data(),sbuf.size());return request;
@@ -63,27 +64,34 @@ static std::vector<uint8_t> entry(unsigned key,uint32_t type,const std::vector<u
   appendAtom(body,vtwire::cc("idxk"),idx,2);appendAtom(body,type,value.data(),uint32_t(value.size()));
   std::vector<uint8_t> out;appendAtom(out,vtwire::cc("keyv"),body.data(),uint32_t(body.size()));return out;
 }
-static std::vector<uint8_t> sampleFormatBody(const std::vector<uint8_t> &conf,bool protection=false,bool duplicate=false) {
+static std::vector<uint8_t> sampleFormatBody(const std::vector<uint8_t> &conf,bool protection=false,bool duplicate=false,uint32_t codecType=vtwire::cc("avc1"),uint32_t width=320,uint32_t height=240,bool stringKey=false) {
   using namespace vtwire;uint8_t plist[1024];Plist pl;int top=pl.data(conf.data(),uint32_t(conf.size()));unsigned n=pl.write(top,plist,sizeof plist);
-  auto e=entry(105,cc("datv"),{plist,plist+n});auto descriptions=e;if(duplicate)descriptions.insert(descriptions.end(),e.begin(),e.end());
+  auto e=entry(codecType==cc("hvc1")?112:105,cc("datv"),{plist,plist+n});
+  if(stringKey){
+    Plist key;uint8_t name[128];const unsigned bytes=key.write(key.string(codecType==cc("hvc1")?"hvcC":"avcC"),name,sizeof name);
+    std::vector<uint8_t> body;appendAtom(body,cc("strk"),name,bytes);appendAtom(body,cc("datv"),plist,n);
+    e.clear();appendAtom(e,cc("keyv"),body.data(),uint32_t(body.size()));
+  }
+  auto descriptions=e;if(duplicate)descriptions.insert(descriptions.end(),e.begin(),e.end());
   if(protection){auto sinf=entry(109,cc("datv"),{plist,plist+n});descriptions.insert(descriptions.end(),sinf.begin(),sinf.end());}
   auto dict=entry(49,cc("dict"),descriptions);std::vector<uint8_t> extn;appendAtom(extn,cc("dict"),dict.data(),uint32_t(dict.size()));
-  std::vector<uint8_t> fdsc;uint32_t media=cc("vide"),codec=cc("avc1"),dims[2]={320,240};
+  std::vector<uint8_t> fdsc;uint32_t media=cc("vide"),codec=codecType,dims[2]={width,height};
   appendAtom(fdsc,cc("mdia"),&media,4);appendAtom(fdsc,cc("codc"),&codec,4);appendAtom(fdsc,cc("vdim"),dims,8);appendAtom(fdsc,cc("extn"),extn.data(),uint32_t(extn.size()));return fdsc;
 }
 static void streamTests() {
   const auto s=makeSps(), p=makePps();auto conf=avcc(s,p);avc::Config c;
   CHECK(avc::config(conf.data(),uint32_t(conf.size()),c));CHECK(c.valid()&&c.pocType==0&&c.hfiProfile()==2&&c.hfiLevel()==4&&c.s.maxReorder==1&&c.s.maxDpb==2);
+  codec::Config wrapped;CHECK(codec::parseAvc(conf.data(),uint32_t(conf.size()),wrapped));
   auto formatBody=sampleFormatBody(conf);vtwire::Atom fdsc;fdsc.type=vtwire::cc("fdsc");fdsc.body=formatBody.data();fdsc.size=uint32_t(formatBody.size());
-  CHECK(vtcontract::sampleFormat(fdsc,c));
+  CHECK(vtcontract::sampleFormat(fdsc,wrapped));
   for(auto bad:{sampleFormatBody(conf,true),sampleFormatBody(conf,false,true),sampleFormatBody(avcc(makeSps(77,2),p))}){
-    fdsc.body=bad.data();fdsc.size=uint32_t(bad.size());CHECK(!vtcontract::sampleFormat(fdsc,c));
+    fdsc.body=bad.data();fdsc.size=uint32_t(bad.size());CHECK(!vtcontract::sampleFormat(fdsc,wrapped));
   }
-  auto invalidFormat=formatBody;invalidFormat[8]^=1;fdsc.body=invalidFormat.data();fdsc.size=uint32_t(invalidFormat.size());CHECK(!vtcontract::sampleFormat(fdsc,c));
-  fdsc.body=formatBody.data();for(unsigned n=0;n<formatBody.size();++n){fdsc.size=n;CHECK(!vtcontract::sampleFormat(fdsc,c));}
+  auto invalidFormat=formatBody;invalidFormat[8]^=1;fdsc.body=invalidFormat.data();fdsc.size=uint32_t(invalidFormat.size());CHECK(!vtcontract::sampleFormat(fdsc,wrapped));
+  fdsc.body=formatBody.data();for(unsigned n=0;n<formatBody.size();++n){fdsc.size=n;CHECK(!vtcontract::sampleFormat(fdsc,wrapped));}
   CHECK(c.same(c));avc::Config different=c;different.pps[2]^=1;CHECK(!c.same(different));
   CHECK(!avc::config(nullptr,0,different));
-  for(auto invalid:{makeSps(100),makeSps(77,1),makeSps(77,0,5),makeSps(77,0,2,20),makeSps(77,0,2,19,true),makeSps(77,0,2,19,false,true),makeSps(77,0,2,19,false,false,3)}){
+  for(auto invalid:{makeSps(100),makeSps(77,1),makeSps(77,0,5),makeSps(77,0,2,120),makeSps(77,0,2,19,true),makeSps(77,0,2,19,false,true),makeSps(77,0,2,19,false,false,3)}){
     auto bad=avcc(invalid,p);CHECK(!avc::config(bad.data(),uint32_t(bad.size()),different));
   }
   for(auto invalid:{makePps(true,1),makePps(true,0,true),makePps(true,0,false,1)}){
@@ -97,14 +105,14 @@ static void streamTests() {
   for(auto &sample:samples){
     avc::Picture pic;CHECK(avc::accessUnit(sample.data(),uint32_t(sample.size()),c,&pic));
     std::vector<uint8_t> normalized(sample.size()+c.parameterBytes());
-    auto bytes=vtcontract::normalize(sample.data(),uint32_t(sample.size()),normalized.data(),uint32_t(normalized.size()),c,true);
+    auto bytes=vtcontract::normalize(sample.data(),uint32_t(sample.size()),normalized.data(),uint32_t(normalized.size()),wrapped,true);
     CHECK(bytes==normalized.size()&&avc::normalized(normalized.data(),bytes,c));
-    CHECK(!vtcontract::normalize(sample.data(),uint32_t(sample.size()),normalized.data(),bytes-1,c,true));
+    CHECK(!vtcontract::normalize(sample.data(),uint32_t(sample.size()),normalized.data(),bytes-1,wrapped,true));
     normalized[5]^=1;CHECK(!avc::normalized(normalized.data(),bytes,c));
     vtcontract::InputReport report;
-    for(unsigned flags:{1u,3u,5u,9u,11u,15u}) {auto request=frameRequest(sample,flags);CHECK(vtcontract::inputRequest(request.data(),uint32_t(request.size()),report,&c)&&report.flags==flags&&report.hasToken&&report.token==124);}
-    for(unsigned flags:{0u,2u,8u,17u,0x80000001u}) {auto request=frameRequest(sample,flags);CHECK(!vtcontract::inputRequest(request.data(),uint32_t(request.size()),report,&c)&&report.transportReject);}
-    for(auto request:{frameRequest(sample,1,2),frameRequest(sample,1,1,1),frameRequest(sample,1,1,0,71),frameRequest(sample,1,1,0,80)})CHECK(!vtcontract::inputRequest(request.data(),uint32_t(request.size()),report,&c)&&!report.transportReject);
+    for(unsigned flags:{0u,1u,2u,3u,4u,5u,6u,8u,9u,11u,15u}) {auto request=frameRequest(sample,flags);CHECK(vtcontract::inputRequest(request.data(),uint32_t(request.size()),report,&wrapped)&&report.flags==flags&&report.hasToken&&report.token==124);}
+    for(unsigned flags:{16u,17u,0x80000001u}) {auto request=frameRequest(sample,flags);CHECK(!vtcontract::inputRequest(request.data(),uint32_t(request.size()),report,&wrapped)&&report.transportReject);}
+    for(auto request:{frameRequest(sample,1,2),frameRequest(sample,1,1,1),frameRequest(sample,1,1,0,71),frameRequest(sample,1,1,0,80)})CHECK(!vtcontract::inputRequest(request.data(),uint32_t(request.size()),report,&wrapped)&&!report.transportReject);
     for(unsigned i=0;i<sample.size();++i)CHECK(!avc::accessUnit(sample.data(),i,c));
   }
   // Multiple slices must retain one picture, strictly increasing MB addresses.
@@ -122,8 +130,93 @@ static void streamTests() {
   uint8_t forbidden[]={0x61,0,0,1};CHECK(!avc::ebsp(forbidden,sizeof forbidden));forbidden[3]=3;CHECK(!avc::ebsp(forbidden,sizeof forbidden));
   uint8_t escaped[]={0x61,0,0,3,2};CHECK(avc::ebsp(escaped,sizeof escaped));escaped[4]=4;CHECK(!avc::ebsp(escaped,sizeof escaped));
 }
+static void hevcContractTests() {
+  using namespace vtwire;
+  for(unsigned depth:{8u,10u}){
+    hevcfixture::Fixture fixture(depth);codec::Config cfg;
+    CHECK(codec::parseHevc(fixture.hvcc.data(),uint32_t(fixture.hvcc.size()),cfg));
+    std::vector<uint8_t> sample;hevcfixture::append(sample,fixture.slice());
+    for(bool stringKey:{false,true}){
+      auto body=sampleFormatBody(fixture.hvcc,false,false,cc("hvc1"),1920,1080,stringKey);
+      Atom fdsc{cc("fdsc"),body.data(),uint32_t(body.size())};CHECK(vtcontract::sampleFormat(fdsc,cfg));
+      for(unsigned flags:{0u,1u,2u,3u}){
+        auto request=frameRequest(sample,flags,1,0,72,&body);vtcontract::InputReport report;
+        CHECK(vtcontract::inputRequest(request.data(),uint32_t(request.size()),report,&cfg)&&report.picture.idr&&report.flags==flags);
+      }
+    }
+    for(auto body:{sampleFormatBody(fixture.hvcc,true,false,cc("hvc1"),1920,1080),
+                   sampleFormatBody(fixture.hvcc,false,true,cc("hvc1"),1920,1080),
+                   sampleFormatBody(fixture.hvcc,false,false,cc("hvc1"),1920,1072),
+                   sampleFormatBody(fixture.hvcc,false,false,cc("avc1"),1920,1080)}){
+      Atom fdsc{cc("fdsc"),body.data(),uint32_t(body.size())};CHECK(!vtcontract::sampleFormat(fdsc,cfg));
+      auto request=frameRequest(sample,0,1,0,72,&body);vtcontract::InputReport report;
+      CHECK(!vtcontract::inputRequest(request.data(),uint32_t(request.size()),report,&cfg)&&!strcmp(report.decision,"sample-format-change"));
+    }
+    hevcfixture::Fixture other(depth==8?10:8);auto changed=sampleFormatBody(other.hvcc,false,false,cc("hvc1"),1920,1080);
+    Atom fdsc{cc("fdsc"),changed.data(),uint32_t(changed.size())};CHECK(!vtcontract::sampleFormat(fdsc,cfg));
+    std::vector<uint8_t> extensions;appendAtom(extensions,cc("hvcC"),fixture.hvcc.data(),uint32_t(fixture.hvcc.size()));extensions.resize(extensions.size()+4);
+    ImageDescription d;d.codec=cc("hvc1");d.width=1920;d.height=1080;d.extensions=extensions.data();d.extensionsSize=uint32_t(extensions.size());
+    codec::Config parsed;vtcontract::FormatReport report;CHECK(vtcontract::format(d,&report,&parsed)&&parsed.same(cfg)&&report.terminalZero);
+    d.codec=cc("hev1");CHECK(!vtcontract::format(d,&report,&parsed));d.codec=cc("hvc1");
+    --d.width;CHECK(!vtcontract::format(d,&report,&parsed));++d.width;
+    const auto original=extensions;extensions.insert(extensions.end()-4,original.begin(),original.end()-4);
+    d.extensions=extensions.data();d.extensionsSize=uint32_t(extensions.size());CHECK(!vtcontract::format(d,&report,&parsed));
+    // The parser keeps accepting the wider syntax for analysis, while the
+    // native admission boundary must reject it before a hardware lease.
+    for(const auto &outside:{hevcfixture::Fixture(depth,true,3840,2160,183),
+                            hevcfixture::Fixture(depth,true,3840,2160,120),
+                            hevcfixture::Fixture(depth,true,1920,1080,183)}) {
+      codec::Config wide;CHECK(codec::parseHevc(outside.hvcc.data(),uint32_t(outside.hvcc.size()),wide));
+      CHECK(!codec::nativeAdmitted(wide));
+      std::vector<uint8_t> ext;appendAtom(ext,cc("hvcC"),outside.hvcc.data(),uint32_t(outside.hvcc.size()));
+      ImageDescription large;large.codec=cc("hvc1");large.width=wide.s.width;large.height=wide.s.height;
+      large.extensions=ext.data();large.extensionsSize=uint32_t(ext.size());
+      CHECK(!vtcontract::format(large,&report,&parsed)&&!strcmp(report.decision,"hevc-native-envelope"));
+    }
+    CHECK(codec::nativeAdmitted(cfg));
+  }
+}
+// Independent reader for the bplist object graph emitted to Apple. Check the
+// actual nested capability dictionary and inventory, not string substrings.
+struct PlistView {
+  const uint8_t *p;uint32_t n;uint64_t count,top,table;unsigned offsetBytes,refBytes;
+  PlistView(const uint8_t *bytes,uint32_t size):p(bytes),n(size){
+    CHECK(n>=40&&!memcmp(p,"bplist00",8));const uint8_t *t=p+n-32;
+    offsetBytes=t[6];refBytes=t[7];count=vtwire::be64(t+8);top=vtwire::be64(t+16);table=vtwire::be64(t+24);
+    CHECK(offsetBytes&&offsetBytes<=8&&refBytes==1&&top<count&&table+count*offsetBytes<=n-32);
+  }
+  uint64_t offset(uint64_t id)const{CHECK(id<count);uint64_t at=0;for(unsigned i=0;i<offsetBytes;++i)at=(at<<8)|p[table+id*offsetBytes+i];CHECK(at<table);return at;}
+  const uint8_t *body(uint64_t id,unsigned kind,uint64_t &length)const{
+    uint64_t at=offset(id);const uint8_t tag=p[at++];CHECK((tag>>4)==kind);length=tag&15;
+    if(length==15){const unsigned bytes=1u<<(p[at++]&15);length=0;for(unsigned i=0;i<bytes;++i)length=(length<<8)|p[at++];}
+    CHECK(at+length<=table);return p+at;
+  }
+  bool string(uint64_t id,const char *value)const{uint64_t bytes;const uint8_t *b=body(id,5,bytes);return strlen(value)==bytes&&!memcmp(b,value,bytes);}
+  uint64_t key(uint64_t dict,const char *name)const{uint64_t size;const uint8_t *b=body(dict,13,size);for(uint64_t i=0;i<size;++i)if(string(b[i],name))return b[size+i];CHECK(false);return 0;}
+  int64_t integer(uint64_t id)const{uint64_t at=offset(id);CHECK(p[at]==0x13);return int64_t(vtwire::be64(p+at+1));}
+};
+static void capabilitiesTests(){
+  using namespace vtwire;uint8_t bytes[4096];Plist p;
+  const int items[]={vtcontract::inventoryEntry(p,false),vtcontract::inventoryEntry(p,true)};
+  const int top=p.array(items,2);const uint32_t size=p.write(top,bytes,sizeof bytes);CHECK(size);
+  PlistView view(bytes,size);uint64_t count;const auto *entries=view.body(view.top,10,count);CHECK(count==2);
+  for(unsigned hevc=0;hevc<2;++hevc){
+    const auto id=entries[hevc];CHECK(view.string(view.key(id,"CMClassImplementationID"),hevc?"com.unixnu.pianovideo.decoder.hevc":"com.unixnu.pianovideo.decoder.avc"));
+    CHECK(view.integer(view.key(id,"VTRating"))==400&&bytes[view.offset(view.key(id,"IsPreferredInternalPlugin"))]==8);
+    uint64_t codecs;const auto *types=view.body(view.key(id,"VTCodecType"),10,codecs);CHECK(codecs==1&&view.string(types[0],hevc?"hvc1":"avc1"));
+    const auto cap=view.key(id,"VTDecoderCapabilities"),profiles=view.key(cap,"VTSupportedProfiles");
+    uint64_t number;const auto *values=view.body(profiles,10,number);CHECK(number==(hevc?2u:3u));
+    CHECK(view.integer(values[0])==(hevc?1:66)&&view.integer(values[1])==(hevc?2:77));
+    const auto per=view.key(cap,"VTPerProfileSupport");
+    for(const char *profile:hevc?std::vector<const char *>{"1","2"}:std::vector<const char *>{"66","77","100"}){
+      const auto support=view.key(per,profile);CHECK(bytes[view.offset(view.key(support,"VTIsHardwareAccelerated"))]==9);
+      CHECK(view.integer(view.key(support,"VTMaxDecodeLevel"))==(hevc?120:42));
+      CHECK(view.integer(view.key(support,"VTMaxPlaybackLevel"))==(hevc?120:42));
+    }
+  }
+}
 int main() {
-  streamTests();
+  streamTests();hevcContractTests();capabilitiesTests();
   uint8_t sample[252], au[287];
   vtwire::put32(sample,248); memcpy(sample+4,session::kAccessUnit+38,248);
   CHECK(vtcontract::sample(sample,sizeof sample));
@@ -191,7 +284,7 @@ int main() {
   CHECK(vtcontract::formatRequest(request,requestBytes,report)&&report.terminalZero&&!strcmp(report.decision,"accept"));
   vtwire::put32(request+8,vtwire::cc("dcan"));CHECK(vtcontract::formatRequest(request,requestBytes,report));
   fds[33]=65;CHECK(!vtcontract::formatRequest(request,requestBytes,report)&&!strcmp(report.decision,"dimensions"));fds[33]=64;
-  vtwire::put32(fds+4,vtwire::cc("hvc1"));CHECK(!vtcontract::formatRequest(request,requestBytes,report)&&!strcmp(report.decision,"codec"));vtwire::put32(fds+4,vtwire::cc("avc1"));
+  vtwire::put32(fds+4,vtwire::cc("hvc1"));CHECK(!vtcontract::formatRequest(request,requestBytes,report)&&!strcmp(report.decision,"hvcC-missing-or-duplicate"));vtwire::put32(fds+4,vtwire::cc("avc1"));
   vtwire::put32(fds,135);CHECK(!vtcontract::formatRequest(request,requestBytes,report)&&!strcmp(report.decision,"declared-size"));vtwire::put32(fds,136);
   vtwire::put32(p+12,vtwire::cc("=dat"));CHECK(!vtcontract::formatRequest(request,requestBytes,report)&&!strcmp(report.decision,"fds-type"));vtwire::put32(p+12,vtwire::cc("=fds"));
   CHECK(!vtcontract::formatRequest(request,requestBytes-1,report));
@@ -239,5 +332,5 @@ int main() {
   uint8_t plist[48]={};memcpy(plist,"bplist00",8);plist[8]=0x5f;plist[9]=0x1f;plist[16]=8;
   plist[22]=1;plist[23]=1;vtwire::put64(plist+24,1);vtwire::put64(plist+32,0);vtwire::put64(plist+40,16);
   char name[96];CHECK(!vtwire::plistString(plist,sizeof plist,name,sizeof name));
-  if(failures)return 1;std::puts("PianoVideo V6 contract: AVC IP/IBP identity, SPS/PPS, wire flags/count/timing, layout and V5 regression PASS");return 0;
+  if(failures)return 1;std::puts("PianoVideo V9 contract: AVC regression HEVC fdsc index112/string profiles metadata sync flags protection DRC layout PASS");return 0;
 }

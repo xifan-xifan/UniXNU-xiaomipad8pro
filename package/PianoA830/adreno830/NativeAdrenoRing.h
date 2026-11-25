@@ -126,7 +126,7 @@ class NativeAdrenoRing final {
     volatile uint32_t *ring_=nullptr,*fence_=nullptr;
     size_t ring_bytes_=0,fence_bytes_=0;
     uint64_t ring_iova_=0,fence_iova_=0;
-    uint32_t next_=0,rptr_shadow_=0,seqno_=0,completed_=0,submissions_=0;
+    uint32_t next_=0,rptr_shadow_=0,seqno_=0,completed_=0,submissions_=0,replays_=0;
     bool attached_=false,poisoned_=false,reset_pending_=false;
     uint32_t context_=0;
     IOReturn poison();
@@ -134,12 +134,15 @@ class NativeAdrenoRing final {
     void leave() const;
     IOReturn writeWptr(uint32_t value);
     uint32_t readShadow();
-    IOReturn emitPrologue(uint32_t at,bool reset,uint32_t *end);
+    /* wait: the fence a context entry waits for (the newest issued one; a replay's: the fence replayed before it). */
+    IOReturn emitPrologue(uint32_t at,bool reset,uint32_t wait,uint32_t *end);
     IOReturn emitFence(uint32_t at,uint32_t seqno,uint32_t *end);
     IOReturn emitFramedFence(uint32_t at,uint32_t seqno,uint32_t *end);
     IOReturn publish(uint32_t from,uint32_t to);
     uint32_t extraWords(bool framed,bool reset) const;
-    IOReturn submitWords(const uint32_t *words,size_t word_count,uint32_t *fence,int kind,uint32_t source);
+    /* replay (nonzero, framed only): the submission takes that issued fence again, behind fence after; the numbering does not move. */
+    IOReturn submitWords(const uint32_t *words,size_t word_count,uint32_t *fence,int kind,uint32_t source,uint32_t replay=0,
+        uint32_t after=0);
     NativeAdrenoRingFence poll(uint32_t fence,const NativeAdrenoRingClock *,uint32_t timeout_us,uint32_t *observed,bool retire);
     void noteCompleted(uint32_t value);
 public:
@@ -194,11 +197,32 @@ public:
     /* After the recovery re-initialized the GPU (ARCHITECTURE 4.13.4, M10): ring words and pointers back to 0, memptrs RPTR
      * shadows 0, the memptrs fences set to the last fence issued so every waiter wakes, the poison lifted, and the next
      * framed submission carries the context entry. The fence numbering continues. last receives the last fence issued: every
-     * fence in (completed before, last] belongs to a job the recovery failed. Call before A830Cp::startRing/startCp. */
-    IOReturn recover(uint32_t *last);
+     * fence in (completed before, last] belongs to a job the recovery failed. Call before A830Cp::startRing/startCp.
+     * UniXNU-piano (2026-11-22, replay): restart (optional, at most the last fence issued) is the fence the memptrs fences go back
+     * to instead: the jobs after it are replayed (replayFramed) and complete them in order. */
+    IOReturn recover(uint32_t *last,const uint32_t *restart=nullptr);
+    /* UniXNU-piano (2026-11-22, private 20261122-render/ANALYSIS.md; the behaviour of Linux msm recover_worker, which replays every
+     * submit but the hung one): after recover(last, &restart) and the CP restart, a job the recovery kept goes into the ring again with
+     * ITS OWN fence (issued before: after < fence <= lastSubmitted()) behind the fence after (restart, or the job replayed just
+     * before it): the framing of submitFramed(), whose context entry, when one is due, waits for after instead of the newest fence.
+     * words are the job's packets as submitFramed() got them. Busy when they do not fit now; BadArgument for a fence outside (after,
+     * lastSubmitted()]. The numbering does not move (lastSubmitted() stays). */
+    IOReturn replayFramed(const uint32_t *words,size_t word_count,uint32_t fence,uint32_t after,
+        uint32_t source=NativeAdrenoRingSourceExternal);
+    /* The ring words one framed submission of word_count words takes (reset: with the context entry), without the gap. */
+    static uint32_t framedWords(size_t word_count,bool reset);
+    uint32_t replays() const {return replays_;}
+    size_t memptrsBytes() const {return fence_bytes_;}
     /* The CP_INDIRECT_BUFFER packet that ends just before ring index rptr (what a thread whose read pointer is rptr executes):
      * its GPU address and size in dwords. kIOReturnUnsupported when the words there are not that packet. */
     IOReturn ibBefore(uint32_t rptr,uint64_t *iova,uint32_t *dwords) const;
+#ifdef ADRENO830_MACOS
+    /* UniXNU-piano (2026-11-21, a CB0 fault's detail): the nearest CP_INDIRECT_BUFFER packet before ring index rptr, walking back over
+     * the whole ring, whose buffer [iova, + 4 * dwords) holds address: the IB a pipe's CP_IB1_BASE stands in (CP_IB1_REM_SIZE is what is
+     * left of it). Reads the words without the ring lock (a diagnostic: a packet being written may be missed or half new).
+     * kIOReturnUnsupported when no packet does. */
+    IOReturn ibHolding(uint32_t rptr,uint64_t address,uint64_t *iova,uint32_t *dwords) const;
+#endif
     bool attached() const {return attached_;}
     bool poisoned() const {return poisoned_;}
     uint32_t outstanding() const {return seqno_-__atomic_load_n(&completed_,__ATOMIC_ACQUIRE);}

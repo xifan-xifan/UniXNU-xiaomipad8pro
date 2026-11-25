@@ -37,6 +37,7 @@
 #include <IOKit/IOService.h>
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/IOLib.h>
+#include <PianoGpuBoost.h>   // boost342: each report handed to macOS asks PianoA830 for its input boost (50 ms apart)
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOMemoryDescriptor.h>
@@ -80,6 +81,8 @@
 #include "ChargerPmic.h"      // package/PianoPower: the PMIC's Type-C block, found read only (only where no other kext reads it)
 #include "../common/PianoIrq.h"
 #include <PianoPowerContract.h>
+#include <PianoPerfInput.h>   // the input boost's event to PianoThermal (2026-11-22)
+namespace { pianoperf::InputNotifier gPerfInput; }   // PianoThermal's input boost (PianoPerfInput.h)
 #include <PianoSpmi.h>   // the SPMI lock and the transactions every kext shares
 
 using namespace pianousb;
@@ -133,6 +136,8 @@ struct Args {
   uint32_t coldSteps; // piano-usb-cold-steps=MASK: the cold start's optional parts (UsbCold.h kStep*, default 0x17)
   uint32_t coldSim;   // piano-usb-cold-sim=MASK: the test hook, before the decision (UsbCold.h kSim*, default 0)
   uint32_t coldWait;  // piano-usb-cold-wait=S: no bus reset this long after RUN_STOP: a cold start (default 15, 0: no link watch)
+  uint32_t wedgeSim;  // piano-usb-wedge-sim=N: the test hook of the controller recovery: 5 s after wake N the gadget is marked wedged
+                      // as a timed-out endpoint command would mark it (USB-WEDGE.md; default 0, never in the daily arguments)
 };
 Args gArgs;
 
@@ -174,6 +179,7 @@ void readArgs()
   gArgs.coldSim = bootArg("piano-usb-cold-sim", 0) & cold::kSimAll;
   gArgs.coldWait = bootArg("piano-usb-cold-wait", cold::kWatchDefaultS);
   if (gArgs.coldWait > 3600) gArgs.coldWait = 3600;
+  gArgs.wedgeSim = bootArg("piano-usb-wedge-sim", 0);
 }
 
 // -------------------------------------------------------------------------------------------------------------------- MMIO
@@ -1680,6 +1686,14 @@ bool coldDecide(uint32_t sim)
 
 uint32_t gLastDsts = ~0u;
 
+// The controller recovery (Dwc3Gadget.h recover(), USB-WEDGE.md): at most kWedgeTries in a row (the reference's DWC3_ERR_RECOVERY_MAX),
+// the count reset once a host has configured the device again; then the core is left alone, as before. gWedgeSimAtMs: the test hook's
+// moment (piano-usb-wedge-sim).
+constexpr unsigned kWedgeTries = 3;
+unsigned gWedgeRow, gWedgeTotal;
+bool gWedgeGaveUp;
+uint64_t gWedgeSimAtMs;
+
 // coldStart: UsbCold.h's c1..c5 first (power, stop, rails, repeater, M31 PHY), instead of trusting what the firmware left.
 bool takeover(bool coldStart)
 {
@@ -1827,8 +1841,12 @@ void usbStatus()
           "off");
   cprintf("speed %u address %u configuration %u; events %u (device %u): resets %u connects %u disconnects %u erratic %u overflows %u\n",
           s.speed, s.address, s.configuration, s.events, s.deviceEvents, s.resets, s.connects, s.disconnects, s.erratic, s.overflows);
-  cprintf("setups %u stalls %u EP0 timeouts %u; command errors %u timeouts %u (last %08x) start errors %u stale %u; notes dropped %llu\n",
-          s.setups, s.stalls, s.ep0Timeouts, s.cmdErrors, s.cmdTimeouts, s.lastCmdFailure, s.startErrors, s.stale, gNotes.dropped);
+  cprintf("setups %u stalls %u EP0 timeouts %u resyncs %u; command errors %u timeouts %u (last %08x) skipped %u start errors %u stale %u; "
+          "notes dropped %llu\n", s.setups, s.stalls, s.ep0Timeouts, s.ep0Resyncs, s.cmdErrors, s.cmdTimeouts, s.lastCmdFailure, s.cmdSkipped,
+          s.startErrors, s.stale, gNotes.dropped);
+  cprintf("wedge: %s; wedges %u, controller recoveries %u (%u in a row, at most %u; %s); piano-usb-wedge-sim=%u\n",
+          gGadget.wedged() ? gGadget.wedgeReason() : "no", s.wedges, s.recoveries, gWedgeRow, kWedgeTries, gWedgeGaveUp ? "given up" : "armed",
+          gArgs.wedgeSim);
   cprintf("bulk in %u transfers %llu bytes, out %u transfers %llu bytes; ports DTR %x/%x; tx0 %u dropped %llu, tx1 %u dropped %llu\n",
           s.inTransfers, s.inBytes, s.outTransfers, s.outBytes, gLines[0], gLines[1], gTx[0].used(), gTx[0].dropped, gTx[1].used(),
           gTx[1].dropped);
@@ -1949,6 +1967,11 @@ bool sleepStep()
       if (!ok) gHal.note("DSTS %08x DCTL %08x", gHal.rd(DSTS), gHal.rd(DCTL));
     } else {
       gHal.note("wake %u: the glue clocked; %s", n, gGadget.configured() ? "kept: the console goes on" : "polling again");
+      gGadget.traceMore(32, 16);   // the requests the Mac sent while frozen (answered now) and their EP0 recovery in the log
+      if (gArgs.wedgeSim == n) {
+        gWedgeSimAtMs = nowNs() / 1000000 + 5000;
+        gHal.note("wake %u: piano-usb-wedge-sim=%u: the gadget is marked wedged in 5 s (the controller recovery's test hook)", n, gArgs.wedgeSim);
+      }
     }
     IOLockLock(gSleepLock);
   }
@@ -2091,6 +2114,35 @@ bool coldRestart(uint32_t sim, const char *why)
   return ok;
 }
 
+// The gadget is wedged (an endpoint command that never completed, or EP0 recovered again and again without a completed transfer): the
+// reference's controller error recovery, on the USB thread between passes, awake only (a sleep's kept state polls until the freeze and
+// is left alone). True: an attempt ran (the caller starts the pass afresh); false: the budget is spent (the core is left alone).
+bool wedgeRecover()
+{
+  using namespace dwc3;
+  if (gWedgeRow >= kWedgeTries) {
+    if (!gWedgeGaveUp) {
+      gWedgeGaveUp = true;
+      gHal.note("wedge: %u recoveries in a row without a host configuring the device: given up; the controller is left as it is (DSTS %08x "
+                "DCTL %08x)", gWedgeRow, gHal.rd(DSTS), gHal.rd(DCTL));
+    }
+    return false;
+  }
+  ++gWedgeRow;
+  ++gWedgeTotal;
+  if (gIrqMode) irqOff("a controller recovery: polled from now on");
+  const bool dwc31 = (gSnpsId >> 16) != 0x5533;
+  gHal.note("wedge recovery %u (%u in a row, at most %u): %s: RUN_STOP off, DCTL.CSFTRST, the device side again, RUN_STOP on; the Mac sees a "
+            "detach and enumerates afresh", gWedgeTotal, gWedgeRow, kWedgeTries, gGadget.wedgeReason());
+  uint32_t waited = 0;
+  const bool ok = gGadget.recover(dwc31, &waited);
+  gHal.note("wedge recovery %u: %s (soft reset %u us; DCTL %08x DSTS %08x GEVNTCOUNT %08x; recoveries %u, wedges %u)", gWedgeTotal,
+            ok ? "soft reset done, running: waiting for the Mac" : "the soft reset or the restart did not go through; tried again in 1 s",
+            waited, gHal.rd(DCTL), gHal.rd(DSTS), gHal.rd(GEVNTCOUNT), gGadget.stats.recoveries, gGadget.stats.wedges);
+  if (!ok) IOSleep(1000);
+  return true;
+}
+
 // The monitor's ask, once its reply had time to go out (0.5 s). True with the mask when it is due.
 bool coldAskDue(uint64_t nowMs, uint32_t *sim)
 {
@@ -2198,6 +2250,23 @@ void usbThread(void *, wait_result_t)
     const bool moved = logPump();
     gGadget.pump();
     gGadget.tick();
+    if (gSleep.state() == SleepState::awake) {   // the controller recovery (USB-WEDGE.md) and its test hook
+      if (gWedgeSimAtMs && nowNs() / 1000000 >= gWedgeSimAtMs) {
+        gWedgeSimAtMs = 0;
+        gGadget.markWedged("simulated: piano-usb-wedge-sim, as a timed-out endpoint command", gArgs.wedgeSim);
+      }
+      if (gGadget.wedged() && wedgeRecover()) {
+        lastReport = nowNs();
+        lastActivity = lastEvent = lastReport / 1000000;
+        continue;
+      }
+    }
+    if (gWedgeRow && gGadget.configured()) {
+      gHal.note("wedge: the Mac configured the device again after recovery %u (%u this boot): the count starts over", gWedgeTotal,
+                gGadget.stats.recoveries);
+      gWedgeRow = 0;
+      gWedgeGaveUp = false;
+    }
     const uint32_t configured = gGadget.configured() ? 1u : 0u;
     const uint32_t net = gGadget.netLinkUp() ? 1u : 0u;
     const uint32_t old = __atomic_exchange_n(&gDomainConfigured, configured, __ATOMIC_ACQ_REL);
@@ -2315,13 +2384,17 @@ OSDefineMetaClassAndStructors(PianoUsbHID, IOHIDDevice)
 namespace {
 IONotifier *gHidPublished;
 
+static pianogpuboost::InputBoostSender gGpuBoost;   // zero-initialised: PianoA830's piano-gpu-boost (PianoGpuBoost.h)
+
 bool hidSend(uint8_t kind, const uint8_t *bytes, unsigned length)
 {
   PianoUsbHID *hid = gHidDevice[kind];
   if (!hid) return false;
+  gPerfInput.notify(kind == 0 ? pianoperf::kKeyboard : pianoperf::kPointer);
   IOBufferMemoryDescriptor *report = IOBufferMemoryDescriptor::withBytes(bytes, length, kIODirectionNone);
   const IOReturn rc = report ? hid->handleReport(report) : kIOReturnNoMemory;
   OSSafeReleaseNULL(report);
+  if (rc == kIOReturnSuccess) gGpuBoost.note();
   if (rc != kIOReturnSuccess && ++gHid.sendErrors <= 5) {
     char line[96];
     snprintf(line, sizeof line, "hid: %s handleReport %#x", kHidProducts[kind], rc);
@@ -2564,6 +2637,8 @@ bool PianoDwc3::start(IOService *provider)
   note("start: piano-usb=%u phy=%u smmu=%u utmi=%u delay=%u shell=%u hid=%u net=%u irq=%u idle=%u (DWC3 %#llx, SMMU stream %#x, %s)",
        gArgs.level, gArgs.phy, gArgs.smmu, gArgs.utmi, gArgs.delay, gArgs.shell, gArgs.hid, gArgs.net, gArgs.irq, gArgs.idle,
        pianohw::kDwc3, pianohw::kUsbStream, gArgs.irq ? "interrupt, else polled" : gArgs.idle ? "polled, adaptive" : "polled every 1 ms");
+  note("start: controller recovery (USB-WEDGE.md): EP0 left with SET STALL; a command that does not complete -> RUN_STOP off, DCTL.CSFTRST, "
+       "the device side again (at most %u in a row); piano-usb-wedge-sim=%u", kWedgeTries, gArgs.wedgeSim);
   note("start: piano-usb-cold=%s%s steps=%#x sim=%#x wait=%u s (the cold start, UsbCold.h: %s)", cold::modeName(gArgs.cold),
        gArgs.coldKnown ? "" : " (an unknown value: auto)", gArgs.coldSteps, gArgs.coldSim, gArgs.coldWait,
        gArgs.cold == cold::Mode::inherited ? "never; the inherited state only, as before" : gArgs.cold == cold::Mode::always ? "always" :

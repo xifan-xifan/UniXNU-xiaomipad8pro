@@ -17,7 +17,6 @@
 #   write FILE DEV SEEK BS                WRITE: dd FILE onto DEV at block SEEK of BS bytes, conv=notrunc,fsync
 #   restore NAME DEV SEEK BS PORT         WRITE: stream http://HOST:PORT/NAME (a verified backup) onto DEV at block SEEK;
 #                                         fails when wget fails (a short body fails wget through the server's Content-Length)
-#   restore-bounded NAME DEV BLOCKS PORT WRITE: restore at block zero with a 4096-byte block limit and exact output count
 #   restore-list FILE DEV PORT NAME       WRITE: FILE's runs from the host's NAME@K, at their DST blocks; the same failure rule
 #   job NAME SUBCOMMAND...                run a subcommand detached (setsid): /run/pp/NAME.{log,rc}; survives the telnet session
 #   job-status NAME                       rc=<exit status> when done, else running=1
@@ -30,7 +29,7 @@
 set -u
 export PATH=${PIANO_PATH:-/usr/sbin:/usr/bin:/sbin:/bin}
 P=${PIANO_PP_DIR:-/run/pp}   # (PIANO_PP_DIR, PIANO_DEV_DIR, PIANO_PATH and PIANO_HOST_IP only for a host-side test of this script)
-DEV=${PIANO_DEV_DIR:-/dev}   # guarded partition operations
+DEV=${PIANO_DEV_DIR:-/dev}   # discard and zero only
 mkdir -p "$P"
 host_ip() { [ -n "${PIANO_HOST_IP:-}" ] || . /etc/piano-network; echo "$PIANO_HOST_IP"; }
 die() { echo "error=$*"; exit 1; }
@@ -86,97 +85,9 @@ map)
 		echo "$n=$1 $2 $3"
 	done
 	;;
-piano-309-gpt-preflight|piano-309-gpt-readback|piano-309-gpt-write)
-	if [ "$cmd" = piano-309-gpt-write ]; then
-		lock=/run/piano-309-gpt-write.lock
-		mkdir "$lock" || die 'GPT write lock already held or unavailable'
-		trap 'rmdir "$lock"' EXIT
-	fi
-	# Refuse active mounts, swap and stacked block devices before a GPT trial.
-	l=$(lun0)
-	case "$l" in sd[a-z]) ;; *) die "LUN 0 missing or ambiguous: '$l'" ;; esac
-	[ "$(cat "/sys/block/$l/queue/logical_block_size")" = 4096 ] || die 'unexpected LUN 0 block size'
-	[ "$(blockdev --getsize64 "/dev/$l")" = 510165778432 ] || die 'unexpected LUN 0 capacity'
-	[ "$(blockdev --getro "/dev/$l")" = 0 ] || die 'LUN 0 is not writable'
-	mounts=$(awk '{print $3}' /proc/self/mountinfo) || die 'cannot inspect mounts'
-	[ -n "$mounts" ] || die 'mount inventory is empty'
-	awk 'END { exit NR != 1 }' /proc/swaps || die 'active swap or unreadable swap inventory'
-	for b in "/sys/block/$l" "/sys/block/$l"/"$l"[0-9]*; do
-		[ -d "$b" ] || continue
-		devno=$(cat "$b/dev") || die "cannot identify ${b##*/}"
-		if printf '%s\n' "$mounts" | grep -Fxq "$devno"; then die "${b##*/} is mounted"; fi
-		[ -d "$b/holders" ] || die "cannot inspect ${b##*/} holders"
-		for holder in "$b"/holders/*; do
-			[ ! -e "$holder" ] || die "${b##*/} has block holder ${holder##*/}"
-		done
-	done
-	if [ "$cmd" = piano-309-gpt-write ]; then
-		[ "$#" = 1 ] || die 'specify stock or candidate'
-		stock_head=9c096761ee7b9c12c1a5c3ef3f100bc27abccbbafb798a141aa4320eb81af25d
-		stock_tail=f8b53b4538913ccf2ac385d8bd87eb8ad689aa3f439222480a95d05c625ca4fe
-		case "$1" in
-		stock) head=$stock_head; tail=$stock_tail ;;
-		candidate)
-			head=12710135635beee2a5de1dd910924a3d2d26e09a6f368c191b879fd6b41a499b
-			tail=9acf222558a6766c4f1fcd09509a41cfd5be10d53f34a2a0f84a8cfe0a18c2f5 ;;
-		*) die 'specify stock or candidate' ;;
-		esac
-		umask 077
-		work=$(mktemp -d /run/piano-gpt.XXXXXX) || die 'cannot allocate RAM write directory'
-		trap 'rm -f "$work/head" "$work/tail" "$work/check"; rmdir "$work"; rmdir "$lock"' EXIT
-		cp "$P/gpt-head.bin" "$work/head" && cp "$P/gpt-tail.bin" "$work/tail" || die 'cannot stage GPT fragments'
-		check_hash() {
-			digest=$(sha256sum "$1") || die 'cannot hash GPT fragment'
-			[ "${digest%% *}" = "$2" ] || die "GPT hash mismatch: $3"
-		}
-		verify_region() {
-			dd if="/dev/$l" of="$work/check" bs=4096 iflag=direct skip="$1" count="$2" || die "GPT read failed at LBA $1"
-			check_hash "$work/check" "$3" "LBA $1"
-		}
-		check_hash "$work/head" "$head" 'staged primary'
-		check_hash "$work/tail" "$tail" 'staged backup'
-		if [ "$1" = candidate ]; then
-			verify_region 0 6 "$stock_head"
-			verify_region 124552187 5 "$stock_tail"
-		fi
-		dd if="$work/tail" of="/dev/$l" bs=4096 seek=124552187 conv=notrunc,fsync || die 'backup GPT write failed'
-		verify_region 124552187 5 "$tail"
-		dd if="$work/head" of="/dev/$l" bs=4096 conv=notrunc,fsync || die 'primary GPT write failed'
-		verify_region 0 6 "$head"
-		verify_region 124552187 5 "$tail"
-		verify_region 0 6 "$head"
-		printf 'gpt_written=%s\n' "$1"
-	fi
-	if [ "$cmd" = piano-309-gpt-readback ]; then
-		umask 077
-		work=$(mktemp -d /run/piano-gpt.XXXXXX) || die 'cannot allocate RAM readback directory'
-		trap 'rm -f "$work/primary" "$work/backup"; rmdir "$work"' EXIT
-		dd if="/dev/$l" of="$work/primary" bs=4096 iflag=direct count=6 || die 'cannot read primary GPT'
-		dd if="/dev/$l" of="$work/backup" bs=4096 iflag=direct skip=124552187 count=5 || die 'cannot read backup GPT'
-		[ "$(wc -c < "$work/primary")" -eq 24576 ] || die 'short primary GPT read'
-		[ "$(wc -c < "$work/backup")" -eq 20480 ] || die 'short backup GPT read'
-		primary=$(sha256sum "$work/primary") || die 'cannot hash primary GPT'
-		backup=$(sha256sum "$work/backup") || die 'cannot hash backup GPT'
-		printf 'primary_sha256=%s\nbackup_sha256=%s\n' "${primary%% *}" "${backup%% *}"
-	fi
-	echo "lun0=$l"
-	echo 'gpt_preflight=ready'
-	;;
-hash|hash-direct)
-	if [ "$cmd" = hash-direct ]; then
-		set -- "$1" "$2" "$3" "${4:-4096}" iflag=direct
-	else
-		sync; { echo 3 > /proc/sys/vm/drop_caches; } 2>/dev/null
-	fi
-	status=$(mktemp "$P/hash.XXXXXX") || die 'cannot create hash status file'
-	digest=$({ LC_ALL=C dd if="/dev/$1" bs="${4:-4096}" skip="$2" count="$3" ${5:+"$5"} 2> "$status" && printf '%s\n' 'read-ok' >> "$status"; } | sha256sum)
-	hash_rc=$?
-	records=$(awk '/^[0-9]+\+[0-9]+ records in$/ {print $1}' "$status")
-	read_status=$(tail -n 1 "$status")
-	rm -f "$status"
-	[ "$read_status" = read-ok ] && [ "$hash_rc" = 0 ] || die 'cannot hash requested device region'
-	[ "$records" = "$3+0" ] || die 'incomplete read of requested device region'
-	printf 'sha256=%s\n' "${digest%% *}"
+hash)   # from the medium: the page cache is dropped first
+	sync; { echo 3 > /proc/sys/vm/drop_caches; } 2>/dev/null
+	dd if="/dev/$1" bs="${4:-4096}" skip="$2" count="$3" 2>/dev/null | sha256sum | cut -d' ' -f1 | sed 's/^/sha256=/'
 	;;
 zero-sha)
 	dd if=/dev/zero bs="${2:-4096}" count="$1" 2>/dev/null | sha256sum | cut -d' ' -f1 | sed 's/^/sha256=/'
@@ -196,13 +107,6 @@ send)   # both statuses collected in files: the pipeline's own status would be n
 fetch)
 	rm -f "$P/$1"
 	wget -q -O "$P/$1" "http://$(host_ip):$3/$1" || die "wget $1"
-	got=$(sha256sum "$P/$1" | cut -d' ' -f1)
-	[ "$got" = "$2" ] || die "$1 sha256 $got, expected $2"
-	echo "fetched=$1 sha256=$got bytes=$(wc -c < "$P/$1")"
-	;;
-fetch-push)   # NAME SHA PORT: the host streams to a listening nc (the reverse of fetch; for hosts whose inbound HTTP is blocked)
-	rm -f "$P/$1"
-	busybox timeout 1800 busybox nc -l -p "$3" > "$P/$1" || die "nc $1"
 	got=$(sha256sum "$P/$1" | cut -d' ' -f1)
 	[ "$got" = "$2" ] || die "$1 sha256 $got, expected $2"
 	echo "fetched=$1 sha256=$got bytes=$(wc -c < "$P/$1")"
@@ -259,32 +163,6 @@ write)
 	dd if="$P/$1" of="/dev/$2" bs="$4" seek="$3" conv=notrunc,fsync 2>"$P/dd.err" || { cat "$P/dd.err"; die "dd write"; }
 	tail -1 "$P/dd.err"; echo "written=$1"
 	;;
-restore-bounded|restore-bounded-push)
-	# NAME DEV BLOCKS PORT. The caller qualifies geometry and verifies readback.
-	[ "$#" = 4 ] || die 'restore-bounded requires NAME DEV BLOCKS PORT'
-	case "$2" in ''|*[!a-zA-Z0-9_-]*) die 'invalid target name' ;; esac
-	case "$3" in ''|0*|*[!0-9]*) die 'invalid block count' ;; esac
-	[ -b "$DEV/$2" ] || die 'target is not a block device'
-	work=$(mktemp -d "$P/restore.XXXXXX") || die 'cannot allocate restore status directory'
-	lock="$P/restore-bounded.$2.lock"
-	if ! mkdir "$lock"; then
-		rmdir "$work"
-		die 'bounded write already active or target lock unavailable'
-	fi
-	trap 'rm -f "$work/wget.rc" "$work/dd.err"; rmdir "$work" "$lock"' EXIT
-	{
-		if [ "$cmd" = restore-bounded-push ]; then
-			busybox timeout 14400 busybox nc -l -p "$4" </dev/null || echo $? > "$work/wget.rc"
-		else
-			wget -q -O - "http://$(host_ip):$4/$1" || echo $? > "$work/wget.rc"
-		fi
-	} |
-		LC_ALL=C dd of="$DEV/$2" bs=4096 iflag=fullblock count="$3" conv=notrunc,fsync 2>"$work/dd.err" ||
-		{ cat "$work/dd.err"; die 'bounded write failed'; }
-	[ ! -s "$work/wget.rc" ] || die 'bounded transfer failed'
-	[ "$(awk '/records out$/ {print $1}' "$work/dd.err")" = "$3+0" ] || die 'short bounded write'
-	echo "restored=$1"
-	;;
 restore)
 	rm -f "$P/wget.rc"
 	{ wget -q -O - "http://$(host_ip):$5/$1" || echo $? > "$P/wget.rc"; } | dd of="/dev/$2" bs="$4" seek="$3" conv=notrunc,fsync 2>"$P/dd.err" || { cat "$P/dd.err"; die "restore $1: dd"; }
@@ -335,6 +213,6 @@ zero)
 	tail -1 "$P/dd.err"; echo "zeroed=$1 bytes=$bytes"
 	;;
 *)
-	die "usage: tablet.sh map|hash|zero-sha|peek|send|fetch|file-sha|copy|copy-list|hash-list|send-list|restore-list|write|restore|restore-bounded|job|job-status|drop-caches|rereadpt|discard-info|discard|zero"
+	die "usage: tablet.sh map|hash|zero-sha|peek|send|fetch|file-sha|copy|copy-list|hash-list|send-list|restore-list|write|restore|job|job-status|drop-caches|rereadpt|discard-info|discard|zero"
 	;;
 esac

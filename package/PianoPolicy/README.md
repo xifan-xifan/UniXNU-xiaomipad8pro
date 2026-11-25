@@ -11,6 +11,9 @@ tests, then the objects); it is in configs/k27-native-kexts.txt.
 | `PianoPolicy.cpp` | the IOService on IOPlatformExpertDevice: inputs, the thread, actions, platform functions, `machdep.piano_policy*` |
 | `Policy.h` | portable: the rules, the order of the root domain's notifications, the GPU ceiling: client 1 of PianoA830's slots, or the slot shared with PianoThermal when PianoA830 has none |
 | `tests/policy_host.cpp` | host tests (every cover x power x display x Low Power Mode x sleep combination, the sequences, the profile through PianoThermal's `Governor.h` to its CPU caps) |
+| `AppleSmc.cpp` | the AppleSMC stand-in (docs/policy.md §12): `AppleSMC` on IOResources (its own personality, inert without `piano-smc`) and its user client `AppleSMCClient`; only `MSHP` = 1 (macOS then offers the Energy Mode picker), every other key not found; `machdep.piano_smc` |
+| `Smc.h` | portable: the parameter structure's fields and the answers |
+| `tests/smc_host.cpp` | host tests: IOKit's and powerd's call sequences (80 and 168 bytes), writes, refused sizes, `MSHP` off, client types |
 
 The userland half (Low Power Mode, the lock on a cover closed on power): `tooling/native/piano-policy-agent/`.
 

@@ -97,6 +97,13 @@ void ar_speaker_defaults(ArSpeakerPlan *p);
  *   attribute 1), in the order Ubuntu's VA macro enables them; released in reverse */
 const ArStep *ar_clock_steps(unsigned *count);
 const ArStep *ar_va_steps(unsigned *count);
+/* duplex-hold1 (2026-11-21, private DUPLEX-VOTES.txt): the VA clocks held for both live paths by a plan of their own. mask: the
+ * shared prefix that plan holds, AR_HOLD_VOTES (the two votes) or AR_HOLD_VOTES | AR_HOLD_MCLK (the votes and the mclk), in
+ * ar_va_steps' order; null and 0 steps for any other mask. */
+#define AR_HOLD_VOTES 1u
+#define AR_HOLD_MCLK 2u
+int ar_hold_valid(int mask);   /* 1 for 0, AR_HOLD_VOTES or AR_HOLD_VOTES | AR_HOLD_MCLK */
+const ArStep *ar_va_hold_steps(unsigned mask, unsigned *count);
 
 /* ---- the microphone plan: the VA clocks (as ar_va_steps), the mic device graph (VA TX0 codec DMA, logger) and the capture stream
  * (logger, MFC, converter, encoder, RD_SH) opened and configured, the capture buffer mapped, both prepared, both started; undone in
@@ -119,6 +126,9 @@ const ArStep *ar_mic_steps(unsigned *count, unsigned *prepared);
 /* Level 10's capture plan: ar_mic_steps' fourteen commands with the VA macro's DMIC path (va_on / va_off, a local step) between
  * "prepare capture" and "start mic device". */
 const ArStep *ar_mic_live_steps(unsigned *count);
+/* The same plan without the prefix a duplex-hold plan holds (ar_va_hold_steps' mask): the mclk alone first (AR_HOLD_VOTES), or
+ * no PRM step at all (AR_HOLD_VOTES | AR_HOLD_MCLK); mask 0 is ar_mic_live_steps. Null and 0 steps for an invalid mask. */
+const ArStep *ar_mic_live_steps_held(unsigned mask, unsigned *count);
 void ar_mic_defaults(ArMicPlan *p);
 
 /* ---- the period pump: a running stream keeps up to `depth` periods queued at the DSP, each slot of the mapped buffer written by the

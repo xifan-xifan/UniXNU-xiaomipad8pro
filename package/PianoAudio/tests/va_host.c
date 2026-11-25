@@ -18,6 +18,7 @@ struct Model {
     uint64_t log_at[512];
     unsigned writes;
     uint64_t now_us;
+    int bad_mux;       // DEC0 selector write is refused
     int dead_clock;    // MCLK enable does not stick
     int bad_offset;
 };
@@ -34,12 +35,14 @@ static void wr(void *ctx, uint32_t off, uint32_t v)
     (void)ctx;
     if (off >= 0x1000 || off % 4) {m.bad_offset = 1; return;}
     if (off == VA_MCLK_CONTROL && m.dead_clock) v &= ~1u;
+    if (off == VA_ADC_MUX0_CFG0 && m.bad_mux) v &= ~0xf0u;
     m.reg[off / 4] = v;
     if (m.writes < 512) {m.log_off[m.writes] = off; m.log_val[m.writes] = v; m.log_at[m.writes] = m.now_us;}
     m.writes++;
 }
 static void sl(void *ctx, uint32_t us) {(void)ctx; m.now_us += us;}
 static const AudioVaIo io = {0, rd, wr, sl};
+static AudioVaReadback rb;
 
 static void reset_model(void)
 {
@@ -69,7 +72,7 @@ static int last_write(uint32_t off)
 static void testOn(void)
 {
     reset_model();
-    CHECK(audio_va_on(&io, AUDIO_VA_GAIN_DEFAULT) == 0 && !m.bad_offset);
+    CHECK(audio_va_on(&io, AUDIO_VA_GAIN_DEFAULT, -1, &rb) == 0 && !m.bad_offset);
     // the final state
     CHECK((m.reg[VA_MCLK_CONTROL / 4] & 1) && (m.reg[VA_FS_CNT_CONTROL / 4] & 3) == 1 && (m.reg[VA_TOP_CFG0 / 4] & 2));
     CHECK(m.reg[VA_DMIC01_CTL / 4] == 0x05 && m.reg[VA_DMIC23_CTL / 4] == 0x05 && !(m.reg[VA_DMIC_CFG / 4] & 0x80));
@@ -108,9 +111,9 @@ static void testOn(void)
 static void testOff(void)
 {
     reset_model();
-    CHECK(audio_va_on(&io, AUDIO_VA_GAIN_DEFAULT) == 0);
+    CHECK(audio_va_on(&io, AUDIO_VA_GAIN_DEFAULT, -1, &rb) == 0);
     const unsigned from = m.writes;
-    audio_va_off(&io);
+    CHECK(audio_va_off(&io, -1, &rb) == 0);
     CHECK(!m.bad_offset);
     // muted first, the DMIC clocks stopped next, the macro's clock last
     CHECK(m.log_off[from] == VA_TX_CTL(0) && (m.log_val[from] & 0x10) && m.log_off[from + 1] == VA_TX_CTL(1) && (m.log_val[from + 1] & 0x10));
@@ -125,7 +128,7 @@ static void testDeadClock(void)
 {
     reset_model();
     m.dead_clock = 1;
-    CHECK(audio_va_on(&io, AUDIO_VA_GAIN_DEFAULT) == -1);
+    CHECK(audio_va_on(&io, AUDIO_VA_GAIN_DEFAULT, -1, &rb) == -1);
     // nothing but the clock's enable and its undo
     for (unsigned i = 0; i < m.writes; ++i)
         CHECK(m.log_off[i] == VA_MCLK_CONTROL || m.log_off[i] == VA_FS_CNT_CONTROL || m.log_off[i] == VA_TOP_CFG0);
@@ -137,13 +140,93 @@ static void testGainAndPins(void)
     CHECK(audio_va_gain_register(124) == 0x28 && audio_va_gain_register(84) == 0x00 && audio_va_gain_register(0) == 0xac);
     CHECK(audio_va_gain_register(200) == 0x28 && audio_va_gain_register(100) == 0x10);
     reset_model();
-    CHECK(audio_va_on(&io, 100) == 0 && m.reg[VA_TX_VOL(0) / 4] == 0x10 && m.reg[VA_TX_VOL(1) / 4] == 0x10);
-    const AudioVaPin *p = audio_va_pins();
-    CHECK(p[0].gpio == 6 && p[0].cfg == 0x244 && p[0].value == 2 && p[0].drive);
-    CHECK(p[1].gpio == 7 && p[1].cfg == 0x044 && !p[1].drive);
-    CHECK(p[2].gpio == 8 && p[2].cfg == 0x244 && p[2].value == 2 && p[2].drive);
-    CHECK(p[3].gpio == 9 && p[3].cfg == 0x044 && !p[3].drive);
-    for (unsigned i = 0; i < AUDIO_VA_PINS; ++i) CHECK((p[i].cfg >> 2 & 0xf) == 1 && (p[i].cfg >> 6 & 7) == 1 && (p[i].cfg & 3) == 0);
+    CHECK(audio_va_on(&io, 100, -1, &rb) == 0 && m.reg[VA_TX_VOL(0) / 4] == 0x10 && m.reg[VA_TX_VOL(1) / 4] == 0x10);
+}
+
+static void testRoutes(void)
+{
+    const char *valid[] = {"-1", "0", "2", "4", "6"};
+    const int wanted[] = {-1, 0, 2, 4, 6};
+    for (unsigned i = 0; i < sizeof valid / sizeof *valid; ++i) {
+        int route = -99;
+        CHECK(audio_mic_route_parse(valid[i], &route) && route == wanted[i]);
+    }
+    const char *invalid[] = {"", "-", "1", "-0", "-2", "3", "4294967300", "4x", "04", "6 "};
+    for (unsigned i = 0; i < sizeof invalid / sizeof *invalid; ++i) {
+        int route = -99;
+        CHECK(!audio_mic_route_parse(invalid[i], &route) && route == -99);
+    }
+    static const struct {
+        int route;
+        unsigned mux, mask, count, gpio[4];
+    } cases[] = {
+        {-1, 0x10, 3, 4, {6, 7, 8, 9}}, {0, 0x10, 3, 4, {6, 7, 8, 9}},
+        {2, 0x30, 2, 2, {8, 9}}, {4, 0x50, 6, 4, {8, 9, 12, 13}}, {6, 0x70, 10, 4, {8, 9, 17, 18}},
+    };
+    for (unsigned i = 0; i < sizeof cases / sizeof *cases; ++i) {
+        reset_model();
+        AudioVaPin pins[AUDIO_VA_PINS];
+        CHECK(audio_va_pair_mask(cases[i].route) == cases[i].mask);
+        CHECK(audio_va_pins(cases[i].route, pins) == cases[i].count);
+        for (unsigned j = 0; j < cases[i].count; ++j) {
+            CHECK(pins[j].gpio == cases[i].gpio[j] && pins[j].drive == !(j % 2));
+            CHECK(pins[j].cfg == (j % 2 ? 0x044u : 0x244u));
+        }
+        for (unsigned pair = 0; pair < 4; ++pair)
+            m.reg[(VA_DMIC01_CTL + 4 * pair) / 4] = cases[i].mask & (1u << pair) ? 0x100 : 0x109;
+        CHECK(audio_va_on(&io, 124, cases[i].route, &rb) == 0);
+        CHECK(rb.mux[0] == cases[i].mux && rb.mux[1] == 0x30);
+        CHECK(audio_va_off(&io, cases[i].route, &rb) == 0);
+        CHECK(rb.mux[0] == 0 && rb.mux[1] == 0);
+        for (unsigned pair = 0; pair < 4; ++pair) {
+            const unsigned ctl = VA_DMIC01_CTL + 4 * pair;
+            const int owned = (cases[i].mask >> pair) & 1;
+            const int enable = find(0, ctl, 0xf, 5);
+            CHECK(rb.ctl[pair] == (owned ? 0x100 : 0x109));
+            if (owned) {
+                CHECK(enable >= 0 && find((unsigned)enable + 1, ctl, 0xf, 5) < 0);
+            } else CHECK(last_write(ctl) < 0);
+        }
+    }
+    reset_model();
+    AudioVaPin pins[AUDIO_VA_PINS];
+    CHECK(audio_va_pins(3, pins) == 0 && audio_va_on(&io, 124, 3, &rb) == -1);
+    CHECK(audio_va_off(&io, 3, &rb) == -1 && m.writes == 0);
+    m.bad_mux = 1;
+    CHECK(audio_va_on(&io, 124, 4, &rb) == -2);
+    CHECK(rb.mux[0] == 0 && rb.mux[1] == 0x30 && rb.ctl[2] == 5);
+    CHECK(m.reg[VA_DMIC23_CTL / 4] == 0 && m.reg[VA_DMIC45_CTL / 4] == 0 && m.reg[VA_MCLK_CONTROL / 4] == 0);
+}
+
+static uint32_t pin_regs[4][2];
+static uint32_t pin_read(void *ctx, unsigned pin, unsigned off)
+{
+    (void)ctx;
+    return pin_regs[pin][off / 4];
+}
+static void pin_write(void *ctx, unsigned pin, unsigned off, uint32_t value)
+{
+    if (ctx && pin == 1 && !off && value == 0x044) return;
+    pin_regs[pin][off / 4] = value;
+}
+
+static void testRestore(void)
+{
+    for (unsigned fail = 0; fail < 2; ++fail) {
+        AudioVaPinIo pin_io = {fail ? &m : NULL, pin_read, pin_write};
+        AudioVaPin pins[AUDIO_VA_PINS];
+        AudioVaPinState state[AUDIO_VA_PINS];
+        const unsigned count = audio_va_pins(4, pins);
+        for (unsigned i = 0; i < count; ++i) {
+            pin_regs[i][0] = 0x300 + i;
+            pin_regs[i][1] = i % 2 ? 2 : 0;
+        }
+        CHECK(audio_va_pin_apply(&pin_io, pins, state, count) == fail);
+        CHECK(state[0].value == 2 && state[2].value == 2 && state[3].cfg == 0x044);
+        CHECK(audio_va_pin_restore(&pin_io, state, count) == 0);
+        for (unsigned i = 0; i < count; ++i)
+            CHECK(pin_regs[i][0] == 0x300 + i && pin_regs[i][1] == (i % 2 ? 2u : 0u));
+    }
 }
 
 int main(void)
@@ -152,6 +235,8 @@ int main(void)
     testOff();
     testDeadClock();
     testGainAndPins();
+    testRoutes();
+    testRestore();
     printf("PASS va: %u checks\n", checks);
     return 0;
 }

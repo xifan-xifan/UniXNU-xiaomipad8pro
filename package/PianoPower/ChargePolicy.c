@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-2-Clause-Patent */
 /* The charging policy (ChargePolicy.h; docs/drivers/charging-policy.md). Written fresh from the behaviour and the numbers of the
  * Ubuntu history pages and the GPL xiaomi_mca driver read as a specification; no code taken. */
+#include "ChargePumpSession.h"   /* charge/cp-sess: the glue at the end of this file */
 #include "ChargePolicy.h"
 
 #define ONLINE_MV 4000           /* a bus above 4 V: a source is attached */
@@ -17,6 +18,9 @@
 #define HV_FIXED_MIN_MA 100u
 #define HV_PPS_MIN_MA 500u
 #define HV_PPS_MAX_MA 3000u
+#define NOTIFY_HOLD_MS 3000u      /* T-14b: a UCSI notification in flight younger than this holds the limits in force, */
+#define NOTIFY_HOLD_MAX 3u        /* for at most this many decisions in a row; then the contract counts as lost */
+#define HV_PD_ROW_MA 1600u       /* stock in_pd: a fixed 9 V PD source's input row; above it only with T-14 9 V's connector rule */
 #define FCC_TBAT_MIN 15
 #define FCC_DERATE_FROM 48
 #define FCC_DERATE_STEP 300u
@@ -47,7 +51,7 @@
 #define RP_QUICK_MS 30000u
 #define RP_STRIKES 2
 /* The stepped Rp limit (cfg.ramp, docs/drivers/charging-policy.md §15): with that limiting off, the policy finds what the source
- * and the cable hold by itself, one step at a time, demand-driven, and remembers for the boot where they did not. 2026-11-12 on the
+ * and the cable hold by itself, one step at a time, demand-driven, with a bounded cool-down after a failed step. 2026-11-12 on the
  * Mac's port (CDP, Rp 3.0 A): 900 mA in -> the bus at 5.05 V and 897 mA, 1600 mA in -> 4.89 V and 1594 mA (about 0.21 Ohm from
  * the source to the charger), so 3 A would leave about 4.6 V. */
 #define RAMP_HOLD_MS 10000u      /* a step taken is held this long, */
@@ -98,7 +102,12 @@ static uint32_t rp_cap(const PianoChargeConfig *c)
 {
     return ramped(c) && c->rp_cap_ma ? umin(c->rp_cap_ma, PIANO_CHG_RP_ABS_MAX) : icl_cap(c);
 }
-uint32_t piano_charge_icl_max(const PianoChargeConfig *c) {return umax(icl_cap(c), ramped(c) ? rp_cap(c) : 0);}
+/* cfg.hv_caps (charge/pd1): the stock 9 V rows at a validated 9 V contract, only in the strict session */
+static int hv_caps(const PianoChargeConfig *c) {return c->strict_contract && c->hv_caps;}
+uint32_t piano_charge_icl_max(const PianoChargeConfig *c)
+{
+    return umax(umax(icl_cap(c), ramped(c) ? rp_cap(c) : 0), hv_caps(c) ? PIANO_CHG_ICL_ABS_MAX : 0);
+}
 
 /* ---------------------------------------------------------------------------------------------------------------- configuration */
 void piano_charge_config_default(PianoChargeConfig *c)
@@ -213,6 +222,14 @@ int piano_charge_is_qc3(int32_t type)
     return type == PIANO_CHG_T_HVDCP3 || type == PIANO_CHG_T_HVDCP3_B || type == PIANO_CHG_T_HVDCP3P5;
 }
 
+int piano_charge_is_qc(int32_t type) {return type == PIANO_CHG_T_HVDCP || piano_charge_is_qc3(type);}
+/* stock qc2 / qc3 9 V rows (the Ubuntu port's xiaomi_mca hv limits, read as a specification) */
+uint32_t piano_charge_qc_icl_9v(int32_t type) {return type == PIANO_CHG_T_HVDCP ? 1200u : piano_charge_is_qc3(type) ? 1600u : 0u;}
+uint32_t piano_charge_qc_fcc_9v(int32_t type)
+{
+    return type == PIANO_CHG_T_HVDCP ? 2600u : piano_charge_is_qc3(type) ? PIANO_CHG_FCC_ABS_MAX : 0u;
+}
+
 uint32_t piano_charge_fcc_full(int cls, int hv_on)
 {
     switch (cls) {
@@ -313,15 +330,20 @@ int piano_charge_write_allowed(const PianoChargeConfig *c, uint32_t property, ui
 {
     switch (property) {
     case PIANO_CHG_ENABLE: return bytes == 1 && value <= 1;
-    case PIANO_CHG_FCC: return bytes == 4 && value >= 100 && value <= (c->strict_contract ? umin(fcc_cap(c),1500) : fcc_cap(c));
+    case PIANO_CHG_FCC:
+        return bytes == 4 && value >= 100 &&
+               value <= (hv_caps(c) ? PIANO_CHG_FCC_ABS_MAX : c->strict_contract ? umin(fcc_cap(c),1500) : fcc_cap(c));
     case PIANO_CHG_ICL: return bytes == 4 && value >= PIANO_CHG_ICL_DEFAULT && value <= piano_charge_icl_max(c);
     case PIANO_CHG_FV:
-        return bytes == 4 && (value == PIANO_CHG_FV_DEFAULT || (c->full_charge && !c->strict_contract && (value == PIANO_CHG_FV_FULL || value == PIANO_CHG_FV_HOT)));
+        return bytes == 4 && (value == PIANO_CHG_FV_DEFAULT ||
+                              (c->full_charge && !c->strict_contract && (value == PIANO_CHG_FV_FULL || value == PIANO_CHG_FV_HOT)) ||
+                              (c->fv_hot && c->strict_contract && value == PIANO_CHG_FV_HOT));
     case PIANO_CHG_PD_FIXED: return bytes == 4 && (value == 5000 || (c->hv && value == HV_MV));
-    case PIANO_CHG_QC_VOLT: return bytes == 4 && c->qc3 && (value == 5000 || value == HV_MV);
+    case PIANO_CHG_QC_VOLT: return bytes == 4 && (c->qc3 || (c->qc && c->strict_contract)) && (value == 5000 || value == HV_MV);
     case PIANO_CHG_PPS: {
         const uint32_t mv = (value >> 16) * 20, ma = (value & 0xffffu) * 50;
-        return bytes == 4 && c->hv >= 2 && mv == HV_MV && ma >= HV_PPS_MIN_MA && ma <= HV_PPS_MAX_MA;
+        return bytes == 4 && (c->hv >= 2 || (c->hv && c->hv_order && c->strict_contract)) && mv == HV_MV &&
+               ma >= HV_PPS_MIN_MA && ma <= HV_PPS_MAX_MA;
     }
     default: return 0;
     }
@@ -334,7 +356,7 @@ static int slot_of(uint32_t property)
     case PIANO_CHG_ENABLE: return PIANO_CHG_S_ENABLE;
     case PIANO_CHG_FCC: return PIANO_CHG_S_FCC;
     case PIANO_CHG_ICL: return PIANO_CHG_S_ICL;
-    case PIANO_CHG_PD_FIXED: case PIANO_CHG_PPS: return PIANO_CHG_S_VOLT;
+    case PIANO_CHG_PD_FIXED: case PIANO_CHG_PPS: case PIANO_CHG_QC_VOLT: return PIANO_CHG_S_VOLT;   /* QC: charge/pd1 */
     case PIANO_CHG_FV: return PIANO_CHG_S_FV;
     default: return -1;
     }
@@ -396,7 +418,7 @@ static void forget(PianoChargeState *s, uint64_t now)
     s->wedge_checks = 0;
     s->wedge_since_ms = 0;
     s->rp_taken_ms = 0;   /* the trust itself and its strikes are about the source and stay */
-    ramp_restart(s);      /* the steps start again from the row; this boot's ceiling is about the source and stays */
+    ramp_restart(s);      /* start from the row; the failed step's ceiling and retry deadline stay */
     kick_reset(s, 1);     /* a stop of the restart that may be in force is s->disabled's: lifted by the enable's rules */
 }
 
@@ -485,6 +507,13 @@ static void want_volt(PianoChargeState *s, uint32_t property, uint32_t value)
 {
     s->volt_want_prop = property;
     s->volt_want_value = value;
+}
+
+/* The 5 V request of the session in force: 0x2011 for a QC source (cfg.qc), vSafe5V (0x21018) otherwise. */
+static uint32_t withdraw_prop(const PianoChargeState *s)
+{
+    return s->hv_qc || s->volt_set_prop == PIANO_CHG_QC_VOLT || s->volt_want_prop == PIANO_CHG_QC_VOLT ? PIANO_CHG_QC_VOLT
+                                                                                                       : PIANO_CHG_PD_FIXED;
 }
 
 static void want_5v(PianoChargeState *s)
@@ -577,6 +606,31 @@ static int conn_allows_rp(const PianoChargeInput *in, const PianoChargeState *s)
     return !s->conn_hot && (v1 || v2) && (!v1 || c1 < CONN_COOL_C) && (!v2 || c2 < CONN_COOL_C);
 }
 
+static int strict_contract(const PianoChargeInput *in);
+
+/* T-14 (owner 2026-11-23 18:45/18:47): with a 9 V mode (hv 1/2) the 5 V contract budget too, but only once this source is
+ * settled at 5 V: the 9 V request asked and not reached (BLOCKED: 5 V until a detach), no 9 V object (SOURCE), or the health
+ * stop (HEALTH). Never while a 9 V request may still be planned (OFF before its wait, a retry), asked or in force: the barrier's
+ * reduced currents then come first. Mode 0 as before. */
+static int hv_settled_5v(const PianoChargeConfig *c, const PianoChargeState *s, uint8_t fallback)
+{
+    if (!c->hv) return 1;
+    if (s->hv == PIANO_CHG_HV_BLOCKED) return 1;
+    return s->hv == PIANO_CHG_HV_OFF && (fallback == PIANO_CHG_FALLBACK_SOURCE || fallback == PIANO_CHG_FALLBACK_HEALTH);
+}
+
+/* At fixed 5 V the selected RDO, rather than an MCA offer or Rp, authorizes PD current. Keep the same opt-in ceiling,
+ * connector check and measured steps as the non-PD path. Voltage withdrawal must finish before this budget is used. */
+static uint32_t contract_5v_budget(const PianoChargeConfig *c, const PianoChargeInput *in, const PianoChargeState *s,
+                                   uint8_t fallback)
+{
+    if (!c->strict_contract || !hv_settled_5v(c, s, fallback) || !ramped(c) || !strict_contract(in) ||
+        !(in->valid & PIANO_CHG_IN_SOURCE) || in->contract_protocol != 1 || in->contract_mv != 5000 ||
+        !(in->valid & PIANO_CHG_IN_BUS) || in->bus_mv < ONLINE_MV || in->bus_mv >= HV_5V_MAX_MV ||
+        s->contract_transition || s->contract_mode_change || volt_raised(s)) return 0;
+    return umin(in->contract_ma, rp_cap(c));
+}
+
 /* The 5 V input limit of a class: its row (a PD source's 5 V offer), or with cfg.rp (and with_rp) the Type-C current. */
 static uint32_t icl_at_5v(const PianoChargeConfig *c, const PianoChargeInput *in, PianoChargeState *s, PianoChargePlan *p, int cls,
                           int with_rp)
@@ -585,6 +639,11 @@ static uint32_t icl_at_5v(const PianoChargeConfig *c, const PianoChargeInput *in
     const uint32_t row = umin(piano_charge_icl_5v(cls, piano_charge_pdo_5v_ma(in->pdo, pdos)), icl_cap(c));
     p->icl_why = PIANO_CHG_ICL_ROW;
     p->rp_ma = 0;
+    const uint32_t contract_ma = with_rp && is_pd(cls) ? contract_5v_budget(c, in, s, p->fallback) : 0;
+    if (contract_ma > row) {
+        const uint32_t target = conn_allows_rp(in, s) ? contract_ma : umin(contract_ma, RAMP_BC12_MA);
+        if (target > row) {p->icl_why = PIANO_CHG_ICL_CONTRACT_5V; return target;}
+    }
     if (!with_rp || !c->rp || s->rp_distrust || !(in->valid & PIANO_CHG_IN_TYPEC) || !in->typec_source) return row;
     uint32_t rp = piano_charge_icl_rp(cls, row, in->rp_ma, rp_cap(c));
     if (rp <= row) return row;
@@ -608,14 +667,15 @@ static void ramp_wait(PianoChargeState *s, PianoChargePlan *p, uint8_t wait)
     if (!(s->ramp_waits_shown & bit)) {s->ramp_waits_shown |= bit; p->events |= PIANO_CHG_EV_RAMP_WAIT;}
 }
 
-/* One step back from the step wanted now, and that is the ceiling for the rest of the boot (it only goes down). */
-static void ramp_back(PianoChargeState *s, PianoChargePlan *p, uint8_t why, int32_t bus_mv)
+/* One step back immediately. A boot-time transient must not pin this source for the rest of the boot. */
+static void ramp_back(PianoChargeState *s, PianoChargePlan *p, uint8_t why, int32_t bus_mv, uint64_t now)
 {
     const uint32_t back = piano_charge_ramp_back(s->ramp_ma, s->ramp_row_ma);
     s->ramp_back_why = why;
     s->ramp_back_from_ma = s->ramp_ma;
     s->ramp_back_mv = bus_mv;
     if (!s->ramp_ceiling_ma || back < s->ramp_ceiling_ma) s->ramp_ceiling_ma = back;
+    s->ramp_retry_ms = now + PIANO_CHG_RAMP_RETRY_MS;
     s->ramp_ma = back;
     s->ramp_step_ms = 0;
     s->ramp_decisions = 0;
@@ -632,11 +692,19 @@ static void ramp_back(PianoChargeState *s, PianoChargePlan *p, uint8_t why, int3
  * RAMP_UP_MV under it and the bus current is within max(100 mA, an eighth) of the limit it is held to (the step, or the firmware's
  * own 0x2029 once that has settled below the step: 1750-1800 under 2000 on the Mac's port, chg-ramp): the system and the battery
  * take what it gives, so more is of use, and the source has just shown it holds this much. A lower target applies at once. A sag
- * below RP_SAG_MV under a step above the row, or the firmware refusing a step three times: one step back and this boot's ceiling (a
- * quick detach: in detached()). Returns the input limit to plan. */
+ * below RP_SAG_MV under a step above the row, or the firmware refusing a step three times: one step back and a temporary ceiling (a
+ * quick detach: in detached()). After the cool-down the same guards authorize each retry. Returns the input limit to plan. */
 static uint32_t ramp(const PianoChargeInput *in, PianoChargeState *s, PianoChargePlan *p, uint64_t now, uint32_t row,
                      uint32_t target)
 {
+    if (s->ramp_ceiling_ma && now >= s->ramp_retry_ms) {
+        s->ramp_ceiling_ma = 0;
+        s->ramp_retry_ms = 0;
+        s->ramp_waits_shown = 0;
+        /* A refused higher value may still own want[] while the lower value was already taken: plan_icl returned without a
+         * new write. Give only the input slot a new bounded attempt; keep ACK state and pending writes intact. */
+        s->tries[PIANO_CHG_S_ICL] = s->mismatch[PIANO_CHG_S_ICL] = s->rewrites[PIANO_CHG_S_ICL] = 0;
+    }
     p->ramp_target_ma = target;
     p->ramp_ceiling_ma = s->ramp_ceiling_ma;
     if (s->ramp_ceiling_ma && target > s->ramp_ceiling_ma) target = umax(s->ramp_ceiling_ma, row);
@@ -646,7 +714,7 @@ static uint32_t ramp(const PianoChargeInput *in, PianoChargeState *s, PianoCharg
         s->ramp_ma = row;
         s->ramp_taken_ms = s->ramp_step_ms = 0;
         p->ramp_ma = row;
-        ramp_wait(s, p, PIANO_CHG_RAMP_TOP);
+        ramp_wait(s, p, s->ramp_ceiling_ma ? PIANO_CHG_RAMP_COOLING : PIANO_CHG_RAMP_TOP);
         return row;
     }
     if (s->ramp_ma < row) {s->ramp_ma = row; ramp_moved(s);}      /* the start (or a higher row) */
@@ -667,14 +735,14 @@ static uint32_t ramp(const PianoChargeInput *in, PianoChargeState *s, PianoCharg
         const int sag = taken && (in->valid & PIANO_CHG_IN_BUS) && in->bus_mv < RP_SAG_MV;
         const int refused = !taken && s->want[PIANO_CHG_S_ICL] == s->ramp_ma && s->tries[PIANO_CHG_S_ICL] >= TRIES;
         if (sag || refused) {
-            ramp_back(s, p, sag ? PIANO_CHG_BACK_SAG : PIANO_CHG_BACK_REFUSED, in->bus_mv);
+            ramp_back(s, p, sag ? PIANO_CHG_BACK_SAG : PIANO_CHG_BACK_REFUSED, in->bus_mv, now);
             p->ramp_ma = s->ramp_ma;
             p->ramp_wait = PIANO_CHG_RAMP_WRITING;
             return s->ramp_ma;
         }
     }
     uint8_t wait;
-    if (s->ramp_ma >= target) wait = PIANO_CHG_RAMP_TOP;
+    if (s->ramp_ma >= target) wait = s->ramp_ceiling_ma ? PIANO_CHG_RAMP_COOLING : PIANO_CHG_RAMP_TOP;
     else if (!taken) wait = PIANO_CHG_RAMP_WRITING;
     else if (now < s->ramp_taken_ms + RAMP_HOLD_MS || s->ramp_decisions < RAMP_HOLD_DECISIONS) wait = PIANO_CHG_RAMP_HOLDING;
     else if (!(in->valid & PIANO_CHG_IN_BUS) || in->bus_mv < RAMP_UP_MV) wait = PIANO_CHG_RAMP_BUS_LOW;
@@ -713,6 +781,36 @@ static int gauge_fresh(const PianoChargeInput *in, uint64_t now)
 }
 
 /* Current UCSI session authorization. Source advertisements alone never authorize draw. */
+static int strict_contract(const PianoChargeInput *in);
+static int gauge_fresh(const PianoChargeInput *in, uint64_t now);
+
+/* T-14b (owner 2026-11-23 19:25, live y10 reads 19:26/19:32): a UCSI notification also reports the completion of our own periodic
+ * status GET, and the contract is withheld from the input until its CCI read resolves it (ChargeContract.h, ChargeLink::fill). A
+ * decision in that window used to count as "no contract": ICL 100 / FCC 500 (the notify-observing transition and the PD clamp),
+ * and the next fresh snapshot armed the recheck barrier (ICL/FCC 500, fallback READBACK) - every cycle on a steady 9 V contract,
+ * with the firmware's input walk restarting from 100 mA each time. Such a decision now holds the limits in force when everything
+ * else is steady: the last decision had a valid contract, the notification is young and not repeated past NOTIFY_HOLD_MAX, no
+ * transition, mode change or voltage write is under way, the bus is where the session is (8.0-9.6 V at 9 V, below 6 V at 5 V),
+ * the gauges are fresh and LPD/DTPT are clear. Nothing goes up in a hold; the board holds and a stop still go down. */
+static int notify_hold(const PianoChargeConfig *c, const PianoChargeInput *in, const PianoChargeState *s, uint64_t now,
+                       int charge_ok)
+{
+    /* the burst's first notification bounds the hold (a renewed notify_ms never extends it; strict_hv's 5 s bound counts from it
+     * too); a stop of any kind is no steady state: the normal path ends the session */
+    const uint64_t since = s->contract_notify_seen && s->contract_notify_since < in->contract_notify_ms ? s->contract_notify_since
+                                                                                                       : in->contract_notify_ms;
+    if (!charge_ok || !c->strict_contract || !in->contract_notify_pending || (in->valid & PIANO_CHG_IN_CONTRACT) || !s->contract_ok ||
+        !s->attached || !s->icl_set || !s->fcc_set || s->notify_holds >= NOTIFY_HOLD_MAX ||
+        s->contract_transition || s->contract_mode_change || s->contract_recheck || (s->pending & (1u << PIANO_CHG_S_VOLT)) ||
+        now < since || now - since >= NOTIFY_HOLD_MS || !(in->valid & PIANO_CHG_IN_BUS) ||
+        !gauge_fresh(in, now) ||
+        (in->safety & (PIANO_CHG_SAFE_LPD_DRY | PIANO_CHG_SAFE_DTPT)) != (PIANO_CHG_SAFE_LPD_DRY | PIANO_CHG_SAFE_DTPT) ||
+        ((in->valid & PIANO_CHG_IN_TYPE) && in->type != s->type)) return 0;
+    if (s->hv == PIANO_CHG_HV_ON) return in->bus_mv >= HV_MIN_MV && in->bus_mv <= HV_MAX_MV;
+    return (s->hv == PIANO_CHG_HV_OFF || s->hv == PIANO_CHG_HV_BLOCKED) && !volt_raised(s) &&
+           in->bus_mv >= ONLINE_MV && in->bus_mv < HV_5V_MAX_MV;
+}
+
 static int strict_contract(const PianoChargeInput *in)
 {
     return (in->valid & PIANO_CHG_IN_CONTRACT) && !in->contract_notify_pending && in->contract_generation &&
@@ -751,7 +849,8 @@ static void strict_fallback(const PianoChargeInput *in, PianoChargeState *s, Pia
     if (strict_contract(in)) s->transition_ma = umin(s->transition_ma, in->contract_ma);
     if (!strict_contract(in)) s->transition_ma = PIANO_CHG_ICL_DEFAULT;
     if (raised) {
-        want_volt(s, PIANO_CHG_PD_FIXED, 5000);
+        /* a QC source (cfg.qc) goes back through its own request, a PD source through vSafe5V */
+        want_volt(s, withdraw_prop(s), 5000);
         s->hv = s->hv == PIANO_CHG_HV_BLOCKED ? PIANO_CHG_HV_BLOCKED : PIANO_CHG_HV_OFF;
     }
 }
@@ -775,8 +874,13 @@ static uint32_t strict_hv(const PianoChargeConfig *c, const PianoChargeInput *in
                           (!contract || (in->contract_protocol == 1 && in->contract_mv < HV_5V_MAX_MV));
     const int at9 = contract && in->contract_mv >= HV_MIN_MV && in->contract_mv <= HV_MAX_MV &&
                     (in->valid & PIANO_CHG_IN_BUS) && in->bus_mv >= HV_MIN_MV && in->bus_mv <= HV_MAX_MV;
-    if (s->contract_generation && s->contract_generation != in->contract_generation) s->contract_recheck = 1;
-    s->contract_generation = in->contract_generation;
+    /* T-14b: only a fresh snapshot carries a generation (ChargeLink omits the contract while a UCSI notification is in flight,
+     * e.g. our own periodic status GET's); a decision without one is no change of contract and must not arm the recheck
+     * barrier. A real change bumps the generation (ChargeContract.h piano_contract_invalidate, the re-read's `changed`). */
+    if (in->contract_generation) {
+        if (s->contract_generation && s->contract_generation != in->contract_generation) s->contract_recheck = 1;
+        s->contract_generation = in->contract_generation;
+    }
     if (contract && s->contract_restore_generation != in->contract_generation) {
         s->contract_restore_generation = in->contract_generation;
         if (s->contract_mode_change || (s->volt_want_prop == PIANO_CHG_PD_FIXED && s->volt_want_value == 5000)) {
@@ -859,10 +963,17 @@ static uint32_t strict_hv(const PianoChargeConfig *c, const PianoChargeInput *in
         !(in->valid & PIANO_CHG_IN_FV) || in->fv_raw != piano_charge_fv_raw(PIANO_CHG_FV_DEFAULT)) {
         strict_fallback(in, s, p, PIANO_CHG_FALLBACK_SAFETY); return 0;
     }
-    const int pps = c->hv == 2;
-    uint32_t budget = (in->valid & PIANO_CHG_IN_SOURCE) ? (pps ? in->pps9_ma : in->fixed9_ma) : 0;
-    budget = umin(budget, pps ? HV_PPS_MAX_MA : 5000);
-    if (pps) budget = budget / 50 * 50;
+    int pps = c->hv == 2;
+    const int source = (in->valid & PIANO_CHG_IN_SOURCE) != 0;
+    const uint32_t fixed9 = source ? umin(in->fixed9_ma, 5000) : 0, apdo9 = source ? umin(in->pps9_ma, HV_PPS_MAX_MA) / 50 * 50 : 0;
+    if (c->hv_order) {
+        /* the Ubuntu port's order: the mode's own object, else the other one this source offers at 9 V; an object once asked
+         * for stays the one judged (a change of offer ends it below, as the budget goes to 0) */
+        if (s->hv == PIANO_CHG_HV_ASKED || s->hv == PIANO_CHG_HV_ON) pps = s->hv_pps;
+        else if (pps && apdo9 < HV_PPS_MIN_MA && fixed9 >= HV_FIXED_MIN_MA) pps = 0;
+        else if (!pps && fixed9 < HV_FIXED_MIN_MA && apdo9 >= HV_PPS_MIN_MA) pps = 1;
+    }
+    const uint32_t budget = pps ? apdo9 : fixed9;
     if (budget < (pps ? HV_PPS_MIN_MA : HV_FIXED_MIN_MA)) {
         strict_fallback(in, s, p, PIANO_CHG_FALLBACK_SOURCE); return 0;
     }
@@ -878,7 +989,9 @@ static uint32_t strict_hv(const PianoChargeConfig *c, const PianoChargeInput *in
         s->hv = PIANO_CHG_HV_ON;
         s->hv_pps = (uint8_t)pps;
         s->hv_ma = umin(in->contract_ma, budget);
-        return umin(s->hv_ma, PIANO_CHG_ICL_CAP);
+        /* cfg.hv_caps: at most the buck's highest stock input at 9 V (in_pps 2500) within the RDO and the object; the decision
+         * applies the class row of a fixed PD source (in_pd 1600) unless T-14 9 V's connector rule allows more */
+        return umin(s->hv_ma, hv_caps(c) ? PIANO_CHG_ICL_ABS_MAX : PIANO_CHG_ICL_CAP);
     }
     if (s->hv == PIANO_CHG_HV_ASKED) {
         if (now < s->hv_asked_ms + HV_SETTLE_MS) return 0;
@@ -889,7 +1002,14 @@ static uint32_t strict_hv(const PianoChargeConfig *c, const PianoChargeInput *in
     if (!at5 || s->hv == PIANO_CHG_HV_ON) {
         strict_fallback(in, s, p, PIANO_CHG_FALLBACK_READBACK); return 0;
     }
-    if (s->hv == PIANO_CHG_HV_BLOCKED || now < s->attach_ms + HV_WAIT_MS || now < s->hv_retry_ms) return 0;
+    if (s->hv == PIANO_CHG_HV_BLOCKED) {
+        /* T-14: asked and not reached, 5 V until a detach. The withdrawal is confirmed here (5 V asked, taken and back on the bus,
+         * checked above), so the transition is recomputed as every other fallback does: without this the barrier's 500 mA stayed
+         * in force for the rest of the attach, below the 5 V contract's own row. */
+        strict_fallback(in, s, p, PIANO_CHG_FALLBACK_TIMEOUT);
+        return 0;
+    }
+    if (now < s->attach_ms + HV_WAIT_MS || now < s->hv_retry_ms) return 0;
     s->transition_ma = umin(500, umin(in->contract_ma, budget));
     s->contract_transition = 1;
     if (!strict_barrier(in, s)) {p->fallback = PIANO_CHG_FALLBACK_READBACK; return 0;}
@@ -900,6 +1020,92 @@ static uint32_t strict_hv(const PianoChargeConfig *c, const PianoChargeInput *in
     s->hv_asked_ms = now;
     want_volt(s, pps ? PIANO_CHG_PPS : PIANO_CHG_PD_FIXED,
               pps ? piano_charge_pps_word(HV_MV, budget) : HV_MV);
+    p->events |= PIANO_CHG_EV_HV_ASKED;
+    return 0;
+}
+
+/* cfg.qc (charge/pd1): the strict session's QC2/QC3 9 V. No PD contract exists for an HVDCP source, so what stands in for it is the
+ * firmware's own classification (type 5-8, read every cycle) and a fresh UCSI status of a connected non-PD sink; everything else is
+ * the PD session's: the same health, temperature (15-45 degC), board, CP-off, LPD/DTPT, verify and float gates, the reduced-current
+ * barrier before the request, 15 s for the bus to reach 8.0-9.6 V, and 0x2011 = 5000 on any loss (a health stop or mode 0 may ask
+ * again later; a lost or unreached 9 V waits for the next attach). Ubuntu's request_volt/hv_step for a QC type, read as a
+ * specification. */
+static int qc_session(const PianoChargeConfig *c, const PianoChargeState *s)
+{
+    return c->strict_contract && c->qc && (piano_charge_is_qc(s->type) || s->hv_qc ||
+                                           s->volt_want_prop == PIANO_CHG_QC_VOLT || s->volt_set_prop == PIANO_CHG_QC_VOLT);
+}
+
+static uint32_t strict_qc(const PianoChargeConfig *c, const PianoChargeInput *in, PianoChargeState *s, PianoChargePlan *p,
+                          const Temps *t, uint64_t now, int charge_ok)
+{
+    s->voltage_observe_hold = 0;
+    const int bus = (in->valid & PIANO_CHG_IN_BUS) != 0;
+    const int at9 = bus && in->bus_mv >= HV_MIN_MV && in->bus_mv <= HV_MAX_MV;
+    const int at5 = bus && in->bus_mv >= ONLINE_MV && in->bus_mv < HV_5V_MAX_MV;
+    const int qc = (in->valid & PIANO_CHG_IN_TYPE) && piano_charge_is_qc(in->type);
+    const int nonpd = (in->valid & PIANO_CHG_IN_NONPD) && !(in->valid & PIANO_CHG_IN_CONTRACT);
+    const int healthy = gauge_fresh(in, now) && t->valid && (in->safety & PIANO_CHG_SAFE_ALL) == PIANO_CHG_SAFE_ALL &&
+                        !in->faults && t->cool >= 15 && t->warm <= 45 && !s->conn_hot && !s->chgr_hot &&
+                        (in->valid & PIANO_CHG_IN_VERIFY) && in->verify == 0 &&
+                        (in->valid & PIANO_CHG_IN_FV) && in->fv_raw == piano_charge_fv_raw(PIANO_CHG_FV_DEFAULT);
+    const int wanted = charge_ok && c->hv && c->writes;
+    const uint8_t why = !charge_ok ? PIANO_CHG_FALLBACK_HEALTH : !c->hv || !c->writes ? PIANO_CHG_FALLBACK_MODE :
+                        !qc || !nonpd ? PIANO_CHG_FALLBACK_SOURCE : PIANO_CHG_FALLBACK_SAFETY;
+    if (s->contract_mode != c->hv) {s->contract_mode = c->hv; if (s->hv == PIANO_CHG_HV_OFF) s->hv_retry_ms = now + HV_WAIT_MS;}
+    if (s->hv == PIANO_CHG_HV_ON || s->hv == PIANO_CHG_HV_ASKED) {
+        if (wanted && healthy && qc && nonpd) {
+            if (at9 && !(s->pending & (1u << PIANO_CHG_S_VOLT)) && s->volt_set_prop == PIANO_CHG_QC_VOLT &&
+                s->volt_set_value == HV_MV) {
+                if (s->hv == PIANO_CHG_HV_ASKED) p->events |= PIANO_CHG_EV_HV_ON;
+                s->hv = PIANO_CHG_HV_ON;
+                s->contract_transition = 0;
+                return s->hv_ma;
+            }
+            if (s->hv == PIANO_CHG_HV_ASKED && now < s->hv_asked_ms + HV_SETTLE_MS) {
+                s->contract_transition = 1;
+                s->transition_ma = 500;
+                return 0;
+            }
+        }
+        /* lost, unreached in time, or a gate: back to 5 V (a health stop or mode 0 may ask again; anything else waits for a detach) */
+        const int retry = !wanted;
+        p->fallback = s->hv == PIANO_CHG_HV_ASKED && now >= s->hv_asked_ms + HV_SETTLE_MS ? PIANO_CHG_FALLBACK_TIMEOUT :
+                      wanted && healthy && qc && nonpd ? PIANO_CHG_FALLBACK_READBACK : why;
+        s->hv = retry ? PIANO_CHG_HV_OFF : PIANO_CHG_HV_BLOCKED;
+        if (retry) s->hv_retry_ms = now + HV_RENEG_MS;
+        if (!retry) p->events |= PIANO_CHG_EV_HV_BLOCKED;
+        want_volt(s, PIANO_CHG_QC_VOLT, 5000);
+        s->contract_transition = 1;
+        s->transition_ma = 500;
+        return 0;
+    }
+    /* a withdrawal in progress: the 5 V request taken and the bus back below 6 V before anything else */
+    if (s->volt_want_prop == PIANO_CHG_QC_VOLT && s->volt_want_value == 5000 &&
+        (!at5 || s->volt_set_prop != PIANO_CHG_QC_VOLT || s->volt_set_value != 5000 || (s->pending & (1u << PIANO_CHG_S_VOLT)))) {
+        s->contract_transition = 1;
+        s->transition_ma = 500;
+        p->fallback = PIANO_CHG_FALLBACK_READBACK;
+        return 0;
+    }
+    s->contract_transition = 0;
+    s->hv_qc = 0;   /* at 5 V: the session ends here */
+    if (!qc && s->volt_want_prop == PIANO_CHG_QC_VOLT && s->volt_want_value == 5000) {
+        /* the type is no QC any more: the taken 5 V request is the last of this session; the PD session decides next */
+        s->volt_want_prop = s->volt_want_value = s->volt_set_prop = s->volt_set_value = 0;
+        if (s->hv == PIANO_CHG_HV_BLOCKED) s->hv = PIANO_CHG_HV_OFF;
+    }
+    if (!(wanted && healthy && qc && nonpd)) {p->fallback = why; return 0;}
+    if (s->hv == PIANO_CHG_HV_BLOCKED || !at5 || now < s->attach_ms + HV_WAIT_MS || now < s->hv_retry_ms) return 0;
+    s->contract_transition = 1;
+    s->transition_ma = 500;
+    if (!strict_barrier(in, s)) {p->fallback = PIANO_CHG_FALLBACK_READBACK; return 0;}
+    s->hv = PIANO_CHG_HV_ASKED;
+    s->hv_qc = 1;
+    s->hv_pps = 0;
+    s->hv_ma = piano_charge_qc_icl_9v(in->type);
+    s->hv_asked_ms = now;
+    want_volt(s, PIANO_CHG_QC_VOLT, HV_MV);
     p->events |= PIANO_CHG_EV_HV_ASKED;
     return 0;
 }
@@ -1030,6 +1236,7 @@ static void plan_fv(const PianoChargeConfig *c, const PianoChargeInput *in, Pian
 {
     uint32_t target = 0;
     if (c->full_charge && !c->strict_contract) target = piano_charge_fv_target(&s->term_hot, t->valid, t->warm);
+    else if (c->strict_contract && c->fv_hot && s->term_hot) target = PIANO_CHG_FV_HOT;   /* protection() keeps term_hot */
     else if (s->touched & (1u << PIANO_CHG_S_FV)) target = PIANO_CHG_FV_DEFAULT;   /* the option went off: the firmware's own */
     p->fv_mv = target;
     if (!target) return;
@@ -1059,6 +1266,19 @@ static void expire_pending(PianoChargeState *s, uint64_t now)
 
 static int limit_on(const PianoChargeConfig *c) {return c->limit && c->stop_pct < 100;}
 
+/* An already enabled 5 V session can leave termination to the firmware
+ * while the gauges recover. This never authorizes an enable or a current rise. */
+static int stale_soc_stop(const PianoChargeConfig *c, const PianoChargeInput *in, const PianoChargeState *s)
+{
+    if (s->soc_failures < SOC_FAILURES_STOP) return 0;
+    const uint32_t needed = PIANO_CHG_IN_BUS | PIANO_CHG_IN_ENABLE;
+    const int at5 = (in->valid & needed) == needed && in->bus_mv >= ONLINE_MV && in->bus_mv < HV_5V_MAX_MV &&
+                    (!(in->valid & PIANO_CHG_IN_CONTRACT) ||
+                     (in->contract_protocol == 1 && in->contract_mv < HV_5V_MAX_MV));
+    return !(c->strict_contract && !c->hv && at5 && s->attached && in->enable == 1 && !s->disabled &&
+             !volt_raised(s) && !s->contract_transition && !s->contract_mode_change);
+}
+
 /* Battery health: the charge hysteresis, the mode's hot/cold stops, and what happens without a charge reading. Returns charge_ok. */
 static int protection(const PianoChargeConfig *c, const PianoChargeInput *in, PianoChargeState *s, PianoChargePlan *p,
                       const Temps *t, uint64_t now)
@@ -1084,9 +1304,24 @@ static int protection(const PianoChargeConfig *c, const PianoChargeInput *in, Pi
         if (t->cool < LIMIT_COLD_C) {if (!s->cold) p->events |= PIANO_CHG_EV_COLD; s->cold = 1;}
         else if (t->cool >= LIMIT_COLD_RELEASE_C) s->cold = 0;
     }
+    /* cfg.fv_hot (charge/pd1): the warm row's float, 4060 mV from 48 degC (the warmest reading) until below 46; a missing
+     * temperature keeps the last state (the strict session holds the currents at their floors without one). The higher pack at
+     * that float (within 5 mV) holds charging until 150 mV below it or the warm row ends (the Ubuntu port's voltage hold). */
+    if (c->strict_contract && c->fv_hot) {
+        if (t->valid && t->warm >= TERM_HOT_C) s->term_hot = 1;
+        else if (t->valid && t->warm < TERM_COOL_C) s->term_hot = 0;
+        if (!s->term_hot) s->fv_hold = 0;
+        else if (gauge_fresh(in, now)) {
+            if (in->vbat_max_mv >= (int32_t)PIANO_CHG_FV_HOT - 5) s->fv_hold = 1;
+            else if (in->vbat_max_mv < (int32_t)PIANO_CHG_FV_HOT - 150) s->fv_hold = 0;
+        }
+    } else {
+        s->fv_hold = 0;
+    }
     p->why_off = s->hold ? PIANO_CHG_OFF_LIMIT : s->hot ? PIANO_CHG_OFF_HOT : s->cold ? PIANO_CHG_OFF_COLD :
+                 s->fv_hold ? PIANO_CHG_OFF_WARM_FV :
                  c->admin_stop ? PIANO_CHG_OFF_ADMIN : in->faults ? PIANO_CHG_OFF_FAULT :
-                 s->soc_failures >= SOC_FAILURES_STOP ? PIANO_CHG_OFF_STALE :
+                 stale_soc_stop(c, in, s) ? PIANO_CHG_OFF_STALE :
                  c->strict_contract && s->fw_block ? PIANO_CHG_OFF_FIRMWARE : PIANO_CHG_OFF_NONE;
     return p->why_off == PIANO_CHG_OFF_NONE;
 }
@@ -1127,9 +1362,9 @@ static void detached(const PianoChargeConfig *c, const PianoChargeInput *in, Pia
             s->rp_distrust = 1;
             p->events |= PIANO_CHG_EV_RP_DISTRUST;
         }
-        /* stepped: gone within 30 s of a step up above the row (planned or taken): that step was one too many, for the boot */
+        /* stepped: gone within 30 s of a step up above the row (planned or taken): back off before retrying */
         if (s->ramp_ma > s->ramp_row_ma && s->ramp_step_ms && now < s->ramp_step_ms + RP_QUICK_MS)
-            ramp_back(s, p, PIANO_CHG_BACK_DETACH, (in->valid & PIANO_CHG_IN_BUS) ? in->bus_mv : 0);
+            ramp_back(s, p, PIANO_CHG_BACK_DETACH, (in->valid & PIANO_CHG_IN_BUS) ? in->bus_mv : 0, now);
     }
     s->rp_taken_ms = 0;
     ramp_restart(s);
@@ -1181,22 +1416,23 @@ static void handover(const PianoChargeConfig *c, const PianoChargeInput *in, Pia
             s->transition_ma = strict_contract(in) ? umin(500, in->contract_ma) : PIANO_CHG_ICL_DEFAULT;
             icl = umin(icl, s->transition_ma); fcc = umin(fcc, 500);
         }
-        const int stop = s->hot || s->cold || c->admin_stop || in->faults || s->soc_failures >= SOC_FAILURES_STOP ||
+        const int stale_stop = stale_soc_stop(c, in, s);
+        const int stop = s->hot || s->cold || c->admin_stop || in->faults || stale_stop ||
                          (c->strict_contract && s->fw_block) || (limit_on(c) && (s->hold || !c->sleep_charge));
         if (stop) {
             p->why_off = s->hold ? PIANO_CHG_OFF_LIMIT : s->hot ? PIANO_CHG_OFF_HOT : s->cold ? PIANO_CHG_OFF_COLD :
                          c->admin_stop ? PIANO_CHG_OFF_ADMIN : in->faults ? PIANO_CHG_OFF_FAULT :
-                         s->soc_failures >= SOC_FAILURES_STOP ? PIANO_CHG_OFF_STALE :
+                         stale_stop ? PIANO_CHG_OFF_STALE :
                          c->strict_contract && s->fw_block ? PIANO_CHG_OFF_FIRMWARE : PIANO_CHG_OFF_SLEEP;
             if (s->enable_set != 0 && !(c->strict_contract && s->fw_block && !s->disabled)) plan_write(c, s, p, now, PIANO_CHG_S_ENABLE, PIANO_CHG_ENABLE, 0, 1);
-        } else if (s->disabled) {
+        } else if (s->disabled && (!c->strict_contract || gauge_fresh(in, now))) {
             /* a charging restart's stop (or one of battery health's being lifted): charging stays on for the sleep */
             plan_write(c, s, p, now, PIANO_CHG_S_ENABLE, PIANO_CHG_ENABLE, 1, 1);
         }
         kick_reset(s, 0);
         if ((s->touched & (1u << PIANO_CHG_S_FCC)) && s->fcc_set != fcc) plan_write(c, s, p, now, PIANO_CHG_S_FCC, PIANO_CHG_FCC, fcc, 4);
         if ((s->touched & (1u << PIANO_CHG_S_ICL)) && s->icl_set != icl) plan_write(c, s, p, now, PIANO_CHG_S_ICL, PIANO_CHG_ICL, icl, 4);
-        if (c->strict_contract && in->bus_mv >= HV_5V_MAX_MV) want_volt(s, PIANO_CHG_PD_FIXED, 5000);
+        if (c->strict_contract && in->bus_mv >= HV_5V_MAX_MV) want_volt(s, withdraw_prop(s), 5000);
         else want_5v(s);
         if (strict_voltage_ready(c, in, s)) plan_volt(c, s, p, now);
         p->icl_ma = icl;
@@ -1396,6 +1632,29 @@ void piano_charge_decide(const PianoChargeConfig *c, const PianoChargeInput *in,
             s->fcc_full = 0;
         }
     }
+    if (notify_hold(c, in, s, now, charge_ok)) {
+        /* T-14b: the limits in force stay; only a board hold may act in this decision. The burst's start is latched as strict_hv
+         * does, so its 5 s bound on a notification storm still counts from the first one. */
+        s->notify_holds++;
+        if (!s->contract_notify_seen) {s->contract_notify_seen = 1; s->contract_notify_since = in->contract_notify_ms;}
+        else if (in->contract_notify_ms < s->contract_notify_since) s->contract_notify_since = in->contract_notify_ms;
+        p->hv = s->hv;
+        p->cls = (uint8_t)(s->hv == PIANO_CHG_HV_ON ? (s->hv_pps ? PIANO_CHG_C_PD_PPS : PIANO_CHG_C_PD) : piano_charge_class(s->type));
+        p->charge = (uint8_t)charge_ok;
+        const uint32_t held_icl = board_cap(s, p, s->icl_set);
+        const uint32_t held_fcc = held_icl < s->icl_set ? umin(s->fcc_set, umax(2 * held_icl, PIANO_CHG_FCC_DEFAULT)) : s->fcc_set;
+        p->icl_ma = held_icl;
+        p->fcc_ma = held_fcc;
+        p->bus_mv = s->hv == PIANO_CHG_HV_ON ? HV_MV : 5000;
+        if (held_icl < s->icl_set) {
+            plan_fcc(c, s, p, now, held_fcc, held_fcc);
+            plan_icl(c, in, s, p, now, held_icl);
+        }
+        plan_fv(c, in, s, p, now, &t);
+        s->hold_awake = p->hold_awake = (uint8_t)(c->writes && limit_on(c) && charge_ok && soc_valid(in));
+        return;
+    }
+    s->notify_holds = 0;
     if (s->type < 0 && !c->strict_contract) {
         if (!charge_ok) plan_enable(c, in, s, p, now, 0);
         return;
@@ -1409,18 +1668,29 @@ void piano_charge_decide(const PianoChargeConfig *c, const PianoChargeInput *in,
         return;
     }
     p->charge = (uint8_t)charge_ok;
-    const uint32_t hv_ma = c->strict_contract ? strict_hv(c, in, s, p, &t, now, charge_ok) :
-                                               hv_step(c, in, s, p, now, cls, charge_ok);
+    const uint32_t hv_ma = !c->strict_contract ? hv_step(c, in, s, p, now, cls, charge_ok) :
+                           qc_session(c, s) ? strict_qc(c, in, s, p, &t, now, charge_ok) :
+                                              strict_hv(c, in, s, p, &t, now, charge_ok);
     const int hv_on = s->hv == PIANO_CHG_HV_ON && hv_ma;
+    if (c->strict_contract) s->contract_ok = (uint8_t)strict_contract(in);   /* T-14b: what a notification hold may keep */
     p->hv = s->hv;
     uint32_t icl;
     if (hv_on) {
-        icl = umin(s->hv_qc ? piano_charge_icl_qc3_9v(hv_ma) : piano_charge_icl_9v(cls, hv_ma), icl_cap(c));
+        icl = umin(s->hv_qc ? piano_charge_icl_qc3_9v(hv_ma) : piano_charge_icl_9v(cls, hv_ma),
+                   hv_caps(c) ? PIANO_CHG_ICL_ABS_MAX : icl_cap(c));
+        /* T-14 9 V (owner 2026-11-23 19:22): with cfg.hv_caps a fixed 9 V PD contract gets what it advertises, its RDO within the
+         * object (hv_ma), up to the buck's highest stock input at 9 V (in_pps 2500; the Ubuntu port's fixed-PD rule, its
+         * MCA_ICL_HV_MAX_MA), instead of the in_pd row 1600; above the row only with a connector that reads below 50 degC and no
+         * hot hold (the 5 V rule), else the row. QC and PPS keep their rows. */
+        if (hv_caps(c) && !s->hv_qc && cls == PIANO_CHG_C_PD) {
+            icl = umin(hv_ma, PIANO_CHG_ICL_ABS_MAX);
+            if (icl > HV_PD_ROW_MA && !conn_allows_rp(in, s)) icl = HV_PD_ROW_MA;
+        }
         p->icl_why = PIANO_CHG_ICL_9V;
         p->rp_ma = 0;
     } else {
         icl = icl_at_5v(c, in, s, p, cls, 1);
-        if (ramped(c) && p->icl_why == PIANO_CHG_ICL_RP) {
+        if (ramped(c) && (p->icl_why == PIANO_CHG_ICL_RP || p->icl_why == PIANO_CHG_ICL_CONTRACT_5V)) {
             /* stepped from the row; the row is computed after the Rp target so that icl_why and rp_ma stay the Rp's */
             const uint8_t why = p->icl_why;
             const uint32_t rp_ma = p->rp_ma;
@@ -1437,7 +1707,9 @@ void piano_charge_decide(const PianoChargeConfig *c, const PianoChargeInput *in,
         if (!icl) icl = PIANO_CHG_ICL_DEFAULT;
         if (is_pd(cls)) {
             const int contract = strict_contract(in);
-            icl = contract ? umin(icl, umin(in->contract_ma, PIANO_CHG_ICL_CAP)) : PIANO_CHG_ICL_DEFAULT;
+            const uint32_t cap = p->icl_why == PIANO_CHG_ICL_CONTRACT_5V ? piano_charge_icl_max(c) :
+                                 hv_on && hv_caps(c) ? PIANO_CHG_ICL_ABS_MAX : PIANO_CHG_ICL_CAP;
+            icl = contract ? umin(icl, umin(in->contract_ma, cap)) : PIANO_CHG_ICL_DEFAULT;
         }
         if (s->contract_transition) icl = umin(icl, s->transition_ma);
         if (!gauge_fresh(in, now) || !t.valid) icl = umin(icl, PIANO_CHG_ICL_DEFAULT);
@@ -1471,9 +1743,16 @@ void piano_charge_decide(const PianoChargeConfig *c, const PianoChargeInput *in,
      * DCP row's (2000, within the ceiling: 1500 at stage A); the derating is the same, and the input limit still governs the input */
     uint32_t full = piano_charge_fcc_full(cls, hv_on);
     if (!hv_on && ramped(c) && p->icl_why == PIANO_CHG_ICL_RP) full = umax(full, piano_charge_fcc_full(PIANO_CHG_C_DCP, 0));
-    full = umin(full, fcc_cap(c));
+    /* cfg.hv_caps at 9 V: the stock rows (PD 3000, PPS 3500, QC3 3500, QC2 2600), at most twice the input limit in force (what
+     * the buck can pass from 9 V into a 4 V pack); 5 V and every transition keep the stage A ceilings */
+    const int fast = hv_on && hv_caps(c);
+    if (fast && s->hv_qc) full = piano_charge_qc_fcc_9v(s->type);
+    /* T-14 9 V: a fixed PD source above its row: the buck's stock maximum at 9 V (chg_pps 3500; the Ubuntu port: 2 x ICL, at most
+     * 3600), still at most twice the input limit below and under every derating and hold */
+    if (fast && !s->hv_qc && cls == PIANO_CHG_C_PD && icl > HV_PD_ROW_MA) full = PIANO_CHG_FCC_ABS_MAX;
+    full = umin(full, fast ? PIANO_CHG_FCC_ABS_MAX : fcc_cap(c));
     if (c->strict_contract) {
-        full = umin(full ? full : PIANO_CHG_FCC_DEFAULT, PIANO_CHG_FCC_CAP);
+        full = umin(full ? full : PIANO_CHG_FCC_DEFAULT, fast ? umin(PIANO_CHG_FCC_ABS_MAX, 2 * icl) : PIANO_CHG_FCC_CAP);
         const uint32_t live_safety = PIANO_CHG_SAFE_LPD_DRY | PIANO_CHG_SAFE_DTPT;
         if (s->contract_transition || !gauge_fresh(in, now) || !t.valid ||
             (in->safety & live_safety) != live_safety ||
@@ -1501,7 +1780,9 @@ void piano_charge_decide(const PianoChargeConfig *c, const PianoChargeInput *in,
     if (strict_voltage_ready(c, in, s) && (!c->strict_contract || !s->voltage_observe_hold) &&
         (!c->strict_contract || !new_hv_write || strict_contract(in))) plan_volt(c, s, p, now);
     if (charge_ok) {
-        if (s->disabled && !kick_holding(s, now)) plan_enable(c, in, s, p, now, 1);
+        if (s->disabled && !kick_holding(s, now)) {
+            if (!c->strict_contract || gauge_fresh(in, now)) plan_enable(c, in, s, p, now, 1);
+        }
         else if ((in->valid & PIANO_CHG_IN_ENABLE) && !in->enable && !s->fw_noted) {s->fw_noted = 1; p->events |= PIANO_CHG_EV_FW_DISABLED;}
     }
     /* the restart: the input measured against the limit it is held to (the one taken, or the firmware's own when lower) */
@@ -1520,6 +1801,22 @@ void piano_charge_decide(const PianoChargeConfig *c, const PianoChargeInput *in,
     s->hold_awake = p->hold_awake = (uint8_t)(c->writes && limit_on(c) && charge_ok && soc_valid(in));
 }
 
+/* The charge indicator's path (the Ubuntu port's top-bar protocol, here for the registry and the log): from the plan's class and
+ * the 9 V state, never from a request alone. */
+int piano_charge_path(const PianoChargeState *s, const PianoChargePlan *p, const PianoChargeInput *in)
+{
+    if (!(in->valid & PIANO_CHG_IN_BUS) || in->bus_mv < ONLINE_MV || !s->attached) return PIANO_CHG_PATH_NONE;
+    if (s->hv == PIANO_CHG_HV_ON) return s->hv_qc ? PIANO_CHG_PATH_QC_9V : s->hv_pps ? PIANO_CHG_PATH_PPS_9V : PIANO_CHG_PATH_PD_9V;
+    if (s->hv == PIANO_CHG_HV_ASKED) return PIANO_CHG_PATH_ASKING;
+    return is_pd(p->cls) ? PIANO_CHG_PATH_PD_5V : PIANO_CHG_PATH_USB_5V;
+}
+
+const char *piano_charge_path_name(int path)
+{
+    static const char *const names[] = {"none", "USB 5 V", "PD 5 V", "PD 9 V", "PPS 9 V", "QC 9 V", "asking 9 V"};
+    return path >= 0 && path <= PIANO_CHG_PATH_ASKING ? names[path] : "?";
+}
+
 void piano_charge_shutdown(const PianoChargeConfig *c, const PianoChargeInput *in, PianoChargeState *s, PianoChargePlan *p)
 {
     zero(p, sizeof *p);
@@ -1536,7 +1833,7 @@ void piano_charge_shutdown(const PianoChargeConfig *c, const PianoChargeInput *i
             s->transition_ma = strict_contract(in) ? umin(500, in->contract_ma) : PIANO_CHG_ICL_DEFAULT;
             plan_fcc(c, s, p, now, 500, 500);
             plan_icl(c, in, s, p, now, s->transition_ma);
-            want_volt(s, PIANO_CHG_PD_FIXED, 5000);
+            want_volt(s, withdraw_prop(s), 5000);
         } else want_5v(s);
         if (strict_voltage_ready(c, in, s)) plan_volt(c, s, p, now);
     }
@@ -1606,4 +1903,91 @@ uint32_t piano_charge_cp_ibat_ma(const PianoChargeCpInput *in, PianoChargeCpStat
     ma = umin(ma, s->warm_ma);
     if (in->t_cool_c < CP_TBAT_FULL) ma = umin(ma, CP_REDUCED_MA);
     return ma;
+}
+
+/* ---------------------------------------------------------------------------------- the charge-pump session's buck side ---- */
+/* charge/cp-sess (ChargePumpSession.h): the system side of the pump session from this policy's view, and the hand-back of the
+ * source when a session ends. The session itself plans nothing here: while it holds the source, the worker clears
+ * PIANO_CHG_SAFE_CP_OFF, and the strict session above plans no voltage and holds the reduced-current barrier. */
+static int temp_ok(int32_t dc) {return dc > -400 && dc < 900;}
+
+void piano_charge_cp_sys(const PianoChargeConfig *c, const PianoChargeInput *in, const PianoChargeState *s, PianoCpSys *y)
+{
+    zero(y, sizeof *y);
+    const uint64_t now = in->now_ms;
+    y->now_ms = now;
+    y->attached = s->attached;
+    y->sleep_pending = in->sleep == PIANO_CHG_WILL_SLEEP;
+    y->awake = !y->sleep_pending && !s->sleeping;
+    /* the 80/75 health limit: its hold ends a session, and no session starts within 3 % of its stop */
+    y->health_hold = (uint8_t)(s->hold || (limit_on(c) && soc_valid(in) && in->soc_max_pct >= (int32_t)c->stop_pct));
+    if (limit_on(c)) y->soc_entry_max = (uint8_t)(c->stop_pct > 3 ? c->stop_pct - 3 : 0);
+    if (limit_on(c) && !y->soc_entry_max) y->health_hold = 1;
+    /* the source: a validated contract, and the APDO (min != max) reaching furthest above 9 V with 2 A or more */
+    const int contract = c->strict_contract && strict_contract(in);
+    y->contract_valid = (uint8_t)contract;
+    y->contract_pps = (uint8_t)(contract && in->contract_protocol == 2);
+    y->contract_mv = contract ? in->contract_mv : 0;
+    y->contract_ma = contract ? in->contract_ma : 0;
+    if (contract && (in->valid & PIANO_CHG_IN_PDOS)) {
+        const unsigned n = in->pdos < 7 ? in->pdos : 7;
+        for (unsigned i = 0; i < n; i++) {
+            const uint32_t lo = in->pdo[i][0], hi = in->pdo[i][1], ma = umin(in->pdo[i][2], 6000);
+            if (lo == hi || hi < HV_MV || lo > hi || ma < 2000) continue;
+            if (y->src_kind == PIANO_CPS_SRC_PPS && (hi < y->apdo_max_mv || (hi == y->apdo_max_mv && ma <= y->apdo_ma))) continue;
+            y->src_kind = PIANO_CPS_SRC_PPS;
+            y->apdo_min_mv = lo; y->apdo_max_mv = hi; y->apdo_ma = ma;
+        }
+    }
+    /* QC3-B / QC3.5: the buck's QC session's evidence (the firmware type and a fresh non-PD UCSI status) stands in for a contract;
+     * only with that session on (its 0x2011 = 5000 is what takes the source back) */
+    if (!y->src_kind && c->qc && c->strict_contract && (in->valid & PIANO_CHG_IN_TYPE) && (in->valid & PIANO_CHG_IN_NONPD)) {
+        if (in->type == PIANO_CHG_T_HVDCP3_B) y->src_kind = PIANO_CPS_SRC_QC3B;
+        else if (in->type == PIANO_CHG_T_HVDCP3P5) y->src_kind = PIANO_CPS_SRC_QC35;
+        if (y->src_kind) y->contract_valid = 1;
+    }
+    y->bus_valid = (in->valid & PIANO_CHG_IN_BUS) != 0;
+    y->vbus_mv = in->bus_mv;
+    y->ibus_ma = (in->valid & PIANO_CHG_IN_IBUS) ? in->ibus_ma : 0;
+    y->buck_icl_set_ma = s->icl_set;
+    y->buck_fcc_set_ma = s->fcc_set;
+    y->buck_pending = (s->pending & ((1u << PIANO_CHG_S_ICL) | (1u << PIANO_CHG_S_FCC))) != 0;
+    y->volt_pending = (s->pending & (1u << PIANO_CHG_S_VOLT)) != 0;   /* the buck's own voltage write in flight */
+    y->gauges_valid = (uint8_t)(packs_valid(in) && soc_valid(in) && gauge_fresh(in, now));
+    y->soc_pct = in->soc_max_pct;
+    y->vbat_max_mv = in->vbat_max_mv;
+    y->t_cool_dc = in->t_cool_dc;
+    y->t_warm_dc = in->t_warm_dc;
+    if ((in->valid & PIANO_CHG_IN_NTC) && temp_ok(in->t_ntc_dc)) {
+        if (in->t_ntc_dc > y->t_warm_dc) y->t_warm_dc = in->t_ntc_dc;
+        if (in->t_ntc_dc < y->t_cool_dc) y->t_cool_dc = in->t_ntc_dc;
+    }
+    const int c1 = (in->valid & PIANO_CHG_IN_CONN1) && temp_ok(in->t_conn1_dc), c2 = (in->valid & PIANO_CHG_IN_CONN2) && temp_ok(in->t_conn2_dc);
+    y->conn_valid = (uint8_t)(c1 || c2);
+    y->t_conn_dc = c1 && c2 ? (in->t_conn1_dc > in->t_conn2_dc ? in->t_conn1_dc : in->t_conn2_dc) : c1 ? in->t_conn1_dc : in->t_conn2_dc;
+    /* the worker's: vbat_min_mv, ibat_a_ma, ibat_b_ma (cells_valid), pps_taken_word, qc_pulses_taken, attach_seq,
+     * mipps_cleanup_pending */
+}
+
+void piano_charge_cp_handback(PianoChargeState *s, uint32_t property, uint32_t value, uint64_t now)
+{
+    const int slot = PIANO_CHG_S_VOLT;
+    s->volt_set_prop = property;
+    s->volt_set_value = value;
+    s->touched |= (uint8_t)(1u << slot);
+    s->pending &= (uint8_t)~(1u << slot);
+    s->tries[slot] = s->mismatch[slot] = s->rewrites[slot] = 0;
+    s->contract_transition = 1;
+    s->transition_ma = 500;
+    s->hv_retry_ms = now + HV_WAIT_MS;
+    if (s->hv != PIANO_CHG_HV_BLOCKED) s->hv = PIANO_CHG_HV_OFF;
+    if (property == PIANO_CHG_QC_VOLT) {
+        s->hv_qc = 1; s->hv_pps = 0;
+        want_volt(s, PIANO_CHG_QC_VOLT, 5000);
+    } else {
+        /* the mode-change path: the barrier, vSafe5V, the bus back below 6 V, and only then (after HV_WAIT_MS) a new 9 V */
+        s->hv_qc = 0; s->hv_pps = (uint8_t)(property == PIANO_CHG_PPS);
+        s->contract_mode_change = 1;
+        want_volt(s, PIANO_CHG_PD_FIXED, 5000);
+    }
 }

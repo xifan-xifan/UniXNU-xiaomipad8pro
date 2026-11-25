@@ -79,7 +79,13 @@ struct Spec {
     uint8_t vcd[3];         /* SH0, MC0, ACV */
     bool shortGfx;
     bool noSh0;
+    int bx=0;              /* 0 absent, 1 real, 2 dummy */
+    bool piano=false;      /* gpu/fullopp1: piano's own gfx/mx/gmxc arcs, as its S0 logged them (R3a ARC lines, gpu-daily3b) */
 };
+/* piano's cmd-db (gpu-daily3b console, R3a ARC lines): gfx.lvl has 0x1c0 and 0x1c4, gmxc.lvl 0x1c4 but no 0x1c0, mx.lvl up to 0x1c0. */
+static const std::vector<uint16_t> PianoGfx={0x0,0x32,0x34,0x38,0x3c,0x40,0x50,0x80,0x90,0xc0,0xe0,0x100,0x140,0x1a0,0x1c0,0x1c4};
+static const std::vector<uint16_t> PianoMx={0x0,0x10,0x40,0x80,0xc0,0x100,0x140,0x180,0x1a0,0x1c0};
+static const std::vector<uint16_t> PianoGmxc={0x0,0x10,0x32,0x34,0x38,0x3c,0x40,0x50,0x80,0x90,0xc0,0xe0,0x100,0x140,0x1a0,0x1c4};
 
 static uint32_t imageRead(void *,uint32_t offset) {return get32(image.bytes+offset);}
 static void imageWrite(void *,uint32_t,uint32_t) {std::abort();}
@@ -94,10 +100,11 @@ static void load(const Spec &s)
                             {"CN0",0x5000c,bcmAux(1000,4,2)}};
     if(!s.noSh0)bcm.push_back({"SH0",0x50008,bcmAux(s.k90?4800000:1000000,s.k90?64:32,s.vcd[0])});
     slave(Sm8750CmdDbSlaveBcm,bcm);
-    std::vector<Entry> arc={{"cx.lvl",0x30000,arcAux(CxLevels)},{"mx.lvl",0x30010,arcAux(MxLevels)},
-                            {"gfx.lvl",0x30020,arcAux(s.shortGfx?ShortGfx:GfxLevels)}};
-    if(s.gmxc==1)arc.push_back({"gmxc.lvl",0x30030,arcAux(GmxcLevels)});
+    std::vector<Entry> arc={{"cx.lvl",0x30000,arcAux(CxLevels)},{"mx.lvl",0x30010,arcAux(s.piano?PianoMx:MxLevels)},
+                            {"gfx.lvl",0x30020,arcAux(s.piano?PianoGfx:s.shortGfx?ShortGfx:GfxLevels)}};
+    if(s.gmxc==1)arc.push_back({"gmxc.lvl",0x30030,arcAux(s.piano?PianoGmxc:GmxcLevels)});
     if(s.gmxc==2)arc.push_back({"gmxc.lvl",0x30030,arcAux({})});
+    if(s.bx)arc.push_back({"gbx.lvl",0x30040,arcAux(s.bx==1?std::vector<uint16_t>{0,0x30,0x40,0x80}:std::vector<uint16_t>{})});
     slave(Sm8750CmdDbSlaveArc,arc);
     const Sm8750RpmhIo io={nullptr,imageRead,imageWrite,imageDelay};
     CHECK(Sm8750CmdDbCopy(&io,&db)==Sm8750RpmhOk);
@@ -619,6 +626,40 @@ static void testAnnibaleFullTable()
     adreno830_profile_value=A830ProfileDesign;
 }
 
+/* gpu/fullopp1 (private/host-checks/20261122-gpu-fullopp/ANALYSIS.md 3.1): the 15-entry GMU table of bin 2 on piano's cmd-db, as the
+ * fullopp S0 check takes it (annibale profile, pagani-gpu-maxlevel, pagani-gpu-speedbin=1, fuse 0xe8): 14 levels, GX 15, 58 perf dwords,
+ * the GX and dependency words of levels 1..11 exactly as piano's S0 logged them today and 12..14 by the same rule (1100 MHz takes the
+ * 0x1c4 corner on gmxc, which has no 0x1c0), the ACD values of the 11 levels from 389 MHz. */
+static void testPianoFullOpp()
+{
+    Spec s={1,true,{1,0,0},false,false};s.piano=true;
+    load(s);
+    Sm8750RpmhResources res;
+    CHECK(Sm8750RpmhResourcesParse(&db,&res)==Sm8750RpmhOk);
+    Sm8750GpuLevelTable levels;
+    CHECK(Sm8750GpuLevelsSelect(Sm8750DtGpuBins,6,0xE8,0,1,&levels)==Sm8750SocInfoOk && levels.count==14 && levels.bin==2);
+    static A830VoteTables t;
+    adreno830_profile_value=A830ProfileAnnibale;
+    CHECK(A830Votes::build(res,board,levels,A830VotesFullTable,&t)==kIOReturnSuccess && t.error_step==A830VotesStepNone);
+    CHECK(t.levels==14 && t.gx_count==15 && t.cx_count==3 && t.perf_dwords==58 && t.initial==1 && t.fused==1);
+    CHECK(t.perf_dwords<=A830VotesPerfDwordsMax && t.perf[0]==A830_HFI_HDR(A830_HFI_H2F_TABLE,0,58,0));
+    const uint32_t mhz[15]={0,160,222,342,389,443,525,607,660,734,832,900,967,1050,1100};
+    const uint32_t gx[15]={0,0x00320201,0x00340302,0x00380403,0x003c0504,0x00400605,0x00500706,0x00800807,0x00900908,0x00c00a09,
+                           0x00e00b0a,0x01000c0b,0x01400d0c,0x01a00e0d,0x01c00f0e};
+    const uint32_t dep[15]={0xffffffff,0xffffc2ff,0xffffc2ff,0xffffc2ff,0xffffc2ff,0xffffc2ff,0xffffc3ff,0xffffc3ff,0xffffc4ff,
+                            0xffffc4ff,0xffffc5ff,0xffffc5ff,0xffffc6ff,0xffffc8ff,0xffffc9ff};
+    const uint8_t bus[15]={0,2,2,3,4,4,4,6,6,8,10,10,11,11,11};
+    for(unsigned g=0;g<15;++g) {
+        CHECK(t.gx[g].khz==mhz[g]*1000 && t.gx[g].vote==gx[g] && t.gx[g].dep==dep[g]);
+        if(g)CHECK(t.level[g-1].khz==mhz[g]*1000 && t.level[g-1].bus==bus[g]);
+    }
+    /* the 15 GX entries are in the M1 message as KGSL lays them out: hdr, version, type, entry {count, stride}, then {vote, dep, khz} */
+    for(unsigned g=0;g<15;++g)CHECK(t.perf[5+3*g]==gx[g] && t.perf[6+3*g]==dep[g] && t.perf[7+3*g]==mhz[g]*1000);
+    CHECK(t.acd_levels==11 && t.acd_mask==0x7FF0);
+    CHECK(A830Votes::levelAtOrBelow(t,1100)==14 && A830Votes::levelAtOrBelow(t,1050)==13 && A830Votes::levelAtOrBelow(t,734)==9);
+    adreno830_profile_value=A830ProfileDesign;
+}
+
 int main()
 {
     /* Everything but testAnnibale and testAnnibaleFullTable checks the design profile. */
@@ -632,6 +673,24 @@ int main()
     testAgainstKit();
     testAnnibale();
     testAnnibaleFullTable();
+    testPianoFullOpp();
+    for(int bx=0;bx<3;++bx) {
+        Spec s={1,true,{1,0,0},false,false,bx};load(s);
+        Sm8750RpmhResources res;CHECK(Sm8750RpmhResourcesParse(&db,&res)==0);
+        Sm8750GpuLevelTable levels;CHECK(Sm8750GpuLevelsSelect(Sm8750DtGpuBins,6,A830VotesNoFuse,0,0,&levels)==0);
+        static A830VoteTables t;adreno830_profile_value=A830ProfileAnnibale;
+        CHECK(A830Votes::build(res,board,levels,A830VotesFullTable,&t)==0 && t.perf_dwords==49);
+        for(unsigned g=1;g<=11;++g) {
+            const uint32_t rounded=t.gx[g].vote>>16;
+            const uint32_t expected=bx==1?(rounded<=0x30?1:rounded<=0x40?2:3):63;
+            CHECK(((t.gx[g].dep>>20)&63)==expected);
+            CHECK((t.gx[g].dep&~(63u<<20))==(A830Votes::dependencyVote(res.mx,levels.levels[g-1].vlvl,false)&~(63u<<20)));
+        }
+        if(bx==1) {
+            res.gbx.vlvl[1]=0;CHECK(A830Votes::build(res,board,levels,A830VotesFullTable,&t)!=0);
+            res.gbx.vlvl[1]=0x30;res.gbx.count=17;CHECK(A830Votes::build(res,board,levels,A830VotesFullTable,&t)!=0);
+        }
+    }
     std::printf("PASS: A830Votes GX/dependency/CX votes, BW table (x=y and x=0), ACD 0x0FF0, level selection and HFI tables "
                 "match the KGSL formulas and the AdrenoFirmware kit (design); annibale's 160/222/342 MHz table, initial level "
                 "1, x = 0 rows, 24-dword perf payload and bus-only bw word (annibale); pagani-gpu-maxlevel: the design's whole "

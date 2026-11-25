@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-#define PIANO_WIFI_ASSOC_SNAPSHOT_VERSION 1u
+#define PIANO_WIFI_ASSOC_SNAPSHOT_VERSION 2u
 #define PIANO_WIFI_ASSOC_SSID_MAX 32u
 
 struct piano_wifi_assoc_snapshot {
@@ -32,14 +32,20 @@ struct piano_wifi_assoc_snapshot {
   uint8_t reserved;
   uint32_t associate_result;
   uint32_t user_stop;  // public link hidden during user stop/replacement; local leave is voluntary
+  uint32_t join_generation;  // accepted SET20 serial, zero for kernel-only diagnostic joins
 };
 
-// Returns 0 and fills a version-1 snapshot.  The function is safe before the
+// Returns 0 and fills a current-version snapshot. The function is safe before the
 // station starts and reports power off/idle in that case.
 int piano_wifi_assoc_snapshot(struct piano_wifi_assoc_snapshot *out);
 
+// 1 while the radio can scan and join (a pass reached level 7, the chip is up and the user power is ON), else 0: the front end
+// posts it to airportd as DRIVER_AVAILABLE (BSD event 55).
+int piano_wifi_assoc_radio_usable(void);
+
 enum { PIANO_WIFI_USER_OFF = 0, PIANO_WIFI_USER_ON = 1, PIANO_WIFI_USER_LEAVE = 2 };
-// Nonblocking intent only. The radio worker owns WMI, DMA and physical power.
+// Leave and ON publish intent. OFF waits for bounded hardware confirmation
+// from the radio worker, which owns WMI, DMA and physical power.
 int piano_wifi_user_control(uint32_t operation);
 
 #ifdef __cplusplus

@@ -164,7 +164,9 @@ int main() {
     const auto gen=s.contract.generation, seq=s.contract.seq;const auto timestamp=s.contract.updated_ms;
     if(active) {piano_contract_refresh(&s.contract);assert(s.wire()==1);}
     const auto requests=s.voltageRequests;const auto start=s.writes.size();
-    s.notify();s.decide();assert(s.icl<=100 && s.voltageRequests==requests && !s.wrote5(start));
+    // T-14b: the completion of our own GET in flight holds the limits in force (y10 dropped to 100 mA here, then the next fresh
+    // snapshot armed the recheck barrier at 500 mA: the 0 / 1.5 A cycle seen live on 2026-11-23)
+    s.notify();s.decide();assert(s.icl==1600 && s.link.st.notify_holds==1 && s.voltageRequests==requests && !s.wrote5(start));
     assert(s.wire()==2); // CCI says completion, not a connector event
     assert(!s.contract.notify_pending && s.contract.generation==gen && s.contract.seq==seq && s.contract.updated_ms==timestamp);
     if(active) {for(unsigned i=0;i<100 && s.contract.seq==seq;++i)assert(s.wire()>=0);}

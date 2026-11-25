@@ -211,6 +211,13 @@ static void test_light(void)
     CHECK(pas_action(&light.stream, 0) == PAS_ACT_NONE);               // the display is off: no stream
     pal_conditions(&light, 1, 1, -1, 0);                                // on, lid unknown (counts as open)
     light_enable(0);
+    /* Invalid IEEE values never seed the first-event gate. Both signed zeros and positive subnormals are valid. */
+    const uint32_t bad[] = {0x7fc00000u, 0x7f800001u, 0x7f800000u, 0xff800000u, 0xbf800000u, 0x80000001u};
+    for (unsigned i = 0; i < sizeof bad / sizeof bad[0]; ++i) {
+        CHECK(pal_event(&light, bad[i], 50 + i) == -1 && !light.stream.got_event && light.stream.waiting);
+        CHECK(light.raw_bits == bad[i] && !light.sample_valid && light.samples == 0 && light.invalid == i + 1);
+    }
+    CHECK(pal_lux_valid(0) && pal_lux_valid(0x80000000u) && pal_lux_valid(1));
     // the first sample applies at once: 300 lux -> the curve's 370 permille
     CHECK(pal_event(&light, float_bits(300.0f), 100) == 370 && light.lux == 300 && pal_settled(&light) && light.tick_at == 0);
     CHECK(pal_deadline(&light, 100) == 0);                              // at rest: no timer
@@ -266,6 +273,15 @@ static void test_light(void)
     // the consumer off: the stream off
     pal_conditions(&light, 0, 1, 1, 70000);
     CHECK(send_now(&light.stream, 70000) == PAS_ACT_DISABLE);
+    /* Finite values beyond the curve saturate before milli conversion; no signed rounding overflow. */
+    pas_response(&light.stream, 1, 70010);
+    pal_conditions(&light, 1, 1, 1, 71000);
+    light_enable(71000);
+    CHECK(pal_event(&light, 0x7f7fffffu, 71100) == 1000 && light.lux == 10000 && light.sample_valid);
+    CHECK(light.valid_ms == 71100 && light.sample_ms == 71100);
+    PsAls saturated;
+    ps_als_init(&saturated);
+    CHECK(ps_als_step(&saturated, 1, 0x7fffffff, 0) == 1000);
     printf("PASS light: first sample at once, smoothing only while moving, off with the display and the lid, a fresh start at wake\n");
 }
 

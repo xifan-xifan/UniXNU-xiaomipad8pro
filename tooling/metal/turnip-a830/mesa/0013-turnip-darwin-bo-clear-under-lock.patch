@@ -1,0 +1,321 @@
+turnip: darwin, a finished BO's struct cleared under the retire lock before its record can be reused (WindowServer's handle-0 Submit)
+
+- darwin_bo_finish queued a freed BO's retire record under retire->lock (darwin_reap_locked puts it into the cache at once when its fence
+  has passed), unlocked, and only then zeroed the tu_bo. A cache hit has the same kernel handle and therefore the same struct
+  (tu_device_lookup_bo): another thread's darwin_bo_init in between set the struct up for its own BO, the late memset wiped it, and that
+  command buffer submitted handle 0 / iova 0 (ws-diag1: "gpu submit refused: handle unknown: entry 13/128 handle 0 iova 0 bytes 1168"),
+  or its later sub-streams carried CPU addresses into the GPU (the slot-1 faults of the PNG -> HEIC wallpaper switch). The trigger is
+  the frontend's reclaim (nmb_device_trim_memory(0): command pools destroyed in a burst off the render threads). The struct is now
+  cleared under the lock, before the record is queued or reaped: upstream msm's tu_bo_make_zombie order (tu_knl_drm.cc, under vma_mutex).
+- A/B on one image: piano-tu-bo-clear=late on the boot line (kern.piano_bootargs, else kern.bootargs), else "late" as the first word of
+  /private/var/ngpu/debug/tu-bo-clear, keeps the old order; early is the default. Read once per process, said once at the device's start:
+  "NativeAdreno: BO clear early (under the retire lock), from the default" / "... late (after the unlock, the old order), from ...".
+- Inert until they fire (the unified log, where a GPU client's line is read without stderr-log=1, and stderr; the first 16 of a kind,
+  then the 100th, 1000th, ...):
+  "NativeAdreno: BO <h> set up again while still set (...): finish/init race" (darwin_bo_init, release builds have no assert);
+  "NativeAdreno: BO <h> handed out again before its finish cleared it (...): the late clear wipes it" (late only);
+  "NativeAdreno: cs <name>: current BO cleared (cpu <p>, ...)" (tu_cs_add_entry);
+  "NativeAdreno: submit entry <i>/<n> refused: BO cleared under it (offset, bytes; its struct last finished as BO <h> of <size> bytes,
+  ...); not sent to the kernel": such an entry is left out of the submission in both modes, instead of a kernel BadArgument and a lost
+  device.
+Against the tree after 0001-0012. MIT, as the files.
+
+--- a/src/freedreno/vulkan/tu_cs.cc
++++ b/src/freedreno/vulkan/tu_cs.cc
+@@ -9,6 +9,10 @@
+ #include "tu_rmv.h"
+ #include "tu_suballoc.h"
+ 
++#ifdef TU_HAS_DARWIN
++void tu_darwin_note_cleared_cs(const struct tu_cs *cs);   /* tu_knl_darwin.cc, 0013 */
++#endif
++
+ uint32_t tu_cs_fail_sink[TU_CS_FAIL_SINK_SIZE];
+ 
+ /* There is a limit to IB size supported by HW,
+@@ -244,6 +248,12 @@
+     */
+    assert(cs->writeable ? cs->read_write.bo_count : cs->read_only.bo_count);
+    assert(cs->entry_count < cs->entry_capacity);
++
++#ifdef TU_HAS_DARWIN
++   /* UniXNU-piano 0013: the BO under this entry was cleared while the stream wrote into it (tu_knl_darwin.cc): name the stream. */
++   if (unlikely(!tu_cs_current_bo(cs)->gem_handle))
++      tu_darwin_note_cleared_cs(cs);
++#endif
+ 
+    /* add an entry for [cs->start, cs->cur] */
+    cs->entries[cs->entry_count++] = (struct tu_cs_entry) {
+--- a/src/freedreno/vulkan/tu_knl_darwin.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin.cc
+@@ -7,12 +7,16 @@
+ 
+ #include <errno.h>
+ #include <pthread.h>
++#include <stdarg.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <sys/mman.h>
++#include <sys/sysctl.h>
+ #include <unistd.h>
+ 
++#include <os/log.h>
++
+ #include <IOKit/IOKitLib.h>
+ #include <dispatch/dispatch.h>
+ #include <mach/mach.h>
+@@ -135,6 +139,9 @@
+    dispatch_source_t trim_timer;
+    bool trim_armed;
+    struct tu_device *dev;
++   /* 0013: the last BOs finished (struct, kernel handle, size), to name a submit entry whose BO was cleared under it. */
++   struct darwin_finished_bo { const struct tu_bo *bo; uint64_t handle, size; } finished[64];
++   uint64_t finished_count;
+ };
+ static struct darwin_retire_state *darwin_stats_state;   /* for tu_darwin_bo_cache_stats */
+ 
+@@ -1336,8 +1343,140 @@
+                 (unsigned long long)(limit >> 20), (unsigned long long)(dw.params.max_bo_bytes >> 20),
+                 (unsigned long long)(dev->physical_device->va_size >> 20), (unsigned long long)refused, refused == 1 ? "" : "s");
+    return true;
++}
++
++/* 0013 (2026-11-21, WindowServer's handle-0 Submit on a PNG -> HEIC wallpaper switch): darwin_bo_finish queued a freed BO's record
++ * (reaped at once into the cache when its fence had passed) under retire->lock, and zeroed its tu_bo only after unlocking. A cache hit
++ * has the same kernel handle and so the same struct (tu_device_lookup_bo): an allocation in between was wiped by the late clear, and
++ * its command buffer then submitted handle 0 / iova 0, or the GPU read at the CPU address of the BO's view. The struct is now cleared
++ * under the lock before the record is queued, as msm's tu_bo_make_zombie clears it under vma_mutex (tu_knl_drm.cc). The old order stays
++ * for an A/B on one image: piano-tu-bo-clear=late on the boot line, else "late" in /private/var/ngpu/debug/tu-bo-clear; early is the
++ * default. The checks below write a line only when they see the race or its result: to the unified log (a GPU client's stderr reaches
++ * no console without stderr-log=1) and to stderr. */
++static void __attribute__((format(printf, 1, 2)))
++darwin_bo_note(const char *format, ...)
++{
++   char text[384];
++   va_list args;
++   va_start(args, format);
++   vsnprintf(text, sizeof(text), format, args);
++   va_end(args);
++   os_log(OS_LOG_DEFAULT, "%{public}s", text);
++   mesa_loge("%s", text);
++}
++
++/* The first 16 lines of a kind in this process, then the 100th, 1000th, ...: a burst stays bounded. */
++static bool
++darwin_bo_note_due(uint32_t count)
++{
++   if (count <= 16)
++      return true;
++   uint32_t mark = 100;
++   while (mark < count && mark <= UINT32_MAX / 10)
++      mark *= 10;
++   return mark == count;
++}
++
++/* A boot argument's value: kern.piano_bootargs has the whole merged line (k27 0071, the ADT's tail too), kern.bootargs the line
++ * clipped at 1023 bytes (an older kernel). */
++static bool
++darwin_boot_arg(const char *key, char *value, size_t value_size)
++{
++   char args[4096] = {};
++   size_t size = sizeof(args) - 1;
++   if (sysctlbyname("kern.piano_bootargs", args, &size, NULL, 0)) {
++      size = sizeof(args) - 1;
++      if (sysctlbyname("kern.bootargs", args, &size, NULL, 0))
++         return false;
++   }
++   args[MIN2(size, sizeof(args) - 1)] = 0;
++   const size_t length = strlen(key);
++   for (const char *at = args; (at = strstr(at, key)); at += length) {
++      if ((at != args && at[-1] != ' ') || at[length] != '=')
++         continue;
++      const char *text = at + length + 1;
++      snprintf(value, value_size, "%.*s", (int)strcspn(text, " "), text);
++      return true;
++   }
++   return false;
++}
++
++static bool darwin_bo_clear_late_mode;
++
++static void
++darwin_bo_clear_init(void)
++{
++   char value[32] = {};
++   const char *source = "the default";
++   if (darwin_boot_arg("piano-tu-bo-clear", value, sizeof(value))) {
++      source = "boot argument piano-tu-bo-clear";
++   } else if (FILE *file = fopen("/private/var/ngpu/debug/tu-bo-clear", "r")) {
++      if (fscanf(file, "%31s", value) == 1)
++         source = "/private/var/ngpu/debug/tu-bo-clear";
++      fclose(file);
++   }
++   darwin_bo_clear_late_mode = !strcmp(value, "late");
++   const bool unknown = value[0] && strcmp(value, "late") && strcmp(value, "early");
++   darwin_bo_note("NativeAdreno: BO clear %s, from %s%s%s%s", darwin_bo_clear_late_mode ? "late (after the unlock, the old order)" :
++                  "early (under the retire lock)", source, unknown ? " ('" : "", unknown ? value : "",
++                  unknown ? "' is neither early nor late)" : "");
++}
++
++/* Read once per process. */
++static bool
++darwin_bo_clear_late(void)
++{
++   static pthread_once_t once = PTHREAD_ONCE_INIT;
++   pthread_once(&once, darwin_bo_clear_init);
++   return darwin_bo_clear_late_mode;
++}
++
++/* Called under retire->lock. */
++static void
++darwin_note_finished(struct darwin_retire_state *retire, const struct tu_bo *bo, uint64_t handle, uint64_t size)
++{
++   retire->finished[retire->finished_count++ % ARRAY_SIZE(retire->finished)] = {bo, handle, size};
+ }
+ 
++/* A submit entry whose BO is cleared (handle 0): named here, and left out of the submission (darwin_submit_add_entries). The ring of
++ * the last finishes is read without the lock: numbers only, never dereferenced. */
++static void
++darwin_note_cleared_entry(struct tu_device *dev, const struct tu_bo *bo, unsigned index, unsigned count, uint32_t offset,
++                          uint32_t bytes)
++{
++   static uint32_t seen;
++   const uint32_t n = p_atomic_inc_return(&seen);
++   if (!darwin_bo_note_due(n))
++      return;
++   const struct darwin_retire_state *retire = (const struct darwin_retire_state *)dev->darwin_retire;
++   const uint64_t total = retire ? retire->finished_count : 0;
++   const uint64_t span = MIN2(total, (uint64_t)ARRAY_SIZE(retire->finished));
++   for (uint64_t k = 1; k <= span; ++k) {
++      const struct darwin_retire_state::darwin_finished_bo f = retire->finished[(total - k) % ARRAY_SIZE(retire->finished)];
++      if (f.bo == bo) {
++         darwin_bo_note("NativeAdreno: submit entry %u/%u refused: BO cleared under it (offset %u, %u bytes; its struct last finished as "
++                        "BO %llu of %llu bytes, %llu finish(es) ago); not sent to the kernel (%u so far)", index, count, offset, bytes,
++                        (unsigned long long)f.handle, (unsigned long long)f.size, (unsigned long long)(k - 1), n);
++         return;
++      }
++   }
++   darwin_bo_note("NativeAdreno: submit entry %u/%u refused: BO cleared under it (offset %u, %u bytes; its struct %p is not among the "
++                  "last %llu finished); not sent to the kernel (%u so far)", index, count, offset, bytes, (const void *)bo,
++                  (unsigned long long)span, n);
++}
++
++/* tu_cs_add_entry (tu_cs.cc) found the stream's current BO cleared: the stream's name and CPU address, to set against a later fault. */
++void tu_darwin_note_cleared_cs(const struct tu_cs *cs);
++void
++tu_darwin_note_cleared_cs(const struct tu_cs *cs)
++{
++   static uint32_t seen;
++   const uint32_t n = p_atomic_inc_return(&seen);
++   if (darwin_bo_note_due(n))
++      darwin_bo_note("NativeAdreno: cs %s: current BO cleared (cpu %p, %u bytes in this entry) (%u so far)", cs->name ? cs->name : "?",
++                     (const void *)cs->start, (unsigned)((const char *)cs->cur - (const char *)cs->start), n);
++}
++
+ static VkResult
+ darwin_bo_init(struct tu_device *dev, struct vk_object_base *base,
+                struct tu_bo **out_bo, uint64_t size, uint64_t client_iova,
+@@ -1447,6 +1586,16 @@
+    uint32_t gem_handle = (uint32_t)handle;
+    struct tu_bo *bo = tu_device_lookup_bo(dev, gem_handle);
+    assert(bo && bo->gem_handle == 0);
++   /* 0013: a struct still set belongs to another owner (the assert above is compiled out): a finish that has not cleared it yet. Only
++    * numbers of the old owner are read: its finish may be clearing the struct now. */
++   if (bo->gem_handle || bo->refcnt) {
++      static uint32_t seen;
++      const uint32_t n = p_atomic_inc_return(&seen);
++      if (darwin_bo_note_due(n))
++         darwin_bo_note("NativeAdreno: BO %u set up again while still set (refcnt %d, %llu bytes; now %s of %llu bytes, %s): finish/init "
++                        "race (%u so far)", gem_handle, (int)bo->refcnt, (unsigned long long)bo->size, name ? name : "?",
++                        (unsigned long long)size, reused ? "a cache hit" : "a new handle", n);
++   }
+ 
+    name = tu_debug_bos_add(dev, size, name);
+ 
+@@ -1674,8 +1823,19 @@
+       TU_RMV(bo_unmap, dev, bo);
+    TU_RMV(bo_destroy, dev, bo);
+ 
++   /* 0013: what the retire record needs, taken before the struct is cleared (its fence below). */
++   const uint32_t gem_handle = bo->gem_handle;
++   struct darwin_retired_bo record = {bo->darwin_handle, bo->iova, bo->darwin_alloc_size ? bo->darwin_alloc_size : bo->size, bo->map,
++                                      bo->darwin_token, 0, bo->darwin_alloc_size != 0, bo->darwin_read_only};
++   const bool late = darwin_bo_clear_late();
++
+    struct darwin_retire_state *retire = (struct darwin_retire_state *)dev->darwin_retire;
+    pthread_mutex_lock(&retire->lock);
++   darwin_note_finished(retire, bo, record.handle, record.size);
++   /* 0013: the BO structs live in a sparse array indexed by the kernel handle: zero the entry to mark it free BEFORE the record can
++    * reach the ring and the cache, where another thread's darwin_bo_init takes the same handle and so this struct. */
++   if (!late)
++      memset(bo, 0, sizeof(*bo));
+    darwin_reap_locked(dev, retire);
+    if (retire->count == retire->capacity && retire->failure == VK_SUCCESS) {
+       /* The ring grows, its records in order from the head. */
+@@ -1692,11 +1852,10 @@
+    }
+    if (retire->count < retire->capacity) {
+       pthread_mutex_lock(&dw.lock);
+-      uint32_t fence = dw.last_fence;
++      record.fence = dw.last_fence;
+       pthread_mutex_unlock(&dw.lock);
+       unsigned slot = (retire->head + retire->count) % retire->capacity;
+-      retire->entries[slot] = {bo->darwin_handle, bo->iova, bo->darwin_alloc_size ? bo->darwin_alloc_size : bo->size, bo->map,
+-                               bo->darwin_token, fence, bo->darwin_alloc_size != 0, bo->darwin_read_only};
++      retire->entries[slot] = record;
+       ++retire->count;
+       ++retire->enqueued;
+       darwin_reap_locked(dev, retire);
+@@ -1707,8 +1866,18 @@
+    }
+    pthread_mutex_unlock(&retire->lock);
+ 
+-   /* The BO structs live in a sparse array: zero the entry to mark it free. */
+-   memset(bo, 0, sizeof(*bo));
++   if (late) {
++      /* piano-tu-bo-clear=late: the old order, the struct zeroed after the unlock. One set up again in between (another thread took
++       * the handle from the cache) is a live BO that this clear wipes: said, then wiped as before. */
++      if (bo->gem_handle == gem_handle && p_atomic_read(&bo->refcnt) > 0) {
++         static uint32_t seen;
++         const uint32_t n = p_atomic_inc_return(&seen);
++         if (darwin_bo_note_due(n))
++            darwin_bo_note("NativeAdreno: BO %u handed out again before its finish cleared it (refcnt %d, iova %#llx): the late clear "
++                           "wipes it (%u so far)", gem_handle, (int)p_atomic_read(&bo->refcnt), (unsigned long long)bo->iova, n);
++      }
++      memset(bo, 0, sizeof(*bo));
++   }
+ 
+    u_rwlock_rdunlock(&dev->dma_bo_lock);
+ }
+@@ -1741,13 +1910,21 @@
+    struct tu_darwin_queue_submit *submit = (struct tu_darwin_queue_submit *)_submit;
+    NativeAdrenoAbiSubmitBuffer *cmds = (NativeAdrenoAbiSubmitBuffer *)
+       util_dynarray_grow(&submit->commands, NativeAdrenoAbiSubmitBuffer, num_entries);
++   unsigned kept = 0;
+    for (unsigned i = 0; i < num_entries; i++) {
+-      cmds[i] = (NativeAdrenoAbiSubmitBuffer) {
++      /* 0013: an entry whose BO was cleared under it (handle 0) is refused here, by name, instead of by the kernel (a BadArgument
++       * Submit, then a lost device) or by the GPU (a fault once the stream's later addresses are CPU addresses). */
++      if (!entries[i].bo->darwin_handle) {
++         darwin_note_cleared_entry(device, entries[i].bo, i, num_entries, entries[i].offset, entries[i].size);
++         continue;
++      }
++      cmds[kept++] = (NativeAdrenoAbiSubmitBuffer) {
+          .handle = entries[i].bo->darwin_handle,
+          .iova = entries[i].bo->iova + entries[i].offset,
+          .bytes = entries[i].size,
+       };
+    }
++   submit->commands.size -= (num_entries - kept) * sizeof(NativeAdrenoAbiSubmitBuffer);
+ }
+ 
+ static void
+@@ -2067,6 +2244,7 @@
+    }
+    dev->darwin_retire = retire;
+    darwin_stats_state = retire;
++   darwin_bo_clear_late();   /* 0013: the mode's one line, at the device's start */
+    darwin_watch_memory_pressure();
+    retire->pressure_seen = p_atomic_read(&darwin_memory_pressure);
+    /* 0009: the idle trim's timer, never armed until something is cached or waits for its fence (darwin_trim_arm). Without it (no

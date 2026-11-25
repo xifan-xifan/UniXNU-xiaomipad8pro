@@ -191,6 +191,14 @@ def stage(out, adreno_firmware):
     src = out / 'src'
     shutil.rmtree(src, ignore_errors=True)
     shutil.copytree(PACKAGE / 'adreno830', src / 'adreno830')
+    # Preserve the package-relative read-only thermal API/model paths used by C5, in the actual staged test layout.
+    for name in ('include', 'PianoThermal'):
+        shared = out / name
+        if shared.is_symlink():
+            shared.unlink()
+        elif shared.exists():
+            shutil.rmtree(shared)
+        shared.symlink_to(PACKAGE.parent / name, target_is_directory=True)
     kits = src / 'UniXNU/kits'
     kits.mkdir(parents=True)
     for name in ('ArmSmmu4K', 'AdrenoPM4'):

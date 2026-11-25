@@ -199,8 +199,11 @@ Checked in an agent worktree (2026-11-12): the KC from this tree with the 0064 k
 
 **desk-dev** (2026-11-12 evening): the owner logs in (or `tooling/native/desk-login.sh` types the password he left in the ignored
 `private/login.secret`: it waits in the running console capture for `PianoA830: SecurityAgent opens the accelerator` and a lit
-frame, types the password on stdin to `piano-input.py type --stdin --enter`, never echoed, and reports when the Finder opens the
-accelerator; `--now` types at once; nothing is typed when the Finder already runs). Then, from the Mac:
+frame. Since 2026-11-18 it first wakes with Shift, requires a **new** lit-frame observation, uses the native
+`piano-login-readiness` AX probe to confirm the selected target account and focused secure field, clears that field,
+then types once on stdin to `piano-input.py type --stdin --enter`. Success requires a new Finder plus the matching console
+UID. AX denial or missing UI proof stops before password input. `--now` only skips the SecurityAgent wait; it never skips
+these guards. This transaction is host tested; its native login-window AX access awaits tablet qualification). Then, from the Mac:
 `tooling/native/usb-console.py --port 1` (the root shell), or `tooling/native/desk-ssh.sh` (ssh with the key, bound to the Mac's
 end of the cable, to the fixed 169.254.80.2, or to `-a <address>` of the `desk-dev: usb net: enN inet ...` line; the Mac's side of
 the USB network left at "Using DHCP" self-assigns a 169.254 address; Internet Sharing gives the tablet a lease instead,

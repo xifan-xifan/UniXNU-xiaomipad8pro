@@ -51,6 +51,7 @@ struct Dma {
   uint64_t tablesPa = 0;
   void *owner = nullptr;   // the Hw's bookkeeping
   bool session = false;
+  uint32_t arenaBytes = session::kAvcArenaBytes;
   volatile uint8_t *arena = nullptr;
   uint64_t *arenaPages = nullptr; // CPU metadata owned with the prepared buffers, not KC static __DATA
 };
@@ -101,9 +102,13 @@ class Bringup {
   IdleClock idle;
   Report rep;
   Options opt;
+  uint32_t avcWidth = 0, avcHeight = 0; // selected before DMA preparation; zero preserves the legacy qualification
+  bool hevc = false;
+  uint32_t bitdepth = 8;
   unsigned doorbells = 0, txEvents = 0, rxEvents = 0, dbgChecks = 0, dbgErrors = 0, msgDrops = 0, watchdogSamples = 0;
   uint32_t watchdogSeen = 0;
   int teardownRc = kOk;
+  int quarantineReason = kOk; // native safety latch; dependencies live until boot reset
   bool firstHfi = false;
   session::Layout layout;
   session::Result v4;
@@ -161,6 +166,10 @@ class Bringup {
     const uint32_t irq = ops.rd(kIris + kWrapperIntrStatus);
     watchdogSeen |= irq & (1u << 3);
     ++watchdogSamples;
+    if (opt.level == 6 && watchdogSeen) {
+      hw.note("V9c core %s watchdog observed irq %08x no-further-trace-MMIO 1",when,irq);
+      return;
+    }
     hw.note("V3 core %s us %llu ctrl %08x tz %08x irq %08x mask %08x watchdog %u cpu-noc %08x/%08x video-noc %08x/%08x", when,
             (unsigned long long)hw.nowUs(), ops.rd(kIris + kCtrlStatus), ops.rd(kIris + kTzCpuStatus), irq,
             ops.rd(kIris + kWrapperIntrMask), unsigned(watchdogSeen != 0), ops.rd(kIris + kCpuNocLpiCtl),
@@ -177,6 +186,19 @@ class Bringup {
   // Bounds checked before indexing even for a malformed RX; called before the response parser.
   void packetTrace(const char *direction, unsigned seq, const uint32_t *buf, uint32_t bytes)
   {
+    // Native sessions retain binary TX/RX history and parsed error evidence.
+    // The ladder's duplicate packet dump must not serialize first-picture work.
+    if (opt.level == 6 && bytes >= kHfiHeaderBytes && !(bytes & 3) && buf[0] == bytes &&
+        buf[7] && buf[7] <= (bytes-kHfiHeaderBytes)/kHfiPacketBytes) {
+      uint32_t at=kHfiHeaderBytes;
+      unsigned n=0;
+      for (;n<buf[7] && at<=bytes && bytes-at>=kHfiPacketBytes;++n) {
+        const uint32_t size=buf[at/4];
+        if (size<kHfiPacketBytes || (size&3) || size>bytes-at) break;
+        at+=size;
+      }
+      if (n==buf[7] && at==bytes) return; // malformed diagnostics still get the original dump
+    }
     if (bytes < kHfiHeaderBytes) {
       hw.note("V3 %s %u short header bytes %u word0 %08x", direction, seq, bytes, bytes >= 4 ? buf[0] : 0);
       return;
@@ -263,6 +285,7 @@ class Bringup {
   // ------------------------------------------------------------------------------------------------------------ V1 pieces
   int on()
   {
+    hw.note("V9c power-on reason level-%u lifecycle %u already-on %u",opt.level,lifecycleEvent,unsigned(pst.on));
     const uint64_t t0 = hw.nowUs();
     const int rc = power.on();
     const uint64_t us = hw.nowUs() - t0;
@@ -271,6 +294,7 @@ class Bringup {
   }
   int off()
   {
+    hw.note("V9c power-off reason level-%u lifecycle %u watchdog %u",opt.level,lifecycleEvent,unsigned(watchdogSeen != 0));
     const uint64_t t0 = hw.nowUs();
     const int rc = power.off();
     const uint64_t us = hw.nowUs() - t0;
@@ -407,6 +431,17 @@ class Bringup {
   // synchronize, then drop power and free memory. A failure retains DMA (and any available dependencies), never reports unloaded.
   int teardown()
   {
+    // A native firmware/session failure is not an ordinary idle transition.
+    // Do not touch failed hardware again (including diagnostic MMIO), collapse
+    // a NoC with unconfirmed work, or free its DMA on this path.
+    if (opt.level == 6 && (quarantineReason || watchdogSeen || rep.fsr)) {
+      teardownRc = quarantineReason ? quarantineReason : watchdogSeen ? kErrWatchdog : kErrFault;
+      quarantineReason = teardownRc;
+      hw.note("V9c quarantine reason %d watchdog %u fault %08x dma-held %u power-held %u no-cleanup-MMIO 1 reboot-required 1",
+              teardownRc,unsigned(watchdogSeen != 0),rep.fsr,unsigned(dmaHeld),unsigned(pst.on));
+      phase("native-quarantine",teardownRc);
+      return teardownRc;
+    }
     phase("release-begin", kOk);
     int un = kOk, faultRc = kOk, offRc = kOk;
     const bool hadPas = fst.loaded || fst.initDone;
@@ -417,9 +452,17 @@ class Bringup {
       phase("release-resume", un);
     }
     coreTrace("before-teardown");
+    if (opt.level == 6 && watchdogSeen) {
+      quarantineReason = kErrWatchdog;
+      return teardown();
+    }
     queueTrace("before-teardown");
     sfrTrace("before-teardown");
     if (routed.bank) faultRc = checkFault();
+    if (opt.level == 6 && faultRc) {
+      quarantineReason = faultRc;
+      return teardown(); // the guard above logs without further hardware access
+    }
     if (!un && hadPas) {
       if (domainPowerReady()) un = firmware.unload();
       else un = kErrScm;
@@ -438,6 +481,7 @@ class Bringup {
     // No TLB operation after off(). Do not withdraw the buses after an unconfirmed detach or quiesce.
     if (!un && detached) {
       offRc = off();
+      if (opt.level == 6 && !offRc && pst.offWarnings) offRc = kErrOffCheck;
       phase("power-off", offRc);
       hw.note("V3 teardown power result %d warnings %u rails %u bus %u controller %u codec %u", offRc, pst.offWarnings,
               unsigned(pst.railsUp), unsigned(pst.busOn), unsigned(pst.ctrlGdsc), unsigned(pst.codecGdsc));
@@ -466,6 +510,7 @@ class Bringup {
     hw.note("V3 evidence: first-HFI %s version %u teardown pending; error %d step %d", firstHfi ? "passed" : "not passed",
             unsigned(rep.version), rc, stepNo);
     hw.note("V3 version error %d stage %d received %u (see CTRL/RX/SFR evidence)", rc, stepNo, unsigned(rep.version));
+    if (opt.level == 6) quarantineReason = rc;
     teardown();
     hw.note("V3 outcome first-HFI %s first-error %d stage %d teardown %d dma-held %u", firstHfi ? "PASS" : "FAIL", rc, stepNo,
             teardownRc, unsigned(dmaHeld));
@@ -481,6 +526,43 @@ class Bringup {
     failureRaw(stepNo, rc);
     return rc;
   }
+  bool prepareLayout()
+  {
+    return hevc ? layout.initHevc(avcWidth, avcHeight, bitdepth) :
+           avcWidth ? layout.init(avcWidth, avcHeight) : layout.init();
+  }
+  bool mapArena()
+  {
+    if (!dma.arena || !session::buildArena(tables, layout, dma.arenaPages, dma.arenaBytes)) return false;
+    const uint32_t span = layout.arenaBytes();
+    unsigned mapped = 0;
+    for (unsigned i = 0; i < span / 4096; ++i) mapped += layout.mapped(i);
+    hw.note("V4 mapping arena [%08x,%08x) reserved %u pages mapped %u guards-invalid %u tables %u full-walk PASS",
+            session::kArenaBase, session::kArenaBase + span, layout.bytes, mapped, span / 4096 - mapped, tables.pageCount);
+    for (unsigned i = 0; i < layout.used; ++i) {
+      const session::Buffer &b = layout.buf[i];
+      hw.note("V4 mapping type %u index %u port %u capacity %u IOVA [%08x,%08x) PA-first %llx PA-last %llx",
+              b.type,b.index,b.port,b.capacity,b.iova(),b.iova()+b.capacity,
+              (unsigned long long)dma.arenaPages[b.off/4096],
+              (unsigned long long)dma.arenaPages[(b.off+b.capacity-1)/4096]);
+    }
+    return true;
+  }
+  int prepareResidentSession()
+  {
+    if (opt.level != 6 || !firstHfi || !fst.loaded || !dmaHeld || !domainPowerReady()) return kErrHfi;
+    watchdogSeen |= ops.rd(kIris + kWrapperIntrStatus) & (1u << 3);
+    ++watchdogSamples;
+    if (watchdogSeen) return kErrWatchdog;
+    if (const int rc = checkFault()) return rc;
+    if (!prepareLayout() || !layout.arenaBytes() || layout.arenaBytes() > dma.arenaBytes) return kErrNoMemory;
+    // The previous CLOSE ack fences arena DMA. Keep the live UC/queues
+    // intact and synchronize changed arena leaves before the next OPEN.
+    if (!mapArena()) return kErrSmmu;
+    hw.cleanToPoc(tables.cpu, tables.pageCount * 4096);
+    if (!vsmmu::tlbSync(ops, plan.cb()) || !vsmmu::globalSync(ops)) return kErrSmmu;
+    return checkFault();
+  }
   int smmuSetup()
   {
     hw.stage(kStepSmmuPlan, "SMMU: two free groups and a free bank for 0x1940/0x1947");
@@ -492,33 +574,21 @@ class Bringup {
     bankTrace("planned");
     hw.stage(kStepSmmuTables, "the UC region's memory and our table");
     dma.session = opt.level >= 5;
-    if (dma.session && !layout.init()) return smmuFail(kStepSmmuTables, kErrNoMemory);
-    if (!hw.dmaAlloc(dma)) return smmuFail(kStepSmmuTables, kErrNoMemory);
-    dmaHeld = true;
+    if (dma.session && !prepareLayout()) return smmuFail(kStepSmmuTables, kErrNoMemory);
+    if (!dmaHeld) {
+      dma.arenaBytes = layout.arenaBytes();
+      if (!hw.dmaAlloc(dma)) return smmuFail(kStepSmmuTables, kErrNoMemory);
+      dmaHeld = true;
+    }
     tables.cpu = dma.tables;
     tables.pa = dma.tablesPa;
-    tables.pageCount = dma.session ? vsmmu::kSessionTablePages : vsmmu::kTablePages;
+    tables.pageCount = dma.session ? vsmmu::sessionTablePages(dma.arenaBytes) : vsmmu::kTablePages;
     if (!vsmmu::build(tables, dma.pages, vsmmu::kUcPages, dma.scratch)) {
       hw.note("smmu: a page of the UC region or the table is not a 4 KiB page of XNU's RAM");
       return smmuFail(kStepSmmuTables, kErrSmmu);
     }
-    if (dma.session && (!dma.arena || !session::buildArena(tables, layout, dma.arenaPages)))
-      return smmuFail(kStepSmmuTables, kErrSmmu);
+    if (dma.session && !mapArena()) return smmuFail(kStepSmmuTables, kErrSmmu);
     hw.cleanToPoc(tables.cpu, tables.pageCount * 4096);
-    if (dma.session) {
-      unsigned mapped = 0;
-      for (unsigned i = 0; i < session::kArenaPages; ++i) mapped += layout.mapped(i);
-      hw.note("V4 mapping arena [%08x,%08x) reserved %u pages mapped %u guards-invalid %u tables %u full-walk PASS",
-              session::kArenaBase, session::kArenaBase + session::kArenaBytes, layout.bytes, mapped,
-              session::kArenaPages - mapped, tables.pageCount);
-      for (unsigned i = 0; i < layout.used; ++i) {
-        const session::Buffer &b = layout.buf[i];
-        hw.note("V4 mapping type %u index %u port %u capacity %u IOVA [%08x,%08x) PA-first %llx PA-last %llx",
-                b.type,b.index,b.port,b.capacity,b.iova(),b.iova()+b.capacity,
-                (unsigned long long)dma.arenaPages[b.off/4096],
-                (unsigned long long)dma.arenaPages[(b.off+b.capacity-1)/4096]);
-      }
-    }
     for (unsigned i = 0; i < vsmmu::kWindowPages; ++i) {   // the self-check: every page of the window as the SMMU will walk it
       const uint64_t want = i < vsmmu::kUcPages ? dma.pages[i] : dma.scratch;
       if (vsmmu::walk(tables, kIovaBase + 4096 * i + 0x10) != want + 0x10) {
@@ -574,7 +644,8 @@ class Bringup {
   void ring()
   {
     ops.wr(kIris + kCpuIcSoftInt, kSoftIntH2a, "IC_SOFTINT: doorbell");
-    hw.note("V3 doorbell %u tx %u cmd read %u write %u", ++doorbells, txEvents,
+    ++doorbells;
+    if (opt.level != 6) hw.note("V3 doorbell %u tx %u cmd read %u write %u", doorbells, txEvents,
             mem.ld(hfi::qhdr(hfi::kCmdq) + hfi::kQRead), mem.ld(hfi::qhdr(hfi::kCmdq) + hfi::kQWrite));
   }
   int send(uint32_t bytes, const char *what)
@@ -583,8 +654,10 @@ class Bringup {
     const uint32_t h = hfi::qhdr(hfi::kCmdq), beforeR = mem.ld(h + hfi::kQRead), beforeW = mem.ld(h + hfi::kQWrite);
     packetTrace("TX", seq, tx, bytes);
     const int rc = hfi::write(mem, hfi::kCmdq, tx, bytes, [this] { hw.barrier(); });
-    hw.note("hfi: %s: %u bytes, header %u, %u packet(s)%s", what, bytes, tx[2], tx[7], rc ? ": the command queue has no room" : "");
-    hw.note("V3 TX %u %s result %d cmd read %u->%u write %u->%u", seq, what, rc, beforeR, mem.ld(h + hfi::kQRead), beforeW, mem.ld(h + hfi::kQWrite));
+    if (opt.level != 6 || rc) {
+      hw.note("hfi: %s: %u bytes, header %u, %u packet(s)%s", what, bytes, tx[2], tx[7], rc ? ": the command queue has no room" : "");
+      hw.note("V3 TX %u %s result %d cmd read %u->%u write %u->%u", seq, what, rc, beforeR, mem.ld(h + hfi::kQRead), beforeW, mem.ld(h + hfi::kQWrite));
+    }
     if (rc) return kErrHfi;
     ring();
     return kOk;

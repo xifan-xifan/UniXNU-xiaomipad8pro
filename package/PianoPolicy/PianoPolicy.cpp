@@ -14,6 +14,9 @@
 //                     hold-off's timing), and that fallback is logged once
 //   machdep.piano_policy_lpm   macOS Low Power Mode, written by root (the agent tooling/native/piano-policy-agent mirrors
 //                     com.apple.system.lowpowermode into it; by hand: sudo sysctl machdep.piano_policy_lpm=1)
+//   machdep.piano_policy_hpm   macOS High Power Mode (Energy Mode, docs/policy.md 12), written by root (the agent mirrors
+//                     com.apple.system.highpowermode into it; by hand: sudo sysctl machdep.piano_policy_hpm=1)
+//   PianoThermal      piano-thermal-profiles: the highest profile mode it takes (3 = High Power; absent = 2)
 //   machdep.piano_sleep (k27 0062)   "on" = system sleep exists (piano-sleep=1), and its wake mask; read once at start. A kernel
 //                     whose OID lacks CTLFLAG_KERN (0062-0064 before 2026-11-12) answers the read with EPERM: then the kernel's own
 //                     boot arguments piano-sleep / piano-sleep-wake (Policy.h resolveSleep)
@@ -35,7 +38,7 @@
 //                                consumed (sleep now, or a display wake), kIOReturnUnsupported: send macOS the HID Power usage
 //   "piano-policy-keyboard-wake" param1 = bool *: PianoKeyboard may arm its gpio95 latch for a system sleep (0062 bit 16);
 //                                param2 = bool *: gpio95 may wake the display now
-// Properties: piano-policy, -close (sleep/lock/none), -profile, -gpu-khz, -keyboard-wake, -keyboard-latch, -lpm, -changes, each
+// Properties: piano-policy, -close (sleep/lock/none), -profile, -gpu-khz, -keyboard-wake, -keyboard-latch, -lpm, -hpm, -changes, each
 // change a kIOMessageServicePropertyChange. sysctl machdep.piano_policy: the state, decisions and counters.
 //
 // Boot arguments:
@@ -44,6 +47,7 @@
 //   piano-policy-lid=1      act on the cover (clamshell, clamshell sleep, AC adaptor). Only once the hall polarity is verified
 //                           (docs/drivers/keyboard.md 10.3) and with piano-keyboard-lid=0 (else PianoKeyboard tells the clamshell)
 //   piano-policy-profile=0  no PianoThermal profile, no GPU ceiling            piano-policy-gpu-mhz=M  Power Saver's GPU ceiling (342)
+//   piano-policy-profile=2  Low Power Mode is the only switch: without it Balanced (PianoThermal profile 2) on battery too
 //   piano-policy-powerkey=0 the power key stays macOS's                       piano-policy-kbd=0  no display wake by gpio95
 //   piano-policy-kbd-holdoff=MS  the display off at least MS before gpio95 counts (1000)
 //   piano-policy-lpm=1      Low Power Mode on from boot (machdep.piano_policy_lpm starts at 1): an unattended test's switch
@@ -173,8 +177,9 @@ int numberProperty(IOService *s, const char *key)
 // ---------------------------------------------------------------------------------------------------------------- sysctls
 volatile uint32_t gLidArm;
 volatile uint32_t gLpm;                 // machdep.piano_policy_lpm
+volatile uint32_t gHpm;                 // machdep.piano_policy_hpm (Energy Mode step E2)
 IOLock *gStatusLock;
-char gStatus[640] = "starting\n";
+char gStatus[768] = "starting\n";
 void kickFromSysctl();
 
 int sysctlStatus(struct sysctl_oid *, void *, int, struct sysctl_req *req)
@@ -196,6 +201,16 @@ int sysctlLpm(struct sysctl_oid *oidp, void *, int, struct sysctl_req *req)
   return 0;
 }
 
+int sysctlHpm(struct sysctl_oid *oidp, void *, int, struct sysctl_req *req)
+{
+  int v = int(__atomic_load_n(&gHpm, __ATOMIC_ACQUIRE));
+  const int err = sysctl_handle_int(oidp, &v, 0, req);
+  if (err || !req->newptr) return err;
+  __atomic_store_n(&gHpm, v ? 1u : 0u, __ATOMIC_RELEASE);
+  kickFromSysctl();
+  return 0;
+}
+
 int sysctlLidArm(struct sysctl_oid *oidp, void *, int, struct sysctl_req *req)
 {
   int v=int(__atomic_load_n(&gLidArm,__ATOMIC_ACQUIRE));
@@ -210,7 +225,7 @@ int sysctlLidArm(struct sysctl_oid *oidp, void *, int, struct sysctl_req *req)
 
 // machdep.piano_policy (read only) and machdep.piano_policy_lpm (root writes), registered at start. Filled in at run time rather
 // than by SYSCTL_OID's static initializer: its parent and handler are signed pointers on arm64e.
-struct sysctl_oid gOidStatus, gOidLpm, gOidLidArm;
+struct sysctl_oid gOidStatus, gOidLpm, gOidHpm, gOidLidArm;
 
 }  // namespace
 
@@ -270,7 +285,7 @@ class PianoPolicy : public IOService {
   Engine fEngine{Config()};
   IOLock *fLock = nullptr;
   uint32_t fPending = 0;
-  IOService *fKeyboard = nullptr, *fPowerSource = nullptr, *fGpu = nullptr;   // retained once found
+  IOService *fKeyboard = nullptr, *fPowerSource = nullptr, *fGpu = nullptr, *fThermal = nullptr;   // retained once found
   // NativeGopDisplay (the panel's): retained once found, its messages listened to; one with piano-display-power-messages replaces
   // one without (D6's second instance shares the class and publishes no display power). Under fDisplayLock, which no handler takes.
   IOLock *fDisplayLock = nullptr;
@@ -327,6 +342,7 @@ bool PianoPolicy::start(IOService *provider)
   note("sleep-contract1: AC lid demand-sleep %s (real AC preserved)", fConfig.lidSleepAC ? "opted in" : "off");
   fConfig.lidConflict = gArgs.keyboardLid != 0;
   fConfig.profile = gArgs.profile != 0;
+  fConfig.lpmOnly = gArgs.profile == 2;
   fConfig.gpuKhz = gArgs.gpuMhz * 1000u;
   fConfig.gpuNeeded = gArgs.gpuMaxGiven;
   fConfig.thermalOwnsGpu = gArgs.thermal >= 2;
@@ -345,7 +361,7 @@ bool PianoPolicy::start(IOService *provider)
   note("start: piano-policy=%u (%s), cover %s, profile %s, GPU ceiling %u MHz (%s), power key %s, keyboard wake %s (hold-off %u ms)",
        gArgs.level, fConfig.act ? "acting" : "decisions only: nothing sent",
        !fConfig.lid ? "not acted on (piano-policy-lid=0)" : fConfig.lidConflict ? "NOT acted on: piano-keyboard-lid is set" : "acted on",
-       fConfig.profile ? "on" : "off", gArgs.gpuMhz,
+       fConfig.lpmOnly ? "on (Low Power Mode is the only switch)" : fConfig.profile ? "on" : "off", gArgs.gpuMhz,
        !gArgs.gpuMhz ? "none" : fConfig.gpuNeeded ? "PianoA830's own maximum is above it" : "a no-op: PianoA830's own maximum is 342 MHz",
        fConfig.powerKey ? "on" : "off", fConfig.keyboard ? "on" : "off", fConfig.holdoffMs);
   const char *const state = fSleepOn ? "on" : "off (piano-sleep=1 turns it on)";
@@ -387,6 +403,9 @@ bool PianoPolicy::start(IOService *provider)
   sysctl_register_oid(&gOidLidArm);
   sysctl_register_oid(&gOidStatus);
   sysctl_register_oid(&gOidLpm);
+  fillOid(gOidHpm, "piano_policy_hpm", CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, sysctlHpm, "I",
+          "PianoPolicy: macOS High Power Mode (0/1), mirrored by the agent");
+  sysctl_register_oid(&gOidHpm);
   setProperty("piano-policy", gArgs.level, 32);
   // The services watched: their appearance (now or later) is an event; PianoKeyboard, the power source and NativeGopDisplay are also
   // listened to (each change of theirs a message: no polling).
@@ -548,6 +567,16 @@ Inputs PianoPolicy::gather()
   in.screen = on < 0 ? Screen::unknown : on ? Screen::on : Screen::off;
   in.displayEvents = displayEvents(marked, __atomic_load_n(&fDisplayMessages, __ATOMIC_ACQUIRE));
   in.lpm = __atomic_load_n(&gLpm, __ATOMIC_ACQUIRE) != 0;
+  in.hpm = __atomic_load_n(&gHpm, __ATOMIC_ACQUIRE) != 0;
+  // PianoThermal's highest profile mode (published before its service is registered: a service found has it, or never will).
+  IOService *th = __atomic_load_n(&fThermal, __ATOMIC_ACQUIRE);
+  if (!th) {
+    if (IOService *t = copyByClass("PianoThermal")) {
+      if (__atomic_exchange_n(&fThermal, t, __ATOMIC_ACQ_REL)) t->release();
+      th = __atomic_load_n(&fThermal, __ATOMIC_ACQUIRE);
+    }
+  }
+  in.thermalProfiles = thermalProfiles(numberProperty(th, kThermalProfilesKey));
   in.sleepOn = fSleepOn;
   in.wakeMask = fWakeMask;
   // PianoA830's slots (published before its service is: a service found has the property, or never will).
@@ -656,12 +685,14 @@ void PianoPolicy::describe(const Inputs &in, const View &v)
 {
   IOLockLock(gStatusLock);
   snprintf(gStatus, sizeof gStatus,
-           "level %u (%s); cover %s, %sattached; %s; display %s; Low Power Mode %u; sleep %s, wake mask %#x; thermal %s; close: %s "
+           "level %u (%s); cover %s, %sattached; %s; display %s; Low Power Mode %u; High Power Mode %u (PianoThermal profiles <= %u); "
+           "sleep %s, wake mask %#x; thermal %s; close: %s "
            "(%s); profile %s (%s); GPU ceiling %u MHz (written %u%s); keyboard wake %u, latch %u; sent: root %u, user-active %u, "
            "profile %u, gpu %u; power keys %u, keyboard wakes %u, input changes %u; display messages %u (%s), tick %u ms\n",
            gArgs.level, fConfig.act ? "acting" : "decisions only", lidName(in.lid), in.attached ? "" : "not ", powerName(in.power),
-           screenName(in.screen), in.lpm ? 1u : 0u, in.sleepOn ? "on" : "off", in.wakeMask, thermalName(in.thermal),
-           closeName(v.close), v.closeWhy, profileName(v.profile), v.profileWhy, v.gpuKhz / 1000, fEngine.gpuWritten() / 1000,
+           screenName(in.screen), in.lpm ? 1u : 0u, in.hpm ? 1u : 0u, in.thermalProfiles, in.sleepOn ? "on" : "off", in.wakeMask,
+           thermalName(in.thermal), closeName(v.close), v.closeWhy, profileName(v.profile), v.profileWhy, v.gpuKhz / 1000,
+           fEngine.gpuWritten() / 1000,
            fEngine.gpuOwnSlot() ? ", client 1" : fEngine.gpuHeld() ? ", PianoThermal holds the slot" : ", shared slot",
            v.keyboardWake ? 1u : 0u, v.keyboardLatch ? 1u : 0u, fRootSent,
            fUserActive, fProfileCalls, fGpuCalls, fKeys, fKbdWakes, fInputChanges, __atomic_load_n(&fDisplayMessages, __ATOMIC_ACQUIRE),
@@ -677,6 +708,7 @@ void PianoPolicy::publishView(const View &v, const Inputs &in)
     {"piano-policy-keyboard-wake", v.keyboardWake, fLastView.keyboardWake},
     {"piano-policy-keyboard-latch", v.keyboardLatch, fLastView.keyboardLatch},
     {"piano-policy-lpm", in.lpm, fLast.lpm},
+    {"piano-policy-hpm", in.hpm, fLast.hpm},
   };
   bool changed = false;
   for (auto &n : numbers)
@@ -689,7 +721,7 @@ void PianoPolicy::publishView(const View &v, const Inputs &in)
     changed = true;
   }
   if (first || v.profile != fLastView.profile) {
-    setProperty("piano-policy-profile", v.profile == Profile::saver ? "saver" : "balanced");
+    setProperty("piano-policy-profile", v.profile == Profile::saver ? "saver" : v.profile == Profile::performance ? "high power" : "balanced");
     changed = true;
   }
   fLastView = v;
@@ -724,12 +756,14 @@ void PianoPolicy::run()
     const uint64_t now = nowMs();
     const Inputs in = gather();
     const bool inputsChanged = !fHaveLast || in.lid != fLast.lid || in.attached != fLast.attached || in.power != fLast.power ||
-                               in.screen != fLast.screen || in.lpm != fLast.lpm || in.thermal != fLast.thermal ||
+                               in.screen != fLast.screen || in.lpm != fLast.lpm || in.hpm != fLast.hpm ||
+                               in.thermalProfiles != fLast.thermalProfiles || in.thermal != fLast.thermal ||
                                in.gpuClients != fLast.gpuClients;
     if (inputsChanged && logged(++fInputChanges))
-      note("inputs: cover %s%s, %s, display %s, Low Power Mode %s, thermal %s (change %u)", lidName(in.lid),
-           in.lid == Lid::unknown ? "" : in.attached ? " (attached)" : " (no cover attached)", powerName(in.power), screenName(in.screen),
-           in.lpm ? "on" : "off", gpuOwnSlot(in.gpuClients) ? "not read (own GPU slot)" : thermalName(in.thermal), fInputChanges);
+      note("inputs: cover %s%s, %s, display %s, Low Power Mode %s, High Power Mode %s (PianoThermal profiles <= %u), thermal %s "
+           "(change %u)", lidName(in.lid), in.lid == Lid::unknown ? "" : in.attached ? " (attached)" : " (no cover attached)",
+           powerName(in.power), screenName(in.screen), in.lpm ? "on" : "off", in.hpm ? "on" : "off", in.thermalProfiles,
+           gpuOwnSlot(in.gpuClients) ? "not read (own GPU slot)" : thermalName(in.thermal), fInputChanges);
     if (int(in.gpuClients) != fGpuSlotsLogged && (in.gpuClients || __atomic_load_n(&fGpu, __ATOMIC_ACQUIRE))) {
       fGpuSlotsLogged = int(in.gpuClients);
       if (gpuOwnSlot(in.gpuClients))

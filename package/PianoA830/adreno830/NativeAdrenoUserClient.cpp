@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "NativeAdrenoUserClient.h"
 #include "NativeAdrenoMeter.h"
+#include "NativeAdrenoPoolBypass.h"   /* UniXNU-piano: GPU-PAGED P0b */
 #include <IOKit/IOLib.h>
 #include <string.h>
 
@@ -33,9 +34,15 @@ extern "C" int proc_selfpid(void);
 /* UniXNU-piano (2026-11-12): a BoAlloc's or BoImport's refusal records why (NativeAdrenoAllocWhy, lastAllocRefusal) the same way. */
 #define ALLOC_REFUSE(why,method,status,a,b,c) refuseAlloc(NativeAdrenoAllocWhy##why,NativeAdrenoMethod##method,status,a,b,c)
 extern "C" volatile uint32_t native_adreno_import_stage;   /* NativeAdrenoMemory.cpp: where the last import stopped */
+/* UniXNU-piano (2026-11-21): a Submit's own refusal records why (NativeAdrenoSubmitWhy, lastSubmitRefusal); an entry's with its figures. */
+#define SUBMIT_REFUSE(why,status,a) refuseSubmit(NativeAdrenoSubmitWhy##why,status,UINT32_MAX,nullptr,0,0,a)
+#define SUBMIT_REFUSE_ENTRY(why,status,i,wire,mapped,mapped_bytes,a) \
+    refuseSubmit(NativeAdrenoSubmitWhy##why,status,i,&(wire),mapped,mapped_bytes,a)
 #else
 #define MAP_REFUSE(why,status,a,b,c,d) (status)
 #define ALLOC_REFUSE(why,method,status,a,b,c) (status)
+#define SUBMIT_REFUSE(why,status,a) (status)
+#define SUBMIT_REFUSE_ENTRY(why,status,i,wire,mapped,mapped_bytes,a) (status)
 #endif
 namespace {
 unsigned gImportNext;
@@ -142,7 +149,15 @@ void NativeAdrenoUserClient::account(const Entry &entry,bool add)
     const uint64_t bytes=memory.bytes(),now=__atomic_load_n(counter,__ATOMIC_RELAXED);
     __atomic_store_n(counter,add?now+bytes:now>=bytes?now-bytes:0,__ATOMIC_RELAXED);
 #ifdef ADRENO830_MACOS
-    const unsigned cls=NativeAdrenoSizeClass(bytes,memory.imported() || memory.scanout());
+    if(counter==&import_bytes_) {
+        const uint64_t count=__atomic_load_n(&imports_,__ATOMIC_RELAXED);
+        __atomic_store_n(&imports_,add?count+1:count?count-1:0,__ATOMIC_RELAXED);
+        if(add && count+1>__atomic_load_n(&peak_imports_,__ATOMIC_RELAXED))
+            __atomic_store_n(&peak_imports_,count+1,__ATOMIC_RELAXED);
+        if(add && now+bytes>__atomic_load_n(&peak_import_bytes_,__ATOMIC_RELAXED))
+            __atomic_store_n(&peak_import_bytes_,now+bytes,__ATOMIC_RELAXED);
+    }
+    const unsigned cls=NativeAdrenoSizeClass(bytes,counter==&import_bytes_);
     const uint64_t count=__atomic_load_n(&size_count_[cls],__ATOMIC_RELAXED),held=__atomic_load_n(&size_bytes_[cls],__ATOMIC_RELAXED);
     __atomic_store_n(&size_count_[cls],add?count+1:count?count-1:0,__ATOMIC_RELAXED);
     __atomic_store_n(&size_bytes_[cls],add?held+bytes:held>=bytes?held-bytes:0,__ATOMIC_RELAXED);
@@ -158,6 +173,15 @@ void NativeAdrenoUserClient::noteMapped(const Entry &entry,bool add)
         __atomic_store_n(counter,add?now+by:now>=by?now-by:0,__ATOMIC_RELAXED);
     };
     step(&mapped_objects_,1);step(&mapped_spans_,spans);step(&mapped_bytes_,bytes);
+    const uint64_t mapped=__atomic_load_n(&mapped_bytes_,__ATOMIC_RELAXED);
+    if(add && mapped>__atomic_load_n(&peak_mapped_bytes_,__ATOMIC_RELAXED))
+        __atomic_store_n(&peak_mapped_bytes_,mapped,__ATOMIC_RELAXED);
+}
+NativeAdrenoResidencyUsage NativeAdrenoUserClient::residencyUsage() const
+{
+    return {__atomic_load_n(&mapped_bytes_,__ATOMIC_RELAXED),__atomic_load_n(&peak_mapped_bytes_,__ATOMIC_RELAXED),
+        __atomic_load_n(&import_bytes_,__ATOMIC_RELAXED),__atomic_load_n(&peak_import_bytes_,__ATOMIC_RELAXED),
+        __atomic_load_n(&imports_,__ATOMIC_RELAXED),__atomic_load_n(&peak_imports_,__ATOMIC_RELAXED)};
 }
 void NativeAdrenoUserClient::mapUsage(NativeAdrenoMapUsage *out) const
 {
@@ -223,13 +247,17 @@ IOReturn NativeAdrenoUserClient::open(uint32_t abi_version,NativeAdrenoVm *vm,
         output_bits<32 || output_bits>48 || vm->poisoned() || submit->poisoned() ||
         ring->poisoned() || objects<NativeAdrenoClientMinObjects || objects>NativeAdrenoClientMaxObjects ||
         (objects&(objects-1)))return kIOReturnBadArgument;
-    entries_=IONewData(Entry,objects);
+    /* UniXNU-piano (2026-11-23, GPU-PAGED P1c, private P1-GATE.md section 8): the connection's tables from kmem's shared data range
+     * (NativeAdrenoNewMeta), as the GPU's other metadata since gpu/daily3c: on RAM boots the private range also carries the volatile
+     * Data disk, and gpu-p1b's holders' opens failed with NoMemory once its chunks had taken the range (NativeRamBlock: 65 chunk
+     * failures before the first refused open). */
+    entries_=NativeAdrenoNewMeta(Entry,objects);
     if(!entries_)return kIOReturnNoMemory;
     memset(static_cast<void *>(entries_),0,sizeof(Entry)*objects);
-    fifo_=IONewData(uint32_t,objects);
+    fifo_=NativeAdrenoNewMeta(uint32_t,objects);
     if(!fifo_ || !index_.allocate(objects)) {
-        if(fifo_)IODeleteData(fifo_,uint32_t,objects);
-        IODeleteData(entries_,Entry,objects);
+        if(fifo_)NativeAdrenoDeleteMeta(fifo_,uint32_t,objects);
+        NativeAdrenoDeleteMeta(entries_,Entry,objects);
         entries_=nullptr;fifo_=nullptr;
         return kIOReturnNoMemory;
     }
@@ -237,6 +265,8 @@ IOReturn NativeAdrenoUserClient::open(uint32_t abi_version,NativeAdrenoVm *vm,
     __atomic_store_n(&pool_bytes_,uint64_t(0),__ATOMIC_RELAXED);__atomic_store_n(&other_bytes_,uint64_t(0),__ATOMIC_RELAXED);
     __atomic_store_n(&import_bytes_,uint64_t(0),__ATOMIC_RELAXED);
 #ifdef ADRENO830_MACOS
+    mapped_bytes_=mapped_objects_=mapped_spans_=0;
+    peak_mapped_bytes_=peak_import_bytes_=imports_=peak_imports_=0;
     for(unsigned i=0;i<NativeAdrenoSizeClasses;++i)
         {__atomic_store_n(&size_count_[i],uint64_t(0),__ATOMIC_RELAXED);__atomic_store_n(&size_bytes_[i],uint64_t(0),__ATOMIC_RELAXED);}
 #endif
@@ -276,7 +306,7 @@ IOReturn NativeAdrenoUserClient::close()
     if(!open_)return kIOReturnNotReady;
     if(liveObjects() || ownRangeOutstanding())return kIOReturnBusy;
     for(size_t i=1;i<NativeAdrenoAbiMaxQueues;++i)if(queues_[i].active)return kIOReturnBusy;
-    IODeleteData(entries_,Entry,entry_count_);IODeleteData(fifo_,uint32_t,entry_count_);entry_count_=0;index_.release();
+    NativeAdrenoDeleteMeta(entries_,Entry,entry_count_);NativeAdrenoDeleteMeta(fifo_,uint32_t,entry_count_);entry_count_=0;index_.release();
     fifo_head_=fifo_count_=fresh_=0;
     queue_base_=0;scoped_=used_=false;window_start_=window_bytes_=window_peak_=0;scanout_={};retry_fence_=0;
     keep_objects_=keep_spans_=keep_pool_=0;source_=NativeAdrenoRingSourceExternal;
@@ -383,7 +413,14 @@ IOReturn NativeAdrenoUserClient::allocBoInner(const NativeAdrenoAbiBoAlloc *requ
     if(!entry)return ALLOC_REFUSE(Objects,BoAlloc,kIOReturnNoResources,live_,entry_count_,0);
     IOReturn status=kIOReturnNoResources;
     const bool zero_outside=NativeAdrenoKoptOn(NativeAdrenoKoptPoolZero);
-    {
+    /* UniXNU-piano (2026-11-22, GPU-PAGED P0b, NativeAdrenoPoolBypass.h): with the pool bypass on, a new BO never tries the pool (nor
+     * takes the Memory lock for it) and goes to the path outside it, as a BO the pool had no room for; off, nothing changes. The path
+     * that backed the BO, its bytes and the call's time are counted. */
+    const bool bypass=NativeAdrenoPoolBypassed();
+    const uint64_t p0b_began=NativeAdrenoP0bNow();
+    unsigned p0b_path=NativeAdrenoPathPool;
+    if(bypass)NativeAdrenoP0bAdd(&native_adreno_p0b_alloc[NativeAdrenoPathPool][4],1);
+    else {
         /* The BO pool is shared by every connection: a pooled allocation runs under the Memory lock. A client with a pool reserve
          * (setReserve: every one but the render server) leaves keep_pool_ bytes of the pool free (read under the same lock, which every
          * pool allocation and release holds). */
@@ -404,14 +441,19 @@ IOReturn NativeAdrenoUserClient::allocBoInner(const NativeAdrenoAbiBoAlloc *requ
         status=kIOReturnUnsupported;
         if(!NativeAdrenoMemory::unmappedUser() && request->contiguous==0 && contiguousAllowed(request->bytes,clock)) {
             __atomic_fetch_add(&native_adreno_meter_contig[0],1u,__ATOMIC_RELAXED);
+            p0b_path=NativeAdrenoPathContiguous;
             status=entry->memory.allocate((size_t)request->bytes,output_bits_,true,(size_t)request->bytes);
             if(status)contiguousFailed(request->bytes,clock);
             if(status && !entry->memory.quarantined() && entry->memory.release()==kIOReturnSuccess)status=kIOReturnUnsupported;
         }
         if(status) {
-            if(NativeAdrenoMemory::unmappedUser() && !request->contiguous)
+            if(NativeAdrenoMemory::unmappedUser() && !request->contiguous) {
+                p0b_path=NativeAdrenoPathUser;
                 status=entry->memory.allocateUser((size_t)request->bytes,output_bits_,(size_t)request->bytes,native_adreno_wc_enabled);
-            else status=entry->memory.allocate((size_t)request->bytes,output_bits_,request->contiguous!=0,(size_t)request->bytes);
+            } else {
+                p0b_path=NativeAdrenoPathMapped;
+                status=entry->memory.allocate((size_t)request->bytes,output_bits_,request->contiguous!=0,(size_t)request->bytes);
+            }
         }
     }
     /* A pooled BO's zero fill: its pages are nobody else's, so the zeros of a large BO hold up no other process's BoAlloc, BoImport or
@@ -425,6 +467,8 @@ IOReturn NativeAdrenoUserClient::allocBoInner(const NativeAdrenoAbiBoAlloc *requ
 #endif
     if(!status && native_adreno_wc_enabled)status=entry->memory.makeWriteCombined();
     if(status) {
+        NativeAdrenoP0bAdd(&native_adreno_p0b_alloc[p0b_path][2],1);
+        NativeAdrenoP0bAdd(&native_adreno_p0b_alloc[p0b_path][3],request->bytes);
 #ifdef ADRENO830_MACOS
         const NativeAdrenoMemoryFailure failure=entry->memory.lastFailure();
         bool figures=false;uint64_t pool_free=0,pool_largest=0;   /* UniXNU-piano: the refusal's pool figures */
@@ -454,6 +498,11 @@ IOReturn NativeAdrenoUserClient::allocBoInner(const NativeAdrenoAbiBoAlloc *requ
     publish(*entry);
     entry->mapped=0;entry->iova=0;entry->mapped_state=false;
     reply->handle=entry->handle;
+    /* GPU-PAGED P0b: the path that backed it (a pooled BO says so itself; the attempt before it may have been another path's). */
+    if(entry->memory.pooled())p0b_path=NativeAdrenoPathPool;
+    NativeAdrenoP0bAdd(&native_adreno_p0b_alloc[p0b_path][0],1);
+    NativeAdrenoP0bAdd(&native_adreno_p0b_alloc[p0b_path][1],request->bytes);
+    if(p0b_began)NativeAdrenoP0bTime(native_adreno_p0b_alloc_us[p0b_path],NativeAdrenoP0bNow()-p0b_began);
     return kIOReturnSuccess;
 }
 void NativeAdrenoUserClient::setScanout(const NativeAdrenoScanoutMapping *mapping)
@@ -496,17 +545,25 @@ IOReturn NativeAdrenoUserClient::importBo(const NativeAdrenoAbiBoImport *request
         return ALLOC_REFUSE(Objects,BoImport,kIOReturnNoResources,live_,entry_count_,0);
     }
     IOReturn status;
+#ifdef ADRENO830_MACOS
+    NativeAdrenoMemoryFailure failure{};uint32_t import_stage=0;
+#endif
     {
         NativeAdrenoSubmitGuard memory(submit_,NativeAdrenoSubmitLockMemory);
         status=scanout?entry->memory.importDevice(scanout_.memory,offset,(size_t)request->bytes):
             entry->memory.importTask(task,request->address,(size_t)request->bytes,output_bits_,(size_t)request->bytes);
+#ifdef ADRENO830_MACOS
+        /* The stage is shared by all connections: copy it before dropping the Memory lock, and before cleanup. */
+        if(status) {failure=entry->memory.lastFailure();import_stage=scanout?5u:native_adreno_import_stage;}
+#endif
         if(status)releaseEntry(*entry);
     }
     if(status) {
         noteImport(status,scanout?5:4,request->bytes,request->address);
 #ifdef ADRENO830_MACOS
         refuseAlloc(NativeAdrenoAllocWhyImport,NativeAdrenoMethodBoImport,status,request->bytes,uint32_t(status),
-                    scanout?5u:native_adreno_import_stage,request->address);
+                    import_stage,request->address);
+        alloc_refusal_.failure=scanout?NativeAdrenoMemoryFailure{"scanout-import",status}:failure;
 #endif
         return status;
     }
@@ -555,12 +612,18 @@ IOReturn NativeAdrenoUserClient::mapBo(const NativeAdrenoAbiBoMap *request,
      * GPU-read-only imports write-back inner-shareable from level 1, GPU-written imports and write-back requests for own BOs from
      * level 2, the scanout and everything else non-cacheable. */
     uint64_t handle=0;
-    const IOReturn status=vm_->mapClient(&entry->memory,request->iova,permissions,request->writeback,request->shareability,&handle,
-        keep_objects_,keep_spans_);
 #ifdef ADRENO830_MACOS
-    /* UniXNU-piano: the VM's reason, when no other connection's map came in between (its memory is this object). */
+    NativeAdrenoVmRefusal vm{};
+#endif
+    const IOReturn status=vm_->mapClient(&entry->memory,request->iova,permissions,request->writeback,request->shareability,&handle,
+        keep_objects_,keep_spans_
+#ifdef ADRENO830_MACOS
+        ,&vm
+#endif
+        );
+#ifdef ADRENO830_MACOS
+    /* The VM copied this call's reason and usage before releasing its own lock. */
     if(status) {
-        const NativeAdrenoVmRefusal vm=vm_->lastRefusal();
         map_refusal_={NativeAdrenoMapWhyVm,request->iova,entry->memory.bytes(),entry->memory.spanCount(),0,vm,vm.memory==&entry->memory};
         return status;
     }
@@ -622,30 +685,54 @@ IOReturn NativeAdrenoUserClient::validateWaitFence(uint64_t fence) const
 IOReturn NativeAdrenoUserClient::submit(const NativeAdrenoAbiSubmit *request,
     NativeAdrenoAbiSubmitReply *reply,const NativeAdrenoRingClock *)
 {
-    if(!request || !reply)return kIOReturnBadArgument;
+#ifdef ADRENO830_MACOS
+    submit_refusal_={};submit_refusal_.index=UINT32_MAX;
+#endif
+    if(!request || !reply)return SUBMIT_REFUSE(Other,kIOReturnBadArgument,0);
+#ifdef ADRENO830_MACOS
+    submit_refusal_.count=request->buffer_count;
+#endif
     reply->fence=0;retry_fence_=0;
-    if(!open_)return kIOReturnNotReady;
+    if(!open_)return SUBMIT_REFUSE(NotOpen,kIOReturnNotReady,0);
     if(!request->buffer_count || request->buffer_count>NativeAdrenoAbiMaxBuffers ||
-        request->reserved)return kIOReturnBadArgument;
+        request->reserved)return SUBMIT_REFUSE(Count,kIOReturnBadArgument,request->reserved);
     if(request->queue>=NativeAdrenoAbiMaxQueues || !queues_[request->queue].active)
-        return kIOReturnBadArgument;
+        return SUBMIT_REFUSE(Queue,kIOReturnBadArgument,request->queue);
     /* No CPU wait for an earlier fence (ARCHITECTURE 4.13.3): the one ring completes in order and every framed submission starts with
      * the BR/BV sync and a cache flush, so an issued fence is already satisfied by ring order. Only a fence never issued is refused. */
     const IOReturn waitable=validateWaitFence(request->wait_fence);
-    if(waitable)return waitable;
+    if(waitable)return SUBMIT_REFUSE(WaitFence,waitable,request->wait_fence);
     NativeAdrenoSubmitBuffer *buffers=submit_buffers_;
     for(uint32_t i=0;i<request->buffer_count;++i) {
         const NativeAdrenoAbiSubmitBuffer &wire=request->buffers[i];
-        if(!wire.bytes || (wire.bytes&3))return kIOReturnBadArgument;
+        if(!wire.bytes || (wire.bytes&3))return SUBMIT_REFUSE_ENTRY(Bytes,kIOReturnBadArgument,i,wire,0,0,0);
         Entry *entry=find(wire.handle);
-        if(!entry || !entry->mapped_state)return kIOReturnBadArgument;
+        if(!entry)return SUBMIT_REFUSE_ENTRY(Handle,kIOReturnBadArgument,i,wire,0,0,next_handle_);
+        if(!entry->mapped_state)return SUBMIT_REFUSE_ENTRY(NotMapped,kIOReturnBadArgument,i,wire,0,entry->memory.bytes(),0);
         buffers[i]={entry->mapped,wire.iova,(size_t)wire.bytes};
     }
     uint32_t fence=0,retry=0;
     used_=true;
+#ifdef ADRENO830_MACOS
+    NativeAdrenoSubmitRefusal refused{};refused.index=UINT32_MAX;
+#endif
     const IOReturn status=submit_->submit(buffers,request->buffer_count,queue_base_+static_cast<uint32_t>(request->queue),&fence,&retry,
-        context_,source_);
+        context_,source_
+#ifdef ADRENO830_MACOS
+        ,&refused
+#endif
+        );
     if(status==NativeAdrenoSubmitRetry)retry_fence_=retry;
+#ifdef ADRENO830_MACOS
+    if(status) {
+        /* The submit object's view: its entry carries the VM's mapping handle, the request's BO handle goes back in (b keeps the VM's). */
+        const uint32_t index=refused.index;
+        submit_refusal_=refused;submit_refusal_.count=request->buffer_count;
+        if(!refused.why)submit_refusal_.why=NativeAdrenoSubmitWhyOther;
+        submit_refusal_.status=status;
+        if(index<request->buffer_count) {submit_refusal_.b=refused.handle;submit_refusal_.handle=request->buffers[index].handle;}
+    }
+#endif
     if(status)return status;
     reply->fence=fence;
     return kIOReturnSuccess;
@@ -745,6 +832,8 @@ IOReturn NativeAdrenoUserClient::dispatch(uint32_t method,const void *input,
 {
 #ifdef ADRENO830_MACOS
     if(method==NativeAdrenoMethodBoAlloc)alloc_refusal_={};
+    if(method==NativeAdrenoMethodBoMap)map_refusal_={};
+    if(method==NativeAdrenoMethodSubmit)submit_refusal_={};
 #endif
 
     const size_t expected_in=inputSize(method),expected_out=outputSize(method);

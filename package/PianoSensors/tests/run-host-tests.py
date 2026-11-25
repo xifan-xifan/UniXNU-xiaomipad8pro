@@ -8,7 +8,9 @@
   orient   the orientation state machine (PaganiSensors' test)
   rpc      the FastRPC file service against PaganiSensors' simulated DSP, then a pack made by tools/make-sensor-pack.py
   bringup  the file service's bring-up after the tablet's first S2 (2026-11-14): Linux's metadata page with every invoke, the init2
-           framing ladder, the release after the attach (withheld from a dying DSP), the deadline, the guard's file-service strike
+           framing ladder, the release after the attach (withheld from a dying DSP), the deadline, the guard's file-service strike; and
+           after s1b's alignment fault: the DSP's calls at odd offsets (its first, remotectl open "apps_std", byte for byte) with the
+           arena unreadable outside SensorsArena.c and every access there checked for natural alignment
   pack     the pack tool: piano's archives, soc0 allowlist, unsafe names, no pack inside a repository's tracked tree
   piano    SensorsGuard, SensorsPolicy, SensorsClient against a simulated hub, SensorsHealth (PianoPower's report), the arena check, a
            declined DSP call, and the independent cross-checks against libqmi, libssc, Linux fastrpc.c and qualcomm/fastrpc
@@ -40,7 +42,7 @@ PKG = HERE.parent
 REPO_OUT = PKG.parents[1] / 'out' / 'host-tests'   # ignored; the pack tool writes only under out/ or private/
 POWER = PKG.parent / 'PianoPower'
 AUTO = PKG.parent / 'PianoAuto'   # AutoStream.c, AutoLight.c: the streams' off/on lifecycle and the light chain (level 4)
-PORTABLE = ('SensorsGuard.c', 'SensorsPolicy.c', 'SensorsPb.c', 'SensorsSsc.c', 'SensorsRpc.c', 'SensorsPack.c', 'SensorsFixed.c',
+PORTABLE = ('SensorsGuard.c', 'SensorsPolicy.c', 'SensorsPb.c', 'SensorsSsc.c', 'SensorsRpc.c', 'SensorsArena.c', 'SensorsPack.c', 'SensorsFixed.c',
             'SensorsOrient.c', 'SensorsClient.c', 'SensorsLoad.c', 'FatVolume.c', 'SensorsStream.c', 'SensorsAddon.c')
 INCLUDE = PKG.parent / 'include'   # PianoAdspContract.h
 CFLAGS = ['-std=c11', '-Wall', '-Wextra', '-Werror', '-O1', '-g', '-fsanitize=address,undefined', '-fno-sanitize-recover=all']
@@ -248,12 +250,15 @@ def main():
             (out / 'dump').mkdir()
             pack = pack_checks(out / 'dump', scratch)
         if 'rpc' in want:
-            run(build(out, 'rpc', [HERE / 'rpc.c', *src('SensorsRpc.c', 'SensorsPack.c')], ['-D_DARWIN_C_SOURCE', '-lpthread']), pack)
+            run(build(out, 'rpc', [HERE / 'rpc.c', *src('SensorsRpc.c', 'SensorsArena.c', 'SensorsPack.c')], ['-D_DARWIN_C_SOURCE', '-lpthread']),
+                pack)
         if 'bringup' in want:
-            run(build(out, 'bringup', [HERE / 'bringup.c', *src('SensorsRpc.c', 'SensorsPack.c', 'SensorsGuard.c')]))
+            # SAR_CHECK: every arena access reported and checked; the arena unreadable outside SensorsArena.c's functions
+            run(build(out, 'bringup', [HERE / 'bringup.c', *src('SensorsRpc.c', 'SensorsArena.c', 'SensorsPack.c', 'SensorsGuard.c')],
+                      ['-DSAR_CHECK', '-D_DARWIN_C_SOURCE']))
         if 'piano' in want:
             run(build(out, 'piano', [HERE / 'piano.c', *src('SensorsGuard.c', 'SensorsPolicy.c', 'SensorsFixed.c', 'SensorsOrient.c',
-                                                           'SensorsSsc.c', 'SensorsPb.c', 'SensorsRpc.c', 'SensorsPack.c',
+                                                           'SensorsSsc.c', 'SensorsPb.c', 'SensorsRpc.c', 'SensorsArena.c', 'SensorsPack.c',
                                                            'SensorsClient.c'),
                                      POWER / 'QcomQrtr.c'], ['-lm', '-I', str(INCLUDE)]))
         if 'streams' in want:

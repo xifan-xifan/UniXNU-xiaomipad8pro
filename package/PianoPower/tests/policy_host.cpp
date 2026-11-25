@@ -184,8 +184,17 @@ struct Sim {
       slots |= 1u << w.slot;
       if (w.property == PIANO_CHG_ICL) CHECK(w.value <= piano_charge_icl_max(&cfg) && w.value <= PIANO_CHG_RP_ABS_MAX);
       if (w.property == PIANO_CHG_ICL && w.value > (cfg.icl_cap_ma ? cfg.icl_cap_ma : PIANO_CHG_ICL_CAP))
-        CHECK(cfg.rp && cfg.ramp && plan.icl_why == PIANO_CHG_ICL_RP);   // above the cap only a stepped Rp limit
-      if (w.property == PIANO_CHG_FCC) CHECK(w.value <= (cfg.fcc_cap_ma ? cfg.fcc_cap_ma : PIANO_CHG_FCC_CAP));
+        CHECK((plan.icl_why == PIANO_CHG_ICL_9V && cfg.strict_contract && cfg.hv_caps && st.hv == PIANO_CHG_HV_ON &&
+               w.value <= PIANO_CHG_ICL_ABS_MAX) ||   // T-14 9 V
+              (cfg.rp && cfg.ramp && (plan.icl_why == PIANO_CHG_ICL_RP ||
+              (plan.icl_why == PIANO_CHG_ICL_CONTRACT_5V && cfg.strict_contract &&
+               (!cfg.hv || st.hv == PIANO_CHG_HV_BLOCKED || plan.fallback == PIANO_CHG_FALLBACK_SOURCE ||
+                plan.fallback == PIANO_CHG_FALLBACK_HEALTH) &&   // T-14: a 9 V mode settled at 5 V
+               (in.valid & PIANO_CHG_IN_CONTRACT) && in.contract_protocol == 1 && in.contract_mv == 5000 &&
+               w.value <= in.contract_ma))));   // above the cap only a measured 5 V step with source authority
+      if (w.property == PIANO_CHG_FCC)   // cfg.hv_caps (charge/pd1): the stock rows only at a 9 V session in force
+        CHECK(w.value <= (cfg.strict_contract && cfg.hv_caps && st.hv == PIANO_CHG_HV_ON ? PIANO_CHG_FCC_ABS_MAX :
+                          cfg.fcc_cap_ma ? cfg.fcc_cap_ma : PIANO_CHG_FCC_CAP));
       // a stop only from battery health, or as the charging restart's first write (its start, in the plan that starts it)
       if (w.property == PIANO_CHG_ENABLE && w.value == 0) CHECK(cfg.limit || (cfg.kick && (plan.kick_events & PIANO_CHG_KICK_EV_START)));
       if (plan.kick_events & PIANO_CHG_KICK_EV_START) CHECK(cfg.kick && cfg.writes);
@@ -1137,20 +1146,24 @@ static void testRamp()
     s.step();
     CHECK(s.wrote(PIANO_CHG_ICL, 900));
   }
-  // a source that gives way above 2.2 A: a sag under 2500 -> 2000, this boot's ceiling (kept across a generation and a wake)
+  // A sag under 2500 -> 2000. Neither a generation nor a wake shortens the cool-down; a recovered source may retry.
   {
     Sim s;
     mac(s);
     s.kneeMa = 2200;
     s.kneeOhms = 1.0;
-    for (int i = 0; i < 40; ++i) s.step();
+    for (int i = 0; i < 40 && !s.st.ramp_ceiling_ma; ++i) s.step();
     CHECK(s.st.ramp_ceiling_ma == 2000 && s.st.ramp_back_why == PIANO_CHG_BACK_SAG && s.st.ramp_back_from_ma == 2500 && s.icl == 2000);
+    const auto retry = s.st.ramp_retry_ms;
     s.generation++;
     s.wakes++;
-    for (int i = 0; i < 40; ++i) s.step();
-    CHECK(s.icl == 2000 && s.plan.ramp_wait == PIANO_CHG_RAMP_TOP && s.plan.ramp_ceiling_ma == 2000);
+    for (int i = 0; i < 10; ++i) {s.step(); CHECK(s.icl <= 2000 && s.st.ramp_retry_ms == retry);}
+    CHECK(s.icl == 2000 && s.plan.ramp_wait == PIANO_CHG_RAMP_COOLING && s.plan.ramp_ceiling_ma == 2000);
+    s.kneeOhms = 0;
+    for (int i = 0; i < 20; ++i) s.step();
+    CHECK(s.icl == 3000 && !s.st.ramp_ceiling_ma);
   }
-  // a quick detach after a step: one step back for the boot; a slow one: nothing
+  // A quick detach after a step: one step back during the cool-down; replug cannot shorten it.
   {
     Sim s;
     mac(s);
@@ -1160,8 +1173,10 @@ static void testRamp()
     s.step();
     CHECK((s.plan.events & PIANO_CHG_EV_RAMP_BACK) && s.st.ramp_ceiling_ma == 900 && s.st.ramp_back_why == PIANO_CHG_BACK_DETACH);
     s.source = true;
+    for (int i = 0; i < 10; ++i) s.step();
+    CHECK(s.icl == 900 && s.plan.ramp_wait == PIANO_CHG_RAMP_COOLING);
     for (int i = 0; i < 20; ++i) s.step();
-    CHECK(s.icl == 900 && s.plan.ramp_wait == PIANO_CHG_RAMP_TOP);
+    CHECK(s.icl == 3000 && !s.st.ramp_ceiling_ma);
   }
   // the input not used up: no step; no bus current reading: none either; a low bus: none
   {
@@ -1206,10 +1221,10 @@ static void testRamp()
     s.refuseIcl = true;
     for (int i = 0; i < 10; ++i) s.step();
     CHECK(s.st.ramp_ceiling_ma == 1500 && s.st.ramp_back_why == PIANO_CHG_BACK_REFUSED && s.icl == 1500);
-    CHECK(s.plan.ramp_wait == PIANO_CHG_RAMP_TOP);
+    CHECK(s.plan.ramp_wait == PIANO_CHG_RAMP_COOLING);
     s.refuseIcl = false;
     for (int i = 0; i < 20; ++i) s.step();
-    CHECK(s.icl == 1500);
+    CHECK(s.icl == 3000 && !s.st.ramp_ceiling_ma);
   }
   // writes off: the steps for the log only, nothing sent; ramp off: the Rp limit at once within the cap (the old behaviour)
   {
@@ -1609,7 +1624,196 @@ struct StrictSim : Sim {
     }
   }
   void run(unsigned n = 12) {while (n--) step();}
+  bool notifyHeld() const {return st.notify_holds > 0;}
 };
+
+static void testDailyFiveVoltBudget()
+{
+  // Installed snapshot: SDP, no PD/RDO/PDOs, Rp3A, hv0, healthy26%, FCC1500, ICL/AICL500, 4848mV/497mA.
+  // Connector temperatures are fixture values: the saved snapshot publishes validity/age but not their readings.
+  PianoChargeConfig cfg;
+  piano_charge_config_default(&cfg);
+  cfg.strict_contract = cfg.limit = cfg.rp = cfg.ramp = 1;
+  cfg.rp_cap_ma = 3000;
+  PianoChargeInput in{};
+  in.now_ms = 6230870; in.generation = 1; in.valid = 65535;
+  in.type = PIANO_CHG_T_SDP; in.typec_source = 1; in.rp_ma = 3000;
+  in.bus_mv = 4848; in.ibus_ma = 497; in.icl_ma = in.aicl_ma = 500;
+  in.enable = 1; in.fv_raw = 5200; in.safety = PIANO_CHG_SAFE_ALL;
+  in.soc_min_pct = in.soc_max_pct = 26; in.t_warm_dc = 344; in.t_cool_dc = 317;
+  in.tbat_c = 34; in.t_ntc_dc = 330; in.t_chgr_dc = 360; in.t_conn1_dc = in.t_conn2_dc = 320;
+  in.vbat_max_mv = 3742; in.ibat_ma = -742;
+  for (bool retainedCeiling : {false, true}) {
+    PianoChargeState st;
+    piano_charge_init(&st);
+    PianoChargeInput x = in;
+    if (retainedCeiling) {st.ramp_ceiling_ma = 500; st.ramp_retry_ms = x.now_ms + PIANO_CHG_RAMP_RETRY_MS;}
+    PianoChargePlan p{};
+    for (unsigned i = 0; i < 40; ++i) {
+      x.now_ms += 5000; x.gauge_ms = x.now_ms - 19526;
+      piano_charge_decide(&cfg, &x, &st, &p);
+      CHECK(p.fallback == PIANO_CHG_FALLBACK_MODE && !p.transition);
+      CHECK(p.fcc_ma == 1500 && p.charge && !st.hold);
+      CHECK(p.icl_why == PIANO_CHG_ICL_RP);
+      if (retainedCeiling && x.now_ms < in.now_ms + PIANO_CHG_RAMP_RETRY_MS)
+        CHECK(p.icl_ma == 500 && p.ramp_target_ma == 3000);
+      for (unsigned j = 0; j < p.writes; ++j) {
+        const auto &w = p.write[j];
+        CHECK(piano_charge_write_allowed(&cfg, w.property, w.value, w.bytes));
+        CHECK(w.property != PIANO_CHG_PD_FIXED && w.property != PIANO_CHG_PPS);
+        piano_charge_ack(&st, w.property, w.value, 0);
+        if (w.property == PIANO_CHG_ICL) x.icl_ma = x.aicl_ma = int32_t(w.value);
+      }
+      x.ibus_ma = x.icl_ma - 3;
+    }
+    CHECK(p.icl_ma == 3000 && !st.ramp_ceiling_ma);
+  }
+  auto dailyPd = [](StrictSim &s) {
+    s.cfg.hv = 0; s.cfg.rp = s.cfg.ramp = 1; s.cfg.rp_cap_ma = 3000;
+    s.boardValid = PIANO_CHG_IN_CONN1 | PIANO_CHG_IN_CONN2;
+    s.loadMa = 3000; s.soc = 26;
+  };
+  {
+    StrictSim s; dailyPd(s);
+    s.type = PIANO_CHG_T_SDP; s.contractValid = s.sourceValid = false;
+    for (unsigned i = 0; i < 20 && s.icl < 1500; ++i) s.step();
+    CHECK(s.icl == 1500);
+    s.busMv = 4490; s.step(); // a real sag at the first step creates precisely the hidden500 ceiling
+    CHECK(s.st.ramp_ceiling_ma == 500 && s.icl == 500);
+    s.busMv = 4848; s.run(10); CHECK(s.icl == 500 && s.fcc == 1500);
+    CHECK(piano_charge_config_transaction(&s.cfg,1,80,75,1,0) == 0);
+    s.step(); CHECK(s.icl == 500); // changing mode is not an ICL reset
+    s.wakes++; s.step(100); CHECK(s.icl == 500);
+    s.source = s.typecSource = false; s.step();
+    s.source = s.typecSource = true; s.run(20); CHECK(s.icl == 3000); // replacement can recover after the cool-down
+  }
+  {
+    StrictSim s; dailyPd(s); s.run(20);
+    CHECK(s.icl == 3000 && s.fcc == 1500 && s.busMv == 5000 && !s.plan.transition);
+    CHECK(s.plan.icl_why == PIANO_CHG_ICL_CONTRACT_5V && !s.plan.rp_ma);
+    s.soc = 80; s.step(); CHECK(s.enable == 0 && s.st.hold && s.icl == 3000);
+    s.soc = 76; s.step(); CHECK(s.enable == 0 && s.st.hold);
+    s.soc = 75; s.step(); CHECK(s.enable == 1 && !s.st.hold);
+    s.contractMa = 1200; s.step(); CHECK(s.icl <= 1200); // actual RDO wins immediately
+    s.contractValid = false; s.step(); CHECK(s.icl <= 100); // PDO/Rp alone cannot grant PD draw
+  }
+  for (unsigned gate = 0; gate < 11; ++gate) {
+    StrictSim s; dailyPd(s);
+    switch (gate) {
+    case 0: s.contractValid = false; break;
+    case 1: s.sourceValid = false; break;
+    case 2: s.contractLink++; break;
+    case 3: s.notifyPending = true; break;
+    case 4: s.protocol = 2; break;
+    case 5: s.bothGauges = false; break;
+    case 6: s.safe &= ~PIANO_CHG_SAFE_LPD_DRY; break;
+    case 7: s.safe &= ~PIANO_CHG_SAFE_DTPT; break;
+    case 8: s.conn1Dc = 600; break;
+    case 9: s.chgrDc = 850; s.boardValid |= PIANO_CHG_IN_CHGR; break;
+    case 10: s.cfg.ramp = 0; break;
+    }
+    s.run(20); CHECK(s.icl <= 1500 && s.busMv == 5000);
+  }
+  {
+    StrictSim s; dailyPd(s); s.boardValid = 0; s.run(20); CHECK(s.icl <= 1500);
+    s.boardValid = PIANO_CHG_IN_CONN1; s.conn1Dc = 510;
+    s.run(20); CHECK(s.icl <= 1500);
+    s.conn1Dc = 310; s.run(20); CHECK(s.icl == 3000);
+    s.st.ramp_ceiling_ma = 2000; s.st.ramp_retry_ms = s.now + PIANO_CHG_RAMP_RETRY_MS;
+    s.step(); CHECK(s.icl == 2000); // retain the failure during its cool-down
+  }
+  {
+    StrictSim s; dailyPd(s); s.contractMa = 2200; s.run(20); CHECK(s.icl == 2200);
+    s.safe &= ~PIANO_CHG_SAFE_CP_OFF; s.run(20); CHECK(s.icl == 2200); // CP gate remains specific to HV
+    s.cfg.admin_stop = 1; s.step(); CHECK(s.enable == 0 && s.plan.why_off == PIANO_CHG_OFF_ADMIN);
+  }
+  {
+    StrictSim s; dailyPd(s);
+    for (unsigned i = 0; i < 20 && s.icl < 2000; ++i) s.step();
+    CHECK(s.icl == 2000);
+    s.busMv = 4490; s.step(); CHECK(s.icl == 1500 && s.st.ramp_ceiling_ma == 1500);
+    s.busMv = 5000; s.run(10); CHECK(s.icl == 1500);
+    s.contractMa = 1800; s.run(20);
+    CHECK(s.icl == 1800 && !s.st.ramp_ceiling_ma && s.plan.icl_why == PIANO_CHG_ICL_CONTRACT_5V);
+  }
+}
+
+static void testBootRampRetry()
+{
+  // Replay the installed boot's 23%, 4844mV/497mA, ICL/AICL500 and -1579mA battery load. Only the early failure is synthetic:
+  // capture begins at37s, so test all three possible causes instead of claiming that a pre37s sag was measured.
+  const uint8_t causes[] = {PIANO_CHG_BACK_SAG, PIANO_CHG_BACK_DETACH, PIANO_CHG_BACK_REFUSED};
+  for (const auto cause : causes) {
+    PianoChargeConfig c; piano_charge_config_default(&c);
+    c.strict_contract = c.limit = c.rp = c.ramp = 1; c.rp_cap_ma = 3000;
+    PianoChargeInput in{};
+    in.generation = 1; in.valid = 65535; in.safety = PIANO_CHG_SAFE_ALL;
+    in.type = PIANO_CHG_T_SDP; in.typec_source = 1; in.rp_ma = 3000;
+    in.icl_ma = in.aicl_ma = 100; in.enable = 1; in.fv_raw = 5200;
+    in.soc_min_pct = in.soc_max_pct = 23; in.vbat_max_mv = 3701; in.ibat_ma = -1579;
+    in.t_warm_dc = 362; in.t_cool_dc = 326; in.tbat_c = 33;
+    in.t_ntc_dc = 340; in.t_chgr_dc = 360; in.t_conn1_dc = in.t_conn2_dc = 320;
+    PianoChargeState s; piano_charge_init(&s);
+    PianoChargePlan p{};
+    auto cycle = [&](uint64_t now, int bus = 4844, int ibus = 497, bool refuse = false) {
+      in.now_ms = in.gauge_ms = now; in.bus_mv = bus; in.ibus_ma = ibus;
+      piano_charge_decide(&c, &in, &s, &p);
+      for (unsigned i = 0; i < p.writes; ++i) {
+        const auto &w = p.write[i];
+        CHECK(piano_charge_write_allowed(&c, w.property, w.value, w.bytes));
+        CHECK(w.property != PIANO_CHG_PD_FIXED && w.property != PIANO_CHG_PPS);
+        const bool reject = refuse && w.property == PIANO_CHG_ICL;
+        piano_charge_ack(&s, w.property, w.value, reject ? 1 : 0);
+        if (!reject && w.property == PIANO_CHG_ICL) in.icl_ma = in.aicl_ma = int32_t(w.value);
+      }
+    };
+    cycle(1000);
+    in.valid &= ~PIANO_CHG_IN_BUS; cycle(1500, 0, 0);
+    CHECK(!s.ramp_ceiling_ma && !(p.events & PIANO_CHG_EV_RAMP_BACK)); // an unavailable bus sample is not a sag/detach
+    in.valid |= PIANO_CHG_IN_BUS;
+    cycle(2000); cycle(7000); cycle(12000, 4844, 497, cause == PIANO_CHG_BACK_REFUSED);
+    CHECK((p.events & PIANO_CHG_EV_RAMP_STEP) && p.ramp_from_ma == 500 && p.ramp_ma == 1500);
+    if (cause == PIANO_CHG_BACK_SAG) cycle(13000, 4490, 1497);
+    else if (cause == PIANO_CHG_BACK_DETACH) {in.typec_source = 0; cycle(13000, 0, 0); in.typec_source = 1;}
+    else {cycle(13000, 4844, 497, true); cycle(14000, 4844, 497, true); cycle(15000);}
+    CHECK((p.events & PIANO_CHG_EV_RAMP_BACK) && s.ramp_back_why == cause && s.ramp_ceiling_ma == 500);
+    const auto retry = s.ramp_retry_ms;
+    CHECK(retry == in.now_ms + 60000);
+    cycle(37000); cycle(60000);
+    CHECK(p.icl_ma == 500 && in.aicl_ma == 500 && p.ramp_target_ma == 3000 && p.ramp_wait == PIANO_CHG_RAMP_COOLING);
+    CHECK(!p.transition && !s.rp_distrust && !s.hold && p.charge && p.fcc_ma == 1500);
+    cycle(retry - 1); CHECK(p.icl_ma == 500 && s.ramp_retry_ms == retry);
+    cycle(retry); CHECK(!s.ramp_ceiling_ma && !s.ramp_retry_ms && p.icl_ma == 500);
+    cycle(retry + 5000); cycle(retry + 10000);
+    CHECK(p.icl_ma == 1500 && (p.events & PIANO_CHG_EV_RAMP_STEP));
+    // A permanent weak source backs off again and starts a new cool-down, rather than oscillating every cycle.
+    cycle(retry + 11000, 4490, 1497);
+    CHECK(s.ramp_ceiling_ma == 500 && s.ramp_retry_ms == retry + 71000);
+    const auto retry2 = s.ramp_retry_ms;
+    cycle(retry2 + 1, 4649); cycle(retry2 + 5001, 4649); cycle(retry2 + 10001, 4649);
+    CHECK(p.icl_ma == 500 && p.ramp_wait == PIANO_CHG_RAMP_BUS_LOW);
+    in.valid &= ~PIANO_CHG_IN_IBUS; cycle(retry2 + 11001);
+    CHECK(p.icl_ma == 500 && p.ramp_wait == PIANO_CHG_RAMP_NO_CURRENT);
+    in.valid |= PIANO_CHG_IN_IBUS; cycle(retry2 + 12001, 4844, 399);
+    CHECK(p.icl_ma == 500 && p.ramp_wait == PIANO_CHG_RAMP_NOT_USED);
+    // Keep source, connector and board caps after recovery; a deadline never grants a current by itself.
+    in.rp_ma = 1500;
+    for (unsigned i = 0; i < 8; ++i) cycle(retry2 + 13001 + i * 5000, 4844, in.icl_ma - 3);
+    CHECK(p.icl_ma == 1500);
+    in.rp_ma = 3000; in.t_conn1_dc = 510;
+    for (unsigned i = 0; i < 8; ++i) cycle(retry2 + 53001 + i * 5000, 4844, in.icl_ma - 3);
+    CHECK(p.icl_ma == 1500);
+    in.t_conn1_dc = 320; in.t_chgr_dc = 850; cycle(retry2 + 93001);
+    CHECK(p.icl_ma == 500 && p.icl_why == PIANO_CHG_ICL_CHGR);
+    in.t_chgr_dc = 740;
+    for (unsigned i = 0; i < 16; ++i) cycle(retry2 + 98001 + i * 5000, 4844, in.icl_ma - 3);
+    CHECK(p.icl_ma == 3000 && !s.ramp_ceiling_ma);
+    in.soc_min_pct = in.soc_max_pct = 80; cycle(retry2 + 180001);
+    CHECK(!p.charge && s.hold && s.enable_set == 0);
+    in.soc_min_pct = in.soc_max_pct = 76; cycle(retry2 + 185001); CHECK(!p.charge && s.hold);
+    in.soc_min_pct = in.soc_max_pct = 75; cycle(retry2 + 190001); CHECK(p.charge && !s.hold && s.enable_set == 1);
+  }
+}
 
 static void testContractSession()
 {
@@ -1617,7 +1821,8 @@ static void testContractSession()
   {
     StrictSim s; s.run(); CHECK(s.st.hv == PIANO_CHG_HV_ON);
     s.notifyPending = true; s.notifyMs = s.now; s.contractValid = false;
-    s.step(1000); CHECK(s.st.hv == PIANO_CHG_HV_ON && s.icl <= 100 && s.fcc <= 500);
+    // T-14b: a young notification on a steady contract holds the limits in force (no longer 100 mA behind it)
+    s.step(1000); CHECK(s.st.hv == PIANO_CHG_HV_ON && s.icl == 1600 && s.notifyHeld());
     CHECK(!s.wrote(PIANO_CHG_PD_FIXED) && !s.wrote(PIANO_CHG_PPS));
     s.notifyPending = false; s.contractValid = true;
     s.step(1000); CHECK(s.st.hv == PIANO_CHG_HV_ON && s.icl == 1600 && s.busMv == 9000);
@@ -1629,7 +1834,9 @@ static void testContractSession()
     StrictSim s; s.run(); s.notifyPending = true; s.notifyMs = s.now; s.contractValid = false;
     s.step(1000); CHECK(s.busMv == 9000);
     s.notifyPending = false; s.contractGen++; // CCI has now confirmed an actual connector change; observation privilege ends
-    s.step(1000); CHECK(s.busMv == 5000 && s.wrote(PIANO_CHG_PD_FIXED,5000));
+    s.step(1000);                             // T-14b: the barrier first (the hold kept 1600), then the withdrawal
+    if (s.busMv != 5000) s.step(1000);
+    CHECK(s.busMv == 5000 && s.wrote(PIANO_CHG_PD_FIXED,5000));
   }
   {
     StrictSim s; s.run(); s.notifyPending = true; s.notifyMs = s.now; s.contractValid = false; s.cfg.admin_stop = 1;
@@ -1821,10 +2028,384 @@ static void testAtomicHealth()
   h.enable = 1; h.step(); CHECK(!h.plan.sleep_ready);   // ACK cache disagrees with the actual enable readback
 }
 
+static void testRam13GaugeLoss()
+{
+  StrictSim s;
+  s.cfg.hv = 0;
+  s.cfg.rp = 1;
+  s.cfg.ramp = 1;
+  s.cfg.rp_cap_ma = 3000;
+  s.boardValid = PIANO_CHG_IN_CONN1 | PIANO_CHG_IN_CONN2;
+  s.type = PIANO_CHG_T_SDP;
+  s.contractValid = s.sourceValid = false;
+  s.soc = 41;
+  s.run();
+  for (unsigned burst = 0; burst < 2; ++burst) {
+    s.bothGauges = false;
+    for (uint64_t elapsed = 0; elapsed < 30000; elapsed += 1600) {
+      s.step(1600);
+      CHECK(s.plan.why_off == PIANO_CHG_OFF_NONE && s.enable == 1 && !s.wrote(PIANO_CHG_ENABLE));
+      CHECK(s.icl == 100 && s.fcc == 500 && !s.wrote(PIANO_CHG_PD_FIXED) && !s.wrote(PIANO_CHG_PPS));
+    }
+    s.bothGauges = true;
+    s.step();
+    CHECK(!s.st.soc_failures && s.enable == 1 && s.fcc == 1500);
+  }
+  s.soc = 80;
+  s.step();
+  s.bothGauges = false;
+  s.soc = 40;
+  s.run(4);
+  CHECK(s.enable == 0 && s.plan.why_off == PIANO_CHG_OFF_LIMIT && !s.wrote(PIANO_CHG_ENABLE, 1));
+  s.bothGauges = true;
+  s.step();
+  CHECK(s.enable == 1 && s.wrote(PIANO_CHG_ENABLE, 1));
+  s.bothGauges = false;
+  s.cfg.admin_stop = 1;
+  s.step();
+  CHECK(s.enable == 0 && s.plan.why_off == PIANO_CHG_OFF_ADMIN);
+  s.cfg.admin_stop = 0;
+  s.step();
+  CHECK(s.enable == 0 && !s.wrote(PIANO_CHG_ENABLE, 1));
+  s.bothGauges = true;
+  s.step();
+  CHECK(s.enable == 1);
+  s.bothGauges = false;
+  s.run(2);
+  s.faults = 1;
+  s.step();
+  CHECK(s.enable == 0 && s.plan.why_off == PIANO_CHG_OFF_FAULT);
+}
+
+// T-14 (owner 2026-11-23 18:45, changed 18:47): at 5 V the input limit is as much as the source advertises, at most 3 A: the
+// Type-C current (Rp 1.5 / 3.0 A) of a non-PD source, the 5 V contract (the RDO within the vSafe5V object) of a PD one, also with
+// a 9 V mode once the source is settled at 5 V (the 9 V request not reached, no 9 V object, the health stop); the USB default
+// keeps the class row. Every step behind the existing guards (the steps, the connector rule, the sag, the quick detach, the board
+// holds); never above the advertisement or the RDO.
+static void testT14FiveVoltMax()
+{
+  auto daily = [](StrictSim &s, uint8_t hv) {   // the y10 daily options (ESP profile): rp, ramp, rp-max 3000, hv-order/-caps, qc, fv-hot
+    s.cfg.hv = hv; s.cfg.rp = s.cfg.ramp = 1; s.cfg.rp_cap_ma = 3000;
+    s.cfg.hv_order = s.cfg.hv_caps = s.cfg.qc = s.cfg.fv_hot = 1;
+    s.boardValid = PIANO_CHG_IN_CONN1 | PIANO_CHG_IN_CONN2;
+    s.loadMa = 3200; s.soc = 40;
+  };
+  auto maxIcl = [](const StrictSim &s) {
+    uint32_t m = 0;
+    for (auto &w : s.all) if (w.property == PIANO_CHG_ICL) m = std::max(m, w.value);
+    return m;
+  };
+  // non-PD: the row with the USB default (or no Rp), the Rp current above it, capped at 3 A
+  struct NonPd {int type; uint32_t rp, want;};
+  const NonPd np[] = {
+    {PIANO_CHG_T_SDP, 0, 500}, {PIANO_CHG_T_SDP, 500, 500}, {PIANO_CHG_T_TYPEC, 500, 500}, {PIANO_CHG_T_CDP, 500, 900},
+    {PIANO_CHG_T_DCP, 500, 1500}, {PIANO_CHG_T_SDP, 1500, 1500}, {PIANO_CHG_T_DCP, 1500, 1500}, {PIANO_CHG_T_TYPEC, 1500, 1500},
+    {PIANO_CHG_T_SDP, 3000, 3000}, {PIANO_CHG_T_CDP, 3000, 3000}, {PIANO_CHG_T_DCP, 3000, 3000}, {PIANO_CHG_T_TYPEC, 3000, 3000}};
+  for (const auto &k : np)
+    for (uint8_t hv : {0, 1, 2}) {
+      StrictSim s; daily(s, hv);
+      s.type = k.type; s.contractValid = s.sourceValid = false; s.rpMa = k.rp; s.typecSource = k.rp != 0; s.pdos.clear();
+      s.run(40);
+      CHECK(s.icl == k.want && s.busMv == 5000);
+      CHECK(maxIcl(s) <= k.want);                                   // never above the row or the Rp current
+      CHECK(!s.wrote(PIANO_CHG_PD_FIXED) && !s.wrote(PIANO_CHG_PPS));
+    }
+  {   // a 3.0 A Rp without a connector reading: 1.5 A (BC 1.2's current), the 3 A only with a cool connector
+    StrictSim s; daily(s, 1);
+    s.type = PIANO_CHG_T_SDP; s.contractValid = s.sourceValid = false; s.pdos.clear(); s.boardValid = 0;
+    s.run(40); CHECK(s.icl == 1500 && maxIcl(s) == 1500);
+  }
+  // PD at 5 V with a 9 V mode: the 9 V request not reached (BLOCKED) -> the 5 V contract's current; 0.9 / 1.5 / 2.4 / 3.0 A
+  for (uint32_t ma : {900u, 1500u, 2400u, 3000u})
+    for (uint8_t hv : {1, 2}) {
+      StrictSim s; daily(s, hv);
+      s.pd({{5000, 5000, ma}, {9000, 9000, 2000}}); s.contractMa = ma; s.follows9v = false;
+      s.run(60);
+      CHECK(s.st.hv == PIANO_CHG_HV_BLOCKED && s.busMv == 5000 && !s.st.contract_transition);
+      CHECK(s.icl == ma);
+      CHECK(maxIcl(s) <= ma);                               // never above the 5 V contract (the barrier's 500 included)
+      if (ma > 1500) CHECK(s.plan.icl_why == PIANO_CHG_ICL_CONTRACT_5V);
+    }
+  // before the fix: the barrier's 500 mA held for the rest of the attach after a 9 V request that was not reached
+  {
+    StrictSim s; daily(s, 1); s.follows9v = false; s.boardValid = 0;   // no connector reading: the row, not the barrier
+    s.run(60); CHECK(s.st.hv == PIANO_CHG_HV_BLOCKED && s.icl == 1500 && !s.st.contract_transition);
+  }
+  // PD 5 V only (no 9 V object: SOURCE) with a 9 V mode: the same
+  for (uint32_t ma : {900u, 1500u, 2400u, 3000u}) {
+    StrictSim s; daily(s, 1); s.pd({{5000, 5000, ma}}); s.contractMa = ma; s.fixed9 = s.pps9 = 0;
+    s.run(40);
+    CHECK(s.icl == ma && s.busMv == 5000 && s.plan.fallback == PIANO_CHG_FALLBACK_SOURCE && maxIcl(s) <= std::max<uint32_t>(ma, 1500));
+    CHECK(!s.wrote(PIANO_CHG_PD_FIXED) && !s.wrote(PIANO_CHG_PPS));
+  }
+  // the cap: 3 A whatever the offer or the configuration; the RDO when it is below the object; the contract, not the Rp, for PD
+  {
+    StrictSim s; daily(s, 1); s.pd({{5000, 5000, 5000}}); s.contractMa = 5000; s.fixed9 = s.pps9 = 0; s.run(40);
+    CHECK(s.icl == 3000 && maxIcl(s) == 3000);
+  }
+  {
+    StrictSim s; daily(s, 1); s.cfg.rp_cap_ma = 3500; s.pd({{5000, 5000, 5000}}); s.contractMa = 5000; s.fixed9 = s.pps9 = 0;
+    s.run(40); CHECK(s.icl == 3000 && maxIcl(s) == 3000);
+  }
+  {
+    StrictSim s; daily(s, 1); s.cfg.rp_cap_ma = 2400; s.pd({{5000, 5000, 3000}}); s.contractMa = 3000; s.fixed9 = s.pps9 = 0;
+    s.run(40); CHECK(s.icl == 2400 && maxIcl(s) == 2400);   // piano-power-rp-max still lowers the cap
+  }
+  {
+    StrictSim s; daily(s, 1); s.pd({{5000, 5000, 3000}}); s.contractMa = 2000; s.fixed9 = s.pps9 = 0; s.run(40);
+    CHECK(s.icl == 2000 && maxIcl(s) == 2000);              // the RDO's current, not the object's
+  }
+  {
+    StrictSim s; daily(s, 1); s.pd({{5000, 5000, 1500}}); s.contractMa = 1500; s.fixed9 = s.pps9 = 0; s.rpMa = 3000; s.run(40);
+    CHECK(s.icl == 1500 && maxIcl(s) == 1500);              // a PD source's Rp grants nothing above its contract
+  }
+  // a 9 V source that reaches 9 V: unchanged (the 9 V row), and the barrier before the request (StrictSim::step checks it)
+  {
+    StrictSim s; daily(s, 1); s.run(40);
+    CHECK(s.busMv == 9000 && s.st.hv == PIANO_CHG_HV_ON && s.icl == 2500);   // T-14 9 V (a cool connector reads)
+    // the health stop takes it back to 5 V: there the 5 V contract, demand-driven, while held
+    s.soc = 80; s.run(30);
+    CHECK(s.busMv == 5000 && s.st.hold && s.enable == 0 && s.icl == 3000 && s.plan.fallback == PIANO_CHG_FALLBACK_HEALTH);
+    s.soc = 75; s.run(30);                                  // resumed: 9 V again, behind the barrier
+    CHECK(!s.st.hold && s.enable == 1 && s.busMv == 9000 && s.icl == 2500);
+  }
+  // before the 9 V request (OFF, the 15 s wait): the row only, so the barrier never has to undo a step
+  {
+    StrictSim s; daily(s, 1);
+    for (unsigned i = 0; i < 3; ++i) {s.step(); CHECK(s.icl <= 1500);}
+  }
+  // held off for a reason that may clear (a pack above 45 C on a 9 V source: SAFETY, still OFF): the row, not the 5 V contract;
+  // cool again -> the 9 V session behind the barrier
+  {
+    StrictSim s; daily(s, 1); s.temp(46);
+    s.run(40);
+    CHECK(s.st.hv == PIANO_CHG_HV_OFF && s.plan.fallback == PIANO_CHG_FALLBACK_SAFETY && s.busMv == 5000);
+    CHECK(s.icl == 1500 && maxIcl(s) == 1500);
+    s.temp(40); s.run(20);
+    CHECK(s.busMv == 9000 && s.icl == 2500);
+  }
+  // a detach in the middle of the steps: the next attach starts from the row, and the quick detach costs one step for 60 s
+  {
+    StrictSim s; daily(s, 1); s.follows9v = false;
+    for (unsigned i = 0; i < 80 && s.icl < 2500; ++i) s.step();
+    CHECK(s.icl == 2500);
+    s.source = false; s.contractValid = s.sourceValid = false; s.step();   // unplugged: no bus, no Rp, no contract
+    s.source = true; s.contractValid = s.sourceValid = true; s.contractGen++; s.step();   // a new contract, same generation
+    CHECK(s.icl <= 1500);
+    for (unsigned i = 0; i < 6; ++i) {s.step(); CHECK(s.icl <= 2500);}
+    s.run(80); CHECK(s.icl == 3000 && s.st.hv == PIANO_CHG_HV_BLOCKED);
+  }
+  // a sag at 3 A: one step back, a ceiling for its cool-down, never more than 3 A
+  {
+    StrictSim s; daily(s, 1); s.follows9v = false; s.ohms = 0.05; s.kneeMa = 2600; s.kneeOhms = 1.0;
+    s.run(80);
+    CHECK(s.icl == 2500 && maxIcl(s) == 3000);
+    CHECK(s.st.ramp_back_why == PIANO_CHG_BACK_SAG);
+  }
+  // heat: a connector at 51 C -> 1.5 A; at 60 C -> 100 mA; released below 50 C -> from the row again; the charger at 85 C -> 500 mA
+  {
+    StrictSim s; daily(s, 1); s.follows9v = false; s.run(60); CHECK(s.icl == 3000);
+    s.conn1Dc = 510; s.run(4); CHECK(s.icl == 1500);
+    s.conn1Dc = 600; s.run(2); CHECK(s.icl == 100);
+    s.conn1Dc = 450; s.step(); CHECK(s.icl <= 1500);
+    s.run(60); CHECK(s.icl == 3000);
+    s.chgrDc = 850; s.boardValid |= PIANO_CHG_IN_CHGR; s.run(2); CHECK(s.icl == 500);
+  }
+  // a warm pack: the charge current is derated from 48 C (and the 4060 mV float), the input limit does not follow the battery
+  {
+    StrictSim s; daily(s, 1); s.follows9v = false; s.run(60); CHECK(s.icl == 3000 && s.fcc == 1500);
+    s.temp(50); s.run(12);
+    CHECK(s.fcc <= 900 && s.icl == 3000);
+    s.temp(56); s.run(4); CHECK(s.enable == 0);              // the firmware's and the policy's 55 C stop
+  }
+}
+
+// T-14 9 V (owner 2026-11-23 19:22): with hv_caps a fixed 9 V PD contract gets its RDO within the object, up to the buck's highest
+// stock 9 V input (in_pps 2500), and the charge current up to chg_pps 3500 (at most twice the input); above the in_pd row (1600)
+// only with a connector that reads below 50 C. Every derating, hold and stop unchanged; 80/75 unchanged.
+static void testT14NineVolt()
+{
+  auto daily = [](StrictSim &s) {
+    s.cfg.hv = 1; s.cfg.rp = s.cfg.ramp = 1; s.cfg.rp_cap_ma = 3000;
+    s.cfg.hv_order = s.cfg.hv_caps = s.cfg.qc = s.cfg.fv_hot = 1;
+    s.boardValid = PIANO_CHG_IN_CONN1 | PIANO_CHG_IN_CONN2;
+    s.loadMa = 3200; s.soc = 40;
+  };
+  auto at9 = [](StrictSim &s, uint32_t pdoMa, uint32_t rdoMa) {
+    s.pd({{5000, 5000, 3000}, {9000, 9000, pdoMa}}); s.fixed9 = pdoMa; s.pps9 = 0;
+    for (unsigned i = 0; i < 40 && s.busMv != 9000; ++i) s.step();
+    s.contractMa = rdoMa;   // the RDO at 9 V (StrictSim keeps the current; the voltage follows the request)
+    s.run(6);
+  };
+  {   // 9 V 3 A (the 70 W charger's fixed object, RDO 3000): 2500 in, 3500 charge
+    StrictSim s; daily(s); at9(s, 3000, 3000);
+    CHECK(s.busMv == 9000 && s.st.hv == PIANO_CHG_HV_ON && s.icl == 2500 && s.fcc == 3500 && s.plan.icl_why == PIANO_CHG_ICL_9V);
+  }
+  {   // 9 V 2 A (an 18 W charger): the object's 2000, charge min(2 x 2000, 3500)
+    StrictSim s; daily(s); at9(s, 2000, 2000);
+    CHECK(s.busMv == 9000 && s.icl == 2000 && s.fcc == 3500);
+  }
+  {   // the cap: a 5 A object and RDO -> 2500 in
+    StrictSim s; daily(s); at9(s, 5000, 5000);
+    CHECK(s.busMv == 9000 && s.icl == 2500 && s.fcc == 3500);
+  }
+  {   // an RDO below the object bounds it
+    StrictSim s; daily(s); at9(s, 3000, 1800);
+    CHECK(s.busMv == 9000 && s.icl == 1800 && s.fcc == 3500);
+  }
+  {   // at or below the row: the stock rows as before (chg_pd 3000)
+    StrictSim s; daily(s); at9(s, 1500, 1500);
+    CHECK(s.busMv == 9000 && s.icl == 1500 && s.fcc == 3000);
+  }
+  {   // no connector reading: the in_pd row 1600 and chg_pd 3000 (y10's behaviour)
+    StrictSim s; daily(s); s.boardValid = 0; at9(s, 3000, 3000);
+    CHECK(s.busMv == 9000 && s.icl == 1600 && s.fcc == 3000);
+  }
+  {   // heat: a connector at 51 C -> the row; at 60 C -> 100 mA; cool -> 2500 again; the charger at 85 C -> 500
+    StrictSim s; daily(s); at9(s, 3000, 3000); CHECK(s.icl == 2500);
+    s.conn1Dc = 510; s.run(2); CHECK(s.icl == 1600 && s.fcc <= 3200);
+    s.conn1Dc = 600; s.run(2); CHECK(s.icl == 100);
+    s.conn1Dc = 310; s.run(20); CHECK(s.busMv == 9000 && s.icl == 2500);
+    s.chgrDc = 850; s.boardValid |= PIANO_CHG_IN_CHGR; s.run(2); CHECK(s.icl <= 500 && s.fcc <= 1000);
+  }
+  {   // a gauge DTPT alert: no raise, the charge current to 500
+    StrictSim s; daily(s); at9(s, 3000, 3000);
+    s.safe &= ~PIANO_CHG_SAFE_DTPT; s.run(3); CHECK(s.fcc <= 500 && s.icl <= 2500);
+  }
+  {   // a pack at 46 C: 5 V again (the 45 C rule), stage A currents; the charge current derates from 48 C at 5 V
+    StrictSim s; daily(s); at9(s, 3000, 3000);
+    s.temp(46); s.run(8); CHECK(s.busMv == 5000 && s.fcc <= 1500 && s.icl <= 1600);
+  }
+  {   // 80/75 unchanged: the hold at 80 % (5 V, charging off), 75 % resumes, 9 V again at 2500 behind the barrier
+    StrictSim s; daily(s); at9(s, 3000, 3000);
+    s.soc = 80; s.run(20); CHECK(s.busMv == 5000 && s.st.hold && s.enable == 0);
+    s.soc = 76; s.run(4); CHECK(s.st.hold && s.enable == 0);
+    s.soc = 75; s.run(30); CHECK(!s.st.hold && s.enable == 1 && s.busMv == 9000 && s.icl == 2500);
+  }
+  {   // without hv_caps nothing changes: the stage-A ceilings at 9 V
+    StrictSim s; daily(s); s.cfg.hv_caps = 0; at9(s, 3000, 3000);
+    CHECK(s.busMv == 9000 && s.icl == 1600 && s.fcc == 1500);
+  }
+}
+
+// T-14b (owner 2026-11-23 19:25; live y10 reads 19:26/19:32 on the 70 W charger): every ~5 s cycle one decision planned ICL 500 with
+// fallback READBACK and the transition pending (some cycles ICL 100 acknowledged), the next one 1600 again; the firmware's input
+// walk restarted from 100 mA each time and the packs hardly charged. Mechanism: our own periodic UCSI status GET completes with a
+// notification; while it is in flight ChargeLink omits the contract (ChargeContract.h piano_contract_fresh), so a decision taken
+// then saw no contract (the notify-observing transition and the PD clamp: 100 mA) and recorded generation 0, which armed the
+// recheck barrier (500 mA, READBACK) at the next fresh snapshot of the SAME contract. Model: the firmware's 0x2029 walks from 100 mA
+// at +500 mA/s after each 0x2008 change; each cycle = the periodic decision, the GET's notification decision, the resolved one.
+struct NotifyBench {
+  StrictSim s;
+  uint32_t lastIcl = 0;
+  uint64_t walkFrom = 0;
+  unsigned decisions = 0, lowRequests = 0, readbacks = 0, pendingVolt = 0, iclWrites = 0, voltWrites = 0;
+  uint32_t steady = 0, minRequested = ~0u;
+  bool counting = false;
+  void step(uint64_t dt, bool inFlight, bool newGeneration = false)
+  {
+    const uint32_t gen = s.contractGen;
+    if (newGeneration) s.contractGen = gen + 1;
+    if (inFlight) {s.contractValid = s.sourceValid = false; s.notifyPending = true; s.notifyMs = s.now + dt; s.contractGen = 0;}
+    if (s.icl != lastIcl) {lastIcl = s.icl; walkFrom = s.now;}
+    s.aiclRead = true;
+    s.aiclCap = int(std::min<uint64_t>(s.icl, 100 + 500 * ((s.now + dt - walkFrom) / 1000)));
+    const size_t before = s.all.size();
+    s.step(dt);
+    if (inFlight) {s.contractValid = s.sourceValid = true; s.notifyPending = false; s.contractGen = newGeneration ? gen + 1 : gen;}
+    else if (newGeneration) s.contractGen = gen + 1;
+    if (!counting) return;
+    decisions++;
+    minRequested = std::min(minRequested, s.plan.icl_ma);
+    if (s.plan.icl_ma < steady) lowRequests++;
+    if (s.plan.fallback == PIANO_CHG_FALLBACK_READBACK) readbacks++;
+    if (s.st.contract_transition || (s.st.pending & (1u << PIANO_CHG_S_VOLT))) pendingVolt++;
+    for (size_t i = before; i < s.all.size(); ++i) {
+      if (s.all[i].property == PIANO_CHG_ICL) iclWrites++;
+      if (s.all[i].property == PIANO_CHG_PD_FIXED || s.all[i].property == PIANO_CHG_PPS) voltWrites++;
+    }
+  }
+  void cycle() {step(4500, false); step(200, true); step(300, false);}
+};
+
+static void testT14NotifyCycle()
+{
+  auto daily = [](StrictSim &s) {
+    s.cfg.hv = 1; s.cfg.rp = s.cfg.ramp = 1; s.cfg.rp_cap_ma = 3000;
+    s.cfg.hv_order = s.cfg.hv_caps = s.cfg.qc = s.cfg.fv_hot = 1;
+    s.loadMa = 3200; s.soc = 59; s.contractGen = 7;
+  };
+  {   // the observed case: a steady fixed 9 V contract (the 70 W charger, RDO 1600 at 9 V as read live), no connector reading
+    NotifyBench b; daily(b.s); b.s.contractMa = 1600;
+    for (unsigned i = 0; i < 40 && b.s.busMv != 9000; ++i) b.s.step();
+    b.s.run(6);
+    CHECK(b.s.busMv == 9000 && b.s.st.hv == PIANO_CHG_HV_ON && b.s.icl == 1600);
+    b.steady = b.s.icl; b.counting = true;
+    for (unsigned i = 0; i < 6; ++i) b.cycle();
+    CHECK(b.lowRequests == 0 && b.minRequested == 1600);   // y10: 500 (the recheck barrier) and 100 (the in-flight decision)
+    CHECK(b.readbacks == 0 && b.pendingVolt == 0);          // y10: fallback READBACK and the transition every cycle
+    CHECK(b.iclWrites == 0 && b.voltWrites == 0);           // the limit is not rewritten, 9 V is not asked again
+    CHECK(b.s.icl == 1600 && b.s.st.icl_set == 1600 && b.s.busMv == 9000);
+  }
+  {   // a real change while the notification is in flight (the resolved snapshot has a new generation): the barrier still runs
+    NotifyBench b; daily(b.s); b.s.contractMa = 1600;
+    for (unsigned i = 0; i < 40 && b.s.busMv != 9000; ++i) b.s.step();
+    b.s.run(6);
+    b.steady = 1600; b.counting = true;
+    b.step(4500, false); b.step(200, true); b.step(300, false, true);
+    CHECK(b.minRequested <= 500 && b.readbacks >= 1);
+    b.s.run(6); CHECK(b.s.busMv == 9000 && b.s.icl == 1600);
+  }
+  {   // a notification that stays in flight: held for at most NOTIFY_HOLD_MAX decisions / 3 s, then the contract counts as lost
+    NotifyBench b; daily(b.s); b.s.contractMa = 1600;
+    for (unsigned i = 0; i < 40 && b.s.busMv != 9000; ++i) b.s.step();
+    b.s.run(6);
+    const uint64_t first = b.s.now + 500;
+    bool dropped = false;
+    for (unsigned i = 0; i < 6; ++i) {
+      b.s.contractValid = b.s.sourceValid = false; b.s.notifyPending = true; b.s.notifyMs = first;
+      const uint32_t g = b.s.contractGen; b.s.contractGen = 0;
+      b.s.step(500);
+      b.s.contractGen = g;
+      if (b.s.plan.icl_ma <= 100) dropped = true;
+    }
+    CHECK(dropped);
+    b.s.contractValid = b.s.sourceValid = true; b.s.notifyPending = false; b.s.run(10);
+    CHECK(b.s.busMv == 9000 && b.s.icl == 1600);
+  }
+  {   // during a hold a hot connector still takes the input to 100 mA, and a bus out of the 9 V window ends the hold
+    NotifyBench b; daily(b.s); b.s.boardValid = PIANO_CHG_IN_CONN1 | PIANO_CHG_IN_CONN2;
+    for (unsigned i = 0; i < 40 && b.s.busMv != 9000; ++i) b.s.step();
+    b.s.run(6); CHECK(b.s.icl == 2500);                     // T-14 9 V with a cool connector
+    b.s.conn1Dc = 600; b.step(200, true); CHECK(b.s.plan.icl_ma == 100 && b.s.icl == 100);
+    b.s.conn1Dc = 310; b.s.run(20); CHECK(b.s.icl == 2500);
+    b.s.busMv = 7500; b.step(200, true); CHECK(b.s.plan.icl_ma <= 500);
+  }
+  {   // the 80 % stop acts in a hold; 75 % resumes on the next fresh decision
+    NotifyBench b; daily(b.s); b.s.contractMa = 1600;
+    for (unsigned i = 0; i < 40 && b.s.busMv != 9000; ++i) b.s.step();
+    b.s.run(6);
+    b.s.soc = 80; b.step(200, true); CHECK(b.s.enable == 0 && !b.s.notifyHeld());   // a stop is no steady state
+  }
+  {   // 5 V PD settled (T-14: the 5 V contract, 3 A, the 9 V request not reached) with the same notifications: no dips
+    NotifyBench b; daily(b.s); b.s.boardValid = PIANO_CHG_IN_CONN1 | PIANO_CHG_IN_CONN2; b.s.follows9v = false;
+    b.s.run(60); CHECK(b.s.icl == 3000 && b.s.st.hv == PIANO_CHG_HV_BLOCKED);
+    b.steady = 3000; b.counting = true;
+    for (unsigned i = 0; i < 6; ++i) b.cycle();
+    CHECK(b.lowRequests == 0 && b.iclWrites == 0 && b.s.icl == 3000);
+  }
+}
+
 int main()
 {
+  testT14FiveVoltMax();
+  testT14NineVolt();
+  testT14NotifyCycle();
+  testDailyFiveVoltBudget();
+  testBootRampRetry();
   testContractSession();
   testAtomicHealth();
+  testRam13GaugeLoss();
   testTables();
   testFiveVolt();
   testThermal();

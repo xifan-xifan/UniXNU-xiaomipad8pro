@@ -21,17 +21,6 @@ if [ -z "${PIANO_K27_TREE:-}" ]; then
   echo "Set it in the environment or as PIANO_K27_TREE=/path in ~/.config/piano/env (docs/bringup-debugging.md §4)." >&2
   exit 1
 fi
-K27_LOCKED_COMMIT=11ac316b789d81fc9f734e15645456f536c05141
-if [ -d "$PIANO_K27_TREE/.git" ]; then
-  K27_HEAD=$(git -C "$PIANO_K27_TREE" rev-parse --verify HEAD 2>/dev/null || true)
-  if [ "$K27_HEAD" != "$K27_LOCKED_COMMIT" ]; then
-    echo "PIANO_K27_TREE=$PIANO_K27_TREE is at ${K27_HEAD:-no commit}; locked native k27 source is $K27_LOCKED_COMMIT" >&2
-    exit 1
-  fi
-else
-  echo "PIANO_K27_TREE=$PIANO_K27_TREE has no Git metadata; refusing an untraceable native k27 source" >&2
-  exit 1
-fi
 if [ ! -d "$PIANO_K27_TREE" ]; then
   echo "PIANO_K27_TREE=$PIANO_K27_TREE is not a directory (the k27 tree, docs/bringup-debugging.md §4)" >&2
   exit 1

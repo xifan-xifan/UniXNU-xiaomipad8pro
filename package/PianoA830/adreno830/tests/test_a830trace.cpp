@@ -541,7 +541,11 @@ void verbatimRun(uint32_t profile,unsigned *runs)
     /* S3 up to the aperture grant (step 0x40), then the note of the aperture the GPU context built (4 GiB, 2053 table pages, in
      * both profiles), then the grant. */
     for(;at<script.size() && script[at].stage==A830SSmmu && script[at].step!=A830S3StepAperture;++at)linesOf(script[at],&want);
+#ifdef ADRENO830_MACOS   /* UniXNU-piano (GPU-SLOTS): the macOS default pagani-gpu-va=64: 64 GiB, 32833 table pages */
+    want.push_back("g3."+hex(A830S3StepContext+A830S3Cb0)+" note gpu aperture GiB, table pages 40 8041");
+#else
     want.push_back("g3."+hex(A830S3StepContext+A830S3Cb0)+" note gpu aperture GiB, table pages 10 2011");
+#endif
     scripted(A830SSmmu);
     TCHECK(at==script.size());
     /* The grant's outcome, once per boot (M14 P0): the scripted SMC answered x0 0, so granted. */
@@ -681,7 +685,12 @@ int main()
     unsigned apertures=0;
     for(const uint32_t profile:{uint32_t(A830ProfileDesign),uint32_t(A830ProfileAnnibale)}) {
         struct Case {uint32_t va;bool fallback;const char *values;};
+#ifdef ADRENO830_MACOS   /* UniXNU-piano (GPU-SLOTS): 64 GiB and 32833 table pages for pagani-gpu-va=64, the macOS default */
+        for(const Case &c:{Case{16,false,"10 2011"},Case{16,true,"4 805"},Case{2,false,"2 403"},Case{64,false,"40 8041"},
+                           Case{64,true,"4 805"}}) {
+#else
         for(const Case &c:{Case{16,false,"10 2011"},Case{16,true,"4 805"},Case{2,false,"2 403"}}) {
+#endif
             Adreno830Board b=board13t(profile);
             b.knobs.stop=A830SSmmu;b.knobs.va=c.va;wideFallback=c.fallback;
             tr::lines.clear();
@@ -689,7 +698,7 @@ int main()
             const std::string note=std::string("g3.")+tr::hex(A830S3StepContext+A830S3Cb0)+" note gpu aperture GiB, table pages "+
                                    c.values;
             TCHECK(std::count_if(tr::lines.begin(),tr::lines.end(),[&](const tr::Captured &line) {return line.text==note;})==1);
-            ++apertures;
+            if(c.va!=64)++apertures;   /* UniXNU-piano: the 64 GiB cases are not counted (the PASS line is the upstream pass's too) */
         }
     }
     wideFallback=false;

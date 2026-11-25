@@ -9,7 +9,8 @@
  *
  * The rules of this file: all four or none (a missing or failing amplifier shuts the others down and holds all four in reset); no
  * amplifier is powered up but by audio_amps_start, which caps the gain at FS19XX_GAIN_TEST (160, -35.6 dB: the unattended-test gain),
- * or by audio_amps_start_capped (levels 8-10's playing gain: never above the core's FS19XX_GAIN_CAP, 231), and both leave them muted;
+ * or by audio_amps_start_capped (levels 8-10's playing gain: never above the core's hard limit 243, the caller's cap 231 unless
+ * speaker protection runs), and both leave them muted;
  * at the end they are held in reset (hardware shutdown), as Ubuntu leaves them unbound.
  * Portable C, new code for PianoAudio: the bus, the reset lines and the sleeps are the owner's. */
 #ifndef PIANO_AUDIO_AMPS_H
@@ -82,7 +83,8 @@ int audio_amps_poll(AudioAmps *g, AudioAmpsPoll *poll);
 int audio_amps_all_down(const AudioAmps *g);
 /* Power all four configured amplifiers up, muted, at min(gain, AUDIO_AMPS_TEST_GAIN). 0; or all of them shut down again. */
 int audio_amps_start(AudioAmps *g, unsigned gain);
-/* The same at min(gain, cap, FS19XX_GAIN_CAP): levels 8-10's playing gain (cap 160 at level 8, at most the core's 231 from level 9). */
+/* The same at min(gain, cap, FS19XX_GAIN_HARD_LIMIT): levels 8-10's playing gain (cap 160 at level 8, 231 from level 9, 243 under
+ * speaker protection). */
 int audio_amps_start_capped(AudioAmps *g, unsigned gain, unsigned cap);
 /* Runtime gain, one bus transaction per call after PCM refill; the same caps as start. Only a fully started group may change.
  * A failed write shuts down all four. The caller discards partial status polls across the four-slot update. */

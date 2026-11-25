@@ -228,7 +228,16 @@ static void scattered()
     CHECK(!s.vm.map(&middle,0,0x802000,3,0,2,&b) && s.vm.spanCount()==6 && s.vm.lastResult().completed_spans==4);
     CHECK(!s.vm.describe(b,&iova,&bytes,&permissions) && iova==0x802000 && bytes==4*4096 && permissions==3);
     CHECK(s.vm.handleAt(0x803000)==b && !s.vm.handleAt(0x806000));
+#ifdef ADRENO830_MACOS
+    CHECK(s.vm.largestClientHole(0x800000,0x10000)==0x7000);
+    CHECK(s.vm.largestClientHole(0x803000,0x3000)==0);
+    CHECK(s.vm.largestClientHole(0x804000,0x4000)==0x2000);
+#endif
     CHECK(!s.vm.unmap(b) && s.vm.spanCount()==2 && s.vm.lastResult().completed_spans==4);
+#ifdef ADRENO830_MACOS
+    CHECK(s.vm.largestClientHole(0x800000,0x10000)==0x7000);
+    CHECK(s.vm.largestClientHole(0x803000,0x5000)==0x5000);
+#endif
     CHECK(!s.vm.map(&middle,0,0x80a000,3,0,2,&b) && s.vm.spanCount()==6);
     CHECK(!s.vm.unmap(a) && s.vm.spanCount()==5);
     CHECK(!s.vm.map(&first,0,0x800000,3,0,2,&a) && s.vm.spanCount()==6);
@@ -239,12 +248,17 @@ static void scattered()
     /* UniXNU-piano: the table ranges, told apart from the records: 3 needed, 2 free of 8. */
     CHECK(s.vm.lastRefusal().why==NativeAdrenoVmWhySpans && s.vm.lastRefusal().a==3 && s.vm.lastRefusal().b==2 &&
           s.vm.lastRefusal().c==8 && s.vm.lastRefusal().memory==&huge && s.vm.spanCapacity()==8);
-    uint64_t kept=0;
-    CHECK(s.vm.mapClient(&first,0x80c000,3,0,2,&kept,0,2)==kIOReturnNoResources &&   /* the render server's reserve of ranges */
+    uint64_t kept=0;NativeAdrenoVmRefusal own{};
+    CHECK(s.vm.mapClient(&first,0x80c000,3,0,2,&kept,0,2,&own)==kIOReturnNoResources &&   /* the render server's reserve of ranges */
           s.vm.lastRefusal().why==NativeAdrenoVmWhyReserveSpans && s.vm.lastRefusal().a==1 && s.vm.lastRefusal().b==2 &&
           s.vm.lastRefusal().c==2);
     CHECK(s.vm.mapClient(&first,0x80c000,3,0,2,&kept,NativeAdrenoVmMaxObjects,0)==kIOReturnNoResources &&
           s.vm.lastRefusal().why==NativeAdrenoVmWhyReserveObjects && s.vm.lastRefusal().a==3);
+    /* A second connection may overwrite the shared slot; the first call's output remains coherent. */
+    CHECK(own.why==NativeAdrenoVmWhyReserveSpans && own.memory==&first && own.objects==3 && own.spans==6 &&
+          own.capacity==8 && own.bytes==6*4096 && own.keep_objects==0 && own.keep_spans==2);
+    CHECK(s.vm.mapClient(&first,0x80c000,3,2,2,&kept,0,0,&own)==kIOReturnBadArgument &&
+          own.why==NativeAdrenoVmWhyRequest && own.memory==&first && !own.objects && !own.spans);
     refusalChecks+=3;
 #endif
     CHECK(!huge.deviceReferences() && model.writes==writes && s.vm.spanCount()==6 && !s.vm.poisoned());
@@ -734,7 +748,11 @@ int main()
         CHECK(exposed(t,NativeAdrenoVmMaxSpans)==kIOReturnSuccess && t.vm.spanCapacity()==NativeAdrenoVmMaxSpans &&
               t.vm.freeSpans()==NativeAdrenoVmMaxSpans);
         release(t);
-        refusalChecks+=2;
+        /* gpu/table1: the fallback capacity NativeAdrenoGpuContext asks when the full table's records are not found */
+        Fixture u;
+        CHECK(exposed(u,NativeAdrenoVmFallbackSpans)==kIOReturnSuccess && u.vm.spanCapacity()==NativeAdrenoVmFallbackSpans);
+        release(u);
+        refusalChecks+=3;
     }
 #endif
     transactions();
@@ -758,7 +776,7 @@ int main()
     const unsigned threaded=concurrent();
 #ifdef ADRENO830_MACOS
     std::printf("PASS: VM refusal reasons (UniXNU-piano): %u checks (the aperture, the request, a reserved window, an overlap, table ranges "
-        "told apart from records, the render server's reserves; 524288 ranges taken, not one more)\n",refusalChecks);
+        "told apart from records, the render server's reserves; 1048576 ranges taken, not one more)\n",refusalChecks);
 #endif
     std::printf("PASS: VM over the A830 programmer: attach proves regions and routes once, %u map/unmap rounds under pending faults "
         "never poison, per-buffer fence unmap, 64-bit TLBIVAL, 4 GiB (2053), 2 GiB (1027) and 16 GiB (8209, BOs across and past 4 GiB) apertures with reserved windows, "

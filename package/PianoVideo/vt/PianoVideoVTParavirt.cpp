@@ -15,6 +15,8 @@
 #include <pexpert/pexpert.h>
 #include <sys/errno.h>
 #include <sys/sysctl.h>
+#include <sys/proc.h>
+#include <kern/task.h>
 #include "PianoVideoVTContract.h"
 
 extern kmod_info_t g_kernel_kmod_info;
@@ -26,7 +28,6 @@ void droidvm_vthost_client_close(void *host);
 int droidvm_vthost_message(void *host, const uint8_t *m, uint32_t n, const uint32_t *surfaces, unsigned surfaceCount);
 volatile uint32_t droidvm_vtpv_sent, droidvm_vtpv_dropped;
 }
-extern "C" int proc_selfpid(void);
 
 namespace {
 constexpr uint32_t FirstSendBytes = 0x4000;       // the framework's first request
@@ -109,6 +110,8 @@ class AppleVideoToolboxParavirtualizationUserClient : public IOUserClient {
     OSDeclareDefaultStructors(AppleVideoToolboxParavirtualizationUserClient)
     typedef IOUserClient super;
     task_t owner;
+    int ownerPid;
+    char ownerName[32];
     IOLock *lock;
     IOBufferMemoryDescriptor *send;
     IOMemoryMap *sendMap;
@@ -137,6 +140,16 @@ OSDefineMetaClassAndStructors(AppleVideoToolboxParavirtualizationUserClient, IOU
 bool AppleVideoToolboxParavirtualizationUserClient::initWithTask(task_t task, void *token, UInt32 type, OSDictionary *properties) {
     if (type != 0 || !super::initWithTask(task, token, type, properties)) return false;
     owner = task;
+    // start()/worker context need not be the process that opened the IOUC.
+    ownerPid = -1;
+    strlcpy(ownerName,"?",sizeof ownerName);
+    proc_t process = task ? (proc_t)get_bsdtask_info(task) : nullptr;
+    if (process) {
+        ownerPid = proc_pid(process);
+        proc_name(ownerPid,ownerName,sizeof ownerName);
+    }
+    setProperty("piano-video-owner-pid",uint64_t(ownerPid),32);
+    setProperty("piano-video-owner-name",ownerName);
     lock = IOLockAlloc();
     sendLock = IOLockAlloc();
     return lock && sendLock;
@@ -145,8 +158,9 @@ bool AppleVideoToolboxParavirtualizationUserClient::initWithTask(task_t task, vo
 bool AppleVideoToolboxParavirtualizationUserClient::start(IOService *provider) {
     if (!super::start(provider)) return false;
     droidvm_vtpv_opens = droidvm_vtpv_opens + 1;
-    IOLog("PianoVideo: vt user client opened by pid %d (count %u)\n", proc_selfpid(), droidvm_vtpv_opens);
-    host = droidvm_vthost_client_open(this, sendToGuest, owner, proc_selfpid());
+    IOLog("PianoVideo: vt user client opened by pid %d (count %u)\n", ownerPid, droidvm_vtpv_opens);
+    IOLog("PianoVideoVT V9c: owner pid %d name %s source owning-task\n",ownerPid,ownerName);
+    host = droidvm_vthost_client_open(this, sendToGuest, owner, ownerPid);
     return host != nullptr;
 }
 
@@ -205,7 +219,7 @@ IOReturn AppleVideoToolboxParavirtualizationUserClient::buffers(uint64_t size, u
     out[0] = capacity;
     out[1] = sendMap->getAddress();
     out[2] = queueMap->getAddress();
-    IOLog("PianoVideoVT V5a: selector0 pid %d capacity %llu shared-send-and-queue 1\n", proc_selfpid(), capacity);
+    IOLog("PianoVideoVT V5a: selector0 pid %d capacity %llu shared-send-and-queue 1\n", ownerPid, capacity);
     return kIOReturnSuccess;
 }
 
@@ -213,7 +227,7 @@ IOReturn AppleVideoToolboxParavirtualizationUserClient::buffers(uint64_t size, u
 // to the native frontend without waiting for any guest reply.
 IOReturn AppleVideoToolboxParavirtualizationUserClient::message(uint64_t length, const uint64_t *surfaces, unsigned count,
                                                                uint64_t *status) {
-    IOLog("PianoVideoVT V5c: send-event pid %d bytes %llu capacity %llu surfaces %u decision received\n",proc_selfpid(),length,capacity,count);
+    IOLog("PianoVideoVT V5c: send-event pid %d bytes %llu capacity %llu surfaces %u decision received\n",ownerPid,length,capacity,count);
     if (!send || length < HeaderBytes || length > capacity || length > MaxSendBytes) {
         droidvm_vtpv_refused = droidvm_vtpv_refused + 1;
         IOLog("PianoVideoVT V5c: send-event decision envelope-rejected status %08x\n",kIOReturnBadArgument);
@@ -240,7 +254,7 @@ IOReturn AppleVideoToolboxParavirtualizationUserClient::message(uint64_t length,
     const uint32_t seq = droidvm_vtpv_messages;
     droidvm_vtpv_record &r = droidvm_vtpv_log[seq % LogEntries];
     r.seq = seq;
-    r.pid = uint32_t(proc_selfpid());
+    r.pid = uint32_t(ownerPid);
     r.length = uint32_t(length);
     r.type = big32(bytes + 8);
     r.flags = big32(bytes + 12);
@@ -339,7 +353,7 @@ IOReturn AppleVideoToolboxParavirtualizationUserClient::registerNotificationPort
     }
     IOLockUnlock(lock);
     droidvm_vtpv_notify_result = uint32_t(result);
-    IOLog("PianoVideoVT V5a: notification type %u pid %d status %08x\n", type, proc_selfpid(), result);
+    IOLog("PianoVideoVT V5a: notification type %u pid %d status %08x\n", type, ownerPid, result);
     return result;
 }
 

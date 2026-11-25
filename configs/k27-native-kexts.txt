@@ -2,7 +2,7 @@
 # sources in package/, objects in out/native-kexts/. Only this repository's kexts (the native kext rule, docs/bringup-debugging.md
 # §5, enforced by tooling/k27/check-native-kexts.py): none of the VM-era paravirtual kexts (virtio block root, Ethernet, audio,
 # video, input, the stub GPU accelerator, the virtio display).
-ARMPlatformStandIn   # AppleARMPlatform's classes, which IOMobileGraphicsFamily and its kexts link against
+ARMPlatformStandIn   # AppleARMPlatform's classes, which IOMobileGraphicsFamily and its kexts link against; and a diagnostic-data stand-in on IOResources (docs/identity.md section 9: no MobileGestalt wait in iokit-restricted sandboxes; no hardware)
 NativeUfs            # UFS root windows + Data store
 NativeRamBlock       # the Data disk (RAM seed + changed pages in NativeUfs's store)
 NativeGopDisplay     # the display: CPU copy into the GOP framebuffer, and its AppleParavirtGPU nub

@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: BSD-2-Clause-Patent
+"""T-16 switcher, phase 1 (private/host-checks/20261123-switcher/DESIGN.md 3.1): maint-session.py accepts Android's slot-A pair
+(vendor_boot 99ef425b + init_boot dce4a752 Magisk or ae0b5153 stock) as well as the Ubuntu-era pair of macos-set-v5, refuses an
+unknown pair, and refuses map / boot-a / check while boot_a holds stock Android (17e89056). A fake tablet (test-persist.py's)."""
+import importlib.util
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import common  # noqa: E402
+
+spec = importlib.util.spec_from_file_location('tp', HERE / 'test-persist.py')
+tp = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(tp)
+CB = common.BACKUP
+failures = tp.failures
+
+
+def unit():
+    print('== common.slot_a_pairs / slot_a_pair_name')
+    ub = (common.VENDOR_BOOT_A_SHA256, common.INIT_BOOT_A_SHA256)
+    tp.check(common.slot_a_pair_name(*ub) == 'the Ubuntu-era pair (macos-set-v5)', 'the Ubuntu-era pair is known')
+    tp.check('Magisk' in (common.slot_a_pair_name(common.ANDROID_VENDOR_BOOT_SHA256, common.ANDROID_INIT_BOOT_MAGISK_SHA256) or ''),
+             'Android + Magisk init_boot is known')
+    tp.check('stock' in (common.slot_a_pair_name(common.ANDROID_VENDOR_BOOT_SHA256, common.ANDROID_INIT_BOOT_SHA256) or ''),
+             'Android stock pair is known')
+    for v, i in ((common.VENDOR_BOOT_A_SHA256, common.ANDROID_INIT_BOOT_MAGISK_SHA256),
+                 (common.ANDROID_VENDOR_BOOT_SHA256, common.INIT_BOOT_A_SHA256), ('0' * 64, '0' * 64)):
+        tp.check(common.slot_a_pair_name(v, i) is None, f'mixed/unknown pair {v[:8]}+{i[:8]} is not known')
+    for name, path, digest in (('android-set boot', CB / 'android-set/boot.img', common.ANDROID_BOOT_A_SHA256),
+                               ('android-set vendor_boot', CB / 'android-set/vendor_boot.img', common.ANDROID_VENDOR_BOOT_SHA256),
+                               ('android-set init_boot', CB / 'android-set/init_boot.img', common.ANDROID_INIT_BOOT_SHA256),
+                               ('android-set-root Magisk init_boot', CB / 'android-set-root/init_boot-magisk-shellgrant.img',
+                                common.ANDROID_INIT_BOOT_MAGISK_SHA256)):
+        tp.check(path.is_file() and common.sha(path) == digest, f'{name}: the constant {digest[:16]} = the CRITICAL-BACKUP file')
+
+
+def session(tmp):
+    print('== maint-session.py with Android\'s slot-A pair (a fake tablet)')
+    root, out, window, old = tp.build_fake(tmp)
+    nas = tmp / 'nas'
+    nas.mkdir()
+    env = dict(os.environ, FAKE_ROOT=str(root), PIANO_PERSIST_OUT=str(out), PIANO_MAINT_HOST='127.0.0.1',
+               PIANO_BACKUP_DIR=str(nas), PIANO_SERIAL='test', PIANO_MAINT_SHELL=str(tmp / 'fake-shell.py'),
+               PYTHONDONTWRITEBYTECODE='1')
+    (tmp / 'fake-shell.py').write_text(f'import sys; sys.path.insert(0, {str(HERE)!r}); import importlib.util\n'
+                                       f'spec = importlib.util.spec_from_file_location("t", {str(HERE / "test-persist.py")!r})\n'
+                                       'm = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n'
+                                       'sys.stdout.write(m.fake_shell(sys.argv[1]))\n')
+    base = ['python3', str(HERE / 'maint-session.py'), '--session', str(tmp / 'session'), '--esp', 'esp-test.img',
+            '--esp-final', 'esp-test.img', '--boot-image', 'boot-test-signed.img', '--http-port', '18030', '--nc-port', '19030']
+
+    def run(*steps, expect=0):
+        r = subprocess.run(base + list(steps), capture_output=True, text=True, env=env, timeout=3600)
+        log = r.stdout + r.stderr
+        (tmp / 'session-out.txt').open('a').write(log)
+        if r.returncode != expect:
+            print(log[-3000:])
+        tp.check(r.returncode == expect, f'maint-session.py {" ".join(steps)} -> {r.returncode} (want {expect})')
+        return log
+
+    lun4 = root / 'lun4.img'
+
+    def put(part, path):
+        data = Path(path).read_bytes()
+        assert len(data) == tp.LUN4[part][2], (part, len(data))
+        tp.write_at(lun4, tp.LUN4[part][1], data)
+
+    def region(part):
+        return tp.sha_region(lun4, tp.LUN4[part][1], tp.LUN4[part][2])
+
+    log = run('map')
+    tp.check('the Ubuntu-era pair (macos-set-v5)' in log, 'map: the Ubuntu-era pair named (the existing path)')
+    put('vendor_boot_a', CB / 'android-set/vendor_boot.img')
+    put('init_boot_a', CB / 'android-set-root/init_boot-magisk-shellgrant.img')
+    log = run('map', 'backup')
+    tp.check('Android\'s pair with the Magisk init_boot (macos-set-v5a)' in log, 'map: Android + Magisk pair accepted and named')
+    run('boot-a')        # check needs the new GPT tables (test-persist's session writes them first): not this test's subject
+    tp.check(region('boot_a') == common.sha(out / 'boot-test-signed.img'), 'boot-a writes boot_a with the Android pair in place')
+    put('init_boot_a', CB / 'android-set/init_boot.img')
+    log = run('map')
+    tp.check('Android\'s stock pair (android-set)' in log, 'map: Android stock pair accepted and named')
+    put('init_boot_a', tp.LUN4 and (common.DEVICE / 'out/persistent/ref/28-init_boot_a.img'))   # Ubuntu init_boot + Android vendor_boot
+    log = run('map', expect=3)
+    tp.check('UNKNOWN' in log, 'map refuses a mixed pair (Android vendor_boot + Ubuntu init_boot)')
+    log = run('boot-a', expect=3)
+    tp.check('UNKNOWN' in log, 'boot-a refuses a mixed pair')
+    put('init_boot_a', CB / 'android-set-root/init_boot-magisk-shellgrant.img')
+    run('map')                                   # state for check (boot_a = the test macOS image)
+    put('boot_a', CB / 'android-set/boot.img')
+    log = run('check', expect=3)
+    tp.check('boot_a holds stock Android' in log, 'check refuses while boot_a holds stock Android')
+    log = run('map', expect=3)
+    tp.check('boot_a holds stock Android' in log, 'map refuses while boot_a holds stock Android')
+    before = region('boot_a')
+    log = run('boot-a', expect=3)
+    tp.check('boot_a holds stock Android' in log and region('boot_a') == before, 'boot-a refuses (boot_a untouched) while it holds Android')
+
+
+def main():
+    tmp = Path(tempfile.mkdtemp(prefix='piano-switch-pair-'))
+    try:
+        unit()
+        session(tmp)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print(f'\n{"PASS" if not failures else "FAIL"}: {len(failures)} failure(s)')
+    sys.exit(1 if failures else 0)
+
+
+if __name__ == '__main__':
+    main()

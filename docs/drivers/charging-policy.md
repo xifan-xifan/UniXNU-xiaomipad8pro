@@ -38,7 +38,7 @@ configuration) logged and diffed with every report, a 2 s watch of the stop's mo
   configuration (always first), the port notifications and the UCSI probe.
 - A computer port (CDP) gets the CDP row, 900 mA, whatever its Type-C Rp advertises; `piano-power-rp=1` trusts a 1.5 / 3.0 A Rp,
   since 2026-11-12 in steps from the row up to the Rp current (3 A at most, `piano-power-rp-max`), each step only while the bus holds
-  and the input is used up, one step back for the boot on a sag, a quick detach or a refusal (§15; `piano-power-ramp=0`: the old
+  and the input is used up, one step back with a 60 s cool-down on a sag, a quick detach or a refusal (§15; `piano-power-ramp=0`: the old
   immediate limit within 1600 mA, §13). The board thermistors PianoThermal publishes only ever make it more conservative (§1).
 - Defaults are today's caution: ceilings ICL 1600 / FCC 1500 mA (PianoMca's allowlist), 5 V only, no float change, Preserve
   Battery Health off. Every planned write passes `piano_charge_write_allowed()`; each new write has a read-back (§7).
@@ -466,18 +466,23 @@ only on evidence, and remembers for the boot where it failed.
 
 | Rule | Value | Why |
 |---|---|---|
-| Target | min(the Rp current, `piano-power-rp-max` (3000), the board holds); a source without a PD contract only | the source's own advertisement (USB Type-C: the Type-C current before BC 1.2); 3.0 A is the most a 5 V Rp can say |
+| Target | min(the source budget, `piano-power-rp-max` (3000), the board holds) | non-PD: Rp; strict mode with hv=0: a fresh fixed 5 V selected RDO and source data, without a voltage transition; PD advertisements alone cannot raise draw |
 | Without a connector reading below 50 °C | at most 1500 mA (`RP_WITHHELD` once) | BC 1.2's CDP/DCP current and the 1.5 A Rp: what the DCP row takes without any thermistor |
 | First step | the class row (CDP 900, DCP 1500, …) | what Linux and the earlier runs wrote first; I and P1 had 100 → 900 answered at once |
-| Steps | 1500, 2000, 2500, 3000 mA (≤ 600 mA each) | each firmware ramp short (§15.3); a sag found at most one step late |
+| Steps | 1500, 2000, 2500, 3000 mA (SDP 500 → 1500 is 1000 mA; later increments ≤ 500 mA) | existing steps unchanged; a sag found at most one step late |
 | Up when | the step taken (acknowledged), held 10 s and two decisions after the decision that saw it taken (15 s with the 5 s cycle), the bus ≥ 4.65 V under it, the bus current ≥ the step − max(100 mA, step / 8) | the source has just held this much, and the system and the battery take it all, so more is of use; demand-driven: a light load never climbs |
 | Down at once | a lower target (the Rp gone, a connector at 50 °C, a PD contract, a type change) | |
-| Back one step, ceiling for the boot | the bus < 4.5 V under a step above the row; a detach within 30 s of a step up (planned or taken); the firmware refusing a step three times | a sag means the source or the cable is at its end; a port's over-current cut looks like a detach; a refusal is the firmware's own ceiling |
+| Back one step, temporary ceiling | the bus < 4.5 V under an acknowledged step above the row; a detach within 30 s of a step up (planned or taken); the firmware refusing a step three times | lower immediately, retain the ceiling for 60 s, then retry through the same ACK/hold/4.65 V/demand guards; another failure renews the cool-down |
 | Restart from the row | every attach, a new charger generation, a wake, a board hold (a hot connector or charger) released, 9 V | never straight back up to a step reached before |
 | Sleep handover | the row (as before: nothing watches the bus while asleep) | |
 
-The ceiling only goes down, survives detaches, generations and wakes, and ends with the boot (a different cable tomorrow starts
-fresh). Measured basis for the margins (P1, P2 on the Mac's port): 5.22 V open, 5.05 V at 897 mA, 4.89 V at 1594 mA, about 0.21 Ω
+The temporary ceiling and its monotonic deadline survive detaches, generations and wakes; these events cannot shorten it. After
+60 s only the ICL retry counters are refreshed, keeping pending writes and acknowledged state. The normal step guards still apply;
+expiry alone cannot authorize more current. No valid bus sample means no sag or detach. A reported bus below 4 V with a live Type-C
+connector enters the strict readback barrier; a valid 4.0–4.5 V reading under an acknowledged raised step backs off immediately.
+This replaces the permanent boot ceiling: an early transient could otherwise hold SDP at 500 mA despite later 4.84 V/497 mA readings.
+Host replay covers recovery and repeated faults; tablet qualification of this change remains pending.
+Measured basis for the margins (P1, P2 on the Mac's port): 5.22 V open, 5.05 V at 897 mA, 4.89 V at 1594 mA, about 0.21 Ω
 from the source to the charger, so 3 A would leave about 4.6 V: above the 4.5 V sag rule, below the 4.65 V needed to go higher.
 `piano-power-ramp=0` keeps the 2026-11-11 behaviour (the Rp limit at once within 1600 mA, a sag ends the trust).
 
@@ -495,7 +500,7 @@ PianoPower: mca: write input limit (0x2008) = 900: ok (0)            (the input 
 PianoPower: mca: write charge current (0x2005) = 900: ok (0)
 PianoPower: policy: input steps: up 900 -> 1500 mA (towards 3000 mA, Rp 3000 mA): it held 5040 mV with 897 mA taken
 PianoPower: policy: input steps: at 2500 mA (towards 3000 mA): the bus is below 4.65 V under it; bus 4610 mV, 2498 mA   (once per step and reason)
-PianoPower: policy: input steps: back from 2500 mA: the bus sagged below 4.5 V under it (bus 4420 mV); 2000 mA is the ceiling for the rest of this boot
+PianoPower: policy: input steps: back from 2500 mA: the bus sagged below 4.5 V under it (bus 4420 mV); ceiling 2000 mA, guarded retry after 60 s
 PianoPower: [126s] input: bus 4720 mV 2490 mA, limit 2500 mA asked, 0x2029 2500; steps 2500 mA (holding) of 3000, ceiling 0; writes 9 ok 0 no answer 0 late, 0 unmatched
 PianoPower: mca: late answer to the write of input limit (0x2008) = 1600: ok (0), after the 1000 ms window (1 late so far): handed to the policy
 PianoPower: mca: an answer that matches no request: opcode 2, input limit (0x2008), sequence 41, return code 0 (in flight: 43); 1 so far
@@ -1106,3 +1111,48 @@ by the fix's. Also under ASan/UBSan. `testChgEn` passes unchanged (its gates now
   DSP (§20.3).
 - **Level 2 with the DSP early** (`piano-power=2 piano-power-delay=0`, the policy for the input limit): CHGR stays at 3 past 60 s and
   the `chgr: changed since` line of the report after the DSP's start names the firmware's writes.
+
+## 21. The buck fast-charge set behind boot arguments (charge/pd1, 2026-11-23; built and host-tested, not run)
+
+What the Ubuntu port's charger driver does on the buck path above 5 V, read as a specification (behaviour, sequence and numbers
+only; no code taken), and what PianoPower now has for it, each **off by default** so the daily profile stays at 5 V. All four act
+only in the strict buck session (`piano-power-policy=1`) and only inside its existing gates: a validated contract (with
+`piano-power-pdo-mca=1` on this tablet's UCSI 1.1 PPM, which offers no PDO details), the reduced-current barrier (ICL and FCC at most 500 mA
+acknowledged and the input limit read back) before any voltage request, the 15 s wait after an attach, the 8.0-9.6 V window,
+15-45 degC on every temperature, the connector (50/60 degC) and charger (75/85 degC) holds, CP off, a dry port, no gauge alert,
+verify 0, and Preserve Battery Health (80/75, unchanged).
+
+| Boot argument | What it does | Ubuntu port behaviour it follows |
+|---|---|---|
+| `piano-power-hv-order=1` | mode 1 takes a PPS APDO covering 9 V when the source has no fixed 9 V PDO; mode 2 takes the fixed 9 V PDO when the source has no such APDO; an object once asked for stays the one judged | a fixed 9 V PDO first, else a 9 V PPS request (fixed vSafe5V for 5 V) |
+| `piano-power-hv-caps=1` | at a validated 9 V contract the stock 9 V rows instead of the stage A ceilings: fixed PD input 1600 / charge 3000 mA, PPS 2500 / 3500, QC3 1600 / 3500, QC2 1200 / 2600; the charge current at most twice the input limit in force; always within the RDO and the object; the codec admits a charge current up to 3500 only with it | the stock buck strategy's in_pd/chg_pd, in_pps/chg_pps and qc2/qc3 rows at 9 V |
+| `piano-power-qc=1` | QC2/QC3/3B/3.5 (firmware type 5-8) with a fresh UCSI status of a connected non-PD sink: the barrier, then 0x2011 = 9000; on at 8.0-9.6 V; 0x2011 = 5000 on any loss (a health stop or mode 0 may ask again; a lost or unreached 9 V waits for the next attach) | 0x2011 9000 for a QC type, 9 V counted from the bus |
+| `piano-power-fv-hot=1` | 0x2007 = 4060 mV from 48 degC (the warmest reading) until below 46, back to the firmware's 4400; charging held (0x2003 = 0, reason 9) while the higher pack is within 5 mV of 4060, released 150 mV below or when the warm row ends | the warm row's float from 48 degC with 2 degC hysteresis and the voltage hold |
+
+Not brought over (separate lanes, each with its own analysis): SC8541 direct charging (the charge pump, the PPS stepping to twice
+the battery voltage, the 500/700 ms regulation loop: the port's real fast charge) and MiPPS authentication (whose only consumer
+is the pump's source budget). The registry's `PianoCharge` now also carries the indicator data: `ChargePath` / `ChargePathName`
+(USB 5 V, PD 5 V, PD 9 V, PPS 9 V, QC 9 V, asking 9 V), `InputMW`, `BatteryMW`, `HV`, `HVPPS`, `HVQC`, `HVBudgetMA`, `TermHot`,
+`FVHold`, `FastOptions` (bits 1 order, 2 caps, 4 qc, 8 fv-hot) and the real `FVTarget`; one `buck-fast:` line per report
+(`[PianoFastChargeV1]`). Host test: `tests/fastcharge_host.cpp`.
+
+## 22. T-14: at 5 V the source's advertised current, at most 3 A, also with a 9 V mode (2026-11-23; built and host-tested, not run)
+
+Owner 2026-11-23 18:45/18:47: at 5 V as much input current as the source advertises (Type-C Rp 1.5 / 3.0 A, or the PD 5 V
+contract), at most 3 A; never above the advertisement; the USB default keeps the class row.
+
+- **Non-PD sources:** unchanged. §15's steps already go to the Rp current within `piano-power-rp-max` (3000), in the daily profile
+  since 2026-11-12. Confirmed on the tablet: 500 -> 3000 on the Mac's port.
+- **PD sources at 5 V:** the 5 V contract budget (the RDO's operating current, the same guarded steps and connector rule, at most
+  3000) applied only with `hv` = 0. It now also applies with `hv` 1/2 once the session is settled at 5 V: the 9 V request asked
+  and not reached (BLOCKED, 5 V until a detach), no 9 V object (fallback SOURCE), or the health stop (HEALTH).
+  - Before a 9 V request, while one is asked or in force, and while the session is held off for a reason that may clear (SAFETY
+    with the session OFF), the row stays: the barrier never has to undo a step.
+  - `ChargePolicy.c` `hv_settled_5v`, `contract_5v_budget`.
+- **Fixed on the way:** after a 9 V request that was not reached, the BLOCKED session never recomputed its transition, so the
+  barrier's 500 mA stayed in force for the rest of the attach, below the 5 V row. strict_hv's BLOCKED branch now recomputes it
+  once the 5 V withdrawal is confirmed.
+- **Unchanged:** the allowlists (<= 3000 already), the FCC ceilings (stage A 1500 at 5 V), the 9 V rows, the 80/75 policy, the
+  thermal derating, the board holds, sleep (the row), detach (100 mA back, the steps from the row), the ADSP lifecycle. There is no
+  new boot argument.
+- **Tests:** `tests/policy_host.cpp` testT14FiveVoltMax. Analysis: the private note T14-ICL.md (charging lane).

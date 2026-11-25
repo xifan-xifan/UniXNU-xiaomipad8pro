@@ -46,3 +46,39 @@ typedef struct {
   uint64_t timeNs;      // when the frame was kept (mach_absolute_time in ns)
   char verdict[96];     // the result line's text
 } PianoCameraFrameInfo;
+
+// ABI v2. Start owns one sensor and one ring until Stop/close. A connection
+// starts at most once. Wait sleeps until it leases a ready slot or times out;
+// Release must return that slot's sequence. Memory 1 exposes only the payloads.
+#define kPianoCameraLiveVersion 2u
+#define kPianoCameraSlotBytes (16u * 1024u * 1024u)
+enum { kPianoCameraSlots = 3 };
+enum {
+  kPianoCameraLiveStart = 2,
+  kPianoCameraLiveStop,
+  kPianoCameraLiveInfo,
+  kPianoCameraLiveWait,
+  kPianoCameraLiveRelease,
+};
+enum { kPianoCameraMemoryRing = 1 };
+enum { kPianoCameraStarting = 1, kPianoCameraStreaming, kPianoCameraStopped, kPianoCameraFailed };
+
+typedef struct {
+  uint32_t version, sensor;
+} PianoCameraLiveStartArgs;
+
+typedef struct {
+  uint32_t version, slot;
+  uint64_t sequence;
+} PianoCameraLiveReleaseArgs;
+
+typedef struct {
+  uint32_t version, sensor, slot, width, height, stride, bayer, black;
+  uint32_t exposure, gain, gainUnit, bytes;
+  uint64_t sequence, sofTicks, drops;
+} PianoCameraLiveFrame;
+
+typedef struct {
+  uint32_t version, sensor, state, failedStep, guardFault, smmuFault, cleanOff, aeSamples;
+  uint64_t produced, dropped, paced;
+} PianoCameraLiveStatus;

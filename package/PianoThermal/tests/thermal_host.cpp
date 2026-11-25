@@ -14,6 +14,7 @@
 //   c++ -std=c++20 -Wall -Wextra -Werror -I.. thermal_host.cpp -o /tmp/thermal_host && /tmp/thermal_host
 #include "Cluster.h"
 #include "Governor.h"
+#include "Perf.h"
 #include "Policy.h"
 #include "Scmi.h"
 #include "Tsens.h"
@@ -328,7 +329,7 @@ struct Cpucp {
             // reverse order inside a page: the parser must sort
             const unsigned j = a1 + (n - 1 - i);
             mem[scmi::kPayload / 4 + w++] = 100 + j;   // perf value (opaque in indexing mode)
-            mem[scmi::kPayload / 4 + w++] = 0;
+            mem[scmi::kPayload / 4 + w++] = 1000 + 37 * j;   // power cost
             mem[scmi::kPayload / 4 + w++] = 30;        // latency
             mem[scmi::kPayload / 4 + w++] = k[j];
             mem[scmi::kPayload / 4 + w++] = j;
@@ -394,6 +395,7 @@ static void testScmi()
         CHECK(dom.levels[i].khz == cp.khz[d][i]);
         CHECK(dom.levels[i].key == cp.keyOf(d, i));
         CHECK(dom.levels[i].latencyUs == 30);
+        if (cp.version >= 0x40000) CHECK(dom.levels[i].power == 1000 + 37 * i);   // the power cost follows its level through the sort
         if (i) CHECK(dom.levels[i].khz > dom.levels[i - 1].khz);
       }
       // sustained: 3532.8 / 4089.6 MHz -> the fastest level at or under it
@@ -691,12 +693,14 @@ static void testBoost()
 
 static void testProfileAndSleep()
 {
-  CHECK(profileValid(0) && profileValid(1) && profileValid(2) && !profileValid(3) && !profileValid(~uintptr_t(0)));
+  CHECK(profileValid(0) && profileValid(1) && profileValid(2) && profileValid(3) && !profileValid(4) && !profileValid(~uintptr_t(0)));
+  CHECK(kProfileMax == 3 && !strcmp(profileName(Profile::performance), "High Power"));
   const PowerSource sources[3] = {PowerSource::unknown, PowerSource::battery, PowerSource::external};
   for (PowerSource p : sources) {
     CHECK(profilePower(p, Profile::bySource) == p);
     CHECK(profilePower(p, Profile::saver) == PowerSource::battery);
     CHECK(profilePower(p, Profile::balanced) == PowerSource::external);
+    CHECK(profilePower(p, Profile::performance) == PowerSource::external);   // High Power: the external caps on battery too
   }
   GovernorConfig gv;
   gv.batteryKhz = capKhz(1958);
@@ -931,6 +935,394 @@ static void printMap()
     }
 }
 
+static void testAndroidCpuStep()
+{
+  const uint32_t little[] = {384000, 1785600, 2400000, 2745600, 3532800};
+  const uint32_t prime[] = {1017600, 1958400, 2438400, 2649600, 4089600, 4320000};
+  CHECK(!androidCpuArmed(CpuMode::fixed, 2400, 2438));
+  CHECK(!androidCpuArmed(CpuMode::govern, 2300, 2438));
+  CHECK(androidCpuArmed(CpuMode::govern, 2400, 2438));
+  CHECK(androidCpuRequestValid(0) && androidCpuRequestValid(1) && !androidCpuRequestValid(2) && !androidCpuRequestValid(-1));
+  CHECK(androidCpuLpmValue(32, 0) == 0 && androidCpuLpmValue(32, 1) == 1);
+  CHECK(androidCpuLpmValue(0, 0) < 0 && androidCpuLpmValue(64, 1) < 0 && androidCpuLpmValue(32, 2) < 0);
+
+  GovernorConfig config{};
+  config.capKhz = capKhz(2400);
+  config.batteryKhz = 1785999;
+  config.externalKhz = 3532999;
+  Governor g;
+  g.init(CpuMode::govern, config, little, 5, 4, 2);
+  AndroidCpuInput in{true, false, true, true, false, false, PowerSource::external, Profile::bySource, 0};
+  auto selection = [&] {
+    const auto s = androidCpuSelection(in);  // Profile 0 with PianoPolicy's independently published LPM input.
+    g.selectAndroidCap(s.enabled ? kAndroidNextKhz[0] : 0);
+    return s;
+  };
+  CHECK(!selection().enabled && g.ceiling(PowerSource::external) == 2);
+  in.requested = true;
+  CHECK(selection().enabled && g.tick(tick(1000, PowerSource::external)) == 3);
+  in.lpm = 1;
+  auto selected = selection();
+  CHECK(!selected.enabled && g.enforce(selected.power) == 1);
+  in.lpm = 0;
+  CHECK(selection().enabled);
+  for (unsigned t = 0; t < 3; ++t) g.tick(tick(1000, PowerSource::external));
+  CHECK(g.level() == 3);
+  in.requested = false;
+  CHECK(!selection().enabled && g.enforce(PowerSource::external) == 2);
+  in.requested = true;
+  in.lpm = -1;
+  CHECK(!selection().enabled);
+  in.lpm = 0;
+  in.source = PowerSource::battery;
+  in.profile = Profile::balanced;
+  selected = selection();
+  CHECK(!selected.enabled && selected.power == PowerSource::battery);
+  in.armed = false;
+  CHECK(selection().power == PowerSource::external);  // unchanged legacy profile behavior
+  in.armed = true;
+  in.source = PowerSource::external;
+  in.boost = true;
+  CHECK(!selection().enabled);
+  in.boost = false;
+  in.sleeping = true;
+  CHECK(!selection().enabled);
+  in.sleeping = false;
+  in.valid = false;
+  CHECK(!selection().enabled);
+  in.valid = true;
+  in.domains = false;
+  CHECK(!selection().enabled);
+  in.domains = true;
+  in.profile = Profile::saver;
+  selected = selection();
+  CHECK(!selected.enabled && selected.power == PowerSource::battery);
+  in.profile = Profile::bySource;
+  g.thermal(cut(), 1000);
+  CHECK(selection().enabled && g.ceiling(PowerSource::external) == 0 && g.limit() == 0);
+  config.capKhz = capKhz(2438);
+  config.externalKhz = 2438999;
+  g.init(CpuMode::govern, config, prime, 6, 4, 2);
+  g.selectAndroidCap(kAndroidNextKhz[1]);
+  CHECK(g.khz(g.ceiling(PowerSource::external)) == 2438400);   // explicit source cap wins
+  config.externalKhz = 0;
+  g.init(CpuMode::govern, config, prime, 6, 2, 2);
+  g.selectAndroidCap(kAndroidNextKhz[1]);
+  CHECK(g.khz(g.ceiling(PowerSource::external)) == 2438400);   // firmware sustained cap wins
+  g.init(CpuMode::govern, config, prime, 6, 4, 2);
+  g.selectAndroidCap(kAndroidNextKhz[1]);
+  CHECK(g.khz(g.tick(tick(1000, PowerSource::external))) == 2649600);
+
+  Cpucp firmware;
+  firmware.khz[0].assign(little, little + 5);
+  firmware.khz[1].assign(prime, prime + 6);
+  scmi::Channel channel;
+  channel.io = firmware.io();
+  for (unsigned d = 0; d < 2; ++d) {
+    firmware.current[d] = 2;
+    scmi::Domain domain;
+    CHECK(!scmi::describeDomain(channel, firmware.version, d, domain) && domain.indexing);
+    uint32_t frequencies[scmi::kMaxLevels]{};
+    for (unsigned i = 0; i < domain.count; ++i) frequencies[i] = domain.levels[i].khz;
+    config.capKhz = capKhz(d ? 2438 : 2400);
+    g.init(CpuMode::govern, config, frequencies, domain.count, domain.sustained, firmware.current[d]);
+    g.selectAndroidCap(kAndroidNextKhz[d]);
+    const unsigned want = g.tick(tick(1000, PowerSource::external));
+    CHECK(frequencies[want] == kAndroidNextKhz[d] && domain.levels[want].key == 3);
+    firmware.setStatus = -3;
+    CHECK(scmi::levelSet(channel, domain, d, want) == -3);
+    int actual = -1;
+    CHECK(!scmi::levelGet(channel, domain, d, actual) && actual == 2);
+    firmware.setStatus = 0;
+    CHECK(!scmi::levelSet(channel, domain, d, want));
+    CHECK(!scmi::levelGet(channel, domain, d, actual) && actual == int(want));
+    g.selectAndroidCap(0);
+    CHECK(!scmi::levelSet(channel, domain, d, g.enforce(PowerSource::external)));
+    CHECK(!scmi::levelGet(channel, domain, d, actual) && frequencies[actual] == kAndroidBaseKhz[d]);
+  }
+}
+
+// The stock-level policy (Perf.h, 2026-11-22): the virtual skin, the step tables with hysteresis, the onset burst, and the
+// Governor's runtime caps (machdep.piano_cpufreq_perf 0 = the v13.1x caps, 1 = profile + perf cap).
+static void testPerf()
+{
+  using namespace pianothermal::perf;
+  // virtual skin: all five at 30 C -> 30 C + 1.6; battery missing -> invalid; only battery + msm -> their weights renormalised
+  int32_t in[kSkinInputs] = {30000, 30000, 30000, 30000, 30000};
+  Skin s = virtualSkin(in, 0x1f);
+  CHECK(s.valid && s.milliC == 30000 * 943 / 1000 + 1600 && s.used == 0x1f);
+  CHECK(!virtualSkin(in, 0x1e).valid);                     // no battery
+  CHECK(!virtualSkin(in, (1u << kSkinBattery) | (1u << kSkinWifi)).valid);   // no skin thermistor
+  int32_t mix[kSkinInputs] = {30000, 0, 0, 0, 40000};
+  s = virtualSkin(mix, (1u << kSkinBattery) | (1u << kSkinMsm));
+  CHECK(s.valid && s.milliC == int32_t(int64_t(500 * 30000 + 232 * 40000) * 943 / (732 * 1000)) + 1600);
+  int32_t stock[kSkinInputs] = {35000, 38000, 36000, 40000, 42000};   // the stock arithmetic: weighted sum / 1000 + 1.6 C
+  CHECK(virtualSkin(stock, 0x1f).milliC == (500 * 35000 + 131 * 38000 - 9 * 36000 + 89 * 40000 + 232 * 42000) / 1000 + 1600);
+  // step tables: below 15 C no cap; 15 C -> 2745.6 / 3072; up the triggers at once, down only under the clear point
+  SkinCap c0, c1;
+  CHECK(c0.update(kCluster0, kCluster0Steps, true, 14000) == 0 && c0.step() == -1);
+  CHECK(c0.update(kCluster0, kCluster0Steps, true, 15000) == 2745600);
+  CHECK(c1.update(kCluster1, kCluster1Steps, true, 30000) == 3072000);
+  CHECK(c1.update(kCluster1, kCluster1Steps, true, 34000) == 2649600);
+  CHECK(c1.update(kCluster1, kCluster1Steps, true, 33000) == 2649600);   // above the 32 C clear point: held
+  CHECK(c1.update(kCluster1, kCluster1Steps, true, 31900) == 3072000);
+  CHECK(c0.update(kCluster0, kCluster0Steps, true, 48500) == 748800 && c0.step() == int(kCluster0Steps) - 1);
+  CHECK(c0.update(kCluster0, kCluster0Steps, false, 0) == 748800);       // no reading: the step stays
+  SkinCap cold;
+  CHECK(cold.update(kCluster1, kCluster1Steps, false, 0) == 3072000);    // no reading from the start: the first step, not "no cap"
+  CHECK(c0.update(kCluster0, kCluster0Steps, true, 36000) == 2400000);   // 48.5 -> 36: down to the step whose clear point holds (37 C, clear 35)
+  CHECK(c0.update(kCluster0, kCluster0Steps, true, 34900) == 2745600);
+  // the tables are ordered and every clear point under its trigger
+  for (unsigned i = 0; i < kCluster0Steps; ++i) CHECK(kCluster0[i].clrMilli < kCluster0[i].trigMilli && (!i || kCluster0[i].trigMilli > kCluster0[i - 1].trigMilli));
+  for (unsigned i = 0; i < kCluster1Steps; ++i) CHECK(kCluster1[i].clrMilli < kCluster1[i].trigMilli && (!i || kCluster1[i].trigMilli > kCluster1[i - 1].trigMilli));
+  // burst: opens at an onset only, ends after the window, needs the gap and a new onset; never from the skin limit; not on saver
+  BurstConfig bc;
+  bc.khz = 4089999;
+  Burst b;
+  CHECK(!b.tick(bc, 0, false, true, true, 30000));
+  CHECK(b.tick(bc, 20, true, true, true, 30000) && b.windows() == 1);    // onset
+  CHECK(b.tick(bc, 1000, true, true, true, 30000));
+  CHECK(!b.tick(bc, 1520, true, true, true, 30000));                     // 1.5 s: over
+  CHECK(!b.tick(bc, 3000, true, true, true, 30000));                     // sustained load: no new onset, no new burst
+  CHECK(!b.tick(bc, 3020, false, true, true, 30000));
+  CHECK(b.tick(bc, 3040, true, true, true, 30000) && b.windows() == 2);  // a new onset after the gap
+  CHECK(!b.tick(bc, 3060, false, true, true, 30000));                    // the load went: closed
+  CHECK(!b.tick(bc, 3080, true, true, true, 30000));                     // an onset inside the 500 ms gap: refused
+  CHECK(!b.tick(bc, 3700, false, true, true, 30000) && b.tick(bc, 3720, true, true, true, 30000));
+  CHECK(!b.tick(bc, 3740, true, true, true, 48000));                     // the skin limit closes it
+  Burst saver;
+  CHECK(!saver.tick(bc, 0, false, false, true, 30000) && !saver.tick(bc, 20, true, false, true, 30000));
+  CHECK(perfCapKhz(3072000, false, 4089999) == 3072000 && perfCapKhz(3072000, true, 4089999) == 4089999);
+  CHECK(perfCapKhz(0, true, 4089999) == 0 && perfCapKhz(1017600, true, 4089999) == 4089999);
+  CHECK(downTicksFor(100, 20) == 5 && downTicksFor(300, 100) == 3 && downTicksFor(0, 20) == 1 && downTicksFor(110, 20) == 6);
+  // the Governor's runtime caps on NCC1's table: v13.1x = hard 2438.4 on power; perf = profile caps + the perf cap
+  const uint32_t ncc1[] = {1017600, 1209600, 1401600, 1689600, 1958400, 2246400, 2438400, 2649600, 2841600, 3072000, 3283200,
+                           3513600, 3801600, 4089600, 4204800, 4320000};
+  GovernorConfig gc;
+  gc.batteryKhz = capKhz(1958);
+  gc.externalKhz = capKhz(4089);
+  gc.hispeedKhz = 1800000;
+  Governor g;
+  g.init(CpuMode::govern, gc, ncc1, 16, 13, 0);
+  g.setRuntimeCaps(true, capKhz(2438), 0);
+  CHECK(g.khz(g.ceiling(PowerSource::external)) == 2438400 && g.khz(g.ceiling(PowerSource::battery)) == 1958400);
+  g.setRuntimeCaps(false, 0, perfCapKhz(3072000, false, capKhz(4089)));
+  CHECK(g.khz(g.ceiling(PowerSource::external)) == 3072000);
+  g.setRuntimeCaps(false, 0, perfCapKhz(3072000, true, capKhz(4089)));
+  CHECK(g.khz(g.ceiling(PowerSource::external)) == 4089600 && g.khz(g.ceiling(PowerSource::battery)) == 1958400);
+  CHECK(g.khz(g.ceilingFor(PowerSource::external, 3072000)) == 3072000);
+  // a burst of load from the floor: hispeed at once, the burst ceiling next; the raw want says "more than the 3072 ceiling"
+  g.setRuntimeCaps(false, 0, 3072000);
+  g.setDownTicks(5);
+  CHECK(g.khz(g.tick({1000, PowerSource::external})) == 1958400);
+  CHECK(g.khz(g.tick({1000, PowerSource::external})) == 2649600);
+  CHECK(g.khz(g.tick({1000, PowerSource::external})) == 3072000 && g.rawWant() > g.ceilingFor(PowerSource::external, 3072000));
+  // downs held 5 ticks
+  for (int i = 0; i < 4; ++i) CHECK(g.khz(g.tick({0, PowerSource::external})) == 3072000);
+  CHECK(g.khz(g.tick({0, PowerSource::external})) == 1017600);
+  // the thermal limit stays on top of the burst
+  ThermalInput hot{true, 1, 1, false};
+  g.setRuntimeCaps(false, 0, capKhz(4089));
+  g.thermal(hot, 1000);
+  CHECK(g.limit() == 14 && g.khz(g.ceiling(PowerSource::external)) == 4089600);   // limit 14 = 4204.8 >= sustained: no change yet
+  for (uint64_t ms = 1010; ms < 1100; ms += 10) g.thermal(hot, ms);
+  CHECK(g.khz(g.ceiling(PowerSource::external)) < 4089600);
+  // mode 2: over sustained only while asked, still under the power cap and the thermal limit
+  GovernorConfig g2c = gc;
+  g2c.externalKhz = capKhz(4320);
+  Governor g2;
+  g2.init(CpuMode::govern, g2c, ncc1, 16, 13, 0);
+  g2.setRuntimeCaps(false, 0, 0, false);
+  CHECK(g2.khz(g2.ceiling(PowerSource::external)) == 4089600);
+  g2.setRuntimeCaps(false, 0, capKhz(4320), false);
+  CHECK(g2.khz(g2.ceiling(PowerSource::external)) == 4089600);   // not asked: sustained stays the top
+  g2.setRuntimeCaps(false, 0, capKhz(4320), true);
+  CHECK(g2.khz(g2.ceiling(PowerSource::external)) == 4320000);
+  CHECK(g2.khz(g2.ceiling(PowerSource::battery)) == 1958400);
+  g2.setRuntimeCaps(true, capKhz(2438), capKhz(4320), true);
+  CHECK(g2.khz(g2.ceiling(PowerSource::external)) == 2438400);   // a hard cap still wins
+  g2.setRuntimeCaps(false, 0, capKhz(4320), true);
+  g2.thermal(hot, 5000);
+  CHECK(g2.limit() == 14 && g2.khz(g2.ceiling(PowerSource::external)) == 4204800);
+  // High Power (Profile::performance, docs/policy.md 12): the top level as the perf cap, over sustained, on battery too (the
+  // external caps); a load from the floor reaches the top; the firmware's refusal keeps sustained; a hard cap and the thermal
+  // limit stay on top; the cluster whose sustained level is its top (NCC0 3532.8) is not lifted past it.
+  GovernorConfig hc = gc;
+  hc.externalKhz = capKhz(4320);
+  Governor h;
+  h.init(CpuMode::govern, hc, ncc1, 16, 13, 0);
+  const PowerSource hpPower = profilePower(PowerSource::battery, Profile::performance);
+  HighPowerCap hp = highPowerCap(capKhz(4320), false);
+  CHECK(hp.aboveSustained && hp.khz == 4320999);
+  h.setRuntimeCaps(false, 0, hp.khz, hp.aboveSustained);
+  CHECK(h.khz(h.ceiling(hpPower)) == 4320000);
+  h.setDownTicks(5);
+  for (int i = 0; i < 6; ++i) h.tick({1000, hpPower});
+  CHECK(h.khz(h.level()) == 4320000);
+  hp = highPowerCap(capKhz(4320), true);   // the firmware refused a level over sustained this boot
+  CHECK(!hp.aboveSustained);
+  h.setRuntimeCaps(false, 0, hp.khz, hp.aboveSustained);
+  CHECK(h.khz(h.ceiling(hpPower)) == 4089600 && h.khz(h.enforce(hpPower)) <= 4089600);
+  h.setRuntimeCaps(true, capKhz(2438), capKhz(4320), true);
+  CHECK(h.khz(h.ceiling(hpPower)) == 2438400);   // a hard cap given still wins
+  h.setRuntimeCaps(false, 0, capKhz(4320), true);
+  for (uint64_t ms = 6000; ms < 6200; ms += 10) h.thermal(hot, ms);
+  CHECK(h.khz(h.ceiling(hpPower)) < 4089600 && h.khz(h.enforce(hpPower)) < 4089600);   // the thermal limit acts on High Power too
+  const uint32_t ncc0[] = {384000, 556800, 748800, 960000, 1152000, 1363200, 1555200, 1785600, 1996800, 2227200, 2400000, 2745600,
+                           2918400, 3072000, 3321600, 3532800};
+  GovernorConfig hc0 = hc;
+  hc0.externalKhz = capKhz(3532);
+  Governor h0;
+  h0.init(CpuMode::govern, hc0, ncc0, 16, 15, 0);
+  h0.setRuntimeCaps(false, 0, capKhz(3532), true);
+  CHECK(h0.khz(h0.ceiling(hpPower)) == 3532800);
+}
+
+// The launch / input boosts (Perf.h, 2026-11-22): the exec path filter, the app name, which boost holds, and the Governor's floor.
+static void testBoosts()
+{
+  using namespace pianothermal::perf;
+  CHECK(isAppLaunchPath("/System/Applications/Calculator.app/Contents/MacOS/Calculator"));
+  CHECK(isAppLaunchPath("/Applications/Safari.app/Contents/MacOS/Safari"));
+  CHECK(!isAppLaunchPath("/usr/bin/open"));
+  CHECK(!isAppLaunchPath("/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"));
+  CHECK(!isAppLaunchPath("/Applications/X.app/Contents/XPCServices/Y.xpc/Contents/MacOS/Y"));
+  CHECK(!isAppLaunchPath(nullptr));
+  char n[40];
+  appName("/System/Applications/Utilities/Activity Monitor.app/Contents/MacOS/Activity Monitor", n, sizeof n);
+  CHECK(!strcmp(n, "Activity Monitor"));
+  appName("/usr/bin/true", n, sizeof n);
+  CHECK(!n[0]);
+  appName("/Applications/A.app/Contents/MacOS/A", n, 2);
+  CHECK(!strcmp(n, "A"));
+  // launch wins over input; windows end; an event stamped after now counts as now
+  CHECK(boostAt(10000000000ull, 9000000000ull, 1500, 9990000000ull, 200) == BoostKind::launch);
+  CHECK(boostAt(10600000000ull, 9000000000ull, 1500, 10500000000ull, 200) == BoostKind::input);
+  CHECK(boostAt(10800000000ull, 9000000000ull, 1500, 10500000000ull, 200) == BoostKind::none);
+  CHECK(boostAt(10000000000ull, 10000000500ull, 1500, 0, 200) == BoostKind::launch);
+  CHECK(boostAt(10000000000ull, 0, 1500, 0, 200) == BoostKind::none);
+  CHECK(boostAt(10000000000ull, 9000000000ull, 0, 0, 200) == BoostKind::none);
+  // the Governor's boost floor: applied at once by enforce, under the ceiling and the thermal limit, gone when cleared
+  const uint32_t ncc1[] = {1017600, 1209600, 1401600, 1689600, 1958400, 2246400, 2438400, 2649600, 2841600, 3072000, 3283200,
+                           3513600, 3801600, 4089600, 4204800, 4320000};
+  GovernorConfig gc;
+  gc.batteryKhz = capKhz(1958);
+  gc.externalKhz = capKhz(4089);
+  Governor g;
+  g.init(CpuMode::govern, gc, ncc1, 16, 13, 0);
+  g.setRuntimeCaps(false, 0, 3072000);
+  CHECK(g.khz(g.enforce(PowerSource::external)) == 1017600);
+  g.setBoostFloor(1958000);
+  CHECK(g.khz(g.enforce(PowerSource::external)) == 1958400);              // the input floor at once
+  CHECK(g.khz(g.tick({0, PowerSource::external})) == 1958400);            // an idle decision keeps it
+  g.setRuntimeCaps(false, 0, capKhz(4089));
+  g.setBoostFloor(4089000);
+  CHECK(g.khz(g.enforce(PowerSource::external)) == 4089600);              // the launch pin
+  g.setRuntimeCaps(false, 0, 1689600);
+  CHECK(g.khz(g.enforce(PowerSource::external)) == 1689600);              // a lower ceiling wins over the floor
+  g.setBoostFloor(0);
+  g.setRuntimeCaps(false, 0, 3072000);
+  g.setDownTicks(2);
+  CHECK(g.khz(g.tick({0, PowerSource::external})) == 1689600);
+  CHECK(g.khz(g.tick({0, PowerSource::external})) == 1017600);            // without the floor it falls after the hold
+  ThermalInput hot{true, 1, 1, false};
+  g.setBoostFloor(4089000);
+  g.setRuntimeCaps(false, 0, capKhz(4089));
+  for (uint64_t ms = 0; ms < 60; ms += 10) g.thermal(hot, 1 + ms);
+  CHECK(g.khz(g.enforce(PowerSource::external)) == g.khz(g.limit()) && g.limit() < 13);   // the thermal limit caps the pin
+  Governor legacy;
+  legacy.init(CpuMode::fixed, gc, ncc1, 16, 13, 0);
+  legacy.setBoostFloor(4089000);
+  CHECK(legacy.boostFloorKhz() == 0);                                     // not in fixed mode
+}
+
+// The full table (Perf.h fullopp, 2026-11-22 22:43): the stock scenes (normal, nolimits) and their boost limits, the battery limit,
+// the scene cap with the battery limit on top, the WALT-like demand, the Governor's demand decision, the thermal limit's release
+// rate, and the sweep pin (floor = ceiling, over sustained, the thermal limit on top).
+static void testFullopp()
+{
+  using namespace pianothermal::perf;
+  const SceneTable normal = sceneTable(perf::Scene::normal), nolimits = sceneTable(perf::Scene::nolimits);
+  CHECK(normal.steps[0] == kCluster0 && normal.count[1] == kCluster1Steps && normal.boostLimitMilli == 48000 && !strcmp(normal.name, "normal"));
+  CHECK(nolimits.count[0] == 1 && nolimits.count[1] == 1 && nolimits.boostLimitMilli == 51000 && !strcmp(nolimits.name, "nolimits"));
+  CHECK(sceneFor(true) == perf::Scene::nolimits && sceneFor(false) == perf::Scene::normal);
+  // nolimits: no cap (the whole table) up to 51 C, then 748.8 / 1017.6, cleared under 50 C
+  SkinCap n0, n1;
+  CHECK(n0.update(nolimits.steps[0], 1, true, 50900) == 0 && n1.update(nolimits.steps[1], 1, true, 45000) == 0);
+  CHECK(n0.update(nolimits.steps[0], 1, true, 51000) == 748800 && n1.update(nolimits.steps[1], 1, true, 51000) == 1017600);
+  CHECK(n0.update(nolimits.steps[0], 1, true, 50100) == 748800 && n0.update(nolimits.steps[0], 1, true, 49900) == 0);
+  CHECK(n1.update(nolimits.steps[1], 1, false, 0) == 1017600);   // no reading: the step stays
+  // the same 40 C virtual skin: normal caps cpu6-7 at 1401.6 (the installed v13.1y6 picture), nolimits not at all
+  SkinCap w1, w2;
+  CHECK(w1.update(normal.steps[1], normal.count[1], true, 40300) == 1401600 && w2.update(nolimits.steps[1], 1, true, 40300) == 0);
+  // the battery limit: <= 3 % -> 1785.6 / 1401.6, <= 1 % -> 1363.2 / 1401.6; down only at 2 % / 4 %; no reading keeps it
+  SocLimit b;
+  CHECK(b.update(78) == 0 && b.khz(0) == 0 && b.khz(1) == 0);
+  CHECK(b.update(3) == 1 && b.khz(0) == 1785600 && b.khz(1) == 1401600);
+  CHECK(b.update(1) == 2 && b.khz(0) == 1363200);
+  CHECK(b.update(-1) == 2);
+  CHECK(b.update(2) == 1 && b.update(3) == 1 && b.update(4) == 0);
+  CHECK(b.update(0) == 2 && b.update(5) == 0);
+  CHECK(fullCapKhz(3072000, 0) == 3072000 && fullCapKhz(0, 1785600) == 1785600 && fullCapKhz(3072000, 1401600) == 1401600 &&
+        fullCapKhz(1017600, 1401600) == 1017600 && fullCapKhz(0, 0) == 0);
+  // WALT-like demand: max(latest, mean of the history), kHz-equivalent
+  CHECK(workKhz(500, 2000000) == 1000000 && workKhz(1000, 4320000) == 4320000 && workKhz(0, 3000000) == 0);
+  WaltCore wc;
+  CHECK(wc.push(1000000) == 1000000);                 // one window: itself
+  CHECK(wc.push(0) == 500000);                        // idle window: the mean holds half
+  CHECK(wc.push(3000000) == 3000000);                 // a burst: the latest wins at once
+  CHECK(wc.push(0) == 1000000 && wc.push(0) == 800000);
+  CHECK(wc.push(0) == 600000);                        // the history is 5 windows: the first (1 GHz) dropped
+  wc.reset();
+  CHECK(wc.push(200000) == 200000);
+  // the Governor on the demand: need = demand / 0.8; hispeed still at >= 90 % busy
+  const uint32_t ncc1[] = {1017600, 1209600, 1401600, 1689600, 1958400, 2246400, 2438400, 2649600, 2841600, 3072000, 3283200,
+                           3513600, 3801600, 4089600, 4204800, 4320000};
+  GovernorConfig gc;
+  gc.externalKhz = capKhz(4320);
+  gc.hispeedKhz = 1800000;
+  Governor g;
+  g.init(CpuMode::govern, gc, ncc1, 16, 13, 0);
+  g.setRuntimeCaps(false, 0, capKhz(4320), true);
+  CHECK(g.khz(g.tick({100, PowerSource::external, 2000000})) == 2649600);   // 2.0 GHz of work / 0.8 = 2.5 GHz -> 2649.6
+  CHECK(g.khz(g.tick({950, PowerSource::external, 1000000})) == 2649600);   // a lower want waits for the down hold
+  g.setDownTicks(1);
+  CHECK(g.khz(g.tick({100, PowerSource::external, 800000})) == 1958400);   // down to the fastest the held ticks wanted (hispeed)
+  CHECK(g.khz(g.tick({100, PowerSource::external, 800000})) == 1017600);   // 1.0 GHz -> 1017.6
+  CHECK(g.khz(g.tick({950, PowerSource::external, 800000})) == 1958400);   // >= 90 % busy: at least hispeed (1800 -> 1958.4)
+  CHECK(g.khz(g.tick({1000, PowerSource::external, 4320000})) == 4320000);  // the full table: over sustained, to the top
+  CHECK(g.khz(g.tick({0, PowerSource::external, 0})) == 1017600);           // no demand: the busy path (0 % -> the slowest)
+  // the release rate: the stock rule's faster release (riseMs 100) against the 1 s default
+  Governor r;
+  r.init(CpuMode::govern, gc, ncc1, 16, 13, 15);
+  ThermalInput hot{true, 1, 1, false}, cool{true, -100, -10, false};
+  for (uint64_t ms = 10; ms <= 50; ms += 10) r.thermal(hot, ms);
+  const unsigned low = r.limit();
+  CHECK(low == 10);
+  r.setRiseMs(100);
+  r.thermal(cool, 100);
+  CHECK(!r.thermal(cool, 150) && r.thermal(cool, 200) && r.limit() == low + 1);
+  CHECK(r.thermal(cool, 300) && r.limit() == low + 2);
+  // the sweep pin: floor = ceiling = the level (over sustained when asked), the thermal limit on top, the power cap on top
+  Governor p;
+  p.init(CpuMode::govern, gc, ncc1, 16, 13, 0);
+  p.setBoostFloor(4204800);
+  p.setRuntimeCaps(false, 0, 4204800, true);
+  CHECK(p.khz(p.enforce(PowerSource::external)) == 4204800 && p.khz(p.tick({0, PowerSource::external})) == 4204800);
+  p.setBoostFloor(2438400);
+  p.setRuntimeCaps(false, 0, 2438400, false);
+  CHECK(p.khz(p.enforce(PowerSource::external)) == 2438400 && p.khz(p.tick({1000, PowerSource::external})) == 2438400);
+  for (uint64_t ms = 10; ms <= 100; ms += 10) p.thermal(hot, ms);
+  CHECK(p.khz(p.enforce(PowerSource::external)) == p.khz(p.limit()) && p.khz(p.limit()) < 2438400);   // 95 C still wins over the pin
+  GovernorConfig saver = gc;
+  saver.batteryKhz = capKhz(1958);
+  Governor q;
+  q.init(CpuMode::govern, saver, ncc1, 16, 13, 0);
+  q.setBoostFloor(4320000);
+  q.setRuntimeCaps(false, 0, 4320000, true);
+  CHECK(q.khz(q.enforce(PowerSource::battery)) == 1958400);   // the power cap (Power Saver) stays on top of a pin
+}
+
 int main(int argc, char **argv)
 {
   if (argc > 1 && !strcmp(argv[1], "--map")) {
@@ -944,10 +1336,14 @@ int main(int argc, char **argv)
   testScmi();
   testLoadWindow();
   testGovernor();
+  testAndroidCpuStep();
   testBoost();
   testProfileAndSleep();
   testCluster();
   testInterruptsAndPolling();
+  testPerf();
+  testBoosts();
+  testFullopp();
   if (failures) {
     std::printf("thermal_host: %d FAILED\n", failures);
     return 1;

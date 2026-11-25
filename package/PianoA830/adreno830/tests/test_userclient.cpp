@@ -245,6 +245,51 @@ int main()
         CHECK(p.client.submit(&future,&reply,&ringclock)==kIOReturnBadArgument && cp.regs[0x0807]==wptr);
         CHECK(p.client.validateWaitFence(0)==kIOReturnSuccess && p.client.validateWaitFence(2)==kIOReturnSuccess &&
             p.client.validateWaitFence(3)==kIOReturnBadArgument);
+#ifdef ADRENO830_MACOS
+        {
+            /* UniXNU-piano (2026-11-21, 20261121-ws-crash): a refused Submit names its check (lastSubmitRefusal): the wait fence, an
+             * entry's bytes, an unknown handle, an object never mapped (its size), an IB past its mapping (the submit object's check,
+             * with the request's BO handle put back and the VM's mapping handle in b), the count and the queue; none reaches the ring. */
+            NativeAdrenoSubmitRefusal r=p.client.lastSubmitRefusal();
+            CHECK(r.why==NativeAdrenoSubmitWhyWaitFence && r.a==(UINT64_C(1)<<32|1) && r.count==1 && r.index==UINT32_MAX);
+            NativeAdrenoAbiSubmit bad=submit;bad.buffers[0].bytes=6;
+            CHECK(p.client.submit(&bad,&reply,&ringclock)==kIOReturnBadArgument);
+            r=p.client.lastSubmitRefusal();
+            CHECK(r.why==NativeAdrenoSubmitWhyBytes && !r.index && r.handle==handle && r.iova==Base && r.bytes==6);
+            bad=submit;bad.buffer_count=2;bad.buffers[1]={handle+1000,Base,64};
+            CHECK(p.client.submit(&bad,&reply,&ringclock)==kIOReturnBadArgument);
+            r=p.client.lastSubmitRefusal();
+            CHECK(r.why==NativeAdrenoSubmitWhyHandle && r.index==1 && r.count==2 && r.handle==handle+1000 && r.a>handle);
+            NativeAdrenoAbiBoAlloc plain{4096,12,0};NativeAdrenoAbiBoAllocReply made{};
+            CHECK(p.client.allocBo(&plain,&made)==kIOReturnSuccess);
+            bad=submit;bad.buffers[0]={made.handle,Base,64};
+            CHECK(p.client.submit(&bad,&reply,&ringclock)==kIOReturnBadArgument);
+            r=p.client.lastSubmitRefusal();
+            CHECK(r.why==NativeAdrenoSubmitWhyNotMapped && r.handle==made.handle && r.mapped_bytes==4096 && !r.mapped && !r.b);
+            NativeAdrenoAbiBoFree drop{made.handle};
+            CHECK(p.client.freeBo(&drop)==kIOReturnSuccess);
+            bad=submit;bad.buffers[0].iova=Base+8192-64;bad.buffers[0].bytes=128;   /* past the end of the 8 KiB BO */
+            CHECK(p.client.submit(&bad,&reply,&ringclock)==kIOReturnBadArgument);
+            r=p.client.lastSubmitRefusal();
+            CHECK(r.why==NativeAdrenoSubmitWhyRange && !r.index && r.count==1 && r.handle==handle && r.mapped==Base &&
+                  r.mapped_bytes==8192 && r.b && r.b!=handle+1000 && r.status==kIOReturnBadArgument);
+            bad=submit;bad.buffer_count=0;
+            CHECK(p.client.submit(&bad,&reply,&ringclock)==kIOReturnBadArgument &&
+                  p.client.lastSubmitRefusal().why==NativeAdrenoSubmitWhyCount && !p.client.lastSubmitRefusal().count);
+            bad=submit;bad.queue=7;
+            CHECK(p.client.submit(&bad,&reply,&ringclock)==kIOReturnBadArgument &&
+                  p.client.lastSubmitRefusal().why==NativeAdrenoSubmitWhyQueue && p.client.lastSubmitRefusal().a==7);
+            CHECK(cp.regs[0x0807]==wptr);
+            /* A fault's detail (NativeAdrenoVm::locate): the mapping over an address and the nearest one below another. */
+            NativeAdrenoVmPlace over{},below{};
+            CHECK(p.vm.locate(Base+100,&over,&below)==kIOReturnSuccess && over.handle && over.iova==Base && over.bytes==8192 &&
+                  over.kind!=NativeAdrenoVmKindNone && over.kind!=NativeAdrenoVmKindImport && over.handle<p.vm.nextHandle());
+            const uint64_t mapping=over.handle;
+            CHECK(p.vm.locate(Base+3*8192,&over,&below)==kIOReturnSuccess && !over.handle && below.handle==mapping && below.iova==Base &&
+                  below.bytes==8192);
+            macosChecks+=11;
+        }
+#endif
         complete(2);
         wait.timeout_ns=UINT64_C(1000000);
         CHECK(p.client.waitFence(&wait,&ringclock)==kIOReturnSuccess);
@@ -308,7 +353,11 @@ int main()
         CHECK(w4==NativeAdrenoClientWindows4G && w2==NativeAdrenoClientWindows2G && NativeAdrenoClientWindowsFor(0)==w4 &&
               w16==NativeAdrenoClientWindows16G && NativeAdrenoClientWindowsFor(0x100000000ull)==w4 &&
               NativeAdrenoClientWindowsFor(0x100001000ull)==w16 && NativeAdrenoClientWindowsFor(0x80000000ull)==w2);
+#ifdef ADRENO830_MACOS   /* UniXNU-piano (GPU-SLOTS): sixty-four slots */
+        CHECK(NativeAdrenoMaxClients==64 && NativeAdrenoLargeSlots==3 && unsigned(NativeAdrenoMaxClients)<=unsigned(NativeAdrenoSubmitRanges));
+#else
         CHECK(NativeAdrenoMaxClients==32 && NativeAdrenoLargeSlots==3 && unsigned(NativeAdrenoMaxClients)<=unsigned(NativeAdrenoSubmitRanges));
+#endif
         enum : unsigned {Windows4G=12};
         CHECK(w4[0].start==0x20000000 && w4[0].bytes==0x60000000 && w4[1].start==0x80000000);
         for(unsigned i=1;i<Windows4G;++i) {
@@ -351,7 +400,7 @@ int main()
         CHECK(NativeAdrenoClientSlotAt(w4,0x1FFFF000)==NativeAdrenoMaxClients && NativeAdrenoClientSlotAt(w4,0x20000000)==0);
         for(unsigned i=0;i<Windows4G;++i)
             CHECK(NativeAdrenoClientSlotAt(w4,w4[i].start)==i && NativeAdrenoClientSlotAt(w4,w4[i].start+w4[i].bytes-1)==i);
-        for(unsigned i=0;i<NativeAdrenoMaxClients;++i)
+        for(unsigned i=0;i<NativeAdrenoMaxClients && w16[i].bytes;++i)
             CHECK(NativeAdrenoClientSlotAt(w16,w16[i].start)==i && NativeAdrenoClientSlotAt(w16,w16[i].start+w16[i].bytes-1)==i);
         CHECK(NativeAdrenoClientSlotAt(w4,0x7FFFFFFF)==0 && NativeAdrenoClientSlotAt(w4,0x80000000)==1 &&
             NativeAdrenoClientSlotAt(w4,0xC1FFFFFF)==3 && NativeAdrenoClientSlotAt(w4,0xC2000000)==4 &&
@@ -398,18 +447,41 @@ int main()
         for(unsigned i=7;i<=8;++i)taken[i]=false;   /* 6-8 free, three small ones: still none for an app */
         CHECK(NativeAdrenoClientSlotFor(false,false,false,w4,taken)==NativeAdrenoMaxClients);
         taken[5]=false;CHECK(NativeAdrenoClientSlotFor(false,false,false,w4,taken)==5);   /* four: the first */
-        /* The 16 GiB table: apps take 24 of the 28 small slots, the posters the last four and then the large ones. */
+        /* The 16 GiB table: apps leave the last four ordinary windows and the large ones to listed clients. */
+#ifdef ADRENO830_MACOS
+        constexpr unsigned small_end=NativeAdrenoDecoderSlot;
+#else
+        constexpr unsigned small_end=NativeAdrenoMaxClients;
+#endif
         for(auto &t:taken)t=false;
         taken[0]=true;count=0;
         for(unsigned s;(s=NativeAdrenoClientSlotFor(false,false,false,w16,taken))<NativeAdrenoMaxClients;taken[s]=true)order[count++]=s;
-        CHECK(count==NativeAdrenoMaxClients-1-NativeAdrenoLargeSlots-NativeAdrenoListedSmallKeep16G && order[0]==4 &&
-              order[count-1]==NativeAdrenoMaxClients-1-NativeAdrenoListedSmallKeep16G);
+#ifdef ADRENO830_MACOS
+        /* UniXNU-piano (GPU-SLOTS): on macOS the keep is 2 and an app then borrows the free large slots but the last one (1, 2). */
+        CHECK(NativeAdrenoListedSmallKeep(w16)==NativeAdrenoListedSmallKeepMacOS && NativeAdrenoListedSmallKeepMacOS==2);
+        CHECK(count==small_end-1-NativeAdrenoLargeSlots-NativeAdrenoListedSmallKeepMacOS+NativeAdrenoLargeSlots-unsigned(NativeAdrenoLargeKeepForList) &&
+              order[0]==4 && order[count-3]==small_end-1-NativeAdrenoListedSmallKeepMacOS && order[count-2]==1 && order[count-1]==2);
         count=0;
         for(unsigned s;(s=NativeAdrenoClientSlotFor(false,false,true,w16,taken))<NativeAdrenoMaxClients;taken[s]=true)order[count++]=s;
-        CHECK(count==NativeAdrenoListedSmallKeep16G+NativeAdrenoLargeSlots && order[0]==28 && order[3]==31 && order[4]==1);
+        CHECK(count==unsigned(NativeAdrenoListedSmallKeepMacOS)+unsigned(NativeAdrenoLargeKeepForList) && order[0]==small_end-2 && order[1]==small_end-1 &&
+              order[2]==3);
+#else
+        CHECK(count==small_end-1-NativeAdrenoLargeSlots-NativeAdrenoListedSmallKeep16G && order[0]==4 &&
+              order[count-1]==small_end-1-NativeAdrenoListedSmallKeep16G);
+        count=0;
+        for(unsigned s;(s=NativeAdrenoClientSlotFor(false,false,true,w16,taken))<NativeAdrenoMaxClients;taken[s]=true)order[count++]=s;
+        CHECK(count==NativeAdrenoListedSmallKeep16G+NativeAdrenoLargeSlots && order[0]==small_end-4 &&
+              order[3]==small_end-1 && order[4]==1);
+#endif
         for(unsigned i=1;i<=NativeAdrenoLargeSlots;++i)taken[i]=false;
-        CHECK(NativeAdrenoClientSlotFor(false,true,true,w16,taken)==1 && NativeAdrenoClientSlotFor(true,false,true,w16,taken)==1 &&
-              NativeAdrenoClientSlotFor(false,false,false,w16,taken)==NativeAdrenoMaxClients);
+        CHECK(NativeAdrenoClientSlotFor(false,true,true,w16,taken)==1 && NativeAdrenoClientSlotFor(true,false,true,w16,taken)==1);
+#ifdef ADRENO830_MACOS   /* three large free: an app borrows one */
+        CHECK(NativeAdrenoClientSlotFor(false,false,false,w16,taken)==1);
+        taken[1]=taken[2]=true;CHECK(NativeAdrenoClientSlotFor(false,false,false,w16,taken)==NativeAdrenoMaxClients);   /* the last one kept */
+        taken[1]=taken[2]=false;
+#else
+        CHECK(NativeAdrenoClientSlotFor(false,false,false,w16,taken)==NativeAdrenoMaxClients);
+#endif
         /* The 2 GiB table has no small window: only listed processes get one of 1-3, slots 4-31 never. */
         for(auto &t:taken)t=false;
         CHECK(NativeAdrenoClientSlotFor(false,false,true,w2,taken)==1 && NativeAdrenoClientSlotFor(true,false,true,w2,taken)==0 &&
@@ -423,8 +495,13 @@ int main()
          * seconds, "~" for an orphan, names cut to 10 characters, what the rate limit dropped. */
         bool held[NativeAdrenoMaxClients]={};
         for(unsigned s=0;s<9;++s)held[s]=true;
-        CHECK(NativeAdrenoClientSmallFree(w4,held)==3 && NativeAdrenoClientSmallFree(w16,held)==23 && NativeAdrenoClientSmallFree(w2,held)==0 &&
-              NativeAdrenoClientSmallFree(nullptr,held)==0 && NativeAdrenoListedSmallKeep(w4)==3 && NativeAdrenoListedSmallKeep(w16)==4 &&
+        CHECK(NativeAdrenoClientSmallFree(w4,held)==3 && NativeAdrenoClientSmallFree(w16,held)==small_end-9 && NativeAdrenoClientSmallFree(w2,held)==0 &&
+              NativeAdrenoClientSmallFree(nullptr,held)==0 && NativeAdrenoListedSmallKeep(w4)==3 &&
+#ifdef ADRENO830_MACOS
+              NativeAdrenoListedSmallKeep(w16)==2 &&
+#else
+              NativeAdrenoListedSmallKeep(w16)==4 &&
+#endif
               NativeAdrenoClientSlotFor(false,false,false,w4,held)==NativeAdrenoMaxClients);
         NativeAdrenoSlotHolder holders[NativeAdrenoMaxClients]={};
         holders[0]={"backboardd",0,false};holders[1]={"WidgetRenderer_Default",12,false};holders[4]={"Maps",301,false};
@@ -439,7 +516,9 @@ int main()
         NativeAdrenoSlotHolder full[NativeAdrenoMaxClients];
         for(auto &holder:full)holder={"WidgetRenderer_Default",9999,true};
         NativeAdrenoSlotLine(slotLine,"WidgetRenderer_Defa",'a',28,4,UINT32_MAX,full);
-        CHECK(strlen(slotLine)<NativeAdrenoSlotLineBytes-1 && !strcmp(slotLine+strlen(slotLine)-20," 31:~WidgetRend/9999"));
+        char lastHolder[32];
+        snprintf(lastHolder,sizeof lastHolder," %u:~WidgetRend/9999",NativeAdrenoMaxClients-1);
+        CHECK(strlen(slotLine)<NativeAdrenoSlotLineBytes-1 && !strcmp(slotLine+strlen(slotLine)-strlen(lastHolder),lastHolder));
         /* The first address past 4 GiB (6.2): slot 5 of the 16 GiB table starts on the line, so its client's first mapping is there; a mapping's end is
          * exclusive, so one that ends at 4 GiB, or in the gap under the line, is still below. A page of a gap belongs to no client. */
 #ifndef ADRENO830_MACOS   /* UniXNU-piano: the same: slot 1 starts on 4 GiB there */
@@ -853,6 +932,11 @@ int main()
         NativeAdrenoAbiBoMap map{allocated.handle,Base,3,0,2,0};
         NativeAdrenoAbiBoMapReply mapped{};
         CHECK(p.client.dispatch(NativeAdrenoMethodBoMap,&map,sizeof(map),&mapped,sizeof(mapped),&ringclock)==kIOReturnSuccess);
+#ifdef ADRENO830_MACOS
+        CHECK(p.client.mapBo(&map,&mapped)==kIOReturnBusy && p.client.lastMapRefusal().why==NativeAdrenoMapWhyMapped);
+        CHECK(p.client.dispatch(NativeAdrenoMethodBoMap,&map,sizeof(map)-1,&mapped,sizeof(mapped),&ringclock)==kIOReturnBadArgument &&
+              p.client.lastMapRefusal().why==NativeAdrenoMapWhyNone);
+#endif
         NativeAdrenoAbiSubmit submit{};
         submit.buffer_count=1;submit.buffers[0]={allocated.handle,Base,2048};
         NativeAdrenoAbiSubmitReply reply{};
@@ -933,6 +1017,8 @@ int main()
         {
             NativeAdrenoMapUsage u{};p.client.mapUsage(&u);
             CHECK(u.objects==1 && u.spans==1 && u.bytes==4096 && !p.client.lastMapRefusal().why);
+            const auto residency=p.client.residencyUsage();
+            CHECK(residency.resident_bytes==4096 && residency.peak_resident_bytes==4096);
             ++macosChecks;
         }
 #endif
@@ -966,6 +1052,8 @@ int main()
         {
             NativeAdrenoMapUsage u{};p.client.mapUsage(&u);   /* UniXNU-piano: the unmap took it away */
             CHECK(!u.objects && !u.spans && !u.bytes);
+            const auto residency=p.client.residencyUsage();
+            CHECK(!residency.resident_bytes && residency.peak_resident_bytes==4096);
             ++macosChecks;
         }
 #endif
@@ -1330,6 +1418,9 @@ int main()
             NativeAdrenoSizeUsage sizes{};p.client.sizeUsage(&sizes);
             CHECK(sizes.count[0]==3 && sizes.bytes[0]==16384+65536 && !sizes.count[1] && !sizes.count[2] && !sizes.count[3]);
             CHECK(sizes.count[4]==1 && sizes.bytes[4]==3*4096);
+            const auto residency=p.client.residencyUsage();
+            CHECK(residency.imports==1 && residency.peak_imports==1);
+            CHECK(residency.import_bytes==3*4096 && residency.peak_import_bytes==3*4096);
         }
 #endif
         /* The second BO's release fails (its descriptor refuses complete()): it stays live and keeps its bytes. */
@@ -1343,6 +1434,9 @@ int main()
         p.client.usage(&pool,&other,&imported);CHECK(!pool && other==8192 && !imported);
 #ifdef ADRENO830_MACOS
         {NativeAdrenoSizeUsage sizes{};p.client.sizeUsage(&sizes);CHECK(sizes.count[0]==1 && sizes.bytes[0]==8192 && !sizes.count[4]);}
+        const auto residency=p.client.residencyUsage();
+        CHECK(!residency.imports && !residency.import_bytes);
+        CHECK(residency.peak_imports==1 && residency.peak_import_bytes==3*4096);
 #endif
         CHECK(p.client.releaseAll(&ringclock,1000)==kIOReturnBusy && p.client.liveObjects()==1);   /* an orphan's retry: the same */
         ++blocks;
@@ -1585,7 +1679,7 @@ int main()
         "the page fault charged to its FAR window's connection whatever was in flight (nobody for the kernel range), the jobs in flight "
         "only counted against it (alike, apart, undecided, polled)\n",attribution);
 #ifdef ADRENO830_MACOS
-    std::printf("PASS: BoMap refusal records and mapping figures (UniXNU-piano): %u checks (every request refusal's reason, already mapped, "
+    std::printf("PASS: BoMap and Submit refusal records and mapping figures (UniXNU-piano): %u checks (every request refusal's reason, already mapped, "
                 "outside the window with its figures, mapped/unmapped counts; the per-object limit as the window, BoAlloc's and BoImport's "
                 "refusal reasons, a 288 MiB BO)\n",macosChecks);
 #endif

@@ -63,8 +63,7 @@ for source in args.sources:
     for define in args.defines:
         command += ['-U', define[2:]] if define.startswith('U:') else ['-D', define]
     command += ['-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter', '-Wno-c99-designator', '-Wno-reorder-init-list',
-                '-Wno-deprecated-enum-enum-conversion', '-Wno-unnecessary-virtual-specifier', '-Wno-missing-designated-field-initializers',
-                '-Wno-unknown-warning-option']
+                '-Wno-deprecated-enum-enum-conversion', '-Wno-unnecessary-virtual-specifier', '-Wno-missing-designated-field-initializers']
     env = dict(os.environ, CCC_OVERRIDE_OPTIONS='+-Wno-error=missing-designated-field-initializers')
     # The kernel's recipe names its compiler and target (arm64e-apple-ios) but no sysroot: an SDKROOT from the caller's
     # environment (a macOS SDK) would become the sysroot and fail -Wincompatible-sysroot (host checklist run of 2026-11-13).

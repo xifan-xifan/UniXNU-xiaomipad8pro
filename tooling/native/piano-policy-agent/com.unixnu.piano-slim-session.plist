@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- UniXNU-piano: the login half of piano-policy-agent's power state for background services (docs/policy.md section 4.1): at each
+     login (an Aqua session) it posts com.unixnu.piano.slim.session once, so the root agent applies Save to the new session's jobs
+     (nothing to do in Normal). Install as /Library/LaunchAgents/com.unixnu.piano-slim-session.plist (root:wheel 644):
+     configs/userland.toml, docs/userland.md. Stock notifyutil; no script, runs once per login. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.unixnu.piano-slim-session</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/notifyutil</string>
+    <string>-p</string>
+    <string>com.unixnu.piano.slim.session</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>LimitLoadToSessionType</key><string>Aqua</string>
+</dict>
+</plist>

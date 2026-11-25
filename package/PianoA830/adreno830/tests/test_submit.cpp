@@ -198,7 +198,11 @@ int main()
      * always finds its slot. Completed jobs free their slots on demand, without a wait. */
     {
         Path p;CHECK(exposed(p)==kIOReturnSuccess);
+#ifdef ADRENO830_MACOS   /* UniXNU-piano (GPU-SLOTS): 64 ranges, 64 + 12 jobs */
+        CHECK(NativeAdrenoSubmitRanges==64 && NativeAdrenoSubmitSharedJobs==12 && NativeAdrenoSubmitJobs==76);
+#else
         CHECK(NativeAdrenoSubmitRanges==32 && NativeAdrenoSubmitSharedJobs==12 && NativeAdrenoSubmitJobs==44);
+#endif
         NativeAdrenoSubmitBuffer buffer{p.handle,0x800000,256};
         uint32_t fence=0,last=0;
         for(uint32_t n=1;n<=1+NativeAdrenoSubmitSharedJobs;++n) {
@@ -294,7 +298,7 @@ int main()
     {
         Path p;CHECK(exposed(p)==kIOReturnSuccess);
         NativeAdrenoSubmitBuffer buffer{p.handle,0x800000,256};
-        uint32_t fence=0,ranges=0,retry=9;
+        uint32_t fence=0,retry=9;NativeAdrenoRangeMask ranges=0;
         CHECK(p.submit.submit(&buffer,1,0,&fence,nullptr,5)==kIOReturnSuccess);
         CHECK(p.submit.submit(&buffer,1,24,&fence,nullptr,8)==kIOReturnSuccess && fence==2);
         complete(1,0);   /* fence 1 passed before the hang: not lost */
@@ -319,7 +323,7 @@ int main()
     {
         Path p;CHECK(exposed(p)==kIOReturnSuccess);
         NativeAdrenoSubmitBuffer buffer{p.handle,0x800000,256};
-        uint32_t fence=0,ranges=0,oldest=0;
+        uint32_t fence=0,oldest=0;NativeAdrenoRangeMask ranges=0;
         CHECK(p.submit.submit(&buffer,1,0,&fence,nullptr,5)==kIOReturnSuccess && fence==1);      /* range 0, passed below */
         CHECK(p.submit.submit(&buffer,1,31*8+2,&fence,nullptr,9)==kIOReturnSuccess && fence==2); /* range 31: where the CP stands */
         CHECK(p.submit.submit(&buffer,1,5*8,&fence,nullptr,6)==kIOReturnSuccess && fence==3);    /* range 5, behind it */
@@ -340,7 +344,7 @@ int main()
     {
         Path p;CHECK(exposed(p)==kIOReturnSuccess);
         NativeAdrenoSubmitBuffer buffer{p.handle,0x800000,256};
-        uint32_t fence=0,ranges=0,oldest=0,last=0;
+        uint32_t fence=0,oldest=0,last=0;NativeAdrenoRangeMask ranges=0;
         CHECK(p.submit.submit(&buffer,1,2*8,&fence,nullptr,5)==kIOReturnSuccess && fence==1);
         CHECK(p.submit.submit(&buffer,1,3*8,&fence,nullptr,6)==kIOReturnSuccess && fence==2);
         complete(2,cp.regs[0x0807]);   /* passed, not retired */
@@ -356,7 +360,7 @@ int main()
     {
         Path p;CHECK(exposed(p)==kIOReturnSuccess);
         NativeAdrenoSubmitBuffer buffer{p.handle,0x800000,256};
-        uint32_t fence=0,ranges=0,oldest=0,last=0;
+        uint32_t fence=0,oldest=0,last=0;NativeAdrenoRangeMask ranges=0;
         CHECK(p.submit.submit(&buffer,1,2*8,&fence,nullptr,5)==kIOReturnSuccess && fence==1);
         CHECK(p.submit.submit(&buffer,1,3*8,&fence,nullptr,6)==kIOReturnSuccess && fence==2);
         CHECK(p.submit.submit(&buffer,1,5*8,&fence,nullptr,8)==kIOReturnSuccess && fence==3);
@@ -369,6 +373,23 @@ int main()
         CHECK(p.submit.detach()==kIOReturnSuccess);
         ++cases;
     }
+#ifdef ADRENO830_MACOS
+    {
+        /* UniXNU-piano (GPU-SLOTS): range 63, the last of 64, is bit 63 of the 64-bit masks (halt, recover, the fence history). */
+        uint32_t fence=0,oldest=0,last=0;NativeAdrenoRangeMask ranges=0;
+        Path q;CHECK(exposed(q)==kIOReturnSuccess);
+        NativeAdrenoSubmitBuffer top{q.handle,0x800000,256};
+        CHECK(q.submit.submit(&top,1,63*8+7,&fence,nullptr,9)==kIOReturnSuccess && fence==1);
+        CHECK(q.submit.submit(&top,1,32*8,&fence,nullptr,7)==kIOReturnSuccess && fence==2);
+        CHECK(q.submit.submit(&top,1,64*8,&fence,nullptr,7)==kIOReturnBadArgument);   /* past the last range */
+        CHECK(q.submit.rangesInFlight(0,2,&ranges)==kIOReturnSuccess && ranges==(NativeAdrenoRangeBit(63)|NativeAdrenoRangeBit(32)));
+        CHECK(q.submit.halt(&ranges,&oldest)==kIOReturnSuccess && ranges==(NativeAdrenoRangeBit(63)|NativeAdrenoRangeBit(32)) && oldest==63);
+        CHECK(q.ring.recover(&last)==kIOReturnSuccess && q.submit.recover(&ranges)==kIOReturnSuccess &&
+              ranges==(NativeAdrenoRangeBit(63)|NativeAdrenoRangeBit(32)) && q.submit.outstanding()==0);
+        q.submit.resume();
+        CHECK(q.submit.detach()==kIOReturnSuccess);   /* not counted: the PASS line is the upstream pass's too */
+    }
+#endif
     /* A commit that poisons the ring retains every reference and disables execbuf until recover(). */
     {
         Path p;CHECK(exposed(p)==kIOReturnSuccess);
@@ -383,7 +404,7 @@ int main()
         CHECK(p.submit.submit(&buffer,1,0,&fence)==kIOReturnNotReady && p.submit.retireCompleted()==kIOReturnNotReady);
         CHECK(p.ring.detach()==kIOReturnBusy && p.vm.detach()==kIOReturnBusy);
         CHECK(p.object.release()==kIOReturnBusy);
-        uint32_t ranges=0,last=0;
+        NativeAdrenoRangeMask ranges=0;uint32_t last=0;
         CHECK(p.ring.recover(&last)==kIOReturnSuccess && !p.ring.poisoned());
         CHECK(p.submit.recover(&ranges)==kIOReturnSuccess && ranges==1u && !p.submit.poisoned() && p.object.deviceReferences()==1);
         CHECK(p.submit.submit(&buffer,1,0,&fence)==kIOReturnSuccess && fence==1);
@@ -437,7 +458,7 @@ int main()
         p.ring.setWaiter(&waiter);
         constexpr uint32_t R=NativeAdrenoRingSourceRender,E=NativeAdrenoRingSourceExternal,C=NativeAdrenoRingStampContext;
         NativeAdrenoSubmitBuffer buffer{p.handle,0x800000,256};
-        uint32_t fence=0,ranges=7;
+        uint32_t fence=0;NativeAdrenoRangeMask ranges=7;
         CHECK(p.submit.submit(&buffer,1,0,&fence,nullptr,5,R)==kIOReturnSuccess && fence==1);       /* range 0, the render server */
         CHECK(p.submit.submit(&buffer,1,3*8+1,&fence,nullptr,6)==kIOReturnSuccess && fence==2);     /* range 3 */
         CHECK(p.submit.submit(&buffer,1,1,&fence,nullptr,5,R)==kIOReturnSuccess && fence==3);       /* range 0 again */

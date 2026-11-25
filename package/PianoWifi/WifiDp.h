@@ -33,6 +33,11 @@ constexpr uint32_t kDpTclEntries = 64, kDpTxCompEntries = 64, kDpReoEntries = 25
 constexpr uint32_t kDpTxBuffers = 32, kDpTxBufferBytes = 2048;
 constexpr uint32_t kDpReoErrQueueAddrZero = 0;   // the reorder unit's error 0: no queue descriptor for the frame's TID
 constexpr uint32_t kDpLinkDescBytes = 128;
+// An MSDU link descriptor (the exception ring's entries name these): a 4-byte header, the next descriptor's address info (8),
+// a word, the PN (16), then six MSDU details of 16 bytes each, each starting with its buffer's address info (cookie in 31:12 of
+// its second word). 32 + 6 * 16 = 128 (layout facts as ath12k's hal_rx_msdu_link; no code taken).
+constexpr uint32_t kDpLinkMsduAt = 32, kDpLinkMsduBytes = 16, kDpMsdusPerLink = 6;
+static_assert(kDpLinkMsduAt + kDpMsdusPerLink * kDpLinkMsduBytes == kDpLinkDescBytes, "MSDU link descriptor layout");
 constexpr uint32_t kDpFrameMax = 1600;   // an 802.3 frame of en0 (1514 and a VLAN tag, rounded)
 
 // piano-wifi-l8=N, level 8's switches (each the A/B of a default): bit 0 the receive buffers return to software ring 1 (the
@@ -69,6 +74,7 @@ struct DpStats {
   uint32_t rxEntries = 0, rxFrames = 0, rxEapol = 0, rxBytes = 0, rxNotDone = 0, rxBadCookie = 0, rxErrors = 0, rxNullData = 0,
            rxMulti = 0, rxNotEthernet = 0, rxTooLong = 0, rxLinkDesc = 0, rxRecycled = 0, rxRecycleFull = 0;
   uint32_t excEntries = 0, relEntries = 0, relRecycled = 0, relOther = 0, relDelivered = 0;
+  uint32_t excLinks = 0, excBufRecycled = 0, excBufOther = 0, excLinkForeign = 0;   // the exception ring's buffers taken back
   uint32_t relBySource[8] = {}, relRxdmaError[32] = {}, relReoError[32] = {}, relGroup = 0, relUnicast = 0;
   DpRelRecord rel[kDpRelRecords];   // the first kDpRelRecords releases
   uint32_t relRecorded = 0;
@@ -564,7 +570,12 @@ inline uint32_t dpPoll(Dp &dp, const ChipIo &io, Deliver deliver)
       write(dp, io, r.r2 + 4, r.ours * r.words);
     }
   }
-  // ---- the reorder unit's exceptions: counted and passed over (their entries name link descriptors, level 8's next piece)
+  // ---- the reorder unit's exceptions (2026-11-20, WIFI-RX-STALL.md): the frames are dropped, their receive buffers are not.
+  // An entry names an MSDU link descriptor (one of ours: its cookie is its index in the bank, its address that slot's) whose MSDU
+  // details carry the receive buffers, or, with buffer type MSDU, one receive buffer itself. Every such buffer goes back into the
+  // refill ring; passing the entries over leaked them until the refill ring was empty and nothing more was received. The link
+  // descriptor itself stays out of the idle list (1023 of them; the WBM keeps the idle ring's tail): counted, returned by the
+  // next level 6 (a radio restart).
   {
     CeRing &r = dp.reoExc;
     const uint32_t head = slotOf(r, load(r.theirs));
@@ -578,6 +589,31 @@ inline uint32_t dpPoll(Dp &dp, const ChipIo &io, Deliver deliver)
       moved = true;
       ++seen;
       ++dp.st.excEntries;
+      HttRx *rx = dp.rx;
+      auto takeBack = [&](const uint8_t *info) {
+        const uint64_t bus = addrOf(info);
+        const uint32_t cookie = cookieOf(info);
+        if (rx && bus && cookie + 1 < kRxRefillEntries && bus == rx->refillBus[cookie] && httRefillPost(*rx, cookie))
+          ++dp.st.excBufRecycled;
+        else if (bus)
+          ++dp.st.excBufOther;
+      };
+      if (!(info0 & kDpReoBufTypeLinkDesc)) {
+        takeBack(e);
+        continue;
+      }
+      const uint32_t index = cookieOf(e);
+      if (!dp.linkVa || index >= dp.linkDescs || addrOf(e) != dp.linkBus + uint64_t(index) * kDpLinkDescBytes) {
+        ++dp.st.excLinkForeign;
+        continue;
+      }
+      ++dp.st.excLinks;
+      const uint8_t *link = dp.linkVa + uint64_t(index) * kDpLinkDescBytes;
+      for (uint32_t m = 0; m < kDpMsdusPerLink; ++m) {
+        const uint8_t *info = link + kDpLinkMsduAt + m * kDpLinkMsduBytes;
+        if (!addrOf(info)) break;
+        takeBack(info);
+      }
     }
     if (moved) write(dp, io, r.r2 + 4, r.ours * r.words);
   }

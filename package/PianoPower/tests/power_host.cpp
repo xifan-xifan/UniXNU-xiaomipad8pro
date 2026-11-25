@@ -1404,6 +1404,63 @@ static void testGauge()
   transient.regs[kGaugeVoltage] = 3785;
   const GaugeReading recovered = readGauge(busF);
   CHECK(recovered.ok && recovered.voltageMv == 3785 && recovered.currentMa == 211 && recovered.socPct == 24);
+
+  // ram13: either pack can ACK a bogus word, and this very sample must be
+  // repaired before it becomes the policy and UI's observation for 30 s.
+  Gauge ramA, ramB;
+  fillGauge(ramA, 3885, 576, 41, 1725, 4290, 399, 0);
+  fillGauge(ramB, 3884, 577, 40, 1715, 4344, 365, 0);
+  ramA.replies[kGaugeVoltage] = {0xffff, 3885};
+  ramB.replies[kGaugeSoc] = {0xffff, 40};
+  I2cBus ramBusA(ramA.io()), ramBusB(ramB.io());
+  GaugeReading sample[2] = {readGauge(ramBusA), readGauge(ramBusB)};
+  CHECK(sample[0].ok && sample[1].ok && combinePacks(sample, 2).fullMah == 8634);
+  ramA.replies[kGaugeFull] = {0xffff, 4290};
+  ramB.replies[kGaugeRemaining] = {0xffff, 1715};
+  ramB.replies[kGaugeStatus] = {0xffff, 0};
+  sample[0] = readGauge(ramBusA);
+  sample[1] = readGauge(ramBusB);
+  const PackReading restored = combinePacks(sample, 2);
+  CHECK(restored.ok && restored.packs == 2 && restored.fullMah == 8634 && restored.remainingMah == 3440);
+  CHECK(restored.socPct == 40 && restored.charging && !restored.full);
+
+  // A later whole-snapshot pass can encounter another corrupt register.
+  // Command-local recovery avoids rereading already credible words.
+  Gauge later;
+  fillGauge(later, 4120, 530, 72, 3000, 4290, 379, 0);
+  later.replies[kGaugeVoltage] = {4120, 0xffff, 4120};
+  later.replies[kGaugeSoc] = {0xffff, 72};
+  I2cBus laterBus(later.io());
+  const GaugeReading local = readGauge(laterBus);
+  CHECK(local.ok && local.socPct == 72 && local.voltageMv == 4120);
+  CHECK(local.wordRetryMask == (1u << 3) && local.wordRereads == 1 && later.replyAt[kGaugeVoltage] == 1);
+
+  // Multiple independent corrupt words, including current -1 as valid data.
+  Gauge scattered;
+  fillGauge(scattered, 4120, -1, 72, 3000, 4290, 379, 0);
+  scattered.replies[kGaugeSoc] = {0xffff, 72};
+  scattered.replies[kGaugeVoltage] = {0xffff, 4120};
+  I2cBus scatterBus(scattered.io());
+  const GaugeReading repaired = readGauge(scatterBus);
+  CHECK(repaired.ok && repaired.socPct == 72 && repaired.voltageMv == 4120 && repaired.currentMa == -1);
+  CHECK(repaired.wordRetryMask == ((1u << 0) | (1u << 3)));
+  CHECK(repaired.wordRetryValid == repaired.wordRetryMask && repaired.wordRereads == 2);
+  CHECK(scattered.reads == 12 && scattered.replyAt[kGaugeSoc] == 2 && scattered.replyAt[kGaugeVoltage] == 2);
+
+  Gauge persistent;
+  fillGauge(persistent, 4120, 530, 65535, 3000, 4290, 379, 0);
+  I2cBus persistentBus(persistent.io());
+  const GaugeReading stillBad = readGauge(persistentBus);
+  CHECK(!stillBad.ok && stillBad.socPct == 65535 && stillBad.failedCommand == 0xff);
+  CHECK(stillBad.wordRetryMask == (1u << 3) && !stillBad.wordRetryValid && stillBad.wordRereads == 2);
+  CHECK(persistent.reads == 22);   // One word reread per pass, two full passes; never unbounded.
+
+  Gauge interrupted;
+  fillGauge(interrupted, 4120, 530, 65535, 3000, 4290, 379, 0);
+  interrupted.nackReadNumber = 5;   // The SOC reobservation cannot be treated as a credible sample.
+  I2cBus interruptedBus(interrupted.io());
+  const GaugeReading noAck = readGaugeOnce(interruptedBus);
+  CHECK(!noAck.ok && noAck.error == I2cResult::nackAddress && noAck.failedCommand == kGaugeSoc);
 }
 
 // ------------------------------------------------------------------------------------------------------------ MCA model
@@ -2200,13 +2257,14 @@ static void testGaugeReobserve()
     for (uint16_t final : {0u, 1u, 3u, 255u}) {
       Gauge g; g.replies[reg] = {255, final}; I2cBus bus(g.io()); GaugeAlerts a;
       a.beginSample(); const auto reads = a.readPack(bus, pack); a.sampled(reads);
-      CHECK(g.reads == 3 && g.starts == 6 && g.stops == 3);
-      CHECK(a.retried == bit && a.retryValid == bit && a.rereads == 1);
+      const unsigned attempts = !field && final == 255 ? 2 : 1;
+      CHECK(g.reads == 2 + attempts && g.starts == 2 * g.reads && g.stops == g.reads);
+      CHECK(a.retried == bit && a.retryValid == bit && a.rereads == attempts);
       CHECK((field ? a.firstSoa[pack] : a.firstIsc[pack]) == 255);
       CHECK((field ? a.soa[pack] : a.isc[pack]) == final);
       CHECK(a.active() == (field ? final != 0 : final == 3));
       CHECK(bool(a.valid & bit) == (field || final <= 3));
-      a.beginSample(); CHECK(!a.retried && !a.retryValid && a.rereads == 1);
+      a.beginSample(); CHECK(!a.retried && !a.retryValid && a.rereads == attempts);
     }
     // A failed reread never converts the successful first255 into clear.
     Gauge g; g.regs[reg] = 255; g.nackReadNumber = field + 2;
@@ -2409,6 +2467,13 @@ static void testLinkRp()
     r.period();
     CHECK(r.d.last(PIANO_MCA_ICL) == 900);
   }
+  Gauge ram13;
+  ram13.replies[0x72] = {255, 255, 0};
+  I2cBus bus(ram13.io());
+  GaugeAlerts alerts;
+  alerts.sampled(0x18 | alerts.readPack(bus, 0));
+  CHECK(alerts.complete() && !alerts.active() && alerts.rereads == 2 &&
+        alerts.firstIsc[0] == 255 && alerts.isc[0] == 0);
 }
 
 // The codec's late answers (2026-11-12 P1/P2: "write ... = 900: no answer (-60)", and the limit read back as written the next cycle).
@@ -2519,23 +2584,27 @@ static void testLinkRamp()
     for (int i = 0; i < 30; ++i) r->period();
     CHECK(r->d.last(PIANO_MCA_ICL) == 2500 && r->link.plan.ramp_wait == PIANO_CHG_RAMP_BUS_LOW && !r->link.st.ramp_ceiling_ma);
   }
-  // a source whose voltage gives way above 2.2 A: the bus sags below 4.5 V under 2.5 A: back to 2000, the ceiling for the boot; a
-  // new attach stops at 2000
+  // A source whose voltage gives way above 2.2 A: back to2000. A new attach keeps the cool-down; recovery permits a retry.
   {
     auto r = rig(o);
     r->d.kneeMa = 2200;
     r->d.kneeOhms = 1.0;
-    for (int i = 0; i < 30; ++i) r->period();
+    for (int i = 0; i < 30 && !r->link.st.ramp_ceiling_ma; ++i) r->period();
     CHECK((r->take() & PIANO_CHG_EV_RAMP_BACK) && r->link.st.ramp_ceiling_ma == 2000 && r->d.last(PIANO_MCA_ICL) == 2000);
     CHECK(r->link.plan.ramp_back_why == PIANO_CHG_BACK_SAG || r->link.st.ramp_back_why == PIANO_CHG_BACK_SAG);
-    CHECK(r->d.count(PIANO_MCA_ICL) == 5);   // 900, 1500, 2000, 2500, back to 2000: no second try at 2500
+    CHECK(r->d.count(PIANO_MCA_ICL) == 5);   // 900,1500,2000,2500,back to2000 before the cool-down
+    const auto retry = r->link.st.ramp_retry_ms;
     r->d.loadMa = 0;
     r->d.props[PIANO_MCA_BUS_VOLTAGE] = 100000;
     r->period();
     CHECK(r->d.last(PIANO_MCA_ICL) == 100);
     r->d.loadMa = 3500;
+    for (int i = 0; i < 7; ++i) r->period();
+    CHECK(r->d.last(PIANO_MCA_ICL) == 2000 && r->link.plan.ramp_wait == PIANO_CHG_RAMP_COOLING);
+    CHECK(r->link.st.ramp_retry_ms == retry && r->d.count(PIANO_MCA_ICL, 2500) == 1);
+    r->d.kneeOhms = 0;
     for (int i = 0; i < 30; ++i) r->period();
-    CHECK(r->d.last(PIANO_MCA_ICL) == 2000 && r->link.plan.ramp_wait == PIANO_CHG_RAMP_TOP);
+    CHECK(r->d.last(PIANO_MCA_ICL) == 3000 && !r->link.st.ramp_ceiling_ma && r->d.count(PIANO_MCA_ICL, 2500) == 2);
     CHECK(r->allAllowed());
   }
   // the system takes 1.2 A: at 1500 the input is not used up, so no higher
@@ -2567,21 +2636,27 @@ static void testLinkRamp()
     w->period();
     CHECK(w->d.last(PIANO_MCA_ICL) == 900);
   }
-  // the port cuts out above 2.1 A: the step to 2500 is followed by a detach: the ceiling 2000 for the boot
+  // The port cuts out above2.1A: each retry of2500 detaches and renews the cool-down. Recover without a reboot.
   {
     auto r = rig(o);
     r->d.tripMa = 2100;
     for (int i = 0; i < 40; ++i) r->period();
     CHECK(r->link.st.ramp_ceiling_ma == 2000 && r->link.st.ramp_back_why == PIANO_CHG_BACK_DETACH);
-    CHECK(r->d.last(PIANO_MCA_ICL) == 2000 && r->d.count(PIANO_MCA_ICL, 2500) == 1);
+    CHECK(r->d.last(PIANO_MCA_ICL) == 2000 && r->d.count(PIANO_MCA_ICL, 2500) >= 2);
+    r->d.tripMa = 0;
+    for (int i = 0; i < 30; ++i) r->period();
+    CHECK(r->d.last(PIANO_MCA_ICL) == 3000 && !r->link.st.ramp_ceiling_ma && r->allAllowed());
   }
-  // the firmware refuses limits above 2000: three refusals of 2500, then 2000 is the ceiling
+  // The firmware refuses limits above2000: three attempts per retry, then back off. Restore its allowance and recover.
   {
     auto r = rig(o);
     r->d.iclMax = 2000;
     for (int i = 0; i < 40; ++i) r->period();
     CHECK(r->link.st.ramp_ceiling_ma == 2000 && r->link.st.ramp_back_why == PIANO_CHG_BACK_REFUSED && r->m.icl_set == 2000);
-    CHECK(r->d.count(PIANO_MCA_ICL, 2500) == 3);
+    CHECK(r->d.count(PIANO_MCA_ICL, 2500) >= 6 && r->d.count(PIANO_MCA_ICL, 2500) % 3 == 0);
+    r->d.iclMax = 3000;
+    for (int i = 0; i < 30; ++i) r->period();
+    CHECK(r->d.last(PIANO_MCA_ICL) == 3000 && !r->link.st.ramp_ceiling_ma && r->allAllowed());
   }
   // piano-power-rp-max=2000: the steps stop there
   {

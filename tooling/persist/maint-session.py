@@ -38,6 +38,7 @@ The tablet side is tooling/persist/tablet.sh (served over HTTP from the host's U
 checked); commands go through tooling/native/maint-shell.py (PIANO_MAINT_HOST). State: out/persistent/session/state.json.
 """
 import argparse
+import fcntl
 import hashlib
 import http.server
 import json
@@ -68,6 +69,30 @@ XNU_LOG = D / 'tooling/native/xnu-log.py'
 V110 = Path(os.path.expanduser(os.environ.get('PIANO_V110', str(Path.home() / 'Downloads/XiaomiPad8Pro-Ubuntu/v1.1.0'))))   # the Ubuntu v1.1.0 release (or its few files)
 MAINT_IMAGE = V110 / 'release/boot/boot-ram-maintenance.img'
 MAINT_IMAGE_SHA256 = '54001a50a13fe80c3bd8e926161608b71d91e57e2d6be6b83cdc2bc62b5f6fbc'
+
+
+def maint_image():
+    """(path or None, the paths tried): the maintenance RAM image, the first candidate that hashes to MAINT_IMAGE_SHA256 (the pin
+    makes every candidate safe): $PIANO_V110's, then each PIANO_V110 of ~/.config/piano/env (plain or `export` lines), then this
+    checkout's private/v1.1.0, then the old default. 2026-11-23 18:40: a shell without PIANO_V110 looked only at the old default,
+    where no file is any more, and maint-boot stopped."""
+    roots = [V110]
+    env = Path.home() / '.config/piano/env'
+    if env.is_file():
+        for line in env.read_text().splitlines():
+            m = re.match(r'\s*(?:export\s+)?PIANO_V110=(.*)$', line)
+            if m:
+                roots.append(Path(os.path.expanduser(m.group(1).strip().strip('"').strip("'"))))
+    roots += [D / 'private/v1.1.0', Path.home() / 'Downloads/XiaomiPad8Pro-Ubuntu/v1.1.0']
+    tried = []
+    for root in roots:
+        path = root / 'release/boot/boot-ram-maintenance.img'
+        if path in tried:
+            continue
+        tried.append(path)
+        if path.is_file() and common.sha(path) == MAINT_IMAGE_SHA256:
+            return path, tried
+    return None, tried
 PLATFORM_TOOLS = '/opt/homebrew/share/android-commandlinetools/platform-tools'
 B = common.LBA
 MiB = 1 << 20
@@ -125,26 +150,6 @@ def esp_store(record):
     return None
 
 
-def check_esp_placement(record, name='ESP'):
-    """The record's partition placement: LUN 0, partition 37, a 1 MiB aligned 1 GiB window inside LUN 0. A record without a
-    placement is the historical one (common.ESP_FIRST)."""
-    placement = (record or {}).get('partition')
-    if placement is None:
-        return {'lun': 0, 'index': common.ESP_INDEX + 1, 'first_lba': common.ESP_FIRST, 'blocks': common.ESP_BLOCKS}
-    if not isinstance(placement, dict):
-        raise Stop(f'{name}: partition placement is not an object')
-    if placement.get('lun') != 0 or placement.get('index') != common.ESP_INDEX + 1:
-        raise Stop(f'{name}: ESP placement is not LUN 0 partition {common.ESP_INDEX + 1}')
-    if placement.get('blocks') != common.ESP_BLOCKS:
-        raise Stop(f'{name}: ESP placement is {placement.get("blocks")} blocks, not {common.ESP_BLOCKS}')
-    first = placement.get('first_lba')
-    if not isinstance(first, int) or not 0 < first < 2**32 or first % 256:
-        raise Stop(f'{name}: ESP first LBA {first!r} is not a 1 MiB aligned FAT32 hidden-sector value')
-    if first + common.ESP_BLOCKS > common.LUN0_BLOCKS:
-        raise Stop(f'{name}: the ESP window at LBA {first} ends past LUN 0')
-    return placement
-
-
 def esp_root_part(record):
     """The partition an ESP's default entry mounts its root image from (native-ufs-root-part; NativeUfs's default linux_rootfs).
     The 27.3-only ESP of 2026-11-13 keeps it on linux_data with its store; the whole-disk layout (2026-11-14) on linux_rootfs, the store
@@ -160,8 +165,6 @@ PART_KEYS = {'linux_rootfs': 'rootfs', 'linux_data': 'linux_data', 'esp': 'esp'}
 def read_nocache(path, digest=None):
     """A file's bytes in 4 MiB chunks, read with the page cache off (F_NOCACHE): the backup as stored, not the bytes just written.
     DIGEST (a hashlib object) is fed them."""
-    import fcntl
-
     fd = os.open(path, os.O_RDONLY)
     try:
         fcntl.fcntl(fd, fcntl.F_NOCACHE, 1)
@@ -250,6 +253,8 @@ class Session:
         ESP is booted) and for unknown contents. 'planned:NAME' is a dry run's boot-a of an image not signed yet."""
         if sha == common.BOOT_A_SHA256:
             return 'Ubuntu\'s boot_a (13-boot_a)', None
+        if sha == common.ANDROID_BOOT_A_SHA256:
+            return 'stock Android\'s boot (android-set)', None
         if sha and sha.startswith('planned:'):
             name = sha.removeprefix('planned:')
             entry = self.boot['unsigned'].get(name.replace('-signed.img', '.img')) or {}
@@ -304,9 +309,8 @@ class Session:
     def tablet_esp(self):
         """The ESP region's sha256 on the tablet (as tablet_boot_a)."""
         if self.execute:
-            first = self.state.get('esp_first_lba') or self.sim.get('esp_first_lba') or common.ESP_FIRST
-            return self.region_sha(self.nodes['lun0'], first * B // MiB, 1024, MiB, name='esp-region-now')
-        return self.sim.get('esp') or self.state.get('esp_sha256')
+            return self.region_sha(self.nodes['lun0'], common.ESP_FIRST * B // MiB, 1024, MiB, name='esp-region-now')
+        return self.sim.get('esp') or self.esp_state()[1] or self.ledger_esp()[1]
 
     def pair(self, boot_sha, esp_record, what):
         """The rule: an ESP whose ADT asks for more than boot_a's DarwinBoot takes never boots (DarwinBoot refuses the ADT)."""
@@ -324,11 +328,48 @@ class Session:
 
     def esp_record(self, name):
         path = OUT / (name.removesuffix('.img') + '.json')
-        if not path.is_file():
-            return None
-        record = json.loads(path.read_text())
-        check_esp_placement(record, path.name)
-        return record
+        return json.loads(path.read_text()) if path.is_file() else None
+
+    @staticmethod
+    def ledger_esp():
+        """(image, sha256) of OUT/installed.json, the ESP the last install wrote; else (None, None)."""
+        try:
+            record = json.loads((OUT / 'installed.json').read_text())
+            return record.get('image'), record.get('sha256')
+        except (OSError, ValueError, AttributeError):
+            return None, None
+
+    def esp_state(self):
+        """(image, sha256) of the ESP this install's session state wrote, while it is current: written under this backup set
+        (esp_set = backup_name), or an untagged entry of an older tool that installed.json names too. Else (None, None): a value an
+        older session left is never used (2026-11-23 18:56: an old v9 esp_written failed check over the installed v13.1y8 ESP)."""
+        st = self.state
+        name, sha = st.get('esp_written'), st.get('esp_sha256')
+        if not (name or sha):
+            return None, None
+        if st.get('esp_set'):
+            return (name, sha) if st['esp_set'] == st.get('backup_name') else (None, None)
+        return (name, sha) if sha and sha == self.ledger_esp()[1] else (None, None)
+
+    def save_esp(self, name, sha):
+        """Record the ESP this step put on the tablet (None: the region as it was before this install), tagged with the backup set."""
+        self.save(esp_written=name, esp_sha256=sha, esp_set=self.state.get('backup_name'))
+
+    def esp_expected(self):
+        """What check expects the ESP region to hold: (sha256, what, ledger) with ledger = installed.json's (image, sha256) when it
+        must name the same ESP (nothing written in this backup set), else None. The ESP this install wrote (esp_state); else the
+        region as this backup set read it before any write (linux_rootfs-tail-esp); else installed.json's; else (None, None, None)."""
+        name, sha = self.esp_state()
+        if sha:
+            return sha, name or 'the image written', None
+        ledger = self.ledger_esp()
+        entry = (self.state.get('backups') or {}).get('linux_rootfs-tail-esp') or {}
+        if entry.get('verified') and entry.get('sha256'):
+            record = self.esp_by_sha(entry['sha256'])
+            return entry['sha256'], f'{record["image"] if record else "the region"} as this backup set read it', ledger if ledger[1] else None
+        if ledger[1]:
+            return ledger[1], f'{ledger[0]} (installed.json)', None
+        return None, None, None
 
     def save(self, **values):
         self.state.update(values)
@@ -371,7 +412,7 @@ class Session:
         """Whether this install has written region KEY since its backup (then a different SHA-256 now is expected)."""
         st = self.state
         return {'lun0-gpt-primary': st.get('gpt_state') == 'new', 'lun0-gpt-backup': st.get('gpt_state') == 'new',
-                'linux_rootfs-tail-esp': bool(st.get('esp_written')), 'boot_a': bool(st.get('boot_a_written')),
+                'linux_rootfs-tail-esp': bool(self.esp_state()[0]), 'boot_a': bool(st.get('boot_a_written')),
                 # the store region changes with the move and whenever macOS runs from the ESP (data-persist=2)
                 'linux_rootfs-store': st.get('gpt_state') == 'new', 'linux_rootfs-store-header': st.get('gpt_state') == 'new',
                 'lun4-gpt-primary': bool(st.get('slot_success_written')),
@@ -393,7 +434,7 @@ class Session:
         self.log(f'  tablet# {command}')
         if not self.execute:
             return None
-        r = subprocess.run([sys.executable, str(MAINT_SHELL), command, str(timeout)], capture_output=True, text=True, timeout=timeout + 30)
+        r = subprocess.run(['python3', str(MAINT_SHELL), command, str(timeout)], capture_output=True, text=True, timeout=timeout + 30)
         out = r.stdout.replace('\r', '')
         for line in out.strip().splitlines()[-40:]:
             self.log('        | ' + line)
@@ -414,9 +455,6 @@ class Session:
     def job(self, name, *argv, timeout=3600, every=None):
         """A long tablet.sh subcommand, detached on the tablet (survives the telnet line), polled until it ends."""
         self.t('job', name, *argv)
-        return self.wait_job(name, timeout, every)
-
-    def wait_job(self, name, timeout, every=None):
         if not self.execute:
             return None
         every = every or JOB_POLL
@@ -433,11 +471,10 @@ class Session:
                 self.shell('piano-maint keepalive')
         raise Stop(f'tablet job {name} still running after {timeout} s')
 
-    def region_sha(self, dev, skip, count, bs=B, name='hash', direct=False):
+    def region_sha(self, dev, skip, count, bs=B, name='hash'):
         """SHA-256 of a region read from the medium (tablet.sh hash drops the page cache first)."""
         big = count * bs > 256 * MiB
-        command = 'hash-direct' if direct else 'hash'
-        r = self.job(name, command, dev, skip, count, bs, timeout=7200) if big else self.t(command, dev, skip, count, bs)
+        r = self.job(name, 'hash', dev, skip, count, bs, timeout=7200) if big else self.t('hash', dev, skip, count, bs)
         return r and r['sha256']
 
     # -- host services -------------------------------------------------------------------------------------------------
@@ -516,30 +553,7 @@ class Session:
         self.serve({})
 
     def fetch(self, name, path, digest):
-        """The tablet gets a host file in /run/pp/NAME and checks its SHA-256. On Windows the host's inbound HTTP is routinely
-        blocked (the tablet's wget times out), so the tablet listens on the reverse channel and the host streams to it."""
-        if os.name == 'nt' and self.execute:
-            port = 18000
-            job = 'fetch-' + name.replace('.', '-')
-            self.log(f'  host  pushes {name} ({Path(path).name}) to tablet port {port}')
-            self.t('job', job, 'fetch-push', name, digest, port)
-            deadline = time.time() + 30
-            while True:             # the tablet's nc starts a moment after the detached job returns
-                try:
-                    conn = socket.create_connection((self.env['PIANO_MAINT_HOST'], port), timeout=30)
-                    break
-                except ConnectionRefusedError:
-                    if time.time() > deadline:
-                        raise Stop(f'{name}: the tablet did not listen on {port}')
-                    time.sleep(0.5)
-            with conn, open(path, 'rb') as source:
-                sent = 0
-                while chunk := source.read(MiB):
-                    conn.sendall(chunk)
-                    sent += len(chunk)
-                conn.shutdown(socket.SHUT_WR)
-            self.need(sent == Path(path).stat().st_size, f'complete {name} stream sent')
-            return self.wait_job(job, 1800)
+        """The tablet downloads a host file to /run/pp/NAME and checks its SHA-256."""
         self.serve({name: path})
         return self.t('fetch', name, digest, self.a.http_port, timeout=900)
 
@@ -593,8 +607,6 @@ class Session:
     @staticmethod
     def sha_nocache(path):
         """SHA-256 of a file read with the page cache off (F_NOCACHE): the NAS copy as stored, not the bytes just sent."""
-        import fcntl
-
         h = hashlib.sha256()
         fd = os.open(path, os.O_RDONLY)
         try:
@@ -802,7 +814,7 @@ class Session:
     def esp_reset_after(self):
         """The reset time of the default entry of the ESP on the tablet (the one written, else --esp). An ESP whose default does not
         reset (default macos) never comes back to ABL fastboot by itself, so the RAM tests refuse it."""
-        name = self.state.get('esp_written') or self.a.esp
+        name = self.esp_state()[0] or self.a.esp
         rec = self.esp_record(name) or {}
         m = re.search(r'piano-reset-after=(\d+)', rec.get('cmdlines', {}).get(rec.get('default', ''), ''))
         if not m:
@@ -858,11 +870,10 @@ def part_geometry(s, name):
     return s.nodes.get(key), s.starts.get(key), (s.sizes.get(key) or 0) // B
 
 
-def bound_store(s, record, fresh_ok=False):
+def bound_store(s, record):
     """The store an ESP of a bound-store record (esp_store) resumes, read from the tablet: the window inside its partition as mapped
     and at NativeUfs's place there for its size (the end of the partition below the reserve: native_ufs_store_open), the header
     valid, of the record's seed, bound to that LBA (PersistOverlay.h kBound). Returns (True/False, the line; None in a dry run).
-    With fresh_ok, a blank header is the expected pre-install state: the first data-persist=2 boot creates the store there.
     The line of a store that passes reads "... the store at LBA N on PART ... IS the one this ESP resumes ..."."""
     store, seed = esp_store(record), record['seed']
     first, blocks, part = store['first_lba'], store.get('blocks') or seed['store_blocks'], store['partition']
@@ -882,11 +893,6 @@ def bound_store(s, record, fresh_ok=False):
                             f'{common.store_first(last, blocks)}, not {first}: the binding would refuse it')
     if not problems:
         header = common.store_header(bytes.fromhex(s.t('peek', node, first - start, 0, 128)['hex']))
-        if header['state'] == 'blank' and fresh_ok:
-            s.save(esp_store={'partition': part, 'first_lba': first, 'node': node, 'header': header, 'problems': [],
-                              'fresh': True})
-            return True, (f'the store window at LBA {first} on {part} is blank: the first data-persist=2 boot creates the '
-                          f'{seed["store_blocks"]}-block store for seed {seed["identity_sha256"][:16]} there')
         if header['state'] != 'valid':
             problems.append(f'its header is {header["state"]} (no store of this seed there)')
         else:
@@ -934,66 +940,6 @@ def entries_using_rootfs(s, record):
     import tomllib   # Python 3.11 (here only: the other steps run on older ones too)
     entries = tomllib.loads(text).get('entry', []) if text else []
     return {e['id']: why for e in entries if (why := common.entry_uses_rootfs(e))}
-
-
-@step('piano-309-root', 'maintenance, WRITE the frozen 27.3 root on the candidate layout',
-      writes='LUN 0 linux_rootfs, first 17547919360 bytes')
-def piano_309_root(s):
-    digest = 'db3629e5da012ce76e64c0f42739ada9541ed8cca5adaab32256fc9b64b34ef7'
-    count, total = 4284160, 5242880
-    if not s.a.root_image:
-        raise Stop('piano-309-root needs --root-image IMG')
-    img = Path(s.a.root_image).expanduser()
-    s.need(img.is_file() and img.stat().st_size == count * B, 'frozen root image size')
-    if not s.execute:
-        s.log('  check source SHA-256, live GPT, blank target, bounded write and independent readback')
-        return
-    s.need(common.sha(img) == digest, 'frozen root image SHA-256')
-
-    def check_target():
-        gpt = s.t('piano-309-gpt-readback')
-        s.need(gpt.get('gpt_preflight') == 'ready' and
-               gpt.get('primary_sha256') == '12710135635beee2a5de1dd910924a3d2d26e09a6f368c191b879fd6b41a499b' and
-               gpt.get('backup_sha256') == '9acf222558a6766c4f1fcd09509a41cfd5be10d53f34a2a0f84a8cfe0a18c2f5',
-               'both frozen candidate GPT copies and unmounted LUN 0')
-        mapping = map_nodes(s)
-        dev, first, blocks = part_geometry(s, 'linux_rootfs')
-        lun = gpt.get('lun0', '')
-        s.need(bool(re.fullmatch(r'sd[a-z]', lun)) and mapping.get('lun0') == lun and
-               (dev, first, blocks) == (lun + '35', 102269696, total), 'candidate linux_rootfs extent')
-        return dev
-
-    dev = check_target()
-    tail_count = total - count
-    blank_tail = s.job('root-zero-tail', 'zero-sha', tail_count, B)['sha256']
-    tail = s.region_sha(dev, count, tail_count, name='root-tail-before', direct=True)
-    s.need(tail == blank_tail, 'candidate root tail is blank')
-    prefix = s.region_sha(dev, 0, count, name='root-prefix-before', direct=True)
-    if prefix != digest:
-        blank_prefix = s.job('root-zero-prefix', 'zero-sha', count, B)['sha256']
-        s.need(prefix == blank_prefix, 'candidate root prefix is blank')
-        s.need(check_target() == dev, 'root target remains the same before writing')
-        s.save(piano_309_root_attempt={'target': dev, 'first_lba': 102269696, 'blocks': count,
-                                       'source_sha256': digest, 'blank_prefix': prefix, 'blank_tail': tail})
-        if s.write(f'{img.name} -> /dev/{dev} blocks 0 through {count - 1}'):
-            name = 'piano-309-root-write'
-            if os.name == 'nt':
-                s.t('job', name, 'restore-bounded-push', 'root.img', dev, count, 18000)
-                with socket.create_connection((s.env['PIANO_MAINT_HOST'], 18000), timeout=30) as conn, img.open('rb') as source:
-                    sent = 0
-                    while chunk := source.read(MiB):
-                        conn.sendall(chunk)
-                        sent += len(chunk)
-                    conn.shutdown(socket.SHUT_WR)
-                s.need(sent == count * B, 'complete root stream sent')
-                s.wait_job(name, 4 * 3600)
-            else:
-                s.serve({'root.img': img})
-                s.job(name, 'restore-bounded', 'root.img', dev, count, s.a.http_port, timeout=4 * 3600)
-        s.need(s.region_sha(dev, 0, count, name='root-prefix-after', direct=True) == digest, 'full root readback matches source')
-    s.need(s.region_sha(dev, count, tail_count, name='root-tail-after', direct=True) == tail, 'root tail hash is unchanged')
-    s.need(check_target() == dev, 'candidate GPT and root target verified after readback')
-    s.save(piano_309_root_verified={'target': dev, 'sha256': digest, 'tail_sha256': tail})
 
 
 @step('linux-data-root', 'maintenance, WRITE linux_data from its first block (a second root image)',
@@ -1341,42 +1287,14 @@ def k273_store_grow_back(s):
     s.save(k273_store_grown=None)
 
 
-@step('snapshot-check', 'Android userspace Fastboot, read only')
-def snapshot_check(s):
-    """Require Android userspace Fastboot and snapshot-update-status=none before leaving Android for storage work."""
-    userspace = s.fastboot('getvar', 'is-userspace')
-    m = re.search(r'is-userspace:\s*(\S+)', userspace or '')
-    s.need(bool(m and m.group(1) == 'yes') if s.execute else None,
-           f'userspace Fastboot is active (got {m.group(1) if m else None})')
-    out = s.fastboot('getvar', 'snapshot-update-status')
-    m = re.search(r'snapshot-update-status:\s*(\S+)', out or '')
-    status = m.group(1) if m else None
-    s.need(status == 'none' if s.execute else None,
-           f'snapshot-update-status = none (got {status})')
-
-
-def abl_snapshot_state(s):
-    values = {}
-    for var, expected in (('is-userspace', 'no'), ('snapshot-update-status', 'none')):
-        out = s.fastboot('getvar', var)
-        m = re.search(rf'{re.escape(var)}:[ \t]*(\S+)', out or '')
-        values[var] = m.group(1) if m else None
-        s.need(values[var] == expected if s.execute else None,
-               f'{var} = {expected} (got {values[var]})')
-    return values
-
-
 @step('abl-check', 'ABL fastboot, read only')
 def abl_check(s):
-    """fastboot getvar from ABL (read only): identity, unlock, slot A state, battery and boot_a size."""
-    values = abl_snapshot_state(s)
+    """fastboot getvar from ABL (read only): identity, unlock, slot A state, battery, boot_a size."""
+    values = {}
     for var in list(ABL_EXPECT) + list(ABL_SHOW):
         out = s.fastboot('getvar', var, check=False)
         m = re.search(rf'{re.escape(var)}:\s*(\S+)', out or '')
         values[var] = m.group(1) if m else None
-        if var == 'slot-retry-count:a':
-            values[var] = int(m.group(1)) if m and re.fullmatch(r'[0-7]', m.group(1)) else None
-            s.need(values[var] is not None if s.execute else None, 'slot-retry-count:a is an integer from 0 through 7')
         if var in ABL_EXPECT and var != 'slot-successful:a':
             s.need(values[var] == ABL_EXPECT[var] if s.execute else None, f'{var} = {ABL_EXPECT[var]} (got {values[var]})')
         else:
@@ -1391,16 +1309,13 @@ def abl_check(s):
 def maint_boot(s):
     """fastboot boot the Ubuntu release's maintenance RAM image, wait for its shell, set the idle limit to 3600 s, install
     tablet.sh (sha256 checked)."""
-    s.need(MAINT_IMAGE.is_file() and common.sha(MAINT_IMAGE) == MAINT_IMAGE_SHA256, f'{MAINT_IMAGE.name} sha256 {MAINT_IMAGE_SHA256[:16]}')
+    image, tried = maint_image()
+    s.need(image is not None, f'{MAINT_IMAGE.name} sha256 {MAINT_IMAGE_SHA256[:16]}: ' +
+           (str(image) if image else 'none of ' + ', '.join(str(t) for t in tried) + ' (set PIANO_V110)'))
     if not s.wait(s.serial, True, 120):
         raise Stop('ABL fastboot not found (power + volume-down 15-20 s)')
-    s.fastboot('boot', str(MAINT_IMAGE), timeout=180)
+    s.fastboot('boot', str(image or MAINT_IMAGE), timeout=180)
     s.wait_shell()
-    maint_attach(s)
-
-
-@step('maint-attach', 'maintenance, attach host tools to an existing RAM session')
-def maint_attach(s):
     s.shell('piano-maint idle 3600')
     out = s.shell('. /etc/piano-network; echo "host_ip=$PIANO_HOST_IP"')
     if out is not None:
@@ -1408,17 +1323,6 @@ def maint_attach(s):
         s.need(m and m.group(1) == s.host_ip(), f'the tablet fetches from {m and m.group(1)}: this host\'s USB-link address')
     # tablet.sh is not on the tablet yet: its own 'fetch' cannot bring it. Bootstrap it with busybox wget + sha256sum.
     digest = common.sha(TABLET_SH)
-    if os.name == 'nt':
-        s.shell('mkdir -p /run/pp && (busybox timeout 30 busybox nc -l -p 18000 </dev/null >/run/pp/tablet.sh & echo script_receiver=$!)')
-        if s.execute:
-            with socket.create_connection((s.env['PIANO_MAINT_HOST'], 18000), timeout=10) as conn:
-                conn.sendall(TABLET_SH.read_bytes())
-                conn.shutdown(socket.SHUT_WR)
-        out = s.shell('sha256sum /run/pp/tablet.sh')
-        if out is not None:
-            s.need(digest in out, 'uploaded RAM maintenance script SHA-256')
-        s.shell('piano-maint status')
-        return
     s.serve({'tablet.sh': TABLET_SH})
     out = s.shell(f'mkdir -p /run/pp && rm -f /run/pp/tablet.sh && wget -q -O /run/pp/tablet.sh http://{s.host_ip()}:{s.a.http_port}/tablet.sh '
                   f'&& sha256sum /run/pp/tablet.sh', 300)
@@ -1436,15 +1340,14 @@ def map_step(s):
     r = map_nodes(s)
     # the ESP these checks are for: --esp's record, else the one this install last wrote (after rootfs-clear a map without --esp
     # must not judge linux_rootfs by the 27.0.1 rules)
-    target = s.esp or s.esp_by_sha(s.state.get('esp_sha256'))
+    target = s.esp or s.esp_by_sha(s.esp_state()[1] or s.ledger_esp()[1])
     elsewhere = esp_store(target)
     if r:
         s.need(r['lun0_block_size'] == '4096' and r['lun0_bytes'] == str(LUN0_BYTES), f'LUN 0 {r["lun0"]}: 4096-byte blocks, {LUN0_BYTES} bytes')
         s.need(r['mounted'] == '0', 'nothing from UFS is mounted')
         start, size = (int(x) for x in r['linux_rootfs'].split()[1:]) if r['linux_rootfs'] != 'none' else (None, None)
-        windows = {common.ROOTFS_FIRST: (common.ROOTFS_LAST - common.ROOTFS_FIRST + 1, common.ROOTFS_NEW_LAST - common.ROOTFS_FIRST + 1),
-                   common.CANDIDATE_ROOTFS_FIRST: (common.CANDIDATE_ROOTFS_LAST - common.CANDIDATE_ROOTFS_FIRST + 1,)}
-        geometry = start is not None and start % 8 == 0 and size % 8 == 0 and size // 8 in windows.get(start // 8, ())
+        geometry = start == common.ROOTFS_FIRST * 8 and size in ((common.ROOTFS_LAST - common.ROOTFS_FIRST + 1) * 8,
+                                                                 (common.ROOTFS_NEW_LAST - common.ROOTFS_FIRST + 1) * 8)
         if elsewhere:
             s.log(f'  info  linux_rootfs {r["linux_rootfs"]} (512-byte units): no entry of {target["image"]} uses it')
         else:
@@ -1455,21 +1358,23 @@ def map_step(s):
     head, tail = s.region_sha(lun0, 0, 6), s.region_sha(lun0, TAIL_LBA, 5)
     new = (s.gpt or {}).get('gpt-head.bin', {}).get('sha256'), (s.gpt or {}).get('gpt-tail.bin', {}).get('sha256')
     if s.execute:
-        candidate = (common.CANDIDATE_GPT_PRIMARY_SHA256, common.CANDIDATE_GPT_BACKUP_SHA256)
-        state = ('old' if (head, tail) == (common.GPT_PRIMARY_SHA256, common.GPT_BACKUP_SHA256) else
-                 'candidate' if (head, tail) == candidate else 'new' if (head, tail) == new else 'unknown')
-        s.need(state != 'unknown', f'GPT copies are the known old (CRITICAL-BACKUP), candidate or new (gpt.json) tables: {state}')
+        state = 'old' if (head, tail) == (common.GPT_PRIMARY_SHA256, common.GPT_BACKUP_SHA256) else 'new' if (head, tail) == new else 'unknown'
+        s.need(state != 'unknown', f'GPT copies are the known old (CRITICAL-BACKUP) or the new (gpt.json) tables: {state}')
         s.save(gpt_state=state, gpt_head=head, gpt_tail=tail)
     else:
         s.log(f'  check GPT head/tail = {common.GPT_PRIMARY_SHA256[:16]}/{common.GPT_BACKUP_SHA256[:16]} (old) or gpt.json\'s (new)')
     signed = ((s.boot or {}).get('signed') or {}).get(s.a.boot_image, {}).get('sha256')
+    pair = {}
     for key, digest in (('boot_a', common.BOOT_A_SHA256), ('vendor_boot_a', common.VENDOR_BOOT_A_SHA256),
                         ('init_boot_a', common.INIT_BOOT_A_SHA256), ('boot_b', None)):
         got = s.region_sha(s.nodes[key], 0, s.sizes[key] // MiB, MiB, name=f'sha-{key}')
         if key in ('vendor_boot_a', 'init_boot_a'):
-            stock = getattr(common, 'STOCK_' + key.upper() + '_SHA256', None)
-            s.need(got in (digest, stock, s.state.get(f'{key}_sha256')) if s.execute else None,
-                   f'{key} = slot A\'s stock or retained image ({got[:16] if got else "-"})')
+            pair[key] = got
+            if key == 'init_boot_a':
+                need_known_pair(s, pair['vendor_boot_a'], got, 'map')
+        elif key == 'boot_a' and s.execute and got == common.ANDROID_BOOT_A_SHA256:
+            s.need(False, f'boot_a holds stock Android ({got[:16]}): switch to macOS first (piano-switch, macos-set-v5 or '
+                          '--only boot with macos-set-v5a), then run this session')
         elif not s.execute:
             s.log(f'  info  {key} sha256 is recorded ({"Ubuntu 13-boot_a " + digest[:16] + " or the macOS image" if digest else "never written"})')
         elif key == 'boot_a':
@@ -1529,7 +1434,7 @@ def map_step(s):
     old = s.state.get('store_old') or {}
     if elsewhere:
         s.save(store_matches_esp=False)
-        ok, text = bound_store(s, target, fresh_ok=True)
+        ok, text = bound_store(s, target)
         s.log(('  check ' if ok is None else '  ok    ' if ok else '  WARN  ') + text +
               ('' if ok is not False else '; write_esp refuses this ESP'))
         current = s.state.get('store_new') or {}
@@ -1718,7 +1623,7 @@ def write_esp(s, image_name):
     if r:
         s.need(r['esp'] != 'none' and r['esp'].split()[1:] == [str(common.ESP_FIRST * 8), str(common.ESP_BLOCKS * 8)], f'esp is {r["esp"]}')
     esp = s.nodes.get('esp') or 'sda37'
-    if s.state.get('esp_written'):
+    if s.esp_state()[0]:
         s.require_backup('linux_rootfs-tail-esp')   # the region holds an ESP image of this install; the backup is of before
     else:
         now = s.region_sha(lun0, common.ESP_FIRST, common.ESP_BLOCKS, name='esp-region-sha')
@@ -1747,9 +1652,8 @@ def write_esp(s, image_name):
     s.need(got == record['sha256'] and got2 == record['sha256'] if s.execute else None,
            f'ESP read back through /dev/{esp} and /dev/{lun0}: {got} / {got2} = {record["sha256"][:16]}')
     s.sim['esp'] = record['sha256']
-    s.sim['esp_first_lba'] = first
     if s.execute:
-        s.save(esp_written=record['image'], esp_sha256=record['sha256'])
+        s.save_esp(record['image'], record['sha256'])
         # The installed ESP's seed, which build-ram-images.py and build-esp.py compare theirs with (common.installed_seed).
         common.write_json(OUT / 'installed.json', {'image': record['image'], 'sha256': record['sha256'], 'seed': record['seed'],
                                                    'inputs': record.get('inputs'), 'written': time.strftime('%Y-%m-%d %H:%M:%S')})
@@ -1834,66 +1738,12 @@ def esp_delta(s):
     s.need(got == record['sha256'] and got2 == record['sha256'] if s.execute else None,
            f'ESP read back through /dev/{esp} and /dev/{s.nodes["lun0"]}: {got} / {got2} = {record["sha256"][:16]}')
     s.sim['esp'] = record['sha256']
-    s.sim['esp_first_lba'] = first
     if s.execute:
-        s.save(esp_written=record['image'], esp_sha256=record['sha256'])
+        s.save_esp(record['image'], record['sha256'])
         common.write_json(OUT / 'installed.json', {'image': record['image'], 'sha256': record['sha256'], 'seed': record['seed'],
                                                    'inputs': record.get('inputs'), 'written': time.strftime('%Y-%m-%d %H:%M:%S'),
                                                    'by': f'esp-delta over {old_name}'})
 
-
-@step('esp-candidate', 'maintenance, WRITE the candidate layout\'s esp partition at the build record\'s LBA',
-      writes='LUN 0 partition esp as mapped, 1 GiB from the record\'s first LBA')
-def esp_candidate(s):
-    """The ESP image (--esp) onto the candidate GPT's own esp partition: the build record's first LBA and block count must equal
-    the live map's esp partition. Reads the whole target first (its SHA-256 is kept as the pre-write state, no NAS copy is made),
-    then writes and reads the whole window back through both the partition and LUN 0."""
-    record = s.esp_record(s.a.esp)
-    if not record:
-        raise Stop(f'{s.a.esp}: no build record in out/persistent (tooling/persist/build-esp.py)')
-    placement = check_esp_placement(record, record.get('image', s.a.esp))
-    first, blocks = placement['first_lba'], placement['blocks']
-    r = map_nodes(s)
-    dev = s.nodes.get('esp')
-    start, size = s.starts.get('esp'), (s.sizes.get('esp') or 0) // B
-    s.need(bool(dev) and start == first and size == blocks if s.execute else None,
-           f'esp is /dev/{dev} at LBA {start} with {size} blocks (the record says LBA {first}, {blocks})')
-    if s.execute and (s.state.get('gpt_state') not in ('candidate', 'new')):
-        raise Stop(f'the live GPT is {s.state.get("gpt_state")}, not the candidate table this ESP is placed for')
-    if r:
-        s.need(r['lun0_block_size'] == '4096' and r['lun0_bytes'] == str(LUN0_BYTES), f'LUN 0 {r["lun0"]}: 4096-byte blocks')
-        s.need(r['mounted'] == '0', 'nothing from UFS is mounted')
-    before = s.region_sha(s.nodes['lun0'], first, blocks, name='esp-before')
-    s.log(f'  info  ESP target LBA {first}-{first + blocks - 1}: pre-write sha256 {before}' if before else
-          f'  info  ESP target LBA {first}-{first + blocks - 1}: pre-write region read')
-    window = s.esp_window(record)
-    if window and window > common.OLD_DARWINBOOT_WINDOW_MAX:
-        s.pair(s.tablet_boot_a(), record, f'{record["image"]} asks for {window >> 20} MiB')
-    else:
-        s.log(f'  info  {record["image"]}: RAM window {window >> 20 if window else "-"} MiB, which every DarwinBoot takes')
-    s.fetch(record['image'], OUT / record['image'], record['sha256'])
-    if s.write(f'{record["image"]} (default {record["default"]}, profile {record.get("profile")}) -> /dev/{dev} '
-               f'(LUN 0 esp, LBA {first}, 1 GiB)'):
-        s.job('esp-candidate-write', 'write', record['image'], dev, 0, MiB, timeout=1800)
-    got = s.region_sha(dev, 0, 1024, MiB, name='esp-candidate-check')
-    got2 = s.region_sha(s.nodes['lun0'], first * B // MiB, 1024, MiB, name='esp-candidate-check-lun0')
-    s.need(got == record['sha256'] and got2 == record['sha256'] if s.execute else None,
-           f'ESP read back through /dev/{dev} and /dev/{s.nodes["lun0"]}: {got} / {got2} = {record["sha256"][:16]}')
-    s.sim['esp'] = record['sha256']
-    s.sim['esp_first_lba'] = first
-    if s.execute:
-        s.save(esp_written=record['image'], esp_sha256=record['sha256'], esp_before=before, esp_first_lba=first)
-        common.write_json(OUT / 'installed.json', {'image': record['image'], 'sha256': record['sha256'], 'seed': record['seed'],
-                                                   'inputs': record.get('inputs'), 'layout': 'candidate',
-                                                   'first_lba': first, 'written': time.strftime('%Y-%m-%d %H:%M:%S')})
-
-
-@rollback('esp-candidate')
-def esp_candidate_back(s):
-    """No byte copy exists (the owner's no-backup instruction): this stops with the recovery path instead of pretending to restore
-    the old 1 GiB. Rebuild the ESP from the recorded inputs and write it again, or roll back boot-a so the table never runs."""
-    raise Stop('esp-candidate: the pre-write sha256 is in the session state, but no byte copy was kept; rebuild the ESP from its '
-               'recorded inputs and rewrite it (WRITE-PLAN.md, Rollback), and roll back boot-a first so no table boots it')
 
 @step('esp', 'maintenance, WRITE partition 37 (test-phase ESP)', writes='LUN 0 LBA 71527424-71789567')
 def esp_step(s):
@@ -1924,12 +1774,12 @@ def esp_back(s):
     s.sim['esp'] = entry.get('sha256')
     if s.execute:
         if record:   # an ESP of a build record (an earlier install's): the installed seed is its seed again
-            s.save(esp_written=record['image'], esp_sha256=record['sha256'])
+            s.save_esp(record['image'], record['sha256'])
             common.write_json(OUT / 'installed.json', {'image': record['image'], 'sha256': record['sha256'], 'seed': record['seed'],
                                                        'inputs': record.get('inputs'), 'written': time.strftime('%Y-%m-%d %H:%M:%S'),
                                                        'by': 'rollback esp'})
         else:
-            s.save(esp_written=None, esp_sha256=None)
+            s.save_esp(None, None)
             (OUT / 'installed.json').unlink(missing_ok=True)   # the region holds what it held before this install
 
 
@@ -1940,8 +1790,7 @@ ROLLBACKS['esp-final'] = ROLLBACKS['esp']
 @step('check', 'maintenance, read only')
 def check_step(s):
     """Before leaving: root manifest block unchanged, vendor_boot_a/init_boot_a/boot_b unchanged, boot_a the old or the new
-    image, the GPT the tables map found (new or candidate) and sgdisk clean, the ESP the image written at its recorded LBA, the
-    store header in place."""
+    image, the GPT the new tables and sgdisk clean, the ESP the image written, the store header in place."""
     lun0, rootfs = s.nodes['lun0'], s.nodes['rootfs']
     m = s.region_sha(rootfs, 0, 1)
     s.need(m == s.state.get('manifest_sha256') if s.execute else None, 'root manifest block unchanged')
@@ -1949,20 +1798,24 @@ def check_step(s):
         got = s.region_sha(s.nodes[key], 0, s.sizes[key] // MiB, MiB, name=f'sha-{key}')
         s.need(got == s.state.get(f'{key}_sha256') if s.execute else None, f'{key} unchanged')
     got = s.region_sha(s.nodes['boot_a'], 0, s.sizes['boot_a'] // MiB, MiB, name='sha-boot_a')
+    if s.execute and got == common.ANDROID_BOOT_A_SHA256:
+        s.need(False, f'boot_a holds stock Android ({got[:16]}): this session is for macOS; switch to macOS first')
     s.need(got in (s.state.get('boot_a_sha256'), s.state.get('boot_a_written')) if s.execute else None, f'boot_a as expected ({got})')
     boot_now = got if s.execute else s.tablet_boot_a()
     head, tail = s.region_sha(lun0, 0, 6), s.region_sha(lun0, TAIL_LBA, 5)
-    new_pair = ((s.gpt or {}).get('gpt-head.bin', {}).get('sha256'), (s.gpt or {}).get('gpt-tail.bin', {}).get('sha256'))
-    known = {new_pair: 'new', (common.CANDIDATE_GPT_PRIMARY_SHA256, common.CANDIDATE_GPT_BACKUP_SHA256): 'candidate'}
-    s.need(known.get((head, tail)) == s.state.get('gpt_state') if s.execute else None,
-           f'GPT = the {s.state.get("gpt_state", "known")} tables')
+    s.need((head, tail) == (s.gpt['gpt-head.bin']['sha256'], s.gpt['gpt-tail.bin']['sha256']) if s.execute else None, 'GPT = the new tables')
     v = s.shell(f'sgdisk -v /dev/{lun0}')
     s.need('No problems found' in v if v is not None else None, 'sgdisk -v clean')
     esp_now = s.tablet_esp() if not s.execute else None
-    if s.state.get('esp_sha256') or not s.execute:
-        first = s.state.get('esp_first_lba') or s.sim.get('esp_first_lba') or common.ESP_FIRST
-        got = s.region_sha(lun0, first * B // MiB, 1024, MiB, name='esp-check-lun0')
-        s.need(got == s.state.get('esp_sha256') if s.execute else None, f'ESP = {s.state.get("esp_written", "the image written")}')
+    want, what, ledger = s.esp_expected()
+    old_name, old_sha = s.state.get('esp_written'), s.state.get('esp_sha256')
+    if (old_name or old_sha) and not s.esp_state()[1]:
+        s.log(f'  info  the session state names the ESP {old_name or old_sha[:16]} of an older session: not used')
+    if ledger:
+        s.need(ledger[1] == want, f'installed.json ({ledger[0]}, {ledger[1][:16]}) = the ESP this backup set read ({want[:16]})')
+    if want or not s.execute:
+        got = s.region_sha(lun0, common.ESP_FIRST * B // MiB, 1024, MiB, name='esp-check-lun0')
+        s.need(got == want if s.execute else None, f'ESP = {what}')
         esp_now = got if s.execute else esp_now
     record_now = s.esp_by_sha(esp_now) if esp_now else None
     s.pair(boot_now, record_now, 'the pair on the tablet')
@@ -1993,7 +1846,7 @@ def maint_exit(s):
     """piano-maint fastboot: the maintenance image reboots into ABL fastboot."""
     s.log('  tablet# sync; piano-maint fastboot')
     if s.execute:
-        subprocess.run([sys.executable, str(MAINT_SHELL), 'sync; piano-maint fastboot', '20'], capture_output=True, text=True, timeout=60)
+        subprocess.run(['python3', str(MAINT_SHELL), 'sync; piano-maint fastboot', '20'], capture_output=True, text=True, timeout=60)
     if not s.wait(s.serial, True, 120):
         raise Stop('not back in ABL fastboot')
 
@@ -2121,7 +1974,7 @@ def ram_boot_a(s):
     s.need(bool(entry) and image.is_file() and common.sha(image) == entry['sha256'],
            f'{image.name} is a signed image of {entry["record"] if entry else "no boot record"}' +
            (f' (sha256 {entry["sha256"][:16]}, DarwinBoot window up to {entry["fd_bound"] >> 20} MiB)' if entry else ''))
-    esp = s.esp_by_sha(s.state.get('esp_sha256')) or s.esp_record(s.state.get('esp_written') or s.a.esp)
+    esp = s.esp_by_sha(s.esp_state()[1] or s.ledger_esp()[1]) or s.esp_record(s.esp_state()[0] or s.a.esp)
     window = s.esp_window(esp)
     s.need(bool(entry) and (window or 0) <= entry['fd_bound'],
            f'the ESP on the tablet ({esp["image"] if esp else "unknown"}, RAM window {window >> 20 if window else "-"} MiB) boots with this FD')
@@ -2137,6 +1990,17 @@ def ram_boot_a(s):
     s.log(f'  check the USB console (usb-console.py --capture 400, started before this step): "NativeRamBlock: RAM window ... '
           f'({window >> 20 if window else 256} MiB)", "Data store state 2 ... first LBA {store_new(s)}", '
           '"piano-boot-guard: healthy after 180 s, restart reason normal"; then usb-console.py --send "reset fastboot" --capture 5')
+
+
+def need_known_pair(s, vendor_boot, init_boot, what):
+    """vendor_boot_a + init_boot_a must be one known slot-A pair (common.slot_a_pairs: the Ubuntu-era pair of macos-set-v5, or
+    Android's with the stock or the Magisk init_boot of the T-16 switcher's resting state)."""
+    name = common.slot_a_pair_name(vendor_boot, init_boot) if s.execute else None
+    known = ', '.join(f'{v[:8]}+{i[:8]} {n}' for (v, i), n in common.slot_a_pairs().items())
+    s.need(name is not None if s.execute else None,
+           f'{what}: vendor_boot_a/init_boot_a {(vendor_boot or "?")[:16]}/{(init_boot or "?")[:16]} = a known slot-A pair '
+           f'({name or "UNKNOWN"}; known: {known})')
+    return name
 
 
 def check_boot_image_pair(s, sha, what):
@@ -2173,13 +2037,12 @@ def boot_a_step(s):
     check_boot_image_pair(s, signed or f'planned:{s.a.boot_image}', f'{image.name} with the ESP on the tablet')
     boot_a = s.nodes['boot_a']
     now = s.region_sha(boot_a, 0, s.sizes['boot_a'] // MiB, MiB, name='sha-boot_a')
+    if s.execute and now == common.ANDROID_BOOT_A_SHA256:
+        s.need(False, f'boot_a holds stock Android ({now[:16]}): switch to macOS first (piano-switch), then run boot-a')
+    got_pair = [s.region_sha(s.nodes[key], 0, s.sizes[key] // MiB, MiB, name=f'sha-{key}') for key in ('vendor_boot_a', 'init_boot_a')]
+    need_known_pair(s, got_pair[0], got_pair[1], 'boot-a (ABL pairs it with boot_a)')
     s.require_backup('boot_a', now if s.execute else None)
     s.require_backup('boot_b')
-    for key, digest in (('vendor_boot_a', common.VENDOR_BOOT_A_SHA256), ('init_boot_a', common.INIT_BOOT_A_SHA256)):
-        got = s.region_sha(s.nodes[key], 0, s.sizes[key] // MiB, MiB, name=f'sha-{key}')
-        stock = getattr(common, 'STOCK_' + key.upper() + '_SHA256', None)
-        s.need(got in (digest, stock, s.state.get(f'{key}_sha256')) if s.execute else None,
-               f'{key} is slot A\'s stock or retained image ({got[:16] if got else "-"}) (ABL pairs it with boot_a)')
     s.fetch('boot.img', image, signed or '<signed sha256>')
     if s.write(f'{image.name} -> /dev/{boot_a} ({common.BOOT_PARTITION_BYTES} bytes)'):
         s.t('write', 'boot.img', boot_a, 0, MiB, timeout=600)
@@ -2213,11 +2076,159 @@ def esp_final(s):
     write_esp(s, s.a.esp_final)
 
 
+def gpt_set_attr_bit(blob, blob_lba, header_lba, number, bit, bs=B):
+    """Return a copy of blob (bs-byte blocks starting at LBA blob_lba) with attribute bit `bit` set in partition entry `number`
+    (1-based) of the GPT whose header is at LBA header_lba, and that header's entry-array CRC and header CRC recomputed. Nothing else
+    changes: no protective MBR, no other header field, no other entry (sgdisk -A rewrites the protective MBR on save, 2026-11-20)."""
+    import zlib
+    out = bytearray(blob)
+    h = (header_lba - blob_lba) * bs
+    if out[h:h + 8] != b'EFI PART':
+        raise Stop(f'no GPT header at LBA {header_lba}')
+    hsize, = struct.unpack_from('<I', out, h + 12)
+    entries_lba, count, esize = struct.unpack_from('<QII', out, h + 72)
+    e = (entries_lba - blob_lba) * bs
+    if not (0 < number <= count) or e < 0 or e + count * esize > len(out):
+        raise Stop(f'entry {number} or the entry array (LBA {entries_lba}, {count} x {esize}) is outside the copy')
+    a = e + (number - 1) * esize + 48
+    attrs, = struct.unpack_from('<Q', out, a)
+    struct.pack_into('<Q', out, a, attrs | (1 << bit))
+    struct.pack_into('<I', out, h + 88, zlib.crc32(bytes(out[e:e + count * esize])) & 0xffffffff)
+    struct.pack_into('<I', out, h + 16, 0)
+    struct.pack_into('<I', out, h + 16, zlib.crc32(bytes(out[h:h + hsize])) & 0xffffffff)
+    return bytes(out)
+
+
+def gpt_backup_header_with(header_block, entries):
+    """The backup GPT header block with its entry-array CRC set from `entries` and its header CRC recomputed (nothing else)."""
+    import zlib
+    out = bytearray(header_block)
+    if out[:8] != b'EFI PART':
+        raise Stop('no backup GPT header')
+    hsize, = struct.unpack_from('<I', out, 12)
+    struct.pack_into('<I', out, 88, zlib.crc32(bytes(entries)) & 0xffffffff)
+    struct.pack_into('<I', out, 16, 0)
+    struct.pack_into('<I', out, 16, zlib.crc32(bytes(out[:hsize])) & 0xffffffff)
+    return bytes(out)
+
+
+def lun4_layout(s, number):
+    """boot_a's LUN: disk node, size in blocks, and the backup copy's layout read from the verified backups (the backup header is the
+    last LBA; its entry array can start BEFORE the 5 backed-up LBAs: on piano LUN 4 it is at total-7, 3 blocks)."""
+    old_p = (s.dir / 'lun4-gpt-primary.img').read_bytes()
+    old_b = (s.dir / 'lun4-gpt-backup.img').read_bytes()
+    bh = old_b[4 * B:5 * B]
+    ph = old_p[B:2 * B]
+    pe, pc, ps = struct.unpack_from('<QII', ph, 72)
+    my, alt = struct.unpack_from('<QQ', bh, 24)
+    be, bc, bs_ = struct.unpack_from('<QII', bh, 72)
+    return old_p, old_b, bh, (pe, pc, ps), (my, alt), (be, bc, bs_)
+
+
+@step('slot-success-crc', 'maintenance, WRITE LUN 4 GPT (boot_a attribute bit 54 and the two CRCs only, both copies)',
+      writes='LUN 4 GPT: backup entry array + backup header, then primary header + entries (bit 54 of boot_a and CRCs only)')
+def slot_success_crc(s):
+    """Like slot-success, without sgdisk (sgdisk -A rewrites the protective MBR and its rollback misses the backup entry array, which
+    on LUN 4 starts 2 blocks before the 5 backed-up LBAs; 2026-11-20). From the verified backups: bit 54 of boot_a's entry set in the
+    primary entry array, its CRC and the primary header CRC recomputed; the backup entry array = the new primary entries, the backup
+    header's two CRCs recomputed. Written backup entries, backup header, then primary (LBA 1-5), each read back against the computed
+    bytes; the protective MBR (LBA 0) is never written. Never set_active."""
+    if s.execute and (s.state.get('abl') or {}).get('slot-successful:a') == 'yes':
+        s.log('  info  slot A is already marked successful: nothing to do')
+        return
+    boot_a = s.nodes['boot_a']
+    disk = re.sub(r'\d+$', '', boot_a)
+    part = s.shell(f'cat /sys/class/block/{boot_a}/partition')
+    number = int(part.strip().splitlines()[-1]) if part else 0
+    s.shell(f'sgdisk -i {number or "<n>"} /dev/{disk}')
+    s.backup('lun4-gpt-primary', disk, 0, 6, B, f'{disk} LBA 0-5 (boot_a\'s LUN, primary GPT)')
+    blocks = s.shell(f'blockdev --getsize64 /dev/{disk}')
+    total = int(blocks.strip().splitlines()[-1]) // B if blocks else 0
+    s.backup('lun4-gpt-backup', disk, total - 5 if total else '<last-5>', 5, B, f'{disk} last 5 LBAs (backup GPT)')
+    if not s.execute:
+        s.log(f'  WRITE computed: backup entries (from its header), backup header (last LBA), primary LBA 1-5; bit 54 of entry <n> + CRCs')
+        return
+    old_p, old_b, bh, (pe, pc, ps), (my, alt), (be, bc, bs_) = lun4_layout(s, number)
+    nblk = (pc * ps + B - 1) // B
+    s.need(pe == 2 and (pc, ps) == (bc, bs_) and my == total - 1 and alt == 1 and be + nblk <= total - 1 and 0 < number <= pc,
+           f'LUN 4 GPT layout: primary entries LBA {pe}, backup header LBA {my} of {total}, backup entries LBA {be} ({nblk} blocks)')
+    s.backup('lun4-gpt-backup-entries', disk, be, nblk, B, f'{disk} LBA {be}+{nblk} (backup entry array, as found)')
+    new_p = gpt_set_attr_bit(old_p, 0, 1, number, 54)
+    entries = new_p[pe * B:pe * B + pc * ps]
+    index = number - 1
+    allowed_p = set(range(B + 16, B + 20)) | set(range(B + 88, B + 92)) | set(range(2 * B + index * 128 + 48, 2 * B + index * 128 + 56))
+    diff_p = {i for i in range(len(old_p)) if old_p[i] != new_p[i]}
+    s.need(diff_p and diff_p <= allowed_p, f'computed primary: {len(diff_p)} bytes differ, all in entry {number}\'s attributes and the '
+           f'two CRCs (protective MBR untouched)')
+    new_bh = gpt_backup_header_with(bh, entries)
+    new_be = new_p[pe * B:(pe + nblk) * B]
+    pieces = (('lun4-gpt-backup-entries-bit54', new_be, be), ('lun4-gpt-backup-header-bit54', new_bh, total - 1),
+              ('lun4-gpt-primary-bit54', new_p[B:], 1))
+    for key, data, seek in pieces:
+        path = s.dir / f'{key}.img'
+        path.write_bytes(data)
+        digest = hashlib.sha256(data).hexdigest()
+        s.serve({f'{key}.img': path})
+        if s.write(f'{key} -> /dev/{disk} at block {seek} of {B} bytes ({len(data) // B} blocks)'):
+            s.job(f'restore-{key}', 'restore', f'{key}.img', disk, seek, B, s.a.http_port, timeout=3600)
+        got = s.region_sha(disk, seek, len(data) // B, B, name=f'check-{key}')
+        s.need(got == digest, f'{key} written: read back {got[:16]} = computed {digest[:16]}')
+    s.save(slot_success_written=True)
+    v = s.shell(f'partx -u /dev/{disk}; sgdisk -A {number}:show /dev/{disk}; sgdisk -v /dev/{disk}')
+    s.need('No problems found' in (v or '') and 'ERROR' not in (v or '') and "don't match" not in (v or ''),
+           'sgdisk -v: both headers and both partition tables OK')
+    attrs = int.from_bytes(new_p[2 * B + index * 128 + 48:2 * B + index * 128 + 56], 'little')
+    s.need(attrs >> 54 & 1 == 1, f'boot_a attributes {attrs:#x}: bit 54 set')
+
+
+@step('lun4-backup-entries-repair', 'maintenance, WRITE LUN 4 backup GPT entry array (= the verified primary entries)',
+      writes='LUN 4 backup entry array (3 blocks before the backed-up 5)')
+def lun4_backup_entries_repair(s):
+    """Repair after the 2026-11-20 13:5x slot-success rollback: sgdisk had written the backup entry array at LBA total-7..total-5, the
+    rollback restored only total-5..total-1, so the backup table no longer matches its header CRC. The original backup entries equal
+    the primary entries (the backed-up backup header's entry CRC = crc32(primary entries)): write the primary entry array from the
+    verified primary backup over the backup entry array (after a backup of what is there now), read back, sgdisk -v clean."""
+    boot_a = s.nodes['boot_a']
+    disk = re.sub(r'\d+$', '', boot_a)
+    blocks = s.shell(f'blockdev --getsize64 /dev/{disk}')
+    total = int(blocks.strip().splitlines()[-1]) // B if blocks else 0
+    s.require_backup('lun4-gpt-primary')
+    s.require_backup('lun4-gpt-backup')
+    if not s.execute:
+        s.log('  WRITE primary entries -> backup entry array LBA (from the backup header)')
+        return
+    import zlib
+    old_p, old_b, bh, (pe, pc, ps), (my, alt), (be, bc, bs_) = lun4_layout(s, 0)
+    nblk = (pc * ps + B - 1) // B
+    entries = old_p[pe * B:pe * B + pc * ps]
+    bcrc, = struct.unpack_from('<I', bh, 88)
+    s.need(pe == 2 and (pc, ps) == (bc, bs_) and my == total - 1 and alt == 1 and be + nblk <= total - 1,
+           f'LUN 4 GPT layout: backup header LBA {my} of {total}, backup entries LBA {be} ({nblk} blocks)')
+    s.need(bcrc == zlib.crc32(entries) & 0xffffffff, f'backup header entry CRC {bcrc:#x} = crc32(primary entries): the original backup '
+           f'entries are the primary entries')
+    s.backup('lun4-gpt-backup-entries-before-repair', disk, be, nblk, B, f'{disk} LBA {be}+{nblk} (backup entry array before repair)')
+    data = old_p[pe * B:(pe + nblk) * B]
+    key = 'lun4-gpt-backup-entries-repair'
+    path = s.dir / f'{key}.img'
+    path.write_bytes(data)
+    digest = hashlib.sha256(data).hexdigest()
+    s.serve({f'{key}.img': path})
+    if s.write(f'{key} -> /dev/{disk} at block {be} of {B} bytes ({nblk} blocks)'):
+        s.job(f'restore-{key}', 'restore', f'{key}.img', disk, be, B, s.a.http_port, timeout=3600)
+    got = s.region_sha(disk, be, nblk, B, name=f'check-{key}')
+    s.need(got == digest, f'{key} written: read back {got[:16]} = primary entries {digest[:16]}')
+    v = s.shell(f'partx -u /dev/{disk}; sgdisk -v /dev/{disk}')
+    s.need('No problems found' in (v or '') and 'ERROR' not in (v or '') and "don't match" not in (v or ''),
+           'sgdisk -v: both headers and both partition tables OK')
+
+
 @step('slot-success', 'maintenance, WRITE LUN 4 GPT (boot_a attribute bit 54 only)', writes='LUN 4 GPT entry of boot_a')
 def slot_success(s):
     """Only when abl-check found slot-successful:a = no: set bit 54 of boot_a's GPT entry (piano-slot-success's single-bit
     write), after verified NAS backups of both GPT copies of boot_a's LUN. Read back: the new primary copy may differ from its
     backup only in that entry's attribute field and the two CRCs. Never set_active."""
+    raise Stop('slot-success (sgdisk -A) is retired: sgdisk rewrites LUN 4\'s protective MBR and its rollback misses the backup entry '
+               'array (2026-11-20); use slot-success-crc')
     if s.execute and (s.state.get('abl') or {}).get('slot-successful:a') == 'yes':
         s.log('  info  slot A is already marked successful: nothing to do')
         return
@@ -2258,21 +2269,27 @@ def slot_back(s):
     s.shell(f'partx -u /dev/{disk}; sgdisk -v /dev/{disk}')
 
 
+@rollback('slot-success-crc')
+def slot_crc_back(s):
+    """LUN 4's GPT as backed up by slot-success-crc: the backup entry array (lun4-gpt-backup-entries, before the 5 LBAs), the backup
+    copy's 5 LBAs (lun4-gpt-backup), then the primary (lun4-gpt-primary); each read back."""
+    map_nodes(s)
+    disk = re.sub(r'\d+$', '', s.nodes['boot_a'])
+    for key in ('lun4-gpt-backup-entries', 'lun4-gpt-backup'):
+        e = s.require_backup(key)
+        s.restore(key, disk, (e or {}).get('skip', '<lba>'), B)
+    s.restore('lun4-gpt-primary', disk, 0, B)
+    s.shell(f'partx -u /dev/{disk}; sgdisk -v /dev/{disk}')
+
+
 @step('abl-final', 'ABL fastboot, read only')
 def abl_final(s):
-    """Before reboot: slot A current/successful/bootable, and retry count unchanged."""
-    abl_snapshot_state(s)
+    """Before the first boot from boot_a: slot A current, successful and bootable."""
     for var, want in (('current-slot', 'a'), ('slot-successful:a', 'yes'), ('slot-unbootable:a', 'no')):
         out = s.fastboot('getvar', var, check=False)
         m = re.search(rf'{re.escape(var)}:\s*(\S+)', out or '')
         s.need((m and m.group(1)) == want if s.execute else None, f'{var} = {want}')
-    var = 'slot-retry-count:a'
-    out = s.fastboot('getvar', var, check=False)
-    m = re.search(rf'{re.escape(var)}:\s*(\S+)', out or '')
-    count = int(m.group(1)) if m and re.fullmatch(r'[0-7]', m.group(1)) else None
-    s.need(count is not None if s.execute else None, f'{var} is an integer from 0 through 7 (got {m.group(1) if m else None})')
-    before = (s.state.get('abl') or {}).get(var)
-    s.need(count == before if s.execute else None, f'{var} unchanged since abl-check ({before} -> {count})')
+    s.fastboot('getvar', 'slot-retry-count:a', check=False)
 
 
 @step('reboot', 'ABL fastboot -> slot A (macOS)')

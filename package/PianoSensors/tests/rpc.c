@@ -525,9 +525,12 @@ static uint32_t start_log = 2, start_deadline;
 
 static void start(int pack)
 {
-    static const SsrConfig base = {0, ARENA_PA, SSR_ARENA_BYTES, bounce, PROCESS, SSR_CONTEXT_BANK, 2, 0, 0, 0};
+    static const SsrConfig base = {0, ARENA_PA, SSR_ARENA_BYTES, bounce, PROCESS, SSR_CONTEXT_BANK, 2, 0, 0, 0, 0};
+    static uint8_t *shadow;                              /* PianoSensors: the calls are served in normal memory */
+    if (!shadow) shadow = malloc(SSR_SHADOW_BYTES);
     SsrConfig cfg = base;
     cfg.arena = arena;
+    cfg.shadow = shadow;
     cfg.bank = expected_bank;
     cfg.log = start_log;
     cfg.deadline_ms = start_deadline;

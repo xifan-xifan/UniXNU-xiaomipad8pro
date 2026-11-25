@@ -14,11 +14,14 @@ struct BoardArgs {
   uint32_t i2cSwap;     // 0: SDA on gpio64 (the DT's lane order), 1: on gpio65, 2: gpio64, and gpio65 once when no amplifier answers
   uint32_t i2cHalfUs;   // the software bus's half bit time (5: about 80 kHz)
   uint32_t smmu;        // 0: the SMMU is left alone (the streams must bypass already)
+  int micRoute;        // level 10: initial signed capture route
   uint32_t micGain;     // level 10: the VA decimators' gain (AudioVa.h: 0..124, 84 = 0 dB; 0 means the default 124)
 };
 
 // Fills the hardware half of ops (what the level needs; the rest stays null and the session reports it).
 void boardSetup(AudioSessionOps &ops, const BoardArgs &args);
+// Live owner, at a released input boundary. This sets policy only, with no MMIO.
+void boardSetMicRoute(int route, uint32_t generation);
 // After the session finished: the bus pins back as found, the DMA slice zeroed and unmapped, every mapping released. The reset lines
 // stay driven low (the amplifiers in hardware shutdown) and the SMMU entries stay (bypass: harmless).
 void boardTeardown();

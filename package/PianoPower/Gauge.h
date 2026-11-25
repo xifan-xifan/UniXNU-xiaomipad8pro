@@ -34,7 +34,7 @@ constexpr unsigned kHalfBitUs = 5;        // about 80 kHz with the register acce
 constexpr unsigned kStretchUs = 50000;    // a gauge may hold SCL low while it prepares data
 constexpr unsigned kBusFreeUs = 100;      // between transactions (the bq27 family wants >= 66 us)
 
-enum class I2cResult : uint8_t { ok, nackAddress, nackData, busBusy, stretchTimeout };
+enum class I2cResult : uint8_t { ok, nackAddress, nackData, busBusy, stretchTimeout, refused };
 
 inline const char *i2cName(I2cResult r)
 {
@@ -44,6 +44,7 @@ inline const char *i2cName(I2cResult r)
   case I2cResult::nackData: return "no ack (command)";
   case I2cResult::busBusy: return "bus held low";
   case I2cResult::stretchTimeout: return "clock stretch timeout";
+  case I2cResult::refused: return "write refused (not the SC8541)";
   }
   return "?";
 }
@@ -51,6 +52,10 @@ inline const char *i2cName(I2cResult r)
 class I2cBus {
  public:
   explicit I2cBus(const I2cIo &io) : io_(io) {}
+
+  // UniXNU-piano (ChargePump.h): a function run before every transaction on this bus, so the SC8541's watchdog kick (same bus as
+  // pack A's gauge) goes ahead of any gauge read when it is due. The hook may itself use the bus: it is not re-entered.
+  void setHook(void (*fn)(void *ctx, I2cBus &bus), void *ctx) { hook_ = fn; hookCtx_ = ctx; }
 
   // Frees a bus a device holds (SDA low): clocks until SDA is released, at most 9 times, then a stop.
   bool recover()
@@ -69,6 +74,7 @@ class I2cBus {
   // A register read: START, address+W, command, repeated START, address+R, two bytes (ACK, NACK), STOP.
   I2cResult readWord(uint8_t address, uint8_t command, uint16_t *value)
   {
+    runHook();
     if ((!io_.readSda(io_.ctx) || !io_.readScl(io_.ctx)) && !recover()) return I2cResult::busBusy;
     const I2cResult r = transfer(address, command, value);
     stop();
@@ -80,6 +86,7 @@ class I2cBus {
   // The command pointer is the sole write, followed by one NACKed data byte.
   I2cResult readRegisterByte(uint8_t address, uint8_t command, uint8_t *value)
   {
+    runHook();
     if ((!io_.readSda(io_.ctx) || !io_.readScl(io_.ctx)) && !recover()) return I2cResult::busBusy;
     uint16_t word = 0;
     const I2cResult r = transfer(address, command, &word, true);
@@ -89,8 +96,55 @@ class I2cBus {
     return r;
   }
 
+  // UniXNU-piano (ChargePump.h, SC8541 only): one register write, START, address+W, register, value, STOP. The caller (the CP
+  // driver) checks the register against its allowlist first and reads it back afterwards.
+  I2cResult writeRegisterByte(uint8_t address, uint8_t reg, uint8_t value)
+  {
+    if (address != 0x6a) return I2cResult::refused;   // the gauges (0x55) are never written
+    runHook();
+    if ((!io_.readSda(io_.ctx) || !io_.readScl(io_.ctx)) && !recover()) return I2cResult::busBusy;
+    I2cResult r = I2cResult::ok;
+    if (!start()) r = I2cResult::busBusy;
+    else if (!writeByte(uint8_t(address << 1), &r)) r = r != I2cResult::ok ? r : I2cResult::nackAddress;
+    else if (!writeByte(reg, &r)) r = r != I2cResult::ok ? r : I2cResult::nackData;
+    else if (!writeByte(value, &r)) r = r != I2cResult::ok ? r : I2cResult::nackData;
+    stop();
+    io_.delayUs(io_.ctx, kBusFreeUs);
+    return r;
+  }
+
+  // UniXNU-piano (ChargePump.h): a sequential read of n bytes from reg (auto-increment), ACK on every byte but the last.
+  I2cResult readBlock(uint8_t address, uint8_t reg, uint8_t *buf, unsigned n)
+  {
+    runHook();
+    if (!n) return I2cResult::ok;
+    if ((!io_.readSda(io_.ctx) || !io_.readScl(io_.ctx)) && !recover()) return I2cResult::busBusy;
+    I2cResult r = I2cResult::ok;
+    if (!start()) r = I2cResult::busBusy;
+    else if (!writeByte(uint8_t(address << 1), &r)) r = r != I2cResult::ok ? r : I2cResult::nackAddress;
+    else if (!writeByte(reg, &r)) r = r != I2cResult::ok ? r : I2cResult::nackData;
+    else if (!start()) r = I2cResult::busBusy;
+    else if (!writeByte(uint8_t(address << 1 | 1), &r)) r = r != I2cResult::ok ? r : I2cResult::nackAddress;
+    else
+      for (unsigned i = 0; i < n; ++i)
+        if (!readByte(&buf[i], i + 1 < n, &r)) break;
+    stop();
+    io_.delayUs(io_.ctx, kBusFreeUs);
+    return r;
+  }
+
  private:
   const I2cIo io_;
+  void (*hook_)(void *ctx, I2cBus &bus) = nullptr;
+  void *hookCtx_ = nullptr;
+  bool inHook_ = false;
+  void runHook()
+  {
+    if (!hook_ || inHook_) return;
+    inHook_ = true;
+    hook_(hookCtx_, *this);
+    inHook_ = false;
+  }
 
   I2cResult transfer(uint8_t address, uint8_t command, uint16_t *value, bool byteOnly = false)
   {
@@ -191,11 +245,26 @@ struct GaugeReading {
   int designMah = 0;      // 0 when the gauge did not answer it (read on its own: it never invalidates the reading)
   int tempDeciC = 0;      // tenths of a degree Celsius
   uint16_t status = 0;
+  uint16_t wordRetryMask = 0, wordRetryValid = 0;
+  unsigned wordRereads = 0;
+  uint8_t firstRetryCommand = 0;
+  uint16_t firstRetryValue = 0;
 };
 
 inline int16_t asSigned(uint16_t v) { return int16_t(v); }
 
-inline GaugeReading readGauge(I2cBus &bus)
+inline bool gaugeWordCredible(uint8_t command, uint16_t value)
+{
+  switch (command) {
+    case kGaugeVoltage: return value >= 2500 && value <= 5000;
+    case kGaugeSoc: return value <= 100;
+    case kGaugeTemperature: return value > 2332 && value < 3632;
+    case kGaugeRemaining: case kGaugeFull: case kGaugeStatus: case kGaugeCycles: return value != 0xffff;
+    default: return true;   // Signed current -1 is a real reading, not an all-ones sentinel.
+  }
+}
+
+inline GaugeReading readGaugeOnce(I2cBus &bus)
 {
   static const uint8_t kOrder[] = {kGaugeVoltage, kGaugeCurrent, kGaugeAverageCurrent, kGaugeSoc, kGaugeRemaining, kGaugeFull,
                                    kGaugeTemperature, kGaugeStatus, kGaugeCycles};
@@ -206,6 +275,25 @@ inline GaugeReading readGauge(I2cBus &bus)
     if (g.error != I2cResult::ok) {
       g.failedCommand = kOrder[i];
       return g;
+    }
+    if (!gaugeWordCredible(kOrder[i], v[i])) {
+      // An ACK is not a plausibility check. Reobserve this command before a
+      // whole new snapshot exposes all the other words to another bad read.
+      // readWord supplies a fresh command pointer, STOP and bus-free interval.
+      if (!g.wordRetryMask) {g.firstRetryCommand = kOrder[i]; g.firstRetryValue = v[i];}
+      const uint16_t bit = uint16_t(1u << i);
+      g.wordRetryMask |= bit;
+      g.wordRereads++;
+      uint16_t next = 0;
+      const I2cResult error = bus.readWord(kGaugeAddress, kOrder[i], &next);
+      if (error == I2cResult::ok) {
+        v[i] = next;
+        if (gaugeWordCredible(kOrder[i], next)) g.wordRetryValid |= bit;
+      } else {
+        g.error = error;
+        g.failedCommand = kOrder[i];
+        return g;
+      }
     }
   }
   g.voltageMv = v[0];
@@ -223,6 +311,33 @@ inline GaugeReading readGauge(I2cBus &bus)
   g.ok = g.voltageMv >= 2500 && g.voltageMv <= 5000 && g.socPct <= 100 && g.tempDeciC > -400 && g.tempDeciC < 900;
   if (!g.ok) g.failedCommand = 0xff;
   return g;
+}
+
+inline bool gaugeWordSentinel(const GaugeReading &g)
+{
+  return g.remainingMah == 0xffff || g.fullMah == 0xffff || g.status == 0xffff || g.cycles == 0xffff;
+}
+
+inline GaugeReading readGauge(I2cBus &bus)
+{
+  const GaugeReading first = readGaugeOnce(bus);
+  if (first.ok && !gaugeWordSentinel(first)) return first;
+
+  // Do not feed one failed observation to every policy decision until the next
+  // report. Each attempt starts over with the command pointers and a new sample.
+  const GaugeReading next = readGaugeOnce(bus);
+  // Capacity/flags are independent of the voltage, SOC and temperature gate.
+  // Keep a credible core reading if its reread failed; publication still has
+  // its own capacity guard. A failed core reading is never made valid here.
+  GaugeReading result = next.ok || !first.ok ? next : first;
+  result.wordRetryMask = first.wordRetryMask | next.wordRetryMask;
+  result.wordRetryValid = first.wordRetryValid | next.wordRetryValid;
+  result.wordRereads = first.wordRereads + next.wordRereads;
+  if (first.wordRetryMask) {
+    result.firstRetryCommand = first.firstRetryCommand;
+    result.firstRetryValue = first.firstRetryValue;
+  }
+  return result;
 }
 
 struct PackReading {

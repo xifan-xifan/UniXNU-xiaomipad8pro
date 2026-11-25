@@ -37,6 +37,9 @@
 #include <pexpert/pexpert.h>
 #include <stdarg.h>
 #include <string.h>
+#include <sys/sysctl.h>
+#include <sys/errno.h>
+#include <PianoBoardTemps.h>
 #include "PianoA830.h"
 #include "PianoA830Rows.h"
 #include "A830Idle.h"
@@ -45,20 +48,160 @@
 #include "Adreno830Device.h"
 #include "NativeAdrenoPublish.h"
 #include "NativeAdrenoMemory.h"
+#include "NativeAdrenoPoolBypass.h"   // GPU-PAGED P0b: machdep.piano_gpu_pool_bypass, machdep.piano_gpu_paged
+#include "NativeAdrenoGpuContext.h"   // GPU-PAGED P1: NativeAdrenoGpuContextVm
+#include "NativeAdrenoPagedLine.h"    // GPU-PAGED P1: machdep.piano_gpu_pt
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOLocks.h>
 #include <kern/clock.h>
 #include <kern/thread_call.h>
+#include <sys/errno.h>
+#include <sys/kauth.h>
+#include <sys/sysctl.h>
 #define PIANO_SCM_LOCK_KERNEL 1
 #include <PianoScmLock.h>
 #include <PianoSpmi.h>   // the SPMI lock's words (PianoSpmiWords), defined below
 #include <PianoPowerContract.h>
 #include "A830Suspend.h"
 #include "A830PowerState.h"
+#include "PianoLlccAudit.h"
 #include "PianoLlccIsland.h"
 #include "PianoGpuCeiling.h"
 #include "PianoGpuIdle.h"
+#include "PianoGpuQualificationLog.h"
+#include "../../include/PianoGpuQualificationDisplay.h"
+
+extern "C" int adreno830_qual607_control(int);
+using QualLog=pianogpu::QualificationLog<>;
+static QualLog *gQualLog;
+static IOSimpleLock *gQualLogLock;
+extern "C" bool adreno830_qualification_log_ready() {return gQualLog && gQualLogLock;}
+extern "C" void adreno830_qualification_note(const char *line) {
+  if(adreno830_qualification_log_ready()) {
+    const auto irq=IOSimpleLockLockDisableInterrupt(gQualLogLock);
+    gQualLog->push(line);
+    IOSimpleLockUnlockEnableInterrupt(gQualLogLock,irq);
+  }
+  IOLog("PianoA830: %s\n",line); // convenience only; qualification evidence comes from the read-only export
+}
+extern "C" void adreno830_qualification_unsafe(A830ExitOrigin origin,uint64_t protectionAt,bool safeLow,bool safeOff) {
+  a830ExitTrace.terminal(origin,protectionAt,safeLow,safeOff);
+  // Native 0070 uses the SMC conduit (k27 0069). A graceful halt can wait on the very power mutex/HFI
+  // whose deadline expired. Only this unconfirmed-GX emergency bypasses filesystem and IOKit shutdown.
+  register uint64_t function __asm__("x0")=0x84000008u; // PSCI SYSTEM_OFF
+  __asm__ volatile("dsb sy; smc #0" : "+r"(function) : : "x1","x2","x3","memory");
+  function=0x84000009u; // SYSTEM_RESET if SYSTEM_OFF unexpectedly returned
+  __asm__ volatile("dsb sy; smc #0" : "+r"(function) : : "x1","x2","x3","memory");
+  panic("PianoA830: emergency PSCI power-off and reset returned");
+}
+extern "C" bool adreno830_qualification_board(piano_gpu_temps *out) {
+  IOService *thermal=IOService::copyMatchingService(IOService::serviceMatching("PianoThermal"));
+  if(!thermal)return false;
+  const IOReturn r=thermal->callPlatformFunction("piano-thermal-gpu-temps",false,out,nullptr,nullptr,nullptr);
+  thermal->release();return r==kIOReturnSuccess;
+}
+// gpu/fullopp1: the virtual skin sensor and its inputs for the Android thermal table (PianoThermal "piano-thermal-skin-temps"; a
+// PianoThermal without it answers unsupported: the guard then treats the skin as unknown and caps at 734 MHz).
+extern "C" bool adreno830_qualification_skin(piano_skin_temps *out) {
+  IOService *thermal=IOService::copyMatchingService(IOService::serviceMatching("PianoThermal"));
+  if(!thermal)return false;
+  const IOReturn r=thermal->callPlatformFunction("piano-thermal-skin-temps",false,out,nullptr,nullptr,nullptr);
+  thermal->release();return r==kIOReturnSuccess;
+}
+SYSCTL_DECL(_machdep);
+static struct sysctl_oid gQual607Oid;
+static struct sysctl_oid gQualLogOid;
+static struct sysctl_oid gExitTraceOid;
+static int exitTraceSysctl(struct sysctl_oid *,void *,int,struct sysctl_req *req) {
+  if(req->newptr || !kauth_cred_issuser(kauth_cred_get()))return EPERM;
+  const uint64_t boot=a830ExitTrace.boot();
+  if(!boot)return EAGAIN;
+  if(!req->oldptr) {req->oldidx=(A830ExitTrace::Capacity+2)*224;return 0;}
+  const uint32_t head=a830ExitTrace.head();
+  const uint32_t end=head<A830ExitTrace::Capacity?head:A830ExitTrace::Capacity;
+  A830ExitTrace::Record row,terminal;
+  const uint32_t terminalSeq=a830ExitTrace.copyTerminal(terminal);
+  const bool appendTerminal=terminalSeq>end && terminalSeq<=head;
+  // Do not output a successful partial snapshot if a producer reserved a slot but has not committed it.
+  for(uint32_t seq=1;seq<=end;++seq)
+    if(!a830ExitTrace.copy(seq,row))return EAGAIN;
+  char line[224];
+  int n=snprintf(line,sizeof line,"R3DXLOG-v1 record-bytes=%u boot=%llu next=%u lost=%u\n",
+                 unsigned(sizeof row),boot,head+1,head-end-unsigned(appendTerminal));
+  int err=SYSCTL_OUT(req,line,n);
+  const auto writeRecord=[&](uint32_t seq,const A830ExitTrace::Record &r) {
+    const int bytes=snprintf(line,sizeof line,"R3DXREC seq=%u at=%llu stage=%u status=%u a=%llx b=%llx c=%llx d=%llx commit=%u\n",
+                             seq,r.at,r.stage,r.status,r.a,r.b,r.c,r.d,seq);
+    return SYSCTL_OUT(req,line,bytes);
+  };
+  for(uint32_t seq=1;!err && seq<=end;++seq) {
+    if(!a830ExitTrace.copy(seq,row))return EAGAIN;
+    err=writeRecord(seq,row);
+  }
+  if(!err && appendTerminal)err=writeRecord(terminalSeq,terminal);
+  n=snprintf(line,sizeof line,"R3DXEND next=%u",head+1);
+  if(!err)err=SYSCTL_OUT(req,line,n+1);
+  return err;
+}
+static int qualLogSysctl(struct sysctl_oid *,void *,int,struct sysctl_req *req) {
+  if(req->newptr)return EPERM;
+  if(!adreno830_qualification_log_ready())return ENOMEM;
+  // sysctl first asks the required size. Reserve the maximum so concurrent new records cannot outgrow it.
+  if(!req->oldptr) {req->oldidx=QualLog::capacity*(QualLog::bytes+96)+256;return 0;}
+  auto irq=IOSimpleLockLockDisableInterrupt(gQualLogLock);
+  const auto bounds=gQualLog->bounds();
+  IOSimpleLockUnlockEnableInterrupt(gQualLogLock,irq);
+  char header[160];
+  int n=snprintf(header,sizeof header,"C5LOG-v1 first=%llu next=%llu rejected=%llu\n",bounds.first,bounds.next,bounds.rejected);
+  int err=SYSCTL_OUT(req,header,n);
+  QualLog::Record record;
+  for(uint64_t sequence=bounds.first;!err && sequence<bounds.next;++sequence) {
+    irq=IOSimpleLockLockDisableInterrupt(gQualLogLock);
+    const bool ok=gQualLog->copy(sequence,record);
+    IOSimpleLockUnlockEnableInterrupt(gQualLogLock,irq);
+    if(!ok)return EAGAIN; // snapshot overwritten while reading; never return a successful partial capture
+    n=snprintf(header,sizeof header,"C5REC seq=%llu bytes=%u\n",sequence,unsigned(record.length));
+    err=SYSCTL_OUT(req,header,n);
+    if(!err)err=SYSCTL_OUT(req,record.text,record.length);
+    if(!err)err=SYSCTL_OUT(req,"\n",1);
+  }
+  if(!err)err=SYSCTL_OUT(req,"C5END\n",7); // includes final NUL for CTLTYPE_STRING
+  return err;
+}
+static int qual607Sysctl(struct sysctl_oid *oidp,void *,int,struct sysctl_req *req) {
+  int value=adreno830_qual607_control(0);
+  const int err=sysctl_handle_int(oidp,&value,0,req);
+  if(err || !req->newptr)return err;
+  if(value<1 || value>4)return EINVAL;
+  return adreno830_qual607_control(value)<0?EAGAIN:0;
+}
+static void registerQual607(bool record) {
+  bzero(&gQual607Oid,sizeof gQual607Oid);
+  gQual607Oid.oid_parent=&sysctl__machdep_children;gQual607Oid.oid_number=OID_AUTO;
+  gQual607Oid.oid_kind=int(CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_OID2);
+  gQual607Oid.oid_name="piano_gpu_qual607";gQual607Oid.oid_handler=qual607Sysctl;gQual607Oid.oid_fmt="I";
+  gQual607Oid.oid_descr="GPU qualification flags; commands 3 and 4 require the R3b exit test";
+  gQual607Oid.oid_version=SYSCTL_OID_VERSION;sysctl_register_oid(&gQual607Oid);
+  if(record) {
+    gQualLog=static_cast<QualLog *>(IOMallocZero(sizeof(QualLog)));gQualLogLock=IOSimpleLockAlloc();
+  }
+  bzero(&gQualLogOid,sizeof gQualLogOid);
+  gQualLogOid.oid_parent=&sysctl__machdep_children;gQualLogOid.oid_number=OID_AUTO;
+  gQualLogOid.oid_kind=int(CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_OID2);
+  gQualLogOid.oid_name="piano_gpu_qual607_log";gQualLogOid.oid_handler=qualLogSysctl;gQualLogOid.oid_fmt="A";
+  gQualLogOid.oid_descr="C5LOG-v1 bounded read-only qualification records";
+  gQualLogOid.oid_version=SYSCTL_OID_VERSION;sysctl_register_oid(&gQualLogOid);
+  bzero(&gExitTraceOid,sizeof gExitTraceOid);
+  gExitTraceOid.oid_parent=&sysctl__machdep_children;gExitTraceOid.oid_number=OID_AUTO;
+  gExitTraceOid.oid_kind=int(CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_OID2);
+  gExitTraceOid.oid_name="piano_gpu_r3b_exit";
+  gExitTraceOid.oid_handler=exitTraceSysctl;gExitTraceOid.oid_fmt="A";
+  gExitTraceOid.oid_descr="R3DXLOG-v1 bounded R3b exit stages";
+  gExitTraceOid.oid_version=SYSCTL_OID_VERSION;sysctl_register_oid(&gExitTraceOid);
+}
 #include <PianoDisplayFollow.h>
+
+SYSCTL_DECL(_machdep);
 
 extern "C" const Adreno830Board *piano_a830_board(void);
 
@@ -713,6 +856,169 @@ int gMayMap;
 const pianollcc::Io kLlccThread = {&gMayMap, llccRead, llccWrite};
 const pianollcc::Io kLlccAny = {nullptr, llccRead, llccWrite};
 
+IOLock *gLlccAuditLock;
+int gLlccAuditGeneration;
+unsigned gLlccAuditIndex;
+bool gLlccAuditPrepared;
+enum class LlccAuditState { waiting, complete, stopped };
+LlccAuditState gLlccAuditState;
+bool gLlccIsland3;
+struct LlccIslandReadback {
+  uint32_t before[5], after[5];  // ATTR0..3, ALLOC3
+  unsigned beforeSeen, afterSeen;
+};
+LlccIslandReadback gLlccIsland3Readback;
+const char *gLlccIsland3Result;
+
+void finishLlccAudit(LlccAuditState state)
+{
+  gLlccAuditState = state;
+  IOLockWakeup(gLlccAuditLock, &gLlccAuditState, true);
+}
+
+int llccAuditCommand(int command, int token)
+{
+  if (gLlccAuditState != LlccAuditState::waiting) return ECANCELED;
+  if (gLlccAuditIndex == pianollcc::kAuditCount) {
+    if (command != token) return EINVAL;
+    IOLog("PianoA830: sens-trace29 RELEASE token=%d reads=%u\n", token, gLlccAuditIndex);
+    finishLlccAudit(LlccAuditState::complete);
+    return 0;
+  }
+
+  const auto &read = pianollcc::kAuditReads[gLlccAuditIndex];
+  const auto physical = static_cast<unsigned long long>(read.physical());
+  if (command == token && !gLlccAuditPrepared) {
+    IOLog("PianoA830: sens-trace29 PRE token=%d seq=%u op=load pa=0x%08llx\n", token, gLlccAuditIndex + 1, physical);
+    gLlccAuditPrepared = true;
+    return 0;
+  }
+  if (command != -token || !gLlccAuditPrepared) return EINVAL;
+  gLlccAuditPrepared = false;
+  uint32_t value = 0;
+  const bool answered = llccRead(&gMayMap, read.view, read.offset, &value);
+  const bool ok = answered && read.accepts(value);
+  ++gLlccAuditIndex;
+  IOLog("PianoA830: sens-trace29 POST token=%d seq=%u op=load pa=0x%08llx value=0x%08x bit12=%u status=%s next=%s\n",
+        token, gLlccAuditIndex, physical, value, (value >> pianollcc::kScid) & 1u,
+        !answered ? "access-failed" : !ok ? "unexpected" : "ok",
+        !ok ? "stop" : gLlccAuditIndex == pianollcc::kAuditCount ? "release" : "step");
+  if (!ok) {
+    finishLlccAudit(LlccAuditState::stopped);
+    return EIO;
+  }
+  return 0;
+}
+
+bool llccIslandSkip(unsigned index, const LlccIslandReadback &readback)
+{
+  using namespace pianollcc;
+  return kIsland3Accesses[index].seq == 20 && !(readback.before[4] & kIsland3Bit);
+}
+
+enum class LlccIslandResult { ok, accessFailed, unexpected, readbackFailed };
+
+// Both modes use the same single-access path and stop at the same failing row.
+LlccIslandResult llccIslandAccess(unsigned index, LlccIslandReadback &readback, uint32_t &value)
+{
+  using namespace pianollcc;
+  const auto &access = kIsland3Accesses[index];
+  const bool alloc3 = access.offset == kIsland3Alloc3;
+  const uint32_t expected = alloc3 ? readback.before[4] & ~kIsland3Bit : access.expected;
+  value = access.store ? expected : 0;
+  const bool answered = access.store ? llccWrite(&gMayMap, access.view, access.offset, value)
+                                     : llccRead(&gMayMap, access.view, access.offset, &value);
+  if (!answered) return LlccIslandResult::accessFailed;
+
+  if (access.seq == 4 || access.seq == 19) {
+    const unsigned slot = alloc3 ? 4 : index - 3;
+    readback.before[slot] = value;
+    readback.beforeSeen |= 1u << slot;
+  } else if (access.seq == 21) {
+    const unsigned slot = index - (kIsland3Count - 5);
+    readback.after[slot] = value;
+    readback.afterSeen |= 1u << slot;
+  }
+  if (access.store || (value & access.mask) == (expected & access.mask)) return LlccIslandResult::ok;
+  return access.seq == 21 ? LlccIslandResult::readbackFailed : LlccIslandResult::unexpected;
+}
+
+const char *llccIslandResultName(LlccIslandResult result)
+{
+  switch (result) {
+  case LlccIslandResult::ok: return "ok";
+  case LlccIslandResult::accessFailed: return "access-failed";
+  case LlccIslandResult::readbackFailed: return "write not accepted";
+  case LlccIslandResult::unexpected: return "unexpected";
+  }
+  return "unexpected";
+}
+
+int llccIsland3Command(int command, int token)
+{
+  using namespace pianollcc;
+  if (gLlccAuditState != LlccAuditState::waiting) return ECANCELED;
+  if (gLlccAuditIndex == kIsland3Count) {
+    if (command != token) return EINVAL;
+    gLlccIsland3Result = "ok";
+    finishLlccAudit(LlccAuditState::complete);
+    return 0;
+  }
+
+  const auto &access = kIsland3Accesses[gLlccAuditIndex];
+  const auto physical = static_cast<unsigned long long>(access.physical());
+  const char *op = access.store ? "store" : "load";
+  if (command == token && !gLlccAuditPrepared) {
+    if (llccIslandSkip(gLlccAuditIndex, gLlccIsland3Readback)) {
+      IOLog("PianoA830: sens-island3 SKIP token=%d seq=20 pa=0x%08llx bit12=0\n", token, physical);
+      ++gLlccAuditIndex;
+      return 0;
+    }
+    IOLog("PianoA830: sens-island3 PRE token=%d seq=%u op=%s pa=0x%08llx\n", token, access.seq, op, physical);
+    gLlccAuditPrepared = true;
+    return 0;
+  }
+  if (command != -token || !gLlccAuditPrepared) return EINVAL;
+  gLlccAuditPrepared = false;
+
+  uint32_t value;
+  const auto result = llccIslandAccess(gLlccAuditIndex, gLlccIsland3Readback, value);
+  const bool ok = result == LlccIslandResult::ok;
+  ++gLlccAuditIndex;
+  IOLog("PianoA830: sens-island3 POST token=%d seq=%u op=%s pa=0x%08llx value=0x%08x status=%s next=%s\n",
+        token, access.seq, op, physical, value,
+        llccIslandResultName(result == LlccIslandResult::readbackFailed ? LlccIslandResult::unexpected : result),
+        !ok ? "stop" : gLlccAuditIndex == kIsland3Count ? "release" : "step");
+  if (!ok) {
+    gLlccIsland3Result = llccIslandResultName(result);
+    finishLlccAudit(LlccAuditState::stopped);
+    return EIO;
+  }
+  return 0;
+}
+
+void llccIslandSummary(const char *mode, const char *result, const LlccIslandReadback &readback)
+{
+  const auto &b = readback.before;
+  const auto &a = readback.after;
+  IOLog("PianoA830: %s SUMMARY result=%s ATTR before=%08x/%08x/%08x/%08x after=%08x/%08x/%08x/%08x "
+        "ALLOC3 before=%08x after=%08x valid=%02x/%02x\n",
+        mode, result, b[0], b[1], b[2], b[3], a[0], a[1], a[2], a[3], b[4], a[4],
+        readback.beforeSeen, readback.afterSeen);
+}
+
+int sysctlLlccAudit(struct sysctl_oid *oid, void *, int, struct sysctl_req *req)
+{
+  if (!kauth_cred_issuser(kauth_cred_get())) return EPERM;
+  IOLockLock(gLlccAuditLock);
+  const int token = gLlccAuditGeneration + int(gLlccAuditIndex) + 1;
+  int command = gLlccAuditState == LlccAuditState::waiting ? token : gLlccAuditState == LlccAuditState::complete ? 0 : -1;
+  int error = sysctl_handle_int(oid, &command, 0, req);
+  if (!error && req->newptr) error = gLlccIsland3 ? llccIsland3Command(command, token) : llccAuditCommand(command, token);
+  IOLockUnlock(gLlccAuditLock);
+  return error;
+}
+
 void islandLine(const char *what, const pianollcc::Reading &r, pianollcc::State state)
 {
   piano_a830_note("llcc: ISLAND1 (SCID 12) %s: ATTR0 %#x (0x26841300, expect 0x7fffffff) ATTR1 %#x (0x26841308, expect 0) ATTR2 %#x "
@@ -733,9 +1039,11 @@ void islandPublish(IOService *service)
 // piano-llcc-island=1 (piano-gpu=2) the programming.
 void islandStart(IOService *service, unsigned level)
 {
+  const uint32_t want = bootArg("piano-llcc-island", 0xffffffffu);
+  if (bootArg("piano-llcc-audit", 0) == 1 || want == 3 || want == 4) return;
   // Opt-in until a tablet boot has shown the reads are safe under Gunyah: without piano-llcc-island (0 = read only,
   // 1 = read and program) the GPU boot does not touch the LLCC at all and the island stays "unknown".
-  if (bootArg("piano-llcc-island", 0xffffffffu) == 0xffffffffu) {
+  if (want == 0xffffffffu) {
     piano_a830_note("llcc: ISLAND1 not read (piano-llcc-island=0 reads it, =1 programs it)");
     return;
   }
@@ -745,7 +1053,6 @@ void islandStart(IOService *service, unsigned level)
   islandLine("as found", r, state);
   gIslandState = uint8_t(state);
   __atomic_store_n(&gLlccArmed, 1u, __ATOMIC_RELEASE);
-  const uint32_t want = bootArg("piano-llcc-island", 0);
   if (want == 1 && level < 2) piano_a830_note("llcc: piano-llcc-island=1 needs piano-gpu=2 (piano-gpu=1 writes nothing): not programmed");
   if (want == 1 && level >= 2) {
     piano_a830_note("llcc: piano-llcc-island=1: reserving ISLAND1's ways (ATTR0 0x7fffffff, ATTR1 0; ATTR2/ATTR3 only where 0)");
@@ -769,12 +1076,470 @@ void islandStart(IOService *service, unsigned level)
 }
 }  // namespace
 
+// The shared ADSP starter calls this once before firmware/PAS. Keep the legacy
+// GPU readiness path unarmed so it cannot issue extra LLCC reads.
+extern "C" void piano_a830_llcc_island4_run(bool ownsStart)
+{
+  LlccIslandReadback readback{};
+  auto result = LlccIslandResult::ok;
+  for (unsigned index = 0; ownsStart && result == LlccIslandResult::ok && index < pianollcc::kIsland3Count; ++index) {
+    if (llccIslandSkip(index, readback)) continue;
+    uint32_t value;
+    result = llccIslandAccess(index, readback, value);
+  }
+  llccIslandSummary("sens-island4", ownsStart ? llccIslandResultName(result) : "ownership-unproven", readback);
+}
+
+// Called once by the normal shared ADSP owner before firmware/PAS. Only the
+// root sysctl's acknowledged access command can reach the LLCC while it waits.
+extern "C" void piano_a830_llcc_audit_wait(bool island3)
+{
+  gLlccIsland3 = island3;
+  gLlccAuditLock = IOLockAlloc();
+  if (!gLlccAuditLock) {
+    if (island3) llccIslandSummary("sens-island3", "lock-failed", gLlccIsland3Readback);
+    else IOLog("PianoA830: sens-trace29 STOP lock allocation failed\n");
+    return;
+  }
+  IOLockLock(gLlccAuditLock);
+  gLlccAuditGeneration = int((mach_absolute_time() & 0x7fffffull) << 8);
+  static struct sysctl_oid oid;
+  oid.oid_parent = &sysctl__machdep_children;
+  oid.oid_number = OID_AUTO;
+  oid.oid_kind = int(CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_OID2);
+  oid.oid_name = "piano_llcc_diag";
+  oid.oid_handler = sysctlLlccAudit;
+  oid.oid_fmt = "I";
+  oid.oid_descr = island3 ? "Root-only, host-acknowledged LLCC SCID12 access" : "Root-only, host-acknowledged LLCC audit read";
+  oid.oid_version = SYSCTL_OID_VERSION;
+  sysctl_register_oid(&oid);
+  if (island3)
+    IOLog("PianoA830: sens-island3 READY token=%d steps=%u awaiting host\n", gLlccAuditGeneration + 1, pianollcc::kIsland3Count);
+  else
+    IOLog("PianoA830: sens-trace29 READY token=%d steps=%u awaiting host\n", gLlccAuditGeneration + 1, pianollcc::kAuditCount);
+  uint64_t deadline;
+  clock_interval_to_deadline(330, kSecondScale, &deadline);
+  while (gLlccAuditState == LlccAuditState::waiting) {
+    if (IOLockSleepDeadline(gLlccAuditLock, &gLlccAuditState, deadline, THREAD_UNINT) == THREAD_TIMED_OUT &&
+        gLlccAuditState == LlccAuditState::waiting) {
+      gLlccAuditState = LlccAuditState::stopped;
+      if (island3) gLlccIsland3Result = "host-timeout";
+      else IOLog("PianoA830: sens-trace29 STOP host handshake timed out\n");
+    }
+  }
+  if (island3) {
+    llccIslandSummary("sens-island3", gLlccIsland3Result, gLlccIsland3Readback);
+    IOLog("PianoA830: sens-island3 RELEASE seq=22\n");
+  }
+  IOLockUnlock(gLlccAuditLock);
+}
+
 // For kexts linked after PianoA830 (their descriptors name it as a library) and the platform function: the two words read again.
 extern "C" bool piano_a830_llcc_island_ready(void)
 {
   if (!__atomic_load_n(&gLlccArmed, __ATOMIC_ACQUIRE)) return false;
   return pianollcc::ready(kLlccAny);
 }
+
+// Read-only first capacity-refusal snapshots survive process exit and bypass IOLog format-address decoding.
+namespace {
+int sysctlGpuRefusals(struct sysctl_oid *,void *,int,struct sysctl_req *req)
+{
+  if(req->newptr)return EPERM;
+  bool any=false;
+  for(unsigned entry=0;entry<NativeAdrenoFailureEntries;++entry) {
+    for(unsigned row=0;row<NativeAdrenoFailureRows;++row) {
+      char line[160];
+      const int count=native_adreno_failure_line(entry,row,line,sizeof(line)-1);
+      if(count<=0)break;
+      const size_t bytes=size_t(count)<sizeof(line)-1?size_t(count):sizeof(line)-2;
+      line[bytes]='\n';
+      const int error=SYSCTL_OUT(req,line,bytes+1);
+      if(error)return error;
+      any=true;
+    }
+  }
+  for(unsigned slot=0;slot<NativeAdrenoMaxClients;++slot) {
+    for(unsigned closed=0;closed<2;++closed) {
+      char line[NativeAdrenoResidencyLineBytes];
+      const int count=native_adreno_residency_line(slot,closed!=0,line,sizeof(line)-1);
+      if(count<=0)continue;
+      const size_t bytes=size_t(count)<sizeof(line)-1?size_t(count):sizeof(line)-2;
+      line[bytes]='\n';
+      const int error=SYSCTL_OUT(req,line,bytes+1);
+      if(error)return error;
+      any=true;
+    }
+  }
+  return any?SYSCTL_OUT(req,"",1):SYSCTL_OUT(req,"none\n",6);
+}
+// machdep.piano_gpu_input_floor (root): the DCVS input floor in MHz (0 off; 160..1100), A830Dcvs::setInputFloor. Read: the floor in force.
+int sysctlGpuInputFloor(struct sysctl_oid *oidp,void *,int,struct sysctl_req *req)
+{
+  int value=int(adreno830_dcvs_input_floor());
+  const int err=sysctl_handle_int(oidp,&value,0,req);
+  if(err || !req->newptr)return err;
+  if(value<0)return EINVAL;
+  const int r=adreno830_dcvs_set_input_floor(uint32_t(value));
+  if(r==-2)return EINVAL;
+  if(r)return EAGAIN;
+  gpuLine("input floor %d MHz (machdep.piano_gpu_input_floor; hold 80 ms after each submission)",value);
+  return 0;
+}
+void registerGpuInputFloor()
+{
+  static struct sysctl_oid oid;
+  oid.oid_parent=&sysctl__machdep_children;oid.oid_number=OID_AUTO;
+  oid.oid_kind=int(CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_OID2);
+  oid.oid_name="piano_gpu_input_floor";oid.oid_handler=sysctlGpuInputFloor;oid.oid_fmt="I";
+  oid.oid_descr="GPU DCVS input floor (MHz) held 80 ms after each submission; 0 off";
+  oid.oid_version=SYSCTL_OID_VERSION;sysctl_register_oid(&oid);
+}
+// ---- the boost floor (piano-gpu-boost, machdep.piano_gpu_boost) ----------------------------------------------------------------
+volatile uint32_t gBoostEnabled;   // piano-gpu-boost=1 at start; machdep.piano_gpu_boost 0/1 at run time
+uint32_t gBoostArg;                // piano-gpu-boost=1 on the command line (never changes)
+IOReturn gpuBoost(uint32_t mhzOrLevel, uint32_t holdMs, uint32_t capMhz = 0)
+{
+  // Unsupported only without the boot argument (senders stop asking for the boot); switched off at run time: Offline, so the senders
+  // keep asking and the next switch-on works at once (gpu-boost342a: the A/B's first "off" ended the senders for the rest of the boot).
+  if (!gBoostArg) return kIOReturnUnsupported;
+  if (!__atomic_load_n(&gBoostEnabled, __ATOMIC_ACQUIRE)) return kIOReturnOffline;
+  // gpu/fullopp1: param4 a cap for the hold (PianoThermal's launch: Android's 967 MHz); 0 none
+  if (capMhz ? adreno830_dcvs_boost_capped(mhzOrLevel, holdMs, capMhz) : adreno830_dcvs_boost(mhzOrLevel, holdMs)) return kIOReturnNotReady;
+  const uint32_t n = adreno830_dcvs_boost_requests();
+  if (n <= 3 || n % 1000 == 0)
+    gpuLine("boost #%u: %u%s for %u ms (piano-gpu-boost; every ceiling still wins)", n, mhzOrLevel, mhzOrLevel == 0 ? " (input)" :
+            mhzOrLevel <= 16 ? " (GMU level)" : " MHz", holdMs);
+  return kIOReturnSuccess;
+}
+int sysctlGpuBoost(struct sysctl_oid *oidp, void *, int, struct sysctl_req *req)
+{
+  int value = int(__atomic_load_n(&gBoostEnabled, __ATOMIC_ACQUIRE));
+  const int err = sysctl_handle_int(oidp, &value, 0, req);
+  if (err || !req->newptr) return err;
+  if (value != 0 && value != 1) return EINVAL;
+  if (value && !gBoostArg) return EPERM;   // the boot argument decides whether senders exist at all
+  __atomic_store_n(&gBoostEnabled, uint32_t(value), __ATOMIC_RELEASE);
+  gpuLine("boost %s (machdep.piano_gpu_boost; %u requests so far)", value ? "on" : "off", adreno830_dcvs_boost_requests());
+  return 0;
+}
+void registerGpuBoost()
+{
+  static struct sysctl_oid oid;
+  oid.oid_parent=&sysctl__machdep_children;oid.oid_number=OID_AUTO;
+  oid.oid_kind=int(CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_OID2);
+  oid.oid_name="piano_gpu_boost";oid.oid_handler=sysctlGpuBoost;oid.oid_fmt="I";
+  oid.oid_descr="GPU boost floor requests (piano-gpu-boost) taken: 1, refused: 0";
+  oid.oid_version=SYSCTL_OID_VERSION;sysctl_register_oid(&oid);
+}
+// machdep.piano_gpu_busy (read-only, gpu-boost342c): the frame-weighted counters an A/B diffs between its marks (A830DcvsStats).
+int sysctlGpuBusy(struct sysctl_oid *,void *,int,struct sysctl_req *req)
+{
+  if(req->newptr)return EPERM;
+  uint64_t v[6];
+  if(adreno830_dcvs_busy(v))return SYSCTL_OUT(req,"none\n",6);
+  char line[192];
+  const int n=snprintf(line,sizeof line,"busy_us %llu low_busy_us %llu submits %llu bursts %llu low_submits %llu tops %llu\n",
+                       (unsigned long long)(v[0]/1000),(unsigned long long)(v[1]/1000),(unsigned long long)v[2],(unsigned long long)v[3],
+                       (unsigned long long)v[4],(unsigned long long)v[5]);
+  if(n<=0)return EIO;
+  return SYSCTL_OUT(req,line,size_t(n)<sizeof line?size_t(n)+1:sizeof line);
+}
+void registerGpuBusy()
+{
+  static struct sysctl_oid oid;
+  oid.oid_parent=&sysctl__machdep_children;oid.oid_number=OID_AUTO;
+  oid.oid_kind=int(CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_OID2);
+  oid.oid_name="piano_gpu_busy";oid.oid_handler=sysctlGpuBusy;oid.oid_fmt="A";
+  oid.oid_descr="GPU busy time (all, at the lowest level), submissions, bursts, burst submissions at the lowest level, bursts to the top";
+  oid.oid_version=SYSCTL_OID_VERSION;sysctl_register_oid(&oid);
+}
+void registerGpuRefusals()
+{
+  static struct sysctl_oid oid;
+  oid.oid_parent=&sysctl__machdep_children;oid.oid_number=OID_AUTO;
+  oid.oid_kind=int(CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_OID2);
+  oid.oid_name="piano_gpu_refusals";oid.oid_handler=sysctlGpuRefusals;oid.oid_fmt="A";
+  oid.oid_descr="First GPU capacity refusals and per-connection residency high water";
+  oid.oid_version=SYSCTL_OID_VERSION;sysctl_register_oid(&oid);
+}
+// ---- test-only GPU fault injection (piano-gpu-fault-test=1, machdep.piano_gpu_fault_test; gpu-daily3, from gpu/daily3c 6b890883) ------
+// Inert without the boot argument: the sysctl is then not registered. Root writes 1 (a software-watchdog hang, the class of the
+// gpu-daily1 iconservicesagent hang) or 2 (a CP hang) and the fault is reported to A830Recovery exactly as the fence watchdog or the
+// hang interrupt would report it; the recovery that follows is the real one (on the daily line: the daily recovery, no strict). Nothing
+// stops the GPU: whoever's job happens to be in flight is the "culprit" (machdep.piano_gpu_fault_hold below gives a real one). At most one per 70 s, so the recovery's "third in
+// 60 s is final" rule stays out of reach. Read: injections so far.
+uint32_t gFaultTests;
+uint64_t gFaultTestLastNs;
+int sysctlGpuFaultTest(struct sysctl_oid *oidp,void *,int,struct sysctl_req *req)
+{
+  int value=int(__atomic_load_n(&gFaultTests,__ATOMIC_ACQUIRE));
+  const int err=sysctl_handle_int(oidp,&value,0,req);
+  if(err || !req->newptr)return err;
+  if(value!=1 && value!=2)return EINVAL;
+  uint64_t now=0;
+  absolutetime_to_nanoseconds(mach_absolute_time(),&now);
+  const uint64_t last=__atomic_load_n(&gFaultTestLastNs,__ATOMIC_ACQUIRE);
+  if(last && now-last<70ull*1000000000ull)return EBUSY;
+  __atomic_store_n(&gFaultTestLastNs,now,__ATOMIC_RELEASE);
+  const uint32_t n=__atomic_add_fetch(&gFaultTests,1u,__ATOMIC_ACQ_REL);
+  gpuLine("fault test #%u: %s reported to the recovery (machdep.piano_gpu_fault_test, piano-gpu-fault-test=1)",n,
+          value==1?"a watchdog hang":"a CP hang");
+  adreno830_recovery_report(value==1?uint8_t(A830FaultWatchdog):uint8_t(A830FaultHang),0x7E57000000000000ull|n);
+  return 0;
+}
+void registerGpuFaultTest()
+{
+  static struct sysctl_oid oid;
+  oid.oid_parent=&sysctl__machdep_children;oid.oid_number=OID_AUTO;
+  oid.oid_kind=int(CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_OID2);
+  oid.oid_name="piano_gpu_fault_test";oid.oid_handler=sysctlGpuFaultTest;oid.oid_fmt="I";
+  oid.oid_descr="Test only (piano-gpu-fault-test=1): 1 reports a watchdog hang, 2 a CP hang to the GPU recovery; at most one per 70 s";
+  oid.oid_version=SYSCTL_OID_VERSION;sysctl_register_oid(&oid);
+}
+// ---- test-only real GPU hang with a known culprit (piano-gpu-fault-test=1, machdep.piano_gpu_fault_hold; gpu-recover2) --------------
+// Root writes a pid: the next submission of that process's GPU connections starts with a wait nothing ever satisfies
+// (NativeAdrenoSubmit::armHold), so the CP stops inside that process's job and every later job (WindowServer's frames included) queues
+// behind it, in flight. The fence watchdog finds the hang after piano-gpu-hang-ms (2 s) and the recovery runs: with the replay
+// (machdep.piano_gpu_recovery_replay=1) only that process is faulted, the others' jobs are replayed. At most one per 35 s (two
+// recoveries in 60 s are allowed, the third is final). ESRCH: no live GPU connection of that pid. Read: holds armed so far.
+uint32_t gFaultHolds;
+uint64_t gFaultHoldLastNs;
+int sysctlGpuFaultHold(struct sysctl_oid *oidp,void *,int,struct sysctl_req *req)
+{
+  int value=int(__atomic_load_n(&gFaultHolds,__ATOMIC_ACQUIRE));
+  const int err=sysctl_handle_int(oidp,&value,0,req);
+  if(err || !req->newptr)return err;
+  if(value<=1)return EINVAL;
+  uint64_t now=0;
+  absolutetime_to_nanoseconds(mach_absolute_time(),&now);
+  const uint64_t last=__atomic_load_n(&gFaultHoldLastNs,__ATOMIC_ACQUIRE);
+  if(last && now-last<35ull*1000000000ull)return EBUSY;
+  char name[20]={};
+  const unsigned connections=native_adreno_fault_hold(value,name);
+  if(!connections)return ESRCH;
+  __atomic_store_n(&gFaultHoldLastNs,now,__ATOMIC_RELEASE);
+  const uint32_t n=__atomic_add_fetch(&gFaultHolds,1u,__ATOMIC_ACQ_REL);
+  gpuLine("fault hold #%u: pid %d %s (%u connection%s): its next submission stops the CP (a real hang, culprit known; replay %s)",n,
+          value,name,connections,connections==1?"":"s",adreno830_recovery_replay_mode()?"on":"off");
+  return 0;
+}
+void registerGpuFaultHold()
+{
+  static struct sysctl_oid oid;
+  oid.oid_parent=&sysctl__machdep_children;oid.oid_number=OID_AUTO;
+  oid.oid_kind=int(CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_OID2);
+  oid.oid_name="piano_gpu_fault_hold";oid.oid_handler=sysctlGpuFaultHold;oid.oid_fmt="I";
+  oid.oid_descr="Test only (piano-gpu-fault-test=1): a pid whose next GPU submission stops the CP (a real hang); at most one per 35 s";
+  oid.oid_version=SYSCTL_OID_VERSION;sysctl_register_oid(&oid);
+}
+// ---- the recovery's replay (2026-11-22, private 20261122-render/ANALYSIS.md): an A/B switch and its counters --------------------------
+// piano-gpu-recovery-replay=0 (default 1) and machdep.piano_gpu_recovery_replay (root, 0/1, read at each recovery's start): 1 replays
+// the jobs of innocent clients and faults the culprit alone (Linux msm recover_worker's behaviour), 0 fails every job in flight and
+// faults every connection that had one (the behaviour before: an innocent WindowServer lost its device and the session ended).
+int sysctlGpuRecoveryReplay(struct sysctl_oid *oidp,void *,int,struct sysctl_req *req)
+{
+  int value=int(adreno830_recovery_replay_mode());
+  const int err=sysctl_handle_int(oidp,&value,0,req);
+  if(err || !req->newptr)return err;
+  if(value!=0 && value!=1)return EINVAL;
+  if(uint32_t(value)!=adreno830_recovery_replay_mode())
+    gpuLine("recovery replay %s (machdep.piano_gpu_recovery_replay): %s",value?"on":"off",
+            value?"innocent clients' jobs are replayed, the culprit alone is faulted":"every job in flight fails (the old behaviour)");
+  adreno830_recovery_set_replay(uint32_t(value));
+  return 0;
+}
+int sysctlGpuRecovery(struct sysctl_oid *,void *,int,struct sysctl_req *req)
+{
+  if(req->newptr)return EPERM;
+  A830RecoveryStats s{};
+  if(!adreno830_recovery_stats(&s))return SYSCTL_OUT(req,"none\n",6);
+  char line[256];
+  const int n=snprintf(line,sizeof line,"replay %u recoveries %u replay_recoveries %u jobs_replayed %u jobs_failed %u failures %u "
+                       "reports %u coalesced %u watchdog %u last_us %u max_us %u last_cause %u lost_cause %u holds %u\n",
+                       adreno830_recovery_replay_mode(),s.recoveries,s.replayRecoveries,s.jobsReplayed,s.jobsFailed,s.failures,s.reports,
+                       s.coalesced,s.watchdogHangs,s.lastUs,s.maxUs,unsigned(s.lastCause),unsigned(s.lostCause),
+                       __atomic_load_n(&gFaultHolds,__ATOMIC_ACQUIRE));
+  if(n<=0)return EIO;
+  return SYSCTL_OUT(req,line,size_t(n)<sizeof line?size_t(n)+1:sizeof line);
+}
+void registerGpuRecovery()
+{
+  static struct sysctl_oid replay,stats;
+  replay.oid_parent=&sysctl__machdep_children;replay.oid_number=OID_AUTO;
+  replay.oid_kind=int(CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_OID2);
+  replay.oid_name="piano_gpu_recovery_replay";replay.oid_handler=sysctlGpuRecoveryReplay;replay.oid_fmt="I";
+  replay.oid_descr="GPU recovery: 1 replays innocent clients' jobs and faults the culprit alone, 0 fails every job in flight";
+  replay.oid_version=SYSCTL_OID_VERSION;sysctl_register_oid(&replay);
+  stats.oid_parent=&sysctl__machdep_children;stats.oid_number=OID_AUTO;
+  stats.oid_kind=int(CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_OID2);
+  stats.oid_name="piano_gpu_recovery";stats.oid_handler=sysctlGpuRecovery;stats.oid_fmt="A";
+  stats.oid_descr="GPU recovery counters: mode, recoveries, replays, jobs replayed and failed, last and longest gate-to-open time (us)";
+  stats.oid_version=SYSCTL_OID_VERSION;sysctl_register_oid(&stats);
+}
+// ---- GPU-PAGED P0b (adreno830/NativeAdrenoPoolBypass.h; private analysis DESIGN.md section 4 and its gate) -------------------------
+// machdep.piano_gpu_pool_bypass (root, 0/1; piano-gpu-pool-bypass=1 at start): 1 sends every NEW BoAlloc past the BO pool to the path
+// outside it (with piano-gpu-user-vm=1 the pageable named entry, 4 KiB pages wired by prepare()); BOs already allocated keep their
+// backing. 0, the default, is today's behaviour. One boot can then run the same workload pooled and scattered.
+int sysctlGpuPoolBypass(struct sysctl_oid *oidp,void *,int,struct sysctl_req *req)
+{
+  int value=int(__atomic_load_n(&native_adreno_pool_bypass,__ATOMIC_ACQUIRE));
+  const int err=sysctl_handle_int(oidp,&value,0,req);
+  if(err || !req->newptr)return err;
+  if(value!=0 && value!=1)return EINVAL;
+  const uint32_t before=__atomic_exchange_n(&native_adreno_pool_bypass,uint32_t(value),__ATOMIC_ACQ_REL);
+  if(before!=uint32_t(value))__atomic_fetch_add(&native_adreno_pool_bypass_flips,1u,__ATOMIC_RELAXED);
+  uint32_t poolMib=0,usedMib=0;
+  NativeAdrenoMemory::usage(&poolMib,&usedMib,nullptr);
+  gpuLine("pool bypass %s (machdep.piano_gpu_pool_bypass, GPU-PAGED P0b): new BOs %s; pool %u/%u MiB in use, flip #%u",
+          value?"on":"off",value?"skip the BO pool":"use the BO pool as before",usedMib,poolMib,
+          unsigned(__atomic_load_n(&native_adreno_pool_bypass_flips,__ATOMIC_RELAXED)));
+  return 0;
+}
+// machdep.piano_gpu_paged (read-only): the P0b figures, one row per line (NativeAdrenoPoolBypassLine): BoAllocs by path with bytes,
+// failures and a latency histogram, the wiring and physical lookups of allocateBacking, GPU map time by backing, TLB invalidations,
+// the per-submission maintenance walk. Cumulative since boot: an A/B diffs two reads.
+int sysctlGpuPaged(struct sysctl_oid *,void *,int,struct sysctl_req *req)
+{
+  if(req->newptr)return EPERM;
+  for(unsigned row=0;;++row) {
+    char line[NativeAdrenoP0bLineBytes];
+    const int count=NativeAdrenoPoolBypassLine(row,line,sizeof(line)-1);
+    if(count<=0)break;
+    const size_t bytes=size_t(count)<sizeof(line)-1?size_t(count):sizeof(line)-2;
+    line[bytes]='\n';
+    const int error=SYSCTL_OUT(req,line,bytes+1);
+    if(error)return error;
+  }
+  return SYSCTL_OUT(req,"",1);
+}
+// ---- GPU-PAGED P1 (adreno830/NativeAdrenoVm.h paged mode; private P1-GATE.md) ----------------------------------------------------
+// piano-gpu-mem=paged (read at probe, before S3): no BO pool, tables on demand, one record per mapping; piano-gpu-mem-cap-mib and
+// piano-gpu-mem-ws-reserve-mib (0: 7168 / 1536); piano-gpu-pt-audit=N (the tick audits every N s; 0: only on request).
+// machdep.piano_gpu_pt (read-only): the mode, then the paged VM's figures (NativeAdrenoPagedLine rows 1-3).
+// machdep.piano_gpu_pt_audit (root, write 1): the whole table tree audited now against the records (EIO when it finds a fault).
+bool gpuMemPagedArg()
+{
+  char value[16] = {};
+  if (!PE_parse_boot_argn("piano-gpu-mem", value, sizeof value - 1)) return false;
+  return !strncmp(value, "paged", sizeof value);
+}
+int sysctlGpuPt(struct sysctl_oid *,void *,int,struct sysctl_req *req)
+{
+  if(req->newptr)return EPERM;
+  NativeAdrenoVmPagedStats s{};
+  if(NativeAdrenoVm *vm=NativeAdrenoGpuContextVm())vm->pagedStats(&s);
+  for(unsigned row=0;row<4;++row) {
+    char line[200];
+    const int count=NativeAdrenoPagedLine(row,s,line,sizeof(line)-1);
+    if(count<=0)break;
+    const size_t bytes=size_t(count)<sizeof(line)-1?size_t(count):sizeof(line)-2;
+    line[bytes]='\n';
+    const int error=SYSCTL_OUT(req,line,bytes+1);
+    if(error)return error;
+  }
+  return SYSCTL_OUT(req,"",1);
+}
+int sysctlGpuPtAudit(struct sysctl_oid *oidp,void *,int,struct sysctl_req *req)
+{
+  int value=0;
+  const int err=sysctl_handle_int(oidp,&value,0,req);
+  if(err || !req->newptr)return err;
+  if(value!=1)return EINVAL;
+  NativeAdrenoVm *vm=NativeAdrenoGpuContextVm();
+  if(!vm || !vm->paged())return ENODEV;
+  ArmSmmu4KPagedAuditResult r{};
+  const IOReturn status=vm->auditTables(&r);
+  gpuLine("pt audit (machdep.piano_gpu_pt_audit): %s: why %u at %#llx, %llu tables, %llu leaves, %llu descriptors read",
+          status==kIOReturnSuccess?"ok":"FAILED",unsigned(r.why),(unsigned long long)r.iova,(unsigned long long)r.tables,
+          (unsigned long long)r.leaves,(unsigned long long)r.descriptor_reads);
+  return status==kIOReturnSuccess?0:EIO;
+}
+// GPU-PAGED P1b: machdep.piano_gpu_wire_workers (root, 0..7; piano-gpu-wire-workers at start): kernel threads that wire the parts of a
+// user BO of >= 1 MiB at the same time as the BoAlloc thread (0: one named entry wired by that thread, as before); machdep.piano_gpu_wire
+// (read-only): BOs split, their parts, BOs wired whole for want of workers, failed splits, threads started, parts the workers wired.
+int sysctlGpuWireWorkers(struct sysctl_oid *oidp,void *,int,struct sysctl_req *req)
+{
+  int value=int(__atomic_load_n(&native_adreno_wire_workers,__ATOMIC_ACQUIRE));
+  const int err=sysctl_handle_int(oidp,&value,0,req);
+  if(err || !req->newptr)return err;
+  if(value<0 || value>int(NativeAdrenoWireMaxWorkers))return EINVAL;
+  __atomic_store_n(&native_adreno_wire_workers,uint32_t(value),__ATOMIC_RELEASE);
+  gpuLine("wire workers %d (machdep.piano_gpu_wire_workers, GPU-PAGED P1b): user BOs of >= 1 MiB %s",value,
+          value?"are wired as parts at the same time":"are wired whole by the BoAlloc thread");
+  return 0;
+}
+// GPU-PAGED P1d: machdep.piano_gpu_wire_priority (root; piano-gpu-wire-priority at start, default 47): the priority the workers wire
+// at (0 or 81: kernel_thread_start's BASEPRI_KERNEL, gpu-p1b/p1c's, above WindowServer's compositing threads); applied before a worker's
+// next part.
+int sysctlGpuWirePriority(struct sysctl_oid *oidp,void *,int,struct sysctl_req *req)
+{
+  int value=int(__atomic_load_n(&native_adreno_wire_priority,__ATOMIC_ACQUIRE));
+  const int err=sysctl_handle_int(oidp,&value,0,req);
+  if(err || !req->newptr)return err;
+  if(value<0 || value>int(NativeAdrenoWirePriorityKernel))return EINVAL;
+  __atomic_store_n(&native_adreno_wire_priority,uint32_t(value),__ATOMIC_RELEASE);
+  gpuLine("wire priority %d (machdep.piano_gpu_wire_priority, GPU-PAGED P1d)",value?value:int(NativeAdrenoWirePriorityKernel));
+  return 0;
+}
+int sysctlGpuWire(struct sysctl_oid *,void *,int,struct sysctl_req *req)
+{
+  if(req->newptr)return EPERM;
+  char line[200];
+  typedef unsigned long long u64;
+  const int n=snprintf(line,sizeof line,"wire workers=%u split=%llu parts=%llu whole=%llu failed=%llu threads=%llu worker-parts=%llu priority=%u\n",
+                       unsigned(__atomic_load_n(&native_adreno_wire_workers,__ATOMIC_ACQUIRE)),u64(native_adreno_wire_stats[0]),
+                       u64(native_adreno_wire_stats[1]),u64(native_adreno_wire_stats[2]),u64(native_adreno_wire_stats[3]),
+                       u64(native_adreno_wire_stats[4]),u64(native_adreno_wire_stats[5]),
+                       unsigned(__atomic_load_n(&native_adreno_wire_priority,__ATOMIC_ACQUIRE)));
+  if(n<=0)return EIO;
+  const int error=SYSCTL_OUT(req,line,size_t(n)<sizeof line?size_t(n):sizeof line-1);
+  return error?error:SYSCTL_OUT(req,"",1);
+}
+void registerGpuPt()
+{
+  static struct sysctl_oid pt,audit,workers,wire,wirePriority;
+  wirePriority.oid_parent=&sysctl__machdep_children;wirePriority.oid_number=OID_AUTO;
+  wirePriority.oid_kind=int(CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_OID2);
+  wirePriority.oid_name="piano_gpu_wire_priority";wirePriority.oid_handler=sysctlGpuWirePriority;wirePriority.oid_fmt="I";
+  wirePriority.oid_descr="GPU-PAGED P1d: the priority the wiring workers run at (0/81: the kernel's, above the compositor; default 47)";
+  wirePriority.oid_version=SYSCTL_OID_VERSION;sysctl_register_oid(&wirePriority);
+  workers.oid_parent=&sysctl__machdep_children;workers.oid_number=OID_AUTO;
+  workers.oid_kind=int(CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_OID2);
+  workers.oid_name="piano_gpu_wire_workers";workers.oid_handler=sysctlGpuWireWorkers;workers.oid_fmt="I";
+  workers.oid_descr="GPU-PAGED P1b: kernel threads wiring the parts of a large user BO at the same time (0: serial, as before)";
+  workers.oid_version=SYSCTL_OID_VERSION;sysctl_register_oid(&workers);
+  wire.oid_parent=&sysctl__machdep_children;wire.oid_number=OID_AUTO;
+  wire.oid_kind=int(CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_OID2);
+  wire.oid_name="piano_gpu_wire";wire.oid_handler=sysctlGpuWire;wire.oid_fmt="A";
+  wire.oid_descr="GPU-PAGED P1b: user BOs split into parts, parts, BOs wired whole, failures, worker threads, parts the workers wired";
+  wire.oid_version=SYSCTL_OID_VERSION;sysctl_register_oid(&wire);
+  pt.oid_parent=&sysctl__machdep_children;pt.oid_number=OID_AUTO;
+  pt.oid_kind=int(CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_OID2);
+  pt.oid_name="piano_gpu_pt";pt.oid_handler=sysctlGpuPt;pt.oid_fmt="A";
+  pt.oid_descr="GPU-PAGED P1: the GPU VM's mode and, paged, its on-demand page tables, records, cap, trims and refusals";
+  pt.oid_version=SYSCTL_OID_VERSION;sysctl_register_oid(&pt);
+  audit.oid_parent=&sysctl__machdep_children;audit.oid_number=OID_AUTO;
+  audit.oid_kind=int(CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_OID2);
+  audit.oid_name="piano_gpu_pt_audit";audit.oid_handler=sysctlGpuPtAudit;audit.oid_fmt="I";
+  audit.oid_descr="GPU-PAGED P1: write 1 to audit the paged GPU page tables against the mappings now (EIO on a finding)";
+  audit.oid_version=SYSCTL_OID_VERSION;sysctl_register_oid(&audit);
+}
+void registerGpuPaged()
+{
+  static struct sysctl_oid bypass,paged;
+  bypass.oid_parent=&sysctl__machdep_children;bypass.oid_number=OID_AUTO;
+  bypass.oid_kind=int(CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_OID2);
+  bypass.oid_name="piano_gpu_pool_bypass";bypass.oid_handler=sysctlGpuPoolBypass;bypass.oid_fmt="I";
+  bypass.oid_descr="GPU-PAGED P0b: 1 = new GPU BOs skip the BO pool (the scattered per-page path), 0 = the pool as before";
+  bypass.oid_version=SYSCTL_OID_VERSION;sysctl_register_oid(&bypass);
+  paged.oid_parent=&sysctl__machdep_children;paged.oid_number=OID_AUTO;
+  paged.oid_kind=int(CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_OID2);
+  paged.oid_name="piano_gpu_paged";paged.oid_handler=sysctlGpuPaged;paged.oid_fmt="A";
+  paged.oid_descr="GPU-PAGED P0b figures: BoAlloc by path, wiring, physical lookups, map time by backing, TLB invalidations, submissions";
+  paged.oid_version=SYSCTL_OID_VERSION;sysctl_register_oid(&paged);
+}
+} // namespace
 
 // ---- the GPU's ceiling slots (PianoGpuCeiling.h) ---------------------------------------------------------------------------------
 namespace {
@@ -800,6 +1565,33 @@ IOReturn ceilingSet(unsigned client, uint32_t khz)
       gpuLine("ceiling cleared (no slot holds one; #%u)", n);
   }
   return kIOReturnSuccess;
+}
+}  // namespace
+
+// ---- gpu/fullopp1: the sweep's ceiling (test only, piano-gpu-fullopp=1) ---------------------------------------------------------------
+// machdep.piano_gpu_sweep_ceiling (root): MHz in ceiling slot 2 (the lowest slot still wins, so Low Power Mode and the thermal trip keep
+// theirs), 0 clears it. The per-OPP holds of spec gpu-fullopp1 set it to each level under the bench (the governor climbs to it).
+namespace {
+uint32_t gSweepMhz;
+int sysctlGpuSweepCeiling(struct sysctl_oid *oidp, void *, int, struct sysctl_req *req)
+{
+  int value = int(__atomic_load_n(&gSweepMhz, __ATOMIC_ACQUIRE));
+  const int err = sysctl_handle_int(oidp, &value, 0, req);
+  if (err || !req->newptr) return err;
+  if (value < 0 || (value && (value < 160 || value > 1100))) return EINVAL;
+  if (ceilingSet(2, uint32_t(value) * 1000u) != kIOReturnSuccess) return EIO;
+  __atomic_store_n(&gSweepMhz, uint32_t(value), __ATOMIC_RELEASE);
+  gpuLine("sweep ceiling %d MHz (machdep.piano_gpu_sweep_ceiling, slot 2)", value);
+  return 0;
+}
+void registerGpuSweepCeiling()
+{
+  static struct sysctl_oid oid;
+  oid.oid_parent=&sysctl__machdep_children;oid.oid_number=OID_AUTO;
+  oid.oid_kind=int(CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_OID2);
+  oid.oid_name="piano_gpu_sweep_ceiling";oid.oid_handler=sysctlGpuSweepCeiling;oid.oid_fmt="I";
+  oid.oid_descr="Test only (piano-gpu-fullopp=1): GPU ceiling slot 2 in MHz for the OPP sweep; 0 clears it";
+  oid.oid_version=SYSCTL_OID_VERSION;sysctl_register_oid(&oid);
 }
 }  // namespace
 
@@ -1114,6 +1906,19 @@ IOService *PianoA830::probe(IOService *provider, SInt32 *score)
 {
   gLevel = bootArg("piano-gpu", 0);
   NativeAdrenoMemory::setUnmappedUser(bootArg("piano-gpu-user-vm", 0) == 1);
+  // GPU-PAGED P1: the VM's mode and its limits, before the bring-up thread reaches S3
+  __atomic_store_n(&native_adreno_gpu_mem_paged, gpuMemPagedArg() ? 1u : 0u, __ATOMIC_RELEASE);
+  __atomic_store_n(&native_adreno_gpu_mem_cap_mib, bootArg("piano-gpu-mem-cap-mib", 0), __ATOMIC_RELEASE);
+  __atomic_store_n(&native_adreno_gpu_mem_reserve_mib, bootArg("piano-gpu-mem-ws-reserve-mib", 0), __ATOMIC_RELEASE);
+  __atomic_store_n(&native_adreno_gpu_pt_audit_s, bootArg("piano-gpu-pt-audit", 0), __ATOMIC_RELEASE);
+  {  // GPU-PAGED P1b: the parallel wiring of large user BOs
+    uint32_t workers = bootArg("piano-gpu-wire-workers", 0);
+    if (workers > NativeAdrenoWireMaxWorkers) workers = NativeAdrenoWireMaxWorkers;
+    __atomic_store_n(&native_adreno_wire_workers, workers, __ATOMIC_RELEASE);
+    uint32_t priority = bootArg("piano-gpu-wire-priority", NativeAdrenoWirePriorityDefault);
+    if (priority > NativeAdrenoWirePriorityKernel) priority = NativeAdrenoWirePriorityKernel;
+    __atomic_store_n(&native_adreno_wire_priority, priority, __ATOMIC_RELEASE);
+  }
   if (!gLevel || !OSDynamicCast(IOPlatformExpertDevice, provider)) return nullptr;
   return IOService::probe(provider, score);
 }
@@ -1139,6 +1944,9 @@ bool PianoA830::start(IOService *provider)
   static bool started;
   if (started) return true;
   started = true;
+  // Board parsing happens later on the bring-up thread; allocate before its first qualification record, under S10's own rule
+  // (gpu/fullopp1b: the 7/607-only test here made every other top fail S10 with reason 12; A830QualificationTop.h).
+  registerQual607(piano_a830_qualification_top() != 0);
   if (gLevel > 2) {
     piano_a830_note("piano-gpu=%u: unknown level (1 survey, 2 bring-up); nothing done", gLevel);
     return true;
@@ -1154,6 +1962,39 @@ bool PianoA830::start(IOService *provider)
   nanoseconds_to_absolutetime(10ull * 1000000000ull, &gRowEvery);
   setProperty("piano-gpu", gLevel, 32);
   gService = this;
+  registerGpuRefusals();
+  registerGpuInputFloor();
+  registerGpuBoost();
+  registerGpuBusy();
+  // GPU-PAGED P0b: the pool bypass switch, off unless piano-gpu-pool-bypass=1 (machdep.piano_gpu_pool_bypass switches it at run time)
+  __atomic_store_n(&native_adreno_pool_bypass, bootArg("piano-gpu-pool-bypass", 0) == 1 ? 1u : 0u, __ATOMIC_RELEASE);
+  registerGpuPaged();
+  registerGpuPt();   // GPU-PAGED P1
+  gBoostArg = bootArg("piano-gpu-boost", 0) == 1 ? 1u : 0u;
+  __atomic_store_n(&gBoostEnabled, gBoostArg, __ATOMIC_RELEASE);
+  // piano_a830_note: start() runs before the line ring exists (gpu-boost342a lost these two through gpuLine).
+  if (gBoostArg) piano_a830_note("boost: piano-gpu-boost=1: the input kexts and callPlatformFunction(\"piano-gpu-boost\") raise a floor "
+                                 "under every ceiling (machdep.piano_gpu_boost)");
+  if (bootArg("piano-gpu-fullopp", 0) == 1) {
+    registerGpuSweepCeiling();
+    piano_a830_note("fullopp: piano-gpu-fullopp=1: Android's bin-2 curve on the R3b line (ANALYSIS gpu-fullopp); "
+                    "machdep.piano_gpu_sweep_ceiling (root, test only) sets ceiling slot 2");
+  }
+  if (const uint32_t floorMhz = bootArg("piano-gpu-input-floor", 0))
+    piano_a830_note("input floor: piano-gpu-input-floor=%u MHz, held 80 ms after each submission, a 50 ms busy burst to the top (machdep.piano_gpu_input_floor)", floorMhz);
+  // 2026-11-22 (private 20261122-render/ANALYSIS.md): the recovery replays innocent clients' jobs unless piano-gpu-recovery-replay=0.
+  adreno830_recovery_set_replay(bootArg("piano-gpu-recovery-replay", 1) != 0 ? 1u : 0u);
+  registerGpuRecovery();
+  piano_a830_note("recovery: piano-gpu-recovery-replay=%u: %s (machdep.piano_gpu_recovery_replay, machdep.piano_gpu_recovery)",
+                  adreno830_recovery_replay_mode(), adreno830_recovery_replay_mode() ?
+                  "a GPU hang faults the culprit alone, the other clients' jobs in flight are replayed" :
+                  "a GPU hang fails every job in flight (the old behaviour)");
+  if (bootArg("piano-gpu-fault-test", 0) == 1) {
+    registerGpuFaultTest();
+    registerGpuFaultHold();
+    piano_a830_note("fault test: piano-gpu-fault-test=1: machdep.piano_gpu_fault_test (root, test only) reports a hang to the recovery; "
+                    "machdep.piano_gpu_fault_hold (root, a pid) stops the CP in that process's next job");
+  }
   gCeilingLock = IOLockAlloc();
   setProperty("piano-gpu-ceiling-clients", pianogpu::kCeilingClients, 32);   // docs/policy.md §5.3: one slot per caller
   suspendConfigure(gLevel);
@@ -1165,6 +2006,19 @@ bool PianoA830::start(IOService *provider)
   // The async line ring is not allocated yet: use the direct startup IOLog channel.
   piano_a830_note("gpu bo backing: user fallback=%s; kernel objects=mapped; pool=unchanged; gpuoom-vm1",
           NativeAdrenoMemory::unmappedUser() ? "unmapped-vm" : "mapped-control");
+  piano_a830_note("pool bypass: piano-gpu-pool-bypass=%u at start (GPU-PAGED P0b; machdep.piano_gpu_pool_bypass switches it, "
+          "machdep.piano_gpu_paged has the per-path figures)", unsigned(__atomic_load_n(&native_adreno_pool_bypass, __ATOMIC_ACQUIRE)));
+  piano_a830_note("gpu mem: piano-gpu-mem=%s (GPU-PAGED P1): %s; cap %u MiB, render-server reserve %u MiB, audit every %u s "
+          "(machdep.piano_gpu_pt, machdep.piano_gpu_pt_audit)",
+          __atomic_load_n(&native_adreno_gpu_mem_paged, __ATOMIC_ACQUIRE) ? "paged" : "pool",
+          __atomic_load_n(&native_adreno_gpu_mem_paged, __ATOMIC_ACQUIRE) ?
+            "no BO pool, page tables on demand, one record per mapping" : "the BO pool and the preallocated tables as before",
+          unsigned(native_adreno_gpu_mem_cap_mib ? native_adreno_gpu_mem_cap_mib : uint32_t(NativeAdrenoVmPagedCapDefault >> 20)),
+          unsigned(native_adreno_gpu_mem_reserve_mib ? native_adreno_gpu_mem_reserve_mib : uint32_t(NativeAdrenoVmPagedReserveDefault >> 20)),
+          unsigned(native_adreno_gpu_pt_audit_s));
+  piano_a830_note("wire workers: piano-gpu-wire-workers=%u (GPU-PAGED P1b): user BOs of >= 1 MiB %s (machdep.piano_gpu_wire_workers, "
+          "machdep.piano_gpu_wire)", unsigned(__atomic_load_n(&native_adreno_wire_workers, __ATOMIC_ACQUIRE)),
+          __atomic_load_n(&native_adreno_wire_workers, __ATOMIC_ACQUIRE) ? "are wired as parts at the same time" : "are wired whole, as before");
   piano_a830_note("start: piano-gpu=%u (A830 chip %#x, k27 native kext, polled)", gLevel, 0x44050001u);
   if (gTraceSync) {
     gRing.stamp = static_cast<uint64_t *>(IOMallocZero(size_t(RingLines) * sizeof(uint64_t)));
@@ -1228,6 +2082,10 @@ IOReturn PianoA830::setPowerState(unsigned long state, IOService *)
 IOReturn PianoA830::callPlatformFunction(const OSSymbol *functionName, bool waitForFunction, void *param1, void *param2, void *param3,
                                          void *param4)
 {
+  if (functionName && functionName->isEqualTo("piano-gpu-qualification-display")) {
+    adreno830_qualification_display(static_cast<const PianoGpuQualificationDisplay *>(param1));
+    return kIOReturnSuccess;
+  }
   if (functionName && functionName->isEqualTo("native-adreno-fences")) {
     if (!param1 || !param2) return kIOReturnBadArgument;
     return native_adreno_fences(static_cast<uint32_t *>(param1), static_cast<uint32_t *>(param2)) ? kIOReturnSuccess : kIOReturnNotReady;
@@ -1238,6 +2096,11 @@ IOReturn PianoA830::callPlatformFunction(const OSSymbol *functionName, bool wait
   // per change of the ceiling in force, the first 8 then every 10th, 100th, ...
   if (functionName && functionName->isEqualTo("piano-gpu-ceiling"))
     return ceilingSet(unsigned(uintptr_t(param2)), uint32_t(uintptr_t(param1)));
+  // A boost floor (PianoGpuBoost.h; boost342 / GPU-DAILY.md): param1 0 = the input boost, 1..16 a GMU level, else MHz; param2 the
+  // hold in ms (0 = the touch hold). From the input kexts and the CPU agent's boost policy; every ceiling still wins. Only with
+  // piano-gpu-boost=1 (machdep.piano_gpu_boost switches it at run time); otherwise unsupported, so senders stop asking.
+  if (functionName && functionName->isEqualTo("piano-gpu-boost"))
+    return gpuBoost(uint32_t(uintptr_t(param1)), uint32_t(uintptr_t(param2)), uint32_t(uintptr_t(param4)));
   // The LLCC island (PianoPowerContract.h pianopower::llccIslandReady): param1 = bool *, the two words read again. Any thread.
   if (functionName && functionName->isEqualTo("piano-llcc-island-ready")) {
     if (!param1) return kIOReturnBadArgument;

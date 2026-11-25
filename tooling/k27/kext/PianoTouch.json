@@ -30,6 +30,16 @@
       "VendorID": 6900,
       "ProductID": 20564,
       "IOProbeScore": 3000
+    },
+    "PianoTouchScreenEventDriver": {
+      "CFBundleIdentifier": "com.apple.iokit.IOHIDFamily",
+      "IOClass": "IOHIDEventDriver",
+      "IOProviderClass": "IOHIDInterface",
+      "VendorID": 6900,
+      "ProductID": 21587,
+      "IOProbeScore": 3000,
+      "DigitizerCollectionDispatch": true,
+      "DisplayIntegrated": true
     }
   },
   "vtable": {

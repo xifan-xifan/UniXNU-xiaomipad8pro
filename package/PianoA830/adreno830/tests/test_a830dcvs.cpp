@@ -1061,6 +1061,199 @@ static void testPark()
     CHECK(gDcvs.level()==1 && gDcvs.ceiling()==1);
 }
 
+/* gpu-daily2 (GPU-ANDROID.md 5): the input floor. Light composed frames (10 % busy, one submission per window) hold 342 MHz
+ * instead of the demand level 160; 64 ms without a submission ends it (the idle rule); a heavy load still climbs over it; the
+ * runtime switch turns it off and on; a ceiling below it wins. */
+static void testInputFloor()
+{
+    adreno830_profile_value=A830ProfileAnnibale;
+    A830DcvsConfig c;c.initialLevel=1;c.initialBus=2;c.maxLevel=7;c.maxMhz=607;c.maxGiven=true;c.inputFloorKhz=342000;
+    boot(c);
+    steps(100,0,false);
+    CHECK(gDcvs.level()==1 && gDcvs.ceiling()==7);
+    steps(20,100);
+    CHECK(gDcvs.level()==3);
+    steps(60,100);
+    CHECK(gDcvs.level()==3);
+    steps(6,0,false);
+    CHECK(gDcvs.level()==1);
+    step(100);
+    CHECK(gDcvs.level()>=3);
+    steps(10,100);
+    CHECK(gDcvs.level()==3);
+    steps(60,990);
+    CHECK(gDcvs.level()==7);
+    CHECK(adreno830_dcvs_set_input_floor(0)==0 && adreno830_dcvs_input_floor()==0);
+    steps(60,100);
+    CHECK(gDcvs.level()==1);
+    CHECK(adreno830_dcvs_set_input_floor(50)==-2 && adreno830_dcvs_set_input_floor(1200)==-2);
+    CHECK(adreno830_dcvs_set_input_floor(342)==0 && adreno830_dcvs_input_floor()==342);
+    steps(10,100);
+    CHECK(gDcvs.level()==3);
+#ifdef ADRENO830_MACOS
+    adreno830_dcvs_set_ceiling(222000);
+    steps(5,100);
+    CHECK(gDcvs.level()<=2);
+    adreno830_dcvs_set_ceiling(0);
+    steps(5,100);
+    CHECK(gDcvs.level()==3);
+#endif
+    /* off by default: the same light frames stay at the demand level */
+    A830DcvsConfig d=c;d.inputFloorKhz=0;
+    boot(d);
+    steps(100,0,false);
+    steps(40,100);
+    CHECK(gDcvs.level()==1);
+}
+
+/* boost342 (piano-gpu-boost, GPU-DAILY.md): a boost floor from any thread for its hold, the highest of overlapping requests until the
+ * latest end, the input default (0: the touch boost's level and hold), a GMU level or MHz, every ceiling winning (the annibale 342). */
+static void testBoostRequests()
+{
+    adreno830_profile_value=A830ProfileAnnibale;
+    A830DcvsConfig c;c.initialLevel=1;c.initialBus=2;
+    boot(c);                                  /* the daily default: annibale, ceiling 342 (level 3) */
+    steps(100,0,false);
+    CHECK(gDcvs.level()==1 && gDcvs.ceiling()==3);
+    CHECK(adreno830_dcvs_boost(0,0)==0);      /* the input boost: 525 MHz for 300 ms, capped at 342 */
+    step(0,false);
+    CHECK(gDcvs.level()==3 && gDcvs.stats().boostRequests==1);
+    steps(17,0,false);                        /* 288 ms later still held */
+    CHECK(gDcvs.level()==3);
+    steps(3,0,false);
+    CHECK(gDcvs.level()==1);                  /* ended after its 300 ms */
+    CHECK(adreno830_dcvs_boost(2,1000)==0);   /* GMU level 2 (222 MHz) for 1 s */
+    step(0,false);
+    CHECK(gDcvs.level()==2);
+    CHECK(adreno830_dcvs_boost(342,100)==0);  /* a higher, shorter one: 342 until the longer end */
+    step(0,false);
+    CHECK(gDcvs.level()==3);
+    steps(70,0,false);                        /* past the 1 s end */
+    CHECK(gDcvs.level()==1);
+    CHECK(adreno830_dcvs_boost(607,200)==0);  /* above the ceiling: the ceiling wins */
+    step(0,false);
+    CHECK(gDcvs.level()==3);
+#ifdef ADRENO830_MACOS
+    steps(20,0,false);
+    adreno830_dcvs_set_ceiling(222000);       /* Low Power Mode style slot below the boost */
+    CHECK(adreno830_dcvs_boost(342,500)==0);
+    step(0,false);
+    CHECK(gDcvs.level()<=2);
+    adreno830_dcvs_set_ceiling(0);
+#endif
+}
+
+/* gpu-boost342c (BOOST342.md): the input floor holds 80 ms after a submission and ends on time; the counters of
+ * machdep.piano_gpu_busy (bursts, burst submissions at the lowest level, busy time at the lowest level); with the floor set, sustained
+ * work of 50 ms busy at or above the 75 % target goes to the top (Android's msm-adreno-tz CEILING), lighter streams do not. */
+static void testBoost342c()
+{
+    adreno830_profile_value=A830ProfileAnnibale;
+    uint64_t a[6],b[6];
+    A830DcvsConfig c;c.initialLevel=1;c.initialBus=2;c.inputFloorKhz=342000;
+    c.wakeBoostKhz=0;                         /* piano-gpu-idle=1, as on the daily line: no wake boost, the 250 ms idle window */
+#ifdef ADRENO830_MACOS
+    c.idleWindowMs=250;
+#endif
+    boot(c);                                  /* the daily line: annibale, ceiling 342 (level 3), floor 342 */
+    steps(100,0,false);
+    CHECK(gDcvs.level()==1 && gDcvs.ceiling()==3);
+    CHECK(adreno830_dcvs_busy(a)==0);
+    step(100);                                /* a burst begins: the floor at once */
+    CHECK(gDcvs.level()==3);
+    steps(4,0,false);                         /* 64 ms later still held (80 ms) */
+    CHECK(gDcvs.level()==3);
+    steps(1,0,false);                         /* 80 ms: ended */
+    CHECK(gDcvs.level()==1);
+    steps(30,100);                            /* a light 60 fps stream: held at 342 all along */
+    CHECK(gDcvs.level()==3);
+    CHECK(adreno830_dcvs_busy(b)==0);
+    CHECK(b[3]-a[3]==2 && b[4]-a[4]==0 && b[2]-a[2]==31);   /* two bursts, no burst submission at 160 */
+    CHECK(b[0]>a[0] && b[1]-a[1]<(b[0]-a[0])/10);            /* nearly all its busy time at 342 */
+    /* the floor off (the A/B's other half): the same stream stays at 160, its submissions and busy time count at the lowest level */
+    CHECK(adreno830_dcvs_set_input_floor(0)==0);
+    steps(10,0,false);
+    CHECK(gDcvs.level()==1 && adreno830_dcvs_busy(a)==0);
+    steps(30,100);
+    CHECK(gDcvs.level()==1 && adreno830_dcvs_busy(b)==0);
+    CHECK(b[3]-a[3]==1 && b[4]-a[4]==29 && b[1]-a[1]==b[0]-a[0] && b[0]>a[0]);
+    /* race to the top under a higher ceiling (607, level 7): 4 windows at 80 % busy = 51 ms -> the top, only with the floor set */
+    A830DcvsConfig d=c;d.maxLevel=7;d.maxMhz=607;d.maxGiven=true;
+#ifdef ADRENO830_MACOS
+    d.idleWindowMs=0;                         /* (with the 250 ms idle window the stretched first window after idle comes first) */
+#endif
+    boot(d);
+    steps(100,0,false);
+    CHECK(gDcvs.level()==1 && gDcvs.ceiling()==7);
+    steps(3,800);
+    CHECK(gDcvs.level()<7 && gDcvs.stats().burstTops==0);
+    step(800);
+    CHECK(gDcvs.level()==7 && gDcvs.stats().burstTops==1);
+    steps(100,0,false);
+    steps(60,100);                            /* a light stream never adds up (windows under the 75 % target) */
+    CHECK(gDcvs.level()==3 && gDcvs.stats().burstTops==1);
+    A830DcvsConfig e=d;e.inputFloorKhz=0;
+    boot(e);
+    steps(100,0,false);
+    steps(4,800);
+    CHECK(gDcvs.level()<7 && gDcvs.stats().burstTops==0);   /* the floor off: the governor as before */
+}
+
+/* gpu/fullopp1 (private/host-checks/20261122-gpu-fullopp/ANALYSIS.md 3.2, 3.4): the KGSL mode (pagani-gpu-governor=2: 10 ms windows on the
+ * timer whatever the TEs, the idle rule at 80 ms, no sustain limit, the race to the top without the input floor) and a boost's cap
+ * (Android's launch: a 443 MHz floor and a cap for the hold, the lowest cap of overlapping requests, gone when the hold ends). */
+static void testFullOpp()
+{
+    adreno830_profile_value=A830ProfileAnnibale;
+    constexpr uint64_t Ms10=10000000ull;
+    A830DcvsConfig c;c.initialLevel=1;c.initialBus=2;c.maxLevel=11;c.maxMhz=900;c.maxGiven=true;c.acd=true;
+    c.kgsl=true;c.windowMs=10;c.idleMs=80;c.sustainKhz=0;c.wakeBoostKhz=0;
+    boot(c);
+    for(unsigned i=0;i<20;++i)step(0,false,Ms10);
+    CHECK(gDcvs.level()==1 && gDcvs.ceiling()==11);
+    /* TEs do not make the windows: every 10 ms step is a window even with vsyncs arriving */
+    const uint32_t windows=gDcvs.stats().windows;
+    for(unsigned i=0;i<10;++i) {gDcvs.noteVsync();gDcvs.noteVsync();step(0,false,Ms10);}
+    CHECK(gDcvs.stats().windows-windows==10);
+    /* the race to the top: 76 % busy windows of 10 ms add up to 50 ms at the 7th, without any input floor */
+    for(unsigned i=0;i<6;++i)step(760,true,Ms10);   /* 76 %: the demand rule climbs about a level a window (607 after six) */
+    CHECK(gDcvs.level()<11 && gDcvs.stats().burstTops==0);
+    step(760,true,Ms10);
+    CHECK(gDcvs.level()==11 && gDcvs.stats().burstTops==1);
+    /* saturated: no sustain limit above 734 MHz (level 9) */
+    for(unsigned i=0;i<20;++i)step(1000,true,Ms10);
+    CHECK(gDcvs.level()==11 && gDcvs.stats().sustainHolds==0);
+    /* idle: still up 70 ms after the last submission, at the floor at 80 ms (KGSL's idle timer) */
+    for(unsigned i=0;i<7;++i)step(0,false,Ms10);
+    CHECK(gDcvs.level()>1);
+    step(0,false,Ms10);
+    CHECK(gDcvs.level()==1);
+    /* the same without the KGSL mode and without the floor: no race to the top (the R3b line as before) */
+    A830DcvsConfig d=c;d.kgsl=false;d.windowMs=16;d.idleMs=64;
+    boot(d);
+    for(unsigned i=0;i<20;++i)step(0,false,Ms10);
+    for(unsigned i=0;i<7;++i)step(760,true,Ms10);
+    CHECK(gDcvs.stats().burstTops==0);
+    /* the launch boost: a 443 MHz floor (level 5) and a cap of 832 MHz (level 10) for 500 ms */
+    boot(c);
+    for(unsigned i=0;i<20;++i)step(0,false,Ms10);
+    CHECK(adreno830_dcvs_boost_capped(443,500,100)==-2 && adreno830_dcvs_boost_capped(443,500,1200)==-2);
+    CHECK(adreno830_dcvs_boost_capped(443,500,832)==0);
+    step(0,false,Ms10);
+    CHECK(gDcvs.level()==5 && gDcvs.ceiling()==10 && gDcvs.boostCap(gEnv.now)==832000);
+    for(unsigned i=0;i<10;++i)step(1000,true,Ms10);
+    CHECK(gDcvs.level()==10);                                  /* saturated under the cap */
+    CHECK(adreno830_dcvs_boost_capped(443,100,967)==0);       /* a later, higher cap: the lower one stays until the later end */
+    step(1000,true,Ms10);
+    CHECK(gDcvs.ceiling()==10 && gDcvs.boostCap(gEnv.now)==832000);
+    for(unsigned i=0;i<40;++i)step(1000,true,Ms10);           /* past the hold: no cap, the top again */
+    CHECK(gDcvs.boostCap(gEnv.now)==0 && gDcvs.ceiling()==11 && gDcvs.level()==11);
+    CHECK(adreno830_dcvs_boost(443,500)==0);                  /* the plain boost: no cap */
+    step(1000,true,Ms10);
+    CHECK(gDcvs.boostCap(gEnv.now)==0 && gDcvs.ceiling()==11);
+    adreno830_profile_value=A830ProfileDesign;
+}
+
 int main()
 {
     /* The design profile for the cases written for it; testAnnibale switches to the annibale one (the boot default). */
@@ -1081,6 +1274,10 @@ int main()
     testServiceAndStatus();
     testAnnibale();
     testMaxLevel();
+    testInputFloor();
+    testBoostRequests();
+    testBoost342c();
+    testFullOpp();
     adreno830_profile_value=A830ProfileDesign;
     testScreen();
     testPark();
@@ -1099,7 +1296,8 @@ int main()
                 "annibale profile: 342 MHz unless pagani-gpu-dcvs-max, 160 MHz at 70 C or unreadable until below 60 C, bw "
                 "without 0xFFFF0000, an unacknowledged vote ends the changes; pagani-gpu-maxlevel: %u ceiling cases (ramp "
                 "160/342/607/734 MHz with the DT bus, level n, the top beyond the table under ACD off, dcvs-max, thermal "
-                "hold, fixed mode, design); the screen rule through the service thread (PaganiPanel's word, dark touches "
+                "hold, fixed mode, design); the input floor (342 MHz held 64 ms after each submission, off/on at run time, under the "
+                "ceilings); the screen rule through the service thread (PaganiPanel's word, dark touches "
                 "ignored, no window polling while dark, the display's refresh tick wakes it at the touch level) (%u checks)\n",
                 compositingCases,headroomCases,heatCases,maxLevelCases,gChecks);
     return 0;

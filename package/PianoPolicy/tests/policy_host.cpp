@@ -374,6 +374,130 @@ static void profile()
   CHECK(s.find("profile:") == std::string::npos && s.find("gpu:") == std::string::npos);
 }
 
+// piano-policy-profile=2 (2026-11-22): Low Power Mode is the only switch: Balanced (PianoThermal profile 2) on battery and on power
+// without it, Power Saver with it, the GPU ceiling only with it; PianoThermal's governor then caps by that profile, not the source.
+static void lpmOnly()
+{
+  Config c = actLid();
+  c.lpmOnly = true;
+  c.gpuNeeded = true;
+  Engine e(c);
+  Inputs in = base();   // on battery
+  CHECK(view(c, in, true).profile == Profile::balanced);
+  std::string s = run(e, in);                // the first step tells PianoThermal Balanced, no GPU ceiling on battery
+  CHECK(s.find("profile:2") != std::string::npos && s.find("gpu:") == std::string::npos);
+  in.lpm = true;
+  CHECK(view(c, in, true).profile == Profile::saver);
+  CHECK(run(e, in) == "profile:1 gpu:342000");
+  in.lpm = false;
+  CHECK(run(e, in) == "profile:2 gpu:0");
+  in.power = Power::external;
+  CHECK(run(e, in).find("profile:") == std::string::npos);   // the source changes nothing
+  in.power = Power::battery;
+  CHECK(run(e, in).find("profile:") == std::string::npos);
+  // PianoThermal's side: profile 2 = the external caps whatever the source; 1 = the battery caps.
+  using pianothermal::PowerSource;
+  CHECK(pianothermal::profilePower(PowerSource::battery, pianothermal::Profile(2)) == PowerSource::external);
+  CHECK(pianothermal::profilePower(PowerSource::external, pianothermal::Profile(1)) == PowerSource::battery);
+  // Without lpmOnly the old rule stays (on battery: Power Saver, nothing sent at boot).
+  Engine old(actLid());
+  CHECK(run(old, base()).find("profile:") == std::string::npos);
+}
+
+// Energy Mode step E2 (docs/policy.md 12): macOS High Power Mode (machdep.piano_policy_hpm) -> PianoThermal's High Power profile
+// (mode 3) whatever the power source and the profile rule, no GPU ceiling; only when PianoThermal publishes that it takes mode 3
+// (piano-thermal-profiles), else Balanced; Low Power Mode wins when both read 1; Automatic (neither) keeps each rule's own choice.
+static void highPowerMode()
+{
+  for (int rule = 0; rule < 2; ++rule)   // 0: by the power source (piano-policy-profile=1), 1: Low Power Mode the only switch (=2)
+    for (int t3 = 0; t3 < 2; ++t3)
+      for (Power power : {Power::unknown, Power::battery, Power::external})
+        for (int lpm = 0; lpm < 2; ++lpm)
+          for (int hpm = 0; hpm < 2; ++hpm)
+            for (int gpuNeeded = 0; gpuNeeded < 2; ++gpuNeeded) {
+              Config c = actLid();
+              c.lpmOnly = rule == 1;
+              c.gpuNeeded = gpuNeeded;
+              Inputs in = base();
+              in.power = power;
+              in.lpm = lpm;
+              in.hpm = hpm;
+              in.thermalProfiles = t3 ? kThermalPerformance : thermalProfiles(-1);
+              const View v = view(c, in, true);
+              Engine e(c);
+              const Actions a = e.step(in, 0);
+              uint32_t mode = kThermalAuto;
+              bool sent = false;
+              for (unsigned i = 0; i < a.n; ++i)
+                if (a.a[i].kind == Kind::thermalProfile) {
+                  mode = a.a[i].value;
+                  sent = true;
+                  CHECK(pianothermal::profileValid(mode));
+                }
+              if (lpm) {
+                CHECK(v.profile == Profile::saver && sent && mode == kThermalSaver);
+                CHECK(v.gpuKhz == (gpuNeeded ? c.gpuKhz : 0));
+              } else if (hpm && t3) {
+                CHECK(v.profile == Profile::performance && sent && mode == kThermalPerformance);
+                CHECK(v.gpuKhz == 0);
+                CHECK(pianothermal::profilePower(pianothermal::PowerSource::battery, pianothermal::Profile(mode)) ==
+                      pianothermal::PowerSource::external);
+              } else if (hpm) {   // PianoThermal without mode 3: never sent, Balanced instead
+                CHECK(v.profile == Profile::balanced && sent && mode == kThermalBalanced);
+                CHECK(v.gpuKhz == 0);
+              } else if (rule == 1) {
+                CHECK(v.profile == Profile::balanced && sent && mode == kThermalBalanced);
+              } else {   // Automatic by the power source: nothing sent at boot (PianoThermal starts by the source)
+                CHECK(!sent);
+                CHECK(v.profile == (power == Power::external ? Profile::balanced : Profile::saver));
+              }
+            }
+  // The sequence of a day: Automatic -> High Power -> Low Power -> High Power -> Automatic (piano-policy-profile=2), each one call.
+  // (base() has the cover open: the first step also tells the root domain the clamshell, so only the profile / GPU tokens count.)
+  auto pg = [](const std::string &x) {
+    std::string r;
+    size_t at = 0;
+    while ((at = x.find_first_not_of(' ', at)) != std::string::npos) {
+      const size_t end = x.find(' ', at);
+      const std::string t = x.substr(at, end == std::string::npos ? std::string::npos : end - at);
+      if (t.rfind("profile:", 0) == 0 || t.rfind("gpu:", 0) == 0) r += (r.empty() ? "" : " ") + t;
+      if (end == std::string::npos) break;
+      at = end;
+    }
+    return r;
+  };
+  Config c = actLid();
+  c.lpmOnly = true;
+  c.gpuNeeded = true;
+  Engine e(c);
+  Inputs in = base();
+  in.thermalProfiles = kThermalPerformance;
+  CHECK(pg(run(e, in)) == "profile:2");
+  in.hpm = true;
+  CHECK(pg(run(e, in)) == "profile:3");
+  in.hpm = false;
+  in.lpm = true;
+  CHECK(pg(run(e, in)) == "profile:1 gpu:342000");
+  in.lpm = false;
+  in.hpm = true;
+  CHECK(pg(run(e, in)) == "profile:3 gpu:0");
+  in.power = Power::external;
+  CHECK(pg(run(e, in)).empty());   // the source changes nothing in High Power
+  in.hpm = false;
+  CHECK(pg(run(e, in)) == "profile:2");
+  // A transient with both at 1: Low Power wins, and the GPU ceiling comes with it.
+  in.lpm = in.hpm = true;
+  CHECK(pg(run(e, in)) == "profile:1 gpu:342000");
+  CHECK(std::string(profileName(Profile::performance)) == "High Power");
+  // PianoThermal's mode 3 published only later (its service starts after ours): High Power is sent then.
+  Engine late(c);
+  Inputs l = base();
+  l.hpm = true;
+  CHECK(pg(run(late, l)) == "profile:2");
+  l.thermalProfiles = kThermalPerformance;
+  CHECK(pg(run(late, l)) == "profile:3");
+}
+
 static void profileUnsupported()
 {
   // PianoThermal without "piano-thermal-profile": asked once, then never again; a missing service is asked again.
@@ -555,7 +679,7 @@ static void profileReachesThermal()
               const pianothermal::PowerSource handed = pianothermal::profilePower(measured, pianothermal::Profile(mode));
               const View v = view(c, in, true);
               // PianoThermal's ceilings: external caps (Balanced) only for an external source; battery and unknown: Power Saver's.
-              CHECK((handed == pianothermal::PowerSource::external) == (v.profile == Profile::balanced));
+              CHECK((handed == pianothermal::PowerSource::external) == (v.profile != Profile::saver));
             };
             turn(start, lpm0);
             turn(power, lpm);
@@ -678,6 +802,8 @@ int main()
   keyboard();
   displayEventsTick();
   profile();
+  lpmOnly();
+  highPowerMode();
   profileUnsupported();
   thermalSharedSlot();
   ownGpuSlot();

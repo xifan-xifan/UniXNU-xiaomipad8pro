@@ -8,6 +8,7 @@
 #include "WifiApple80211.h"
 #include "PianoWifiUcTransport.h"
 #include "WifiUserControl.h"
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -124,14 +125,13 @@ struct PowerRig : Rig {
   WifiBootPower bootGuard;
   PowerRig() { bootGuard.enabled = false; } // existing unrestricted-lifecycle replays
   unsigned powerEvents = 0, downEvents = 0;
-  Power eventPower{};
   void publish(bool acceptedPowerSet = false) {
     const bool on = WifiUserControl::power(owner.read());
     const bool notify = powerEventRequired(st, on, acceptedPowerSet);
     Association next = st.association;
     if (!owner.allowed(owner.read())) { next = {}; next.result = 2; }
     const Association old = observeAssociation(st, next, on, true);
-    if (notify) { ++powerEvents; eventPower = {1, 1, {on ? 1u : 0u, 0, 0, 0}}; }
+    if (notify) ++powerEvents;
     if (associationLinkDownEvent(old, next)) {
       ++downEvents;
       st.linkEvent = {};
@@ -139,11 +139,11 @@ struct PowerRig : Rig {
     }
   }
   Answer control(int32_t type, uint32_t length) {
-    const Answer a = ask(true, type, length);
+    Answer a = ask(true, type, length);
     if (!a.error && (a.effects & (kDoPowerChanged | kDoDisassociate))) {
       if (a.effects & kDoDisassociate) owner.disconnect();
-      else bootGuard.setPower(owner, st.power);
-      publish((a.effects & kDoPowerChanged) != 0);
+      else if (!bootGuard.setPower(owner, a.powerOn)) a.error = EBUSY;
+      publish(!a.error && (a.effects & kDoPowerChanged) != 0);
     }
     return a;
   }
@@ -194,29 +194,29 @@ int main()
     const uint32_t initial = r.owner.read();
     for (unsigned daemon = 0; daemon < 3; ++daemon) {
       r.setPowerRecord(false);
-      CHECK(!r.control(kPower, sizeof(Power)).error);
+      CHECK(r.control(kPower, sizeof(Power)).error == EBUSY);
       CHECK(r.getPower() && r.owner.read() == initial && !r.owner.radioStop());
-      CHECK(r.eventPower.radios == 1 && r.eventPower.state[0] == 1);
+      CHECK(r.powerEvents == daemon);
       r.setPowerRecord(true);
       CHECK(!r.control(kPower, sizeof(Power)).error && !r.bootGuard.isArmed());
     }
-    CHECK(r.powerEvents == 6 && r.downEvents == 0);
+    CHECK(r.powerEvents == 3 && r.downEvents == 0);
     r.setPowerRecord(false);
     r.put32(0, 2); // invalid payload cannot mutate/arm the guard
     CHECK(r.control(kPower, sizeof(Power)).error == kErrInval);
-    CHECK(!r.bootGuard.isArmed() && r.owner.read() == initial && r.powerEvents == 6);
+    CHECK(!r.bootGuard.isArmed() && r.owner.read() == initial && r.powerEvents == 3);
     // Automatic SET20 cannot prove user power intent. Joining must leave the
     // guard in place; only an explicit root write arms real OFF.
     if (!explicitArm) CHECK(!r.associate().error && r.owner.join());
     CHECK(!r.bootGuard.isArmed());
     r.setPowerRecord(false);
-    CHECK(!r.control(kPower, sizeof(Power)).error && r.getPower() && !r.owner.radioStop());
+    CHECK(r.control(kPower, sizeof(Power)).error == EBUSY && r.getPower() && !r.owner.radioStop());
     r.bootGuard.arm();
     CHECK(r.bootGuard.isArmed());
     for (unsigned cycle = 0; cycle < 3; ++cycle) {
       r.setPowerRecord(false);
       CHECK(!r.control(kPower, sizeof(Power)).error && !r.getPower());
-      CHECK(r.owner.radioStop() && r.eventPower.state[0] == 0);
+      CHECK(r.owner.radioStop());
       r.owner.radioOff(r.owner.read());
       r.setPowerRecord(true);
       CHECK(!r.control(kPower, sizeof(Power)).error && r.getPower());
@@ -230,20 +230,81 @@ int main()
   CHECK(!useIfnet2Old(2));
   CHECK(useIfnet2Old(kIfnet2Old));
 
-  // The menu event contract: ASSOC_DONE is visible while WPA2 is still
-  // waiting for the private port, and the link/SSID/BSSID transition follows
-  // only after AUTHORIZE.  A disconnect emits one down transition.
+  // ASSOC_DONE may precede WPA2 authorization. The public link/SSID/BSSID
+  // transition waits for authorization. A disconnect emits one down transition.
   {
     Association old = {}, pending = {}, open = {};
     pending.associated = true;
     auto t = associationTransition(old, pending);
     CHECK(t.assocDone && !t.connected && !t.disconnected);
+    auto events = associationEvents(old, pending, false);
+    CHECK(events.count == 1 && events.codes[0] == 9);
     open = pending;
     open.authorized = true;
+    open.result = 1;
     t = associationTransition(pending, open);
     CHECK(!t.assocDone && t.connected && !t.disconnected);
+    events = associationEvents(pending, open, false);
+    CHECK(events.count == 4 && events.codes[0] == 9 && events.codes[1] == 4 &&
+          events.codes[2] == 2 && events.codes[3] == 3);
     t = associationTransition(open, Association{});
     CHECK(!t.assocDone && !t.connected && t.disconnected);
+    Association failed;
+    failed.result = 2;
+    events = associationEvents(open, failed, true);
+    CHECK(events.count == 3 && events.codes[0] == 4 && events.codes[1] == 2 && events.codes[2] == 3);
+    events = associationEvents(old, failed, false);
+    CHECK(events.count == 4 && events.codes[0] == 9 && events.codes[1] == 4 &&
+          events.codes[2] == 2 && events.codes[3] == 3);
+    Association failedAgain = failed;
+    failedAgain.generation = 2;
+    events = associationEvents(failed, failedAgain, false);
+    CHECK(events.count == 4 && events.codes[0] == 9); // another generation can fail between polls
+    CHECK(associationEvents(open, open, false).count == 0);
+    events = associationEvents(old, open, false);
+    CHECK(events.count == 4 && events.codes[0] == 9 && events.codes[1] == 4 &&
+          events.codes[2] == 2 && events.codes[3] == 3);
+    events = associationEvents(open, failed, false);
+    CHECK(events.count == 3 && events.codes[0] == 4 && events.codes[1] == 2 && events.codes[2] == 3);
+  }
+
+  // Post-size checks include both BSD vectors and the 24-byte kernel header.
+  {
+    CHECK(kBsdEventHeaderSize == 24 && kBsdEventNameSize == 16 && kBsdEventMaxSize == 288);
+    CHECK(kEventClass == 6 && kEventSubclass == 1 && kEvPowerChanged == 1);
+    LinkEvent link = {};
+    link.down = 1;
+    link.rssi = -65;
+    link.snr = 0x1234;
+    link.noise = 0x5678;
+    link.involuntary = 1;
+    link.reason = 0x11223344;
+    link.subreason = 0x55667788;
+    const uint8_t linkBytes[] = {
+      1, 0, 0, 0, 0xbf, 0xff, 0xff, 0xff, 0x34, 0x12, 0x78, 0x56, 0, 0, 0, 0,
+      1, 0, 0, 0, 0x44, 0x33, 0x22, 0x11, 0x88, 0x77, 0x66, 0x55, 0, 0, 0, 0,
+    };
+    const uint8_t scanBytes[] = {1, 0, 0, 0, 0, 0, 0, 0};
+    for (bool scanStatus : {false, true}) {
+      for (const uint32_t code : {kEvPowerChanged, kEvSsidChanged, kEvBssidChanged, kEvLinkChanged,
+                                  kEvAssocDone, kEvScanDone, kEvScanCacheUpdated}) {
+        Power power = {};
+        power.version = 1; power.radios = 1; power.state[0] = 1;
+        const auto payload = bsdEventPayload(code, link, scanStatus, code == kEvPowerChanged ? &power : nullptr);
+        CHECK(kBsdEventHeaderSize + kBsdEventNameSize + payload.size <= kBsdEventMaxSize);
+        if (code == kEvPowerChanged) {
+          const uint8_t powerBytes[] = {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+          CHECK(payload.size == sizeof powerBytes && std::memcmp(payload.data, powerBytes, sizeof powerBytes) == 0);
+          CHECK(bsdEventPayload(code, link, scanStatus).size == 0);
+        } else if (code == kEvLinkChanged) {
+          CHECK(payload.size == sizeof linkBytes && std::memcmp(payload.data, linkBytes, sizeof linkBytes) == 0);
+        } else if (code == kEvScanDone && scanStatus) {
+          CHECK(payload.size == sizeof scanBytes && std::memcmp(payload.data, scanBytes, sizeof scanBytes) == 0);
+        } else {
+          CHECK(payload.size == 0 && payload.data == nullptr);
+        }
+      }
+    }
   }
 
   // ---- the layouts: the request and the answers' fixed sizes and offsets
@@ -334,17 +395,16 @@ int main()
       r.setPowerRecord(true);
       CHECK(!r.control(19, 24).error);
       CHECK(r.getPower() && r.powerEvents == bootSet + 1);
-      CHECK(r.eventPower.version == 1 && r.eventPower.radios == 1 && r.eventPower.state[0] == 1);
     }
     r.publish(); r.publish(); // timer/polls cannot duplicate the SET notification
     CHECK(r.powerEvents == 2);
     r.setPowerRecord(false);
     CHECK(!r.control(19, 24).error && !r.getPower() && r.owner.radioStop());
-    CHECK(r.powerEvents == 3 && r.eventPower.state[0] == 0 && r.eventPower.radios == 1);
+    CHECK(r.powerEvents == 3);
     r.owner.radioOff(r.owner.read()); // quiesced DMA and physical power-down
     r.setPowerRecord(true);
     CHECK(!r.control(19, 24).error && r.getPower() && r.owner.allowed(r.owner.read()));
-    CHECK(r.powerEvents == 4 && r.eventPower.state[0] == 1);
+    CHECK(r.powerEvents == 4);
     r.put32(0, 2); // a refused SET cannot generate an acknowledgement
     CHECK(r.control(19, 24).error == kErrInval && r.getPower() && r.powerEvents == 4);
     for (int32_t leave : {22, 29}) {
@@ -383,7 +443,7 @@ int main()
       oldBoot.owner.radioOff(oldBoot.owner.read());
       oldBoot.publish();
       CHECK(!oldBoot.getPower() && !oldBoot.owner.allowed(oldBoot.owner.read()));
-      CHECK(oldBoot.powerEvents == 2 && oldBoot.eventPower.state[0] == 0);
+      CHECK(oldBoot.powerEvents == 2);
 
       PowerRig fixedBoot;
       for (unsigned daemon = 0; daemon < 2; ++daemon) {
@@ -410,7 +470,7 @@ int main()
       }
       r.publish();
       CHECK(r.getPower() && r.owner.allowed(r.owner.read()) && !r.owner.radioStop());
-      CHECK(r.powerEvents == 2 && r.eventPower.state[0] == 1);
+      CHECK(r.powerEvents == 2);
     }
     // A single persisted OFF must survive polls and worker completion forever;
     // administrative UP is an initialization default, not a periodic override.
@@ -424,7 +484,7 @@ int main()
       CHECK(!persistedOff.owner.join());
       CHECK(persistedOff.ask(true, kScanReq, 0).error == kErrPowerOff);
     }
-    CHECK(persistedOff.powerEvents == 1 && persistedOff.eventPower.state[0] == 0);
+    CHECK(persistedOff.powerEvents == 1);
     std::puts("boot power replay: DOWN/OFF twice, UP/ON twice, persisted OFF and drained OFF->ON passed");
   }
 
@@ -438,7 +498,8 @@ int main()
     r.put32(4, 1);
     r.put32(8, 0);
     a = r.ask(true, kPower, 24);
-    CHECK(a.error == 0 && (a.effects & kDoPowerChanged) && !r.st.power && r.st.powerSets == 1);
+    CHECK(a.error == 0 && (a.effects & kDoPowerChanged) && !a.powerOn && r.st.power && r.st.powerSets == 1);
+    observeAssociation(r.st, Association{}, a.powerOn, true);
     a = r.ask(false, kPower, 24);
     CHECK(r.u32(8) == 0);
     a = r.ask(true, kScanReq, 0x80);
@@ -448,7 +509,8 @@ int main()
     CHECK(r.ask(false, kState, 0, false).error == 0 && r.rq.value == int32_t(kStateInit));
     r.put32(8, 1);
     a = r.ask(true, kPower, 24);
-    CHECK(a.error == 0 && r.st.power && (a.effects & kDoPowerChanged));
+    CHECK(a.error == 0 && a.powerOn && !r.st.power && (a.effects & kDoPowerChanged));
+    observeAssociation(r.st, Association{}, a.powerOn, true);
     a = r.ask(true, kScanReq, 0x80);
     CHECK(a.error == 0 && (a.effects & kDoScanStarted));
     // a short buffer: what fits of the answer
@@ -462,6 +524,7 @@ int main()
     Rig r;
     r.put32(0, 1); r.put32(4, 1); r.put32(8, 0);
     CHECK(r.ask(true, kPower, 24).error == 0);
+    observeAssociation(r.st, Association{}, false, true);
     CHECK(r.associate().error == kErrPowerOff);
     CHECK(!r.st.power);
     r.put32(0, 2); r.put32(8, 1);
@@ -484,7 +547,12 @@ int main()
     CHECK(r.ask(false, kOpMode, 0, false).error == 0 && r.rq.value == int32_t(kOpModeStation));
     CHECK(r.ask(false, kPhyMode, 12).error == 0 && r.u32(4) == kPhySupported && r.u32(8) == 0);
     CHECK(r.ask(false, kNoise, 52).error == 0 && int32_t(r.u32(12)) == -95 && int32_t(r.u32(28)) == -95);
-    for (int32_t t : {kRssi, kChannel, kSsid, kBssid, kCurrentNetwork, kRate}) CHECK(r.ask(false, t, 1164).error == kErrNotAssociated);
+    for (int32_t t : {1, 9, 4, 16, 103})
+      CHECK(r.ask(false, t, 1164).error == 2);
+    for (int32_t t : {96, 97, 115, 469, 490, 575}) {
+      CHECK(r.ask(false, t, 16).error == 102);
+      CHECK(r.ask(true, t, 16).error == 102);
+    }
     CHECK(r.ask(false, kAssociateResult, 0, false).error == 0 && r.rq.value == 0);
     Answer a = r.ask(false, kCountryCode, 3);
     CHECK(a.error == 0 && std::memcmp(r.at(0), "XX", 3) == 0 && r.rq.length == 3);
@@ -506,8 +574,21 @@ int main()
     CHECK(r.associate().error == 0);
     CHECK(r.ask(true, kCipherKey, 148).error == 0);
     CHECK(r.ask(false, 9999, 16).error == kErrUnsupported);
-    // accepted sets that change nothing
-    CHECK(r.ask(true, kCountryCode, 8).error == 0 && r.ask(true, kPowerSave, 8).error == 0);
+    // Country SET has a version word; an unsupported change must not succeed.
+    std::memset(r.user.mem.data(), 0, 8);
+    r.put32(0, 1);
+    r.user.mem[4] = 'X'; r.user.mem[5] = 'X';
+    CHECK(r.ask(true, kCountryCode, 8).error == 0);
+    CHECK(r.ask(true, kCountryCode, 3).error == kErrInval);
+    r.user.mem[4] = 'U'; r.user.mem[5] = 'S';
+    CHECK(r.ask(true, kCountryCode, 8).error == kErrUnsupported);
+    CHECK(r.st.country[0] == 'X' && r.st.country[1] == 'X');
+    r.user.mem[6] = 'A';
+    CHECK(r.ask(true, kCountryCode, 8).error == kErrInval);
+    r.user.mem[6] = 0; r.put32(0, 2);
+    CHECK(r.ask(true, kCountryCode, 8).error == kErrInval);
+    CHECK(r.ask(true, kCountryCode, 8, false).error == kErrInval);
+    CHECK(r.ask(true, kPowerSave, 8).error == 0);
   }
 
   // ---- SET 20: both wire layouts become a level-7 profile; malformed requests are refused with a reason
@@ -606,7 +687,19 @@ int main()
     CHECK(a.error == 0 && a.wrote >= offsetof(ScanResult, elements) && r.u32(8) == 36);
     ScanResult joined;
     std::memcpy(&joined, r.at(0), sizeof joined);
-    CHECK(joined.ssidLength == 4 && std::memcmp(joined.ssid, "test", 4) == 0 && joined.bssid[5] == 0x55);
+    CHECK(joined.ssidLength == 4 && std::memcmp(joined.ssid, "test", 4) == 0 && joined.bssid[5] == 0x55 &&
+          joined.rssi == -47 && (joined.capability & 0x11) == 0x11);
+    auto &candidate = r.st.scan.bss[0];
+    std::memcpy(candidate.bssid, bssid, sizeof bssid);
+    candidate.rsnLength = 4;
+    candidate.rsn[0] = 48;
+    candidate.rsn[1] = 2;
+    candidate.rsn[2] = 1;
+    candidate.beaconInterval = 125;
+    r.st.scan.count = 1;
+    CHECK(r.ask(false, kCurrentNetwork, kScanResultBytes27).error == 0);
+    std::memcpy(&joined, r.at(0), sizeof joined);
+    CHECK(joined.beaconInterval == 125 && joined.rssi == -47 && joined.elements[joined.elementsLength - 4] == 48);
     CHECK(r.associate().error == 0 && r.ask(true, kDisassociate, 0).error == 0);
   }
 
@@ -678,11 +771,23 @@ int main()
     CHECK(a.error == 0 && (a.effects & kDoScanStarted) && r.st.scanRequests == 1);
     // The user-client/raw-get loop returns 0 for each complete record, then exactly 5 at the list end.  The tail after the
     // information elements is zeroed even though the caller prefilled it with a marker.
+    {   // DRIVER_AVAILABLE (event 55): the 0xf8-byte record, available at +8, inside the single-mbuf kernel event
+      DriverAvailability availability = {};
+      availability.available = 1;
+      const auto payload = bsdEventPayload(kEvDriverAvailable, LinkEvent{}, false, nullptr, &availability);
+      CHECK(payload.size == 0xf8 && static_cast<const uint8_t *>(payload.data)[8] == 1 &&
+            static_cast<const uint8_t *>(payload.data)[4] == 0);
+      CHECK(kBsdEventHeaderSize + kBsdEventNameSize + payload.size == kBsdEventMaxSize);
+      CHECK(bsdEventPayload(kEvDriverAvailable, LinkEvent{}, false).size == 0);
+    }
     std::memset(r.user.mem.data(), 0, kScanResultBytes27);
+    r.st.nowNs = 0x1122334455667788ull;
     std::memcpy(r.user.mem.data() + 0x88c, "request-7", 10);
     a = r.ask(false, kScanResult, kScanResultBytes27);
     CHECK(a.error == 0 && a.wrote == kScanResultBytes27);
-    for (uint32_t i = 0x8c + 47; i < kScanResultBytes27; ++i) CHECK(r.at(i)[0] == 0);
+    for (uint32_t i = 0x8c + 47; i < kScanResultBytes27; ++i)
+      CHECK(r.at(i)[0] == ((i >= kScanResultTimestampAt && i < kScanResultTimestampAt + 8)
+                               ? uint8_t(0x1122334455667788ull >> (8 * (i - kScanResultTimestampAt))) : 0));
     ScanResult got;
     std::memcpy(&got, r.at(0), sizeof got);
     CHECK(got.version == 1 && got.channel.channel == 36 && (got.channel.flags & kChan5GHz) && got.rssi == -48 && got.noise == -95);

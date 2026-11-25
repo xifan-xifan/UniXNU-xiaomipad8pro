@@ -26,6 +26,7 @@
 #include <stdarg.h>
 #include "BoardTemps.h"
 #include "PianoThermalAdc.h"
+#include "Perf.h"
 #include "PmicAdc.h"
 #include "Tsens.h"
 
@@ -417,6 +418,24 @@ uint32_t hookLevel()
   return v > 2 ? 2 : v;
 }
 
+bool hookSkin(int32_t milliC[perf::kSkinInputs], uint32_t &validMask)
+{
+  validMask = 0;
+  Snapshot s;
+  if (!gHook.level || !readSnapshot(s) || s.state != PIANO_BOARD_TEMPS_RUNNING) return false;
+  const uint64_t nowUs = nowNs() / 1000;
+  for (unsigned i = 0; i < perf::kSkinInputs; ++i) {
+    milliC[i] = 0;
+    const int c = channelIndex(perf::kSkinChannel[i]);
+    if (c < 0 || !(s.validMask & (1u << c))) continue;
+    const uint64_t ageMs = nowUs > s.atUs[c] ? (nowUs - s.atUs[c]) / 1000 : 0;
+    if (ageMs > uint64_t(kFreshPeriods) * s.periodMs) continue;
+    milliC[i] = s.milliC[c];
+    validMask |= 1u << i;
+  }
+  return true;
+}
+
 void hookStart(IOService *svc, uint32_t level, uint32_t periodS, uint32_t delayS)
 {
   gStartNs = nowNs();
@@ -442,6 +461,28 @@ void hookStart(IOService *svc, uint32_t level, uint32_t periodS, uint32_t delayS
 }
 
 bool hookBoardTemps(void *param1) { return piano_thermal_board_temps(static_cast<piano_board_temps *>(param1)) >= 0; }
+bool hookGpuTemps(void *param1)
+{
+  Snapshot s;
+  if (!readSnapshot(s)) s = Snapshot();
+  return fillGpuTemps(s, nowNs() / 1000, static_cast<piano_gpu_temps *>(param1));
+}
+// gpu/fullopp1: the virtual skin sensor's inputs, the XO thermistor and the virtual sensor itself (the CPU policy's virtualSkin over the
+// same five readings), for PianoA830's Android thermal table.
+bool hookSkinTemps(void *param1)
+{
+  Snapshot s;
+  if (!readSnapshot(s)) s = Snapshot();
+  piano_skin_temps *t = static_cast<piano_skin_temps *>(param1);
+  if (!fillSkinTemps(s, nowNs() / 1000, t)) return false;
+  static_assert(int(PIANO_SKIN_BATTERY) == int(perf::kSkinBattery) && int(PIANO_SKIN_QUIET) == int(perf::kSkinQuiet) &&
+                    int(PIANO_SKIN_CHARGER) == int(perf::kSkinCharger) && int(PIANO_SKIN_WIFI) == int(perf::kSkinWifi) &&
+                    int(PIANO_SKIN_MSM) == int(perf::kSkinMsm),
+                "the skin API's first five are the virtual sensor's inputs in its order");
+  const perf::Skin v = perf::virtualSkin(t->milli_c, t->valid & ((1u << perf::kSkinInputs) - 1u));
+  t->virtual_milli_c = v.milliC; t->virtual_valid = v.valid ? 1u : 0u; t->virtual_used = v.used;
+  return true;
+}
 
 }  // namespace pianothermal::adc
 

@@ -1,5 +1,52 @@
 # Cameras (B11): PianoCamera, the level ladder
 
+2026-11-19, compatibility output (host verified; tablet preview pending): index 1 now advertises and delivers
+640×480 `420v` at 15–30 fps. The provider synchronously converts its complete BGRA working frame into BT.709 video-range
+Y and interleaved CbCr planes, using each plane's reported stride, before sending the retained sample. Native index 0
+remains BGRA. This removes the automatic BGRA-to-420v conversion from Photo Booth's input path. The earlier diagnostic
+capture already had damaged luma before its Core Image replay; its chroma bars were intact. Retained provider frames 1
+and 32 pass the diagnostic CPU plane, color-bar, counter and sweep checks on the host. Stock-app previews require the
+new tablet test; distortion-effect graph compatibility remains a separate issue.
+
+2026-11-18, stock applications: the baked-approval image delivered 77 valid front and 73 valid rear colour frames through the
+AVFoundation client, with clean stops and no reported guard/SMMU fault. Photo Booth subsequently aborted during fish-eye effect
+initialization: its CIKernel array was empty. Static tracing and a host reproduction identify the Metal frontend's omitted
+additional compiler arguments. The same trace finds separate Photo Booth format gates: max frame rate at least 24 fps and a
+normal-quality BGRA format at least 640×480. The original 15 fps modes and front's 459-line image miss those gates.
+
+The combined fix selects the existing legacy CIKL backend and adds a 640×480 BGRA compatibility format with 15–30 fps
+software-paced output. Physical sensor acquisition remains 15 fps; extra output frames repeat the latest source, with explicit counters and a
+stale-source cutoff. Native modes remain available. The signed client has a discovery-only `--inventory` mode; its ordinary
+capture still selects the first native mode. QuickTime's traced preview path adds no known source-rate/FourCC requirement.
+A complete host Core Image replay also exposes missing Metal function return/argument reflection after source compilation.
+The selected legacy path bypasses both missing contracts with the existing seed GPU; no GPU replacement is required.
+The userland compatibility agent therefore selects Core Image's existing legacy CIKL metadata path for UID 501 through its
+`com.apple.coreimage` preference suite and the GUI session environment before apps launch. This affects custom CIKL kernels in that user's apps; it leaves ordinary Metal rendering
+available. The helper saves the prior typed preference and GUI environment value and restores them with `piano-coreimage-compat --remove`. The normal
+Metal CIKL path can return when the frontend supplies full function reflection. No Apple app binary or resource is modified.
+Actual stock-app preview, switching and recording are still unqualified; the combined test runs QuickTime first, polls app
+processes and windows, then tests Photo Booth independently and retains user/system crash reports from each phase.
+
+2026-11-18, avf5: the early reservation worked on the tablet. The live front path published its first RAW frame and completed
+151 hardware frames in 5.49 seconds. After cancellation, the final guard check failed at step 331. The tablet reset before
+the fault registers, completed teardown, rear capture or AVFoundation PNGs were captured. The guard write and reset causes
+remain open.
+
+The host-tested live path requires a translating buffer-plus-guard aperture, drains an outstanding frame on cancellation,
+and immediately disables the write master when it detects guard damage or a translation fault. It retains unsafe DMA,
+tables and clocks and refuses further hardware starts. With `piano-camera-live-diagnostics=1`, the first front request
+captures 30 private frames and must return its DMA lease cleanly before the same request starts sending frames to the app.
+The context bank must read back in terminate mode with fault reporting. The worker polls context faults, including during
+stop, and logs write-master and RDI0 registers for the first 20 completions of each stream. Tablet measurements are pending.
+
+Earlier on 2026-11-18: the B-TC CoreMediaIO extension, Camera consent and AVFoundation discovery passed on 27.3; its pattern stream delivered
+31 valid moving frames. After correcting the CPU ring's alignment, `cmio-real-avf4` reached both chip IDs and the hardware worker's
+step 307. Both late private DMA allocations failed: VM found no contiguous 8/16 MiB run. No real frame reached AVFoundation.
+Level 5 now reserves the largest private DMA buffer and table pages on the early camera thread, then reuses bounded sensor views
+after safe teardown. Its physical alignment, SMMU geometry and guards are unchanged; an unsafe stop retains the lease. Completed
+steps log register readbacks, with bounded first-frame/timeout status snapshots. Reservation efficacy and real app frames remain
+unverified on the tablet. The CPU ring and ABI1 copy buffer retain runtime page alignment.
+
 Status, 2026-11-13: **both sensors' first RAW10 frames on the tablet** (cplan, §8.4: the rear's colour bars exact at 4080x3072,
 30 fps through our SMMU window; the front's 3264x1836 frames; every power-down complete), the scenes still black (fixed since: the
 exposure loop, §4.3 "After cplan"; image `cae`); level 2 takes level 3's path for either sensor (§4.2 "After c2fx"). Earlier,
@@ -339,6 +386,14 @@ Research of 2026-11-12 (public documentation and developer reports, sources at t
   apps that ask), frame durations 1/30..1/15 s, host-time clock; samples sent with `send(_:discontinuity:hostTimeInNanoseconds:)`
   from an IOSurface-backed pool. There is no position property: Front/Back come from the names only (`AVCaptureDevice.position` stays
   unspecified).
+- **Movie recording (2026-11-21).** The only `avc1` encoder on this system (VideoToolbox's software H.264) returns its first frame
+  after 14-15 inputs and holds them meanwhile. With a 4-buffer delivery pool QuickTime's "High" recording got 4 frames and then none
+  ("Cannot Record"); the pools now let a client hold 24 (`kPianoDeliveryBuffers`, allocated on demand: at most 10.6 MB per stream for
+  640x480 `420v`, 34.7/72.0 MB only if a client holds 24 native front/rear frames). A dropped-sample discontinuity is sent only for a
+  format/duration change or a stall past the 250 ms source age (`pianoOutputDiscontinuity`): kernel source drops (8-10 % on the rear)
+  are covered by repeating the latest frame, and flagging each of them made the capture graph restart its compressor and cut the
+  movie's timeline into pieces. `PianoCameraCapture --movie DIR SECONDS` records an H.264 movie from each camera's 640x480 `420v`
+  format with `AVCaptureMovieFileOutput` (what QuickTime does) and checks the file: codec, duration, one media segment, frames.
 - **C5, before any camera code: a test-pattern extension** (no kernel): the trust-cached host app runs with the install
   entitlement; `systemextensionsctl developer on` succeeds; sysextd's log accepts the empty-team extension and its category; the
   approval appears and `systemextensionsctl list` shows it activated; the job `CMIOExtension.<id>` runs in `user/262` without sandbox

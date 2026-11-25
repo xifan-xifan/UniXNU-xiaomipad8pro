@@ -537,6 +537,13 @@ struct KernelHw {
   bool ucPrepared = false, tablePrepared = false, arenaPrepared = false, ledgerPrepared = false;
   uint64_t *uniquePages = nullptr;
   unsigned uniqueCapacity = 0;
+  void dmaOwners(const char *stage)
+  {
+    ::note("V9h boot reservation owners %s ledger %u UC %u tables %u arena %u prepared %u/%u/%u/%u views %u/%u",
+           stage, unsigned(ledgerMem != nullptr), unsigned(ucMem != nullptr), unsigned(tableMem != nullptr),
+           unsigned(arenaMem != nullptr), unsigned(ledgerPrepared), unsigned(ucPrepared),
+           unsigned(tablePrepared), unsigned(arenaPrepared), unsigned(ucMap != nullptr), unsigned(arenaMap != nullptr));
+  }
   bool rememberPage(uint64_t pa)
   {
     if ((pa & 4095) || pa < kXnuDramBase || pa >= kXnuDramEnd) return false;
@@ -552,35 +559,68 @@ struct KernelHw {
   }
   bool dmaAlloc(Dma &d)
   {
+    static constexpr uint64_t arenaPhysicalMask = 0x0000000ffffff000ull;
+    const bool traceArena = d.session && d.arenaBytes == session::kAvcArenaBytes;
+    const uint64_t arenaTid = traceArena ? thread_tid(current_thread()) : 0;
     const uint64_t bytes = (uint64_t(kUcBytes) + 4096 + 0x3fff) & ~0x3fffull;
-    const uint64_t tableBytes = ((d.session ? vsmmu::kSessionTablePages : vsmmu::kTablePages) * 4096ull + 16383) & ~16383ull;
+    const unsigned arenaPages = d.session ? d.arenaBytes/4096 : 0;
+    const uint64_t tableBytes = ((d.session ? vsmmu::sessionTablePages(d.arenaBytes) : vsmmu::kTablePages) * 4096ull + 16383) & ~16383ull;
     // CPU-only metadata follows the same owner lifetime. Keeping 384 KiB in static __DATA exceeds the KC insertion gap.
-    uniqueCapacity = d.session ? 32768 : 2048;
-    const uint64_t ledgerBytes = uint64_t(uniqueCapacity + (d.session ? session::kArenaPages : 0)) * sizeof(uint64_t);
+    uniqueCapacity = d.session ? (d.arenaBytes > session::kAvcArenaBytes ? 524288 : 131072) : 2048;
+    const uint64_t ledgerBytes = uint64_t(uniqueCapacity + arenaPages) * sizeof(uint64_t);
     ledgerMem = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task, IOOptionBits(kIODirectionInOut), ledgerBytes,
                                                                0x0000000ffffff000ull);
     ucMem = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task, IOOptionBits(kIODirectionInOut), bytes, 0x0000000ffffff000ull);
     tableMem = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
         IOOptionBits(kIODirectionInOut) | IOOptionBits(kIOMemoryPhysicallyContiguous), tableBytes, 0x0000000fffffc000ull);
-    if (d.session) arenaMem = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
-        IOOptionBits(kIODirectionInOut), session::kArenaBytes, 0x0000000ffffff000ull);
-    if (!ledgerMem || !ucMem || !tableMem || (d.session && !arenaMem)) { dmaFree(d); return false; }
+    if (d.session) {
+      if (traceArena) ::note("V9g arena diagnostic tid %llu factory begin bytes %u alignment-arg 1 mask %#llx",
+        (unsigned long long)arenaTid, d.arenaBytes, (unsigned long long)arenaPhysicalMask);
+      arenaMem = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
+        IOOptionBits(kIODirectionInOut), d.arenaBytes, arenaPhysicalMask);
+      if (traceArena) ::note("V9g arena diagnostic tid %llu factory returned nonnull %u prior-owners-ready %u",
+        (unsigned long long)arenaTid, unsigned(arenaMem != nullptr),
+        unsigned(ledgerMem && ucMem && tableMem));
+    }
+    if (!ledgerMem || !ucMem || !tableMem || (d.session && !arenaMem)) {
+      ::note("V9e allocation refused arena %u metadata %llu table %llu owners ledger %u UC %u tables %u arena %u release-partial 1",
+        d.arenaBytes,(unsigned long long)ledgerBytes,(unsigned long long)tableBytes,
+        unsigned(ledgerMem!=nullptr),unsigned(ucMem!=nullptr),unsigned(tableMem!=nullptr),unsigned(arenaMem!=nullptr));
+      if (traceArena) ::note("V9g arena diagnostic tid %llu explicit prepare skipped", (unsigned long long)arenaTid);
+      if (d.session && gArgs.level == 6) dmaOwners("factory-failed");
+      dmaFree(d); return false;
+    }
     ledgerPrepared = ledgerMem->prepare() == kIOReturnSuccess;
     ucPrepared = ucMem->prepare() == kIOReturnSuccess;
     tablePrepared = tableMem->prepare() == kIOReturnSuccess;
-    if (d.session) arenaPrepared = arenaMem->prepare() == kIOReturnSuccess;
-    if (!ledgerPrepared || !ucPrepared || !tablePrepared || (d.session && !arenaPrepared)) { dmaFree(d); return false; }
+    if (d.session) {
+      const IOReturn prepareResult = arenaMem->prepare();
+      arenaPrepared = prepareResult == kIOReturnSuccess;
+      if (traceArena) ::note("V9g arena diagnostic tid %llu explicit prepare result %#x",
+        (unsigned long long)arenaTid, unsigned(prepareResult));
+    }
+    if (!ledgerPrepared || !ucPrepared || !tablePrepared || (d.session && !arenaPrepared)) {
+      if (d.session && gArgs.level == 6) dmaOwners("prepare-failed");
+      dmaFree(d); return false;
+    }
     uint8_t *cached = static_cast<uint8_t *>(ucMem->getBytesNoCopy());
+    if (!cached) {
+      if (d.session && gArgs.level == 6) dmaOwners("UC-view-failed");
+      dmaFree(d); return false;
+    }
     bzero(cached, bytes); ::cleanToPoc(cached, bytes);
     d.tables = static_cast<uint64_t *>(tableMem->getBytesNoCopy());
     IOByteCount tableSegment = 0;
     d.tablesPa = tableMem->getPhysicalSegment(0, &tableSegment, kIOMemoryMapperNone);
     bool ok = d.tables && d.tablesPa && tableSegment >= tableBytes;
     uint64_t *ledger = static_cast<uint64_t *>(ledgerMem->getBytesNoCopy());
-    if (!ledger) { dmaFree(d); return false; }
+    if (!ledger) {
+      if (d.session && gArgs.level == 6) dmaOwners("ledger-view-failed");
+      dmaFree(d); return false;
+    }
     bzero(ledger, ledgerBytes);
     d.arenaPages = d.session ? ledger : nullptr;
-    uniquePages = ledger + (d.session ? session::kArenaPages : 0);
+    uniquePages = ledger + arenaPages;
     for (unsigned i = 0; ok && i < vsmmu::kUcPages; ++i) {
       IOByteCount segment = 0;
       d.pages[i] = ucMem->getPhysicalSegment(4096ull * i, &segment, kIOMemoryMapperNone);
@@ -591,8 +631,12 @@ struct KernelHw {
     for (unsigned i = 0; ok && i < tableBytes / 4096; ++i) ok = rememberPage(d.tablesPa + 4096ull * i);
     if (d.session) {
       uint8_t *arenaCached = static_cast<uint8_t *>(arenaMem->getBytesNoCopy());
-      bzero(arenaCached, session::kArenaBytes); ::cleanToPoc(arenaCached, session::kArenaBytes);
-      for (unsigned i = 0; ok && i < session::kArenaPages; ++i) {
+      if (!arenaCached) {
+        if (gArgs.level == 6) dmaOwners("arena-view-failed");
+        dmaFree(d); return false;
+      }
+      bzero(arenaCached, d.arenaBytes); ::cleanToPoc(arenaCached, d.arenaBytes);
+      for (unsigned i = 0; ok && i < arenaPages; ++i) {
         IOByteCount segment = 0;
         d.arenaPages[i] = arenaMem->getPhysicalSegment(4096ull * i, &segment, kIOMemoryMapperNone);
         ok = segment >= 4096 && rememberPage(d.arenaPages[i]);
@@ -604,11 +648,16 @@ struct KernelHw {
     ucMap = ok ? ucMem->createMappingInTask(kernel_task, 0, kIOMapAnywhere | kIOMapWriteCombineCache) : nullptr;
     d.uc = ucMap ? reinterpret_cast<volatile uint32_t *>(ucMap->getVirtualAddress()) : nullptr;
     ok = ok && d.uc;
-    if (!ok) { dmaFree(d); return false; }
+    if (!ok) {
+      if (d.session && gArgs.level == 6) dmaOwners("mapping-failed");
+      dmaFree(d); return false;
+    }
     ::note("dma: UC region %u bytes in %u pages (first %#llx), write-combined at %p; table %#llx", kUcBytes, vsmmu::kUcPages,
            (unsigned long long)d.pages[0], (void *)d.uc, (unsigned long long)d.tablesPa);
     if (d.session) ::note("V4 backing unique PASS UC scratch tables arena pages %u prepared 1 NC-view 1 no-UC-alias 1",
-                         unsigned(vsmmu::kUcPages + 1 + tableBytes / 4096 + session::kArenaPages));
+                         unsigned(vsmmu::kUcPages + 1 + tableBytes / 4096 + arenaPages));
+    if (d.session) ::note("V9 allocated arena %u ledger-pages %u unique-slots %u table-pages %llu metadata %llu wired-prepared 1",
+      d.arenaBytes,arenaPages,uniqueCapacity,(unsigned long long)(tableBytes/4096),(unsigned long long)ledgerBytes);
     return true;
   }
   void hashActive(const volatile uint8_t *base, char text[65])
@@ -637,18 +686,17 @@ struct KernelHw {
 KernelHw gHw;
 Bringup<KernelHw> gBringup(gHw);
 
-// V5 has one serialized consumer worker, disjoint from the autonomous V4 mode.
-// Keep the owner object alive permanently if PAS/domain/TLB cleanup cannot be
-// confirmed. No destructor is permitted to free an arena still owned by DMA.
+// Level 6 uses the boot-lifetime core and backing. The serialized worker
+// owns only the HFI session, its history and the output loans.
 struct NativeOwner {
-  KernelHw hw;
-  Bringup<KernelHw> core;
+  Bringup<KernelHw> &core;
   session::SelfTest<Bringup<KernelHw>> tx;
   IOMemoryDescriptor *loans[stream::Raws] = {};
-  avc::Config config;
+  codec::Config config;
   diagnostic::History history;
+  int error = 0;
   bool prepared = false, attempted = false;
-  NativeOwner() : core(hw), tx(core, core.layout) {}
+  NativeOwner() : core(gBringup), tx(core, core.layout) {}
 };
 IOLock *gNativeLock;
 stream::Owner gNativeState;
@@ -656,8 +704,7 @@ NativeOwner *gNativeOwner;
 IOService *gVideoService;
 session::Observation gPreviousNative;
 bool gTimeoutCaptured=false;
-// Independent of NativeOwner lifetime: PAS teardown and owner deletion cannot
-// erase this evidence. IOLog is also collected by the existing event-window export.
+// Independent of the session lifetime. IOLog also reaches the event-window export.
 struct SnapshotText {
   char text[32768]={};
   unsigned used=0;
@@ -673,20 +720,35 @@ struct SnapshotText {
 } gTimeoutText;
 diagnostic::Hardware gTimeoutHardware;
 session::Observation gTimeoutCurrent;
-void nativeTimeoutSnapshot(void *context,const session::SelfTest<Bringup<KernelHw>> &tx)
+void nativeSnapshot(NativeOwner &owner, bool sampleMmio)
 {
   if(gTimeoutCaptured)return;
   gTimeoutCaptured=true;
-  auto &owner=*static_cast<NativeOwner *>(context);
   // All sampling precedes formatting/logging and any worker error cleanup.
-  gTimeoutCurrent=tx.observation();
-  gTimeoutHardware.capture(owner.core);
+  gTimeoutCurrent=owner.tx.observation();
+  gTimeoutHardware.capture(owner.core,sampleMmio);
   auto &s=gTimeoutText;
   s.note("V6f native owner prepared %u attempted %u phase %u serial %u previous-valid %u",
     unsigned(owner.prepared),unsigned(owner.attempted),unsigned(gNativeState.phase),gNativeState.serial,unsigned(gPreviousNative.sid!=0));
   session::printTimeoutObservation(s,gTimeoutHardware,gPreviousNative,gTimeoutCurrent,owner.history);
   const bool exported=gVideoService&&gVideoService->setProperty("piano-video-first-error",s.text);
   ::note("V6f snapshot exported IORegistry %u bytes %u truncated %u",unsigned(exported),s.used,unsigned(s.truncated));
+}
+void nativeTimeoutSnapshot(void *context,const session::SelfTest<Bringup<KernelHw>> &)
+{
+  nativeSnapshot(*static_cast<NativeOwner *>(context),true);
+}
+
+void nativeStartTrace(Bringup<KernelHw> &core, uint32_t sid, bool resident, int rc)
+{
+  if (rc || !core.power.ccReadable() || !core.power.controllerReadable()) {
+    note("V9h session start %08x resident %u registers-unavailable rc %d",sid,unsigned(resident),rc);
+    return;
+  }
+  note("V9h session start %08x resident %u CTRL_STATUS %08x 0x8090 %08x AON-LPM mvp %08x/%08x video-ctl %08x/%08x",
+       sid,unsigned(resident),core.ops.rd(kIris+kCtrlStatus),core.ops.rd(kVideoCc+kCcMvs0FreerunMem),
+       core.ops.rd(kIris+kAonNocLpiCtl),core.ops.rd(kIris+kAonNocLpiStatus),
+       core.ops.rd(kIris+kAonVideoCtlNocLpiCtl),core.ops.rd(kIris+kAonVideoCtlNocLpiStatus));
 }
 
 void hashBytes(const uint8_t *bytes, uint32_t size, char text[65])
@@ -700,7 +762,7 @@ void hashBytes(const uint8_t *bytes, uint32_t size, char text[65])
 
 extern "C" bool piano_video_native_ready(void)
 {
-  return gArgs.level == 6 && gNativeLock;
+  return gArgs.level == 6 && gNativeLock && gBringup.dmaHeld;
 }
 
 extern "C" int piano_video_native_open(uint32_t *sessionId)
@@ -708,45 +770,107 @@ extern "C" int piano_video_native_open(uint32_t *sessionId)
   if (!piano_video_native_ready()) return -45;
   IOLockLock(gNativeLock);
   const int rc = gNativeState.acquire(sessionId);
+  const unsigned phase = unsigned(gNativeState.phase);
+  const bool resident = !rc && gBringup.firstHfi;
   IOLockUnlock(gNativeLock);
-  note("V5 native reserve result %d session %08x firmware-open 0", rc, rc ? 0 : *sessionId);
+  const uint64_t openUs = rc == 0 ? nowUs() : 0;
+  note("V5 native reserve result %d session %08x firmware-open %u", rc, rc ? 0 : *sessionId, unsigned(resident));
+  if (!rc) note("V9g native open session %08x uptime-us %llu", *sessionId, (unsigned long long)openUs);
+  if (rc) note("V9c cycle refused reason reserve-%d phase %u no-bootstrap 1",rc,phase);
+  return rc;
+}
+
+extern "C" int piano_video_native_prepare(uint32_t sid, const codec::Config *format)
+{
+  // All work here depends on the validated format, not an access unit. VT's
+  // synchronous StartSession must finish it before item/window eligibility.
+  if (!piano_video_native_ready() || !format || !codec::nativeAdmitted(*format)) return -22;
+  IOLockLock(gNativeLock);
+  const bool ours=gNativeState.owns(sid);
+  IOLockUnlock(gNativeLock);
+  if (!ours || gNativeOwner) return -22;
+  auto *owner=new NativeOwner;
+  if (!owner) return kErrNoMemory;
+  const uint64_t prepareUs=nowUs();
+  gNativeOwner=owner;owner->config=*format;
+  note("V9c cycle begin reason session-format session %08x previous %08x previous-close %d previous-teardown %d",
+       sid,gPreviousNative.sid,gPreviousNative.closeRc,gPreviousNative.teardownRc);
+  owner->tx.timeoutObserver=nativeTimeoutSnapshot;owner->tx.observerContext=owner;
+  owner->tx.history=&owner->history;owner->tx.streaming=true;
+  owner->tx.sessionId=sid;owner->tx.checkGolden=false;
+  owner->tx.accessUnit=nullptr;owner->tx.accessUnitBytes=0;
+  int rc=0;
+  const uint32_t codedWidth=format->isHevc()?(format->s.codedWidth+31)&~31u:format->s.codedWidth;
+  const uint32_t codedHeight=format->isHevc()?(format->s.codedHeight+31)&~31u:format->s.codedHeight;
+  owner->core.avcWidth=codedWidth;owner->core.avcHeight=codedHeight;
+  owner->core.hevc=format->isHevc();owner->core.bitdepth=format->depth;
+  auto &core=owner->core;
+  const bool resident=core.firstHfi;
+  if (resident) {
+    rc=core.prepareResidentSession();
+    if (!rc) {
+      bzero(const_cast<uint8_t *>(core.dma.arena),core.layout.arenaBytes());
+      core.hw.barrier();
+    }
+  } else {
+    Options options; options.level=6; options.mmcxFloor=gArgs.mmcxFloor;
+    rc=core.run(options);
+  }
+  owner->prepared=rc==0;
+  nativeStartTrace(core,sid,resident,rc);
+  if(!rc){
+    note("V9h boot reservation leased session %08x backing %u layout %u resident %u",
+         sid,core.dma.arenaBytes,core.layout.arenaBytes(),unsigned(resident));
+    owner->tx.expectedPoc=format->s.pocType;
+    owner->tx.expectedProfile=format->hfiProfile();
+    owner->tx.expectedLevel=format->hfiLevel();
+    owner->tx.expectedDepth=format->depth;owner->tx.expectedTier=format->hfiTier();
+    owner->tx.psc.poc=owner->tx.expectedPoc;
+    owner->tx.psc.profile=owner->tx.expectedProfile;
+    owner->tx.psc.level=owner->tx.expectedLevel;
+    owner->tx.psc.depth=(format->depth<<16)|format->depth;owner->tx.psc.tier=format->hfiTier();
+    owner->tx.activeWidth=format->s.width;owner->tx.activeHeight=format->s.height;
+    owner->tx.psc.resolution=(codedWidth<<16)|codedHeight;
+    owner->tx.psc.crop[0]=(format->s.left<<16)|format->s.top;
+    owner->tx.psc.crop[1]=((format->s.right+codedWidth-format->s.codedWidth)<<16)|(format->s.bottom+codedHeight-format->s.codedHeight);
+    owner->tx.psc.color=format->s.color;
+    owner->tx.initialPsc=owner->tx.psc;
+    if(format->isHevc())note("V9e HEVC bounded Main/Main10 backing %u reserved %u Ncap10 active %ux%u coded %ux%u profile %u level %u tier %u depth %u scratch4",
+      owner->core.layout.arenaBytes(),owner->core.layout.bytes,format->s.width,format->s.height,codedWidth,codedHeight,
+      format->hfiProfile(),format->hfiLevel(),format->hfiTier(),format->depth);
+    else note("V8 native bounded AVC %ux%u coded %ux%u profile %u level %u aperture256 Ncap16 scratch4",format->s.width,format->s.height,
+      format->s.codedWidth,format->s.codedHeight,format->hfiProfile(),format->hfiLevel());
+    // Record the real OPEN/input side effects even if no AU ever arrives.
+    owner->attempted=true;
+    rc=owner->tx.prepareInput();
+  }
+  if(rc){owner->error=rc;nativeSnapshot(*owner,false);}
+  note("V9j eager-session input-ready session %08x status %d elapsed-us %llu before-dsta-reply 1 ETB %u",
+       sid,rc,(unsigned long long)(nowUs()-prepareUs),owner->tx.r.etb);
   return rc;
 }
 
 extern "C" int piano_video_native_submit(uint32_t sid, const uint8_t *bytes, uint32_t size, uint64_t token,
-                                         const avc::Config *format)
+                                         const codec::Config *format)
 {
-  // Validate again at the internal boundary before powering or using DMA.
-  avc::Picture picture;
-  if (!piano_video_native_ready() || !format || !avc::normalized(bytes,size,*format,&picture)) return -22;
+  codec::Picture picture;
+  if (!piano_video_native_ready() || !format || size > session::kInputBytes ||
+      !codec::nativeAdmitted(*format) || !codec::normalized(bytes,size,*format,&picture)) return -22;
   IOLockLock(gNativeLock);
   const bool ours=gNativeState.owns(sid);
   IOLockUnlock(gNativeLock);
-  if(!ours)return -22;
   NativeOwner *owner=gNativeOwner;
-  if(owner&&!owner->config.same(*format))return -22;
+  if(!ours || !owner || !owner->prepared || owner->error || !owner->config.same(*format))return -22;
   int rc=0;
-  if(!owner){
-    if(!picture.idr)return -22;
-    owner=new NativeOwner;
-    if(!owner)return kErrNoMemory;
-    gNativeOwner=owner;owner->config=*format;
-    owner->tx.timeoutObserver=nativeTimeoutSnapshot;owner->tx.observerContext=owner;
-    owner->tx.history=&owner->history;
-    Options options; options.level=6; options.mmcxFloor=gArgs.mmcxFloor;
-    rc=owner->core.run(options);owner->prepared=rc==0;
-    if(!rc){
-      owner->tx.streaming=true;
-      owner->tx.expectedPoc=format->pocType;
-      owner->tx.expectedProfile=format->hfiProfile();
-      owner->tx.expectedLevel=format->hfiLevel();
-      owner->tx.psc.poc=owner->tx.expectedPoc;
-      owner->tx.psc.profile=owner->tx.expectedProfile;
-      owner->tx.psc.level=owner->tx.expectedLevel;
-      if(!owner->tx.nativeInput(sid,bytes,size,token))rc=kErrArgument;
-      else{owner->attempted=true;rc=owner->tx.transaction();}
-      if(!rc){IOLockLock(gNativeLock);gNativeState.start(sid);IOLockUnlock(gNativeLock);}
-    }
+  if(!owner->tx.r.etb){
+    if(!picture.idr || !owner->tx.nativeInput(sid,bytes,size,token))return -22;
+    const uint64_t inputUs=nowUs();
+    rc=owner->tx.transaction();
+    note("V9j3 native first-input session %08x status %d elapsed-us %llu output-ready %u qualification-trace %u uptime-us %llu",
+         sid,rc,(unsigned long long)(nowUs()-inputUs),unsigned(owner->tx.rawStarted),unsigned(owner->tx.qualificationTrace()),
+         (unsigned long long)nowUs());
+    if(!rc){IOLockLock(gNativeLock);gNativeState.start(sid);IOLockUnlock(gNativeLock);}
+    if(rc){owner->error=rc;nativeSnapshot(*owner,false);}
   }else rc=owner->tx.streamSubmit(bytes,size,token);
   if(!rc){char digest[65];hashBytes(bytes,size,digest);
     note("V6 native submit session %08x token %llu bytes %u SHA256 %s persistent 1",sid,(unsigned long long)token,size,digest);}
@@ -764,11 +888,25 @@ extern "C" int piano_video_native_poll(uint32_t sid,native::Frame *frame)
   if(!o.tx.popOutput(f))return 1;
   auto *b=o.core.layout.find(session::Raw,f.index);
   if(!b||b->queued||b->pendingRelease||b->readonly||o.loans[f.index])return kErrHfi;
-  auto *loan=IOSubMemoryDescriptor::withSubRange(o.hw.arenaMem,b->off,b->size,kIODirectionInOut);
+  auto *loan=IOSubMemoryDescriptor::withSubRange(o.core.hw.arenaMem,b->off,b->size,kIODirectionInOut);
   if(!loan)return kErrNoMemory;
   o.loans[f.index]=loan;
   frame->memory=loan;frame->cpu=o.core.dma.arena+b->off;frame->length=b->size;
   frame->iova=b->iova();frame->token=f.token;frame->index=f.index;
+  const auto &l=o.core.layout;const auto &psc=o.tx.psc;
+  const uint32_t width=l.hevc?l.hevcGeometry.width:l.geometry.width;
+  const uint32_t height=l.hevc?l.hevcGeometry.height:l.geometry.height;
+  const uint32_t stride=l.hevc?l.hevcGeometry.stride:l.geometry.stride;
+  const uint32_t scanlines=l.hevc?l.hevcGeometry.scanlines:l.geometry.scanlines;
+  const uint32_t pixelBytes=o.config.depth==10?2:1;
+  frame->layout.width=o.config.s.width;frame->layout.height=o.config.s.height;
+  frame->layout.codedWidth=width;frame->layout.codedHeight=height;
+  frame->layout.cropLeft=psc.crop[0]>>16;frame->layout.cropTop=psc.crop[0]&65535;
+  frame->layout.stride=stride;frame->layout.scanlines=scanlines;
+  frame->layout.yOffset=frame->layout.cropTop*stride+frame->layout.cropLeft*pixelBytes;
+  frame->layout.uvOffset=l.uvOffset()+(frame->layout.cropTop/2)*stride+frame->layout.cropLeft*pixelBytes;
+  frame->layout.bytes=l.rawBytes();frame->layout.codec=o.config.format();frame->layout.bitdepth=o.config.depth;frame->layout.format=o.config.pixelFormat();
+  frame->noOutput=!f.bytes;
   return 0;
 }
 extern "C" int piano_video_native_frame_release(uint32_t sid,native::Frame *frame)
@@ -820,17 +958,22 @@ extern "C" int piano_video_native_close(uint32_t sid)
   int rc = 0;
   bool held = false;
   if (owner) {
-    if (owner->attempted) {
+    rc = owner->error ? owner->error : owner->tx.r.error ? owner->tx.r.error : owner->core.rep.error ? owner->core.rep.error :
+         owner->core.watchdogSeen ? kErrWatchdog : owner->core.rep.fsr ? kErrFault : owner->core.quarantineReason;
+    if (!rc && owner->attempted) {
       owner->tx.ledger.cancel();
-      rc = owner->tx.shutdown();
+      rc = owner->tx.shutdown(true);
       note("V6 ownership session %08x input-reuse %u raw-reuse %u high-water %u cancelled %u loans %u",sid,
            owner->tx.ledger.inputReuse,owner->tx.ledger.rawReuse,owner->tx.ledger.highWater,owner->tx.ledger.cancelled,unsigned(loans));
     }
-    // run() already performs fail-safe teardown on failed initialization.
-    if (owner->prepared) {
-      const int un = owner->core.teardown();
-      if (!rc) rc = un;
+    if (rc) {
+      nativeSnapshot(*owner,false);
+      // A failed cold bring-up may already have entered quarantine.
+      if (!owner->core.quarantineReason) owner->core.quarantineReason = rc;
+      if (!owner->core.teardownRc) (void)owner->core.teardown();
     }
+    if (owner->prepared)
+      note("V9c cycle end reason %s session %08x status %d",rc?"native-failure":"healthy-session-close",sid,rc);
     held = owner->core.dmaHeld;
     gPreviousNative=owner->tx.observation();gPreviousNative.closeRc=rc;
     gPreviousNative.teardownRc=owner->core.teardownRc;gPreviousNative.dmaHeld=held;
@@ -839,10 +982,12 @@ extern "C" int piano_video_native_close(uint32_t sid)
          owner->tx.r.decoded, unsigned(owner->tx.r.drainAck), unsigned(owner->tx.r.last), unsigned(owner->tx.r.stopRaw),
          unsigned(owner->tx.r.stopInput), unsigned(owner->tx.r.closed), owner->core.teardownRc, unsigned(held),
          unsigned(owner->core.watchdogSeen != 0), owner->core.rep.fsr);
-    if (!held) { delete owner; gNativeOwner = nullptr; unmapAll(); }
-  } else note("V5 native close session %08x result 0 no-input 1 firmware-open 0 DMA 0", sid);
+    if (!rc) { delete owner; gNativeOwner = nullptr; }
+    else note("V9c cycle quarantined session %08x status %d dma-held %u no-reopen 1",sid,rc,unsigned(held));
+  } else note("V5 native close session %08x result 0 no-input 1 firmware-open %u DMA 0", sid,unsigned(gBringup.firstHfi));
   IOLockLock(gNativeLock);
-  gNativeState.closed(held);
+  // Boot backing stays wired in both cases. Only quarantine poisons the lease.
+  gNativeState.closed(rc && held,rc);
   IOLockUnlock(gNativeLock);
   return rc;
 }
@@ -876,9 +1021,23 @@ bool PianoVideo::start(IOService *provider)
     gNativeLock = IOLockAlloc();
     if (!gNativeLock) return false;
     gVideoService=this;
+    gBringup.dma.session = true;
+    gBringup.dma.arenaBytes = session::kAvcArenaBytes;
+    gBringup.dmaHeld = gHw.dmaAlloc(gBringup.dma);
+    if (gBringup.dmaHeld) {
+      gHw.dmaOwners("ready");
+      note("V9h boot reservation ready backing %u core-lifetime 1",gBringup.dma.arenaBytes);
+    } else {
+      note("V9h boot reservation failed no-decoders 1");
+    }
     note("V6 bounded AVC streaming ready level 6 exclusive credits8 inputs2 RAW-reuse descriptor-WC 1");
     note("V6c completion disposition AVC-known NOSHOW40 ancillary-ignored finish-sticky");
     note("V6f first-timeout snapshot armed passive console IORegistry before-cleanup");
+    note("V8 bounded AVC High geometry1920x1080 aperture256 Ncap16 scratch4");
+    note("V9 HEVC Main/Main10 geometry3840x2160 aperture-layout max768 Ncap10 P010 sync8s candidate-unqualified");
+    note("V9e HEVC layout-sized backing round2MiB AVC256 unchanged quarantine-preserved");
+    note("V9c native-failure quarantine no-reopen no-cleanup-MMIO owning-task identity");
+    note("V9d HEVC admission1080 level120 before-native no4K quarantine-preserved");
   }
   if (bootArg("piano-video-vt", 0)) {
     const int vt = piano_video_vt_attach();

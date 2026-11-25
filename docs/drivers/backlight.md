@@ -80,9 +80,7 @@ piano), so there is no clock, firmware or vote, and no PianoA830 lock is needed.
 
 Watched properties: NativeGopDisplay's `piano-display-power` (boolean, set with each change; read every second, so a call missed while
 PianoBacklight was not yet published is caught up) and PianoKeyboard's `piano-keyboard-hall` (1 open, 0 closed; every 250 ms with
-`piano-backlight-lid=1`); with `piano-backlight-auto=1` also PianoSensors' `piano-sensors-light-target` (permille) with
-`piano-sensors-seq` and `piano-sensors-lux`, read on the same 250 ms poll and taken when the sequence or the value moves (absent until
-PianoSensors' level 4: inert until then; PianoSensors does not register itself, so it is found by class beside this service).
+`piano-backlight-lid=1`); with `piano-backlight-auto=1` also PianoSensors' immutable `piano-sensors-light` snapshot, read every 250 ms. Only a valid target from the current sensor session is consumed; an invalid/fault snapshot retires the old target. PianoSensors level 4 registers its service for class matching.
 Published: `piano-backlight-code`, `-percent`, `-lit`, `-found-code`; with `piano-backlight-auto=1` also `piano-backlight-auto`
 (automatic now), `-offset` (signed 32-bit, in steps), `-ambient-permille`, `-ambient-lux`. `setProperties` (administrator only):
 `piano-backlight-percent` (0-100), `piano-backlight-step` (signed) and, with `piano-backlight-auto=1`, `piano-backlight-auto` (0/1).
@@ -91,9 +89,9 @@ Published: `piano-backlight-code`, `-percent`, `-lit`, `-found-code`; with `pian
 A target (the light policy's curve, smoothed in the sensor kext: at most one per 250 ms, none at rest) sets the code: permille x 2047,
 never under the floor. The brightness keys then shift the curve by this driver's own steps (x 2^(1/3) with the linear mapping, 1/16 of
 the range with the exponential one): the offset stays for the boot, so "a step darker than automatic" holds as the room changes, and a
-press is always a visible step unless the code is at an end. `piano-backlight-percent` switches to manual (targets recorded only);
-`piano-backlight-auto=1` as a property re-enters (the last target at once, the offset kept), `=0` leaves; a target of -1 (the sensor
-gone) leaves with the code as it is. Writes happen only on a change and not while dark (the newest code lights the wake). The writes'
+press is always a visible step unless the code is at an end. `piano-backlight-percent` switches to manual (targets not applied);
+`piano-backlight-auto=1` as a property requests it again (a fresh session target, the offset kept), `=0` leaves; a target of -1 (the sensor
+gone) leaves with the code as it is. Writes happen only on a change and not while dark (wake awaits a fresh automatic target). The writes'
 own lines are folded into one per 10 s: `ambient: N targets in S s, lux A..B, target P..Q permille, offset K, code X -> Y (Z %)`; the
 first target says `automatic brightness: on (PianoSensors): ...`, a key `step +1 from ... in automatic mode: offset 0 -> 1, code ...`.
 
@@ -255,3 +253,91 @@ the display asleep).
 Linux's ktz8866 driver and Project-SunUEFI's patch to it (GPL-2.0) were read as the specification only; nothing of them is in this
 repository. Register facts come from the public KTZ8866 datasheet. PianoBacklight is BSD-2-Clause-Patent
 (`package/PianoBacklight/LICENSE`), its I2C engine PianoKeyboard's (same licence).
+
+### Automatic-light session and applied-state evidence
+
+The automatic-light loop rejects nonfinite and negative nonzero ALS values before the first-event gate; signed zero is valid darkness. Finite values above the curve endpoint saturate before milli conversion. The existing curve, smoothing, floor and key offset are retained.
+
+`piano-backlight-auto-requested` records user intent independently of `piano-backlight-ambient-valid` (a target in the current live sensor session). `piano-backlight-auto-active` and the legacy `piano-backlight-auto` are true only while both ICs have applied the target, control is enabled and the display/lid allow light. `piano-backlight-auto-fault` records a latched sensor/ADSP fault or stopped IC control. Setting auto to 1 cannot clear either fault. Manual mode, display off, sleep, lid close and sensor re-arm invalidate the cached target; resumption waits for the new session's first valid sample.
+
+PianoSensors publishes the immutable `piano-sensors-light` snapshot (target, lux, session, seq, valid, fault) for the backlight consumer, plus diagnostic numeric validity, raw IEEE bits, accuracy status, valid/invalid counts and sample timestamps. The consumer gate reads explicit requested/control properties rather than inferring intent from an old target.
+
+For each of `primary` and `secondary`, PianoBacklight publishes `piano-backlight-<ic>-code`, `-lit`, `-enable`, `-readbacks`, `-enable-readbacks` and `-errors`. Applied code moves only after both brightness registers read back correctly. Aggregate `-control`, `-errors` and `-writes` are also published, including after a one-sided retry or control failure. No additional register polling is introduced. These are implementation/host-test contracts; daily automatic brightness still requires real lux changes and same-boot tablet readbacks.
+
+### CoreBrightness follows the automatic level (2026-11-21)
+
+The Control Center / menu-bar slider reads `DisplayServicesGetBrightness`, that is corebrightnessd's `CBDisplayModuleSKL` level.
+On macOS 27.3 that level never comes from the panel (decoded 27.3 cache). `-[CBDisplayModuleSKL initialiseSDR]` starts at 150 nits,
+then takes the capabilities' `DefaultNitsLevel` (SkyLight fills it only for external HDR displays), then the
+`DisplayPreferences/<display UUID>/BrightnessLevelNits` preference. After that only CoreBrightness's own commits change it: the
+slider, the keys, its own automatic mode (that needs the AOP light sensor node `IODeviceTree:/arm-io/aop/iop-aop-nub/als`).
+WindowServer's BrightnessControl reads our `IODisplayParameters` once, at its start. QuartzCore's IOMFB brightness callback only
+carries a bool. So while PianoBacklight's automatic mode set the panel, the slider showed CoreBrightness's stale preference.
+On the installed boot of 11-21 11:42 that was 600 nits ("full") while the panel was at 26 nits, then at the automatic level.
+
+`piano-brightness-sync` (userland, a root LaunchDaemon) keeps the two in agreement.
+
+Round 2 (slider2 and the installed boot of 14:06): WindowServer's swap brightness, the value PianoBacklight sees, is CoreBrightness's
+SDR level times the EDR headroom. `commitBrightness sdr: 431.949, headroom: 1.04185` became `swap brightness: 450.025`. So
+CoreBrightness's restore at start and EDR ramps arrive in the stream like slider moves, and both runs lost automatic mode that way.
+Restores and EDR ramps leave CoreBrightness's own level (`DisplayNitsKey`) alone; only the user's moves and our syncs change it.
+So the daemon decides, and the kernel stops guessing from the stream:
+
+- The daemon holds the lease, root's `piano-backlight-managed` (120 s, renewed while corebrightnessd answers). While it holds,
+  `NativeIntent` never ends automatic mode from WindowServer's stream; without the daemon the old rule stays (2 % after the settle).
+- While automatic mode owns the lit panel (`piano-backlight-auto-requested`), a `DisplayNitsKey` change the daemon did not cause is
+  the user's move. It reports it as `piano-backlight-moved` (16.16). Until 2026-11-22, PianoBacklight ended automatic mode until the
+  next display power-on or wake and applied WindowServer's newest request (the level with its headroom). Since then automatic mode
+  stays and the level becomes the curve's trim (see "Automatic mode stays on after a slider move" below).
+- Once the automatic level (`IODisplayParameters` `BrightnessMilliNits`) has been unchanged for 1 s and CoreBrightness is more than
+  3 % and 0.2 nit away, the daemon announces the sync (`piano-backlight-sync`), sets `DisplayNitsKey` and reads it back. CoreBrightness
+  converts the value with its own slider mapping, commits it once, notifies the slider and stores the preference. The next restore then
+  lands on the panel's level. Syncs are at least 2 s apart; a level CoreBrightness does not take gets three tries, then a minute's
+  back-off.
+- CoreBrightness's level when the daemon first reads it (its restore) is the baseline, never a move, and so is the level after a
+  corebrightnessd restart. In manual mode and while dark the daemon only follows CoreBrightness's level.
+- Round 3 (slider3): automatic mode that WindowServer's stream ended while no lease held is given back when the lease arrives
+  (`Handover`). This covers CoreBrightness's restore or an EDR ramp at the login window before the daemon runs. A display power-on
+  or wake, a reported move or an explicit `piano-backlight-auto` clears it. slider3's "move at login" was two real brightness-up
+  keys: desk-login's `seq 1 0` is `1 0` on macOS (fixed). CoreBrightness's level did not change at the login itself.
+- The daemon wakes on PianoBacklight's property-change messages (it publishes each new request, `piano-backlight-native-requested`,
+  at most every 100 ms) and once every 30 s.
+
+### Automatic mode stays on after a slider move (2026-11-22)
+
+On the installed v13.1y3 boot, automatic mode was on at 27 lux (code 1333, CoreBrightness synced to 91.575 nits). Then Low Power
+Mode was switched on from Control Center for 5 s. CoreBrightness's eco factor took its own level from 91.575 to 64.103 nits
+(`EcoModeState = 1`; no slider commit was logged). The daemon reported that as the user's move, so automatic mode ended until the
+next display power-on, and covering the light sensor did nothing. The rule "a move ends automatic mode" was the real fault:
+macOS does not work that way. The decoded 27.3 CoreBrightness shows it:
+- `-[CBAutoBrightnessModuleSKL userBrightnessCommitHandler:]` reads the committed nits and the current lux, puts that point into
+  its automatic-brightness curve (stored as `AutoBrightnessCurve`), and leaves `_enabled` alone;
+- Android's slider likewise shifts the automatic curve while adaptive brightness stays on.
+
+So a reported move now keeps automatic mode, and CoreBrightness's own SDR level becomes the curve's **trim**
+(`AmbientBacklight.h` `adjust()`, `Controller::userLevel()`):
+- The panel shows the level at once, then follows the room from there.
+- With the exponential mapping (perceptual codes) the trim is codes added to the curve's code, bounded by the range. With the
+  linear mapping it is a ratio, (1024 + trim) / 1024.
+- It is kept for the boot like the keys' offset: through display off/on, a sleep, a manual level and re-entry.
+- A level that arrives before a session's first target is shown at once; its trim is taken at the next target.
+- In manual mode (`piano-backlight-auto=0`) a reported move is the level, as before.
+- Only the stream's own rule without the daemon (no lease) still ends automatic mode, and a display power-on or a wake gives that
+  back.
+- Low Power Mode's dim becomes a trim too: the panel dims with it and returns when it ends (both edges are reported).
+
+Published: `piano-backlight-trim` (signed 32-bit). Lines: `automatic brightness: the user's level from piano-brightness-sync at L
+lux: trim A -> B, code X -> Y (...); automatic mode stays`, and `PianoBacklightNativeIntentV1 a move to requested16=N (reported by
+piano-brightness-sync ...): automatic mode stays, the move is the curve's trim`. The `on` and summary lines carry `trim T` after
+the offset.
+
+CoreBrightness's own "Automatically adjust brightness" switch is not offered on this system. `DisplayServicesHasAmbientLightCompensation`
+is CBAutoBrightnessModuleSKL's `_available`, which needs an ALS HID service or a native AOP ALS node; neither exists here. So the
+only off switch is `piano-backlight-auto=0` (root; `piano-brightness-control --auto 0`), and a slider move no longer acts as one.
+
+Witnesses: console `PianoBacklightManagedV1 ...`, `PianoBacklightSyncV1 CoreBrightness is given requested16=N (...)`,
+`PianoBacklightNativeIntentV1 a move ... (reported by piano-brightness-sync ...)`; ioreg `piano-backlight-managed`,
+`piano-backlight-sync-count`, `-echoes`, `-missed`; the daemon's `/private/var/db/piano-userland/brightness-sync/status` (`syncs=`,
+`taken=`, `moves=`, `failed=`); `piano-brightness-sync --check` (`panel_millinits`, `corebrightness_millinits`, `managed`, `in_step`).
+Host tests: `backlight_host` (`NativeIntent` with announced syncs, the lease and `streamChoice` on both runs' streams),
+`make -C tooling/native/piano-brightness-sync test` (`SyncPolicy.h`).

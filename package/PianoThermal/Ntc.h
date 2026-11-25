@@ -56,13 +56,10 @@ constexpr int64_t lnQ32(uint64_t x)
 // 1/T in kelvin^-1, Q50, of a resistance in ohms.
 constexpr int64_t inverseKelvinQ50(uint64_t ohms)
 {
-  // lnQ32 is nonnegative and below 2^38 for every uint64_t input. All coefficients are positive.
-  // The largest intermediate product fits in 128 bits, and the final sum fits in int64_t.
-  // Unsigned products avoid the signed-overflow runtime helper in Apple clang kernel builds.
-  const uint64_t l = uint64_t(lnQ32(ohms));
-  const __uint128_t l2 = (__uint128_t(l) * l) >> 32;
-  const __uint128_t l3 = (l2 * l) >> 32;
-  return int64_t(kA + ((__uint128_t(kB) * l) >> 32) + ((__uint128_t(kC) * l3) >> 32));
+  const int64_t l = lnQ32(ohms);
+  const __int128 l2 = (__int128(l) * l) >> 32;
+  const __int128 l3 = (l2 * l) >> 32;
+  return int64_t(__int128(kA) + ((__int128(kB) * l) >> 32) + ((__int128(kC) * l3) >> 32));
 }
 
 // The temperature of a resistance, milli-degrees C. ohms in 1 .. 2^40 (the callers clamp; outside the part's range the number is
