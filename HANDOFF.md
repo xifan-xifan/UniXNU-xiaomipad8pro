@@ -1,3 +1,11 @@
+## 2026-11-26 - 根镜像在本机构建完成，但它的写计划属于参考机（危险）
+
+`root.img` 20,936,916,992 B、sha256 `e682bd1f9b9c24744b535743cb7f1278be41c310640e744288057826f5e2165b` 在本机构建成功；SystemOS 窗口 `1947ac49e4c8...`、信任包 3 模块 `002db2e6ee90...`、seed `48dbc08d5955...`。27.3 的 Apple 输入全部从 Apple 取到并通过 pin（`PASS: every pinned Apple input is present and equal to its pin`）。G2 用我们自己的 3 模块信任包按上游第二选项关闭，G3 用我们自己的 seed。
+
+**但 `root.json` 的写计划是参考机的几何**：`linux_data` first_lba `71789568`、blocks `5111552`、last_lba `76901119`。拿我们自己的 LUN0 GPT 解析（4 KiB 扇区、37 分区）对照：`userdata`(34) 3,632,128-102,269,695（376.3 GiB）、`linux_rootfs`(35) 102,269,696-107,512,575（20 GiB）、`linux_data`(36) 107,512,576-124,289,791（64 GiB）、`esp`(37) 124,289,792-124,551,935（1 GiB）。`71789568`、`76901119`、`5111552` **全部落在 `userdata` 内部**。照这个计划写就会把 19.5 GiB 根镜像写进 Android 的 `userdata`，而 `linux_data` 一字节不动。我们这台正确的计划是 first_lba `107512576`、5,111,552 块、末 `112624127`（分区共 16,777,216 块）；`root.json` 里"分区末尾的 Data store 窗口"这句话在我们这儿位置也不同，正对应 `tooling/persist/common.py` 的 `INSTALLED_STORE_PAGES` 守卫。`root.img` 内容本身与设备无关（manifest + 两个窗口，OS 窗口哈希等于 profile pin），错的只是记录下来的写计划。
+
+这就是 G6 的具体形态，也是上游"第二台设备在有自己的 device profile 之前不得写入"的原因。LUN4 GPT 头仍未采集（boot/vbmeta/dtbo/vendor_boot/init_boot 都在 LUN4），它是持久写入前必须在 RAM 维护镜像里只读取得的一份数据。本轮设备侧只有 `ls /dev/block/by-name/`，未写入、未重启。详见 `docs/results-2026-11-26-root-image-built-and-write-plan-hazard.md`。
+
 ## 2026-11-26 - 27.3 Apple 输入在本机全部通过 pin，SystemOS 与根镜像在本机构建
 
 **`tooling/repro/fetch-ipsw.py --remove-aea` 在本机 `PASS: every pinned Apple input is present and equal to its pin`**（上游 `d70c16ce`，`--dry-run` 先给出 14.0 GB 计划、163.9 GB 可用）。落地的 pin 包括 `kernelcache.release.mac17j` `66bbe2fa3edf...`、App cryptex `797bb1e07e35...`、SystemOS cryptex `00f80636bede...`（AEA 解密后 `141-22145-021.dmg`），以及解压出的 KC 基座 `kc/kc273-mac17j.bin` 124,518,400 B `d1003b5143ff...`。也就是说上游 G2 之外那些"参考机本地输入"里，凡是 Apple 公开可下载的部分，我们都从 Apple 自己取到并验证过了。
