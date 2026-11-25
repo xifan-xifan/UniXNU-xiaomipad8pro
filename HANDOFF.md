@@ -1,3 +1,13 @@
+## 2026-11-26 - kext 阶段停在三份"私有 bootstrap 生成的头目录"（新发现的缺口，上游清单里没有）
+
+`PIANO_STOP_AFTER=kexts` 在本机跑到第二个 kext 就停：`ARMPlatformStandIn` 正常产出 5 个对象（公开输入足够），接着 `NativeUfs.cpp:7` 报 `IOKit/storage/IOBlockStorageDevice.h` 找不到。根因查清：`build-native-ufs.sh` 等 8 个 kext 脚本传 `-I $PIANO_K27_TREE/out/x12377/storage-abi/include`、`-I .../xnu-m/osfmk`，8 个还传 `-I .../inc-gfx`，而这三个目录**公开 k27 树里没有，本仓库和 `Droid-VM/UniXNU` 里也没有任何脚本创建它们**（只有脚本引用与 `scripts/audit-reference.py` 读取的 `build/storage-abi/interface-audit.json`）。xnu 源码顶不掉：`out/k27/xnu/iokit/IOKit` **没有 `storage` 子目录**（0 项），`installhdrs` 把那些头装到 `Kernel.framework/Versions/A/Headers/IOKitUser/`（`IOBlockStorageDevice.h` 加 23 个同级），与源码里 `<IOKit/storage/...>` 的写法不同名；KDK 展开 5.2 GB 里总共只有 76 个头、没有 IOKit 树。结论：`storage-abi` 是维护者 bootstrap 环境私有的头 shim，与 G1 其他本地件同源，但**上游 `skills/install-piano-macos` 的缺口清单没有列它**——我们已关闭 k27 树、信任包、Data seed，该阶段剩下的真实阻塞是 kext 需要的 `storage-abi`/`xnu-m`/`inc-gfx` 与 Metal 插件需要的 `UniXNU-turnip`。
+
+计划影响（准确表述）：内核（0066 与 27.3 线 0075）、KC 基座、根镜像、信任包、Data seed 全部本机已有，**下一个缺失输入是原生 kext 对象集**（KC 要链接它），没有它就没有可启动的 KC，也就没有我们自建产物的新 RAM 启动 —— 这现在排在桌面之前，是构建队列首位。自行重建 `IOKit/storage/*.h` 可行（IOKitUser 头 + 公开 IOKit 源），但 ABI 必须匹配 `NativeUfs`/`NativeRamBlock` 的期待，而校验用的 `interface-audit.json` 我们没有，所以自建版本只能标注为未验证兜底，不能悄悄替换；正确动作是向上游索取这三个头目录（是头文件不是机密，G1 文本本身就把 bootstrap 当作可以出哈希清单的东西）。本轮设备未动。
+
+另外两处纯环境教训（看起来像缺输入其实不是）：kext 日志路径是相对**本仓库根**的 `out/k27/`（不是树里），需要先建目录；`build-native-kext.py` 读内核 recipe 用的是 `raw_decode`（配方文件尾部有多余数据），照 `json.load` 会误判。
+
+详见 `docs/results-2026-11-26-kext-stage-header-shim-gap.md`。
+
 ## 2026-11-26 - 27.3 内核本机产出；G4 的准确边界（只挡桌面）；上游主机检查 0 FAIL
 
 上游 `tooling/repro/check-host.sh` 在这台 Mac 上 **0 FAIL / 1 WARN（fastboot，仅平板步骤）/ 1 GAP（Data seed，用我们自己的 seed 即通过）**，并确认 `ld-classic` 已就位、`UNIXNU_RESEARCH` 齐备。`tooling/k273/prepare-k27-tree.sh 0066` 产出 **27.3 线内核** `kernel-k273-0075-s0001-native.macho` 27,669,352 B、sha256 `308a6dbf0101937d81ccbc9b66fea9eb3999bbc5d75fb4630347f2fd95abe516`，纯内核 Mach-O，克隆树已带 k27 0067-0075（含 0075 的 47 位用户地址空间），段地址按 27.3 的 mac17j KC 基座重写无冲突。
