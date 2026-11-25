@@ -121,3 +121,33 @@ the reference unit - `tooling/persist/common.py` has no device-profile hook and 
 read-only start; **G1b** the SystemOS boot shims; **G2** the base trust bundle; **G3** a Data seed from the IPSW template.
 G7 (boot_a signing) is already solved on this side: this host signs with its own AVB key and knows that a host-signed image
 can only be `fastboot boot`ed, since the device's own key differs.
+
+## Resolved the same day: the kernel is built here, not relinked from another machine's objects
+
+The clean rebuild finished in 63 s and produced 27,557,496 bytes with sha256
+`12d3088acce0b2c375066d94dd60264766c9d6cb978f5cd03e062a1c81dcc3be`, which differs from the first link's
+`c896e203...`. Comparing hashes was the wrong test and is recorded as such: a linked Mach-O carries a freshly
+generated `LC_UUID` (`2B8C8311-3728-3ED7-938F-D75B0EFEEBC1` here), so two correct builds of identical sources never
+share a sha256. What settles provenance instead:
+
+```
+$ python3 -c "...stat every .o/.cpo under k27-native-obj/DEVELOPMENT_ARM64_BCM2837..."
+objects 1093   min 05:51:37  max 05:52:29  span_s 52.3   distinct_seconds 53
+$ strings -a kernel-k27-native.macho | grep -m1 'Darwin Kernel Version'
+@(#)VERSION: Darwin Kernel Version 27.0.0: Thu Nov 26 05:52:29 CST 2026; zhangqi:k27-native-obj/DEVELOPMENT_ARM64_BCM2837
+```
+
+All 1093 objects were written inside the build's own window, spread over 53 distinct seconds (~20/s at `JOBS=6`:
+the BCM2837 `DEVELOPMENT` configuration is a small subset of xnu, most of it tiny generated or stub files), and the
+`XNU_BUILD_STRING` names this user and this object tree. `kernel.log` for a clean stage is 7686 lines starting at
+`CC externs.o`, against 74 lines for the relink that first produced an image; that relink was the *second* pass of
+`build-k27-piano.sh` (the first pass exists to produce the platform recipes), which is why it looked impossibly fast.
+
+The image is what the downstream tools expect: `__thread_starts` present (the k27 tree's `scripts/kc-build.py` reads
+that section out of the base kernel), zero `LC_LOAD_DYLIB` and zero `LC_FILESET_ENTRY`, so it is a plain kernel Mach-O
+rather than a fileset collection, exactly what `tooling/ci/release-assets.sh` checks before publishing.
+
+Two notes for the next reader of this file: the Mac's clock runs 8 hours behind the tablet's and the operator's
+timezone while still printing `CST`, so timestamps in these logs are not wall-clock comparable with the tablet's
+logs; and reproducibility here means "this host, from the pinned sources, twice", not "byte-identical to the owner's
+kernel" - the owner's own hashes are not published, and `LC_UUID` alone makes byte equality impossible.

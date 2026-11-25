@@ -384,3 +384,22 @@ HyperOS with the slot state untouched. One shape rule came out of the second run
 persistent one (`out/persistent/boot-piano-macos-persistent-v4-avb.img`), because `pack-selector.py` hands the UEFI payload only the
 FDT, so a RAM image that keeps its macOS payload inside its own Android ramdisk is invisible to the selector. See
 [the run result](../docs/results-2026-11-26-selector-first-runs.md).
+
+## 2026-11-26 - the k27 native kernel built on this host, and the inputs it needed
+
+Built on the desk Mac (macOS 27.2.1 `26B131`, Xcode 27.2 `27B52`, Homebrew prefix `/opt/homebrew`) from
+`tooling/ci/k27-kernel.sh` at upstream `d70c16ce`, with `K27_DIR=~/Codex/k27-tree` (public k27 tree, tree id
+`544f9468b660...`), `LD_CLASSIC=~/bin/ld-classic` (ld64-957.1 from Apple's public Command Line Tools 26.6 dmg) and
+`KDK_DMG` from dortania/KdkSupportPkg `26C5035r`. Evidence and the provenance check:
+[results-2026-11-26-mac-build-host-unblocked.md](../docs/results-2026-11-26-mac-build-host-unblocked.md). Status of the
+kernel: **BUILT_ON_SECOND_HOST, NOT YET BOOTED ON THE TABLET**. It is an input to the KC, not a boot image.
+
+| File | Bytes | SHA-256 | What |
+|---|---|---|---|
+| `out/kernel-k27-native.macho` (clean build) | 27557496 | 12d3088acce0b2c375066d94dd60264766c9d6cb978f5cd03e062a1c81dcc3be | k27 native variant, xnu-12377.121.6 + series 0001-0066, plain kernel Mach-O, `__thread_starts` present |
+| `out/kernel-k27-native.macho` (earlier second pass of the same day) | 27557496 | c896e2032bd35218fc57dba0081cd2db575244c64d35978d656864768ae7552f | same sources; differs only because the linker generates a fresh `LC_UUID` per link |
+| `out/x12377/fakeroot/usr/local/lib/kernel/libfirehose_kernel.a` | - | a6ad6d76591a20730cb8d748b362a08a8d6d8228076b648594deba3c0169042f | built from libdispatch `701f4d1a` (`src/firehose/firehose_buffer.c`), arm64e, the archive the kernel links |
+| `Kernel_Debug_Kit_27.2_build_26C5035r.dmg` (not stored; fetched from the public KdkSupportPkg release) | 1258400759 | 529ba51a476e1f22c34bda3b3eff357b70bf19a6869d4542c66201cbf2eaa8ff | the KDK whose headers `stage_kdk` stages; only headers are kept, nothing of it is linked |
+
+`K27_TREE_TOP=0066` is the configured baseline series; 0067-0075 are applied to the 27.3 clone by
+`tooling/k273/prepare-k27-tree.sh`, so `out/k27/kernel-k27-0066-native.macho` is the name that tool measures.
