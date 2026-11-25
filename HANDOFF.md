@@ -1,3 +1,19 @@
+## 2026-11-26 - 27.3 Apple 输入在本机全部通过 pin，SystemOS 与根镜像在本机构建
+
+**`tooling/repro/fetch-ipsw.py --remove-aea` 在本机 `PASS: every pinned Apple input is present and equal to its pin`**（上游 `d70c16ce`，`--dry-run` 先给出 14.0 GB 计划、163.9 GB 可用）。落地的 pin 包括 `kernelcache.release.mac17j` `66bbe2fa3edf...`、App cryptex `797bb1e07e35...`、SystemOS cryptex `00f80636bede...`（AEA 解密后 `141-22145-021.dmg`），以及解压出的 KC 基座 `kc/kc273-mac17j.bin` 124,518,400 B `d1003b5143ff...`。也就是说上游 G2 之外那些"参考机本地输入"里，凡是 Apple 公开可下载的部分，我们都从 Apple 自己取到并验证过了。
+
+**SystemOS 窗口本机自建**：`tooling/k273/make-systemos.sh`（`sudo` 用于 `newfs_apfs`/`diskutil enableOwnership`/`ditto`）`SYSTEMOS-RC=0`，产物 6,442,450,944 B、sha256 `1947ac49e4c86186856a6b233c5b690fd0e21c98beb7571825c67b519952dcc3`、`volume_uuid A8D7C405-7BF1-4ACA-94D0-5DE65E3A7D2B`。注意它由 sudo 创建后属主是 root 且模式 `0600`，紧接着要 `chown` 回构建用户，否则下一步（非 root）读不到。上游 G1b 需要的 boot shims 来自 k27 树 `overlay/systemos-shims/sbin`，公开树里就有。
+
+**根镜像**：`make-root-image.sh` 已产出 manifest 并开始写窗口：OS 窗口 14,493,417,472 B at `0x100000`（sha256 `40d8282eb8650da9b4d7437a981764c48d47ee4bdc5b8b362248f25ecbce0e70`，等于 profile 的 pin）、SystemOS 6,442,450,944 B at `0x35ff00000`，`image_bytes 20,936,916,992`，manifest sha256 `590173211ddba136804c53c7de7b5cfc00bf907e2c1afa59bd8a79011edc9e7f`。
+
+**G2（基础信任包）不需要维护者私有文件**：`make-root-image.sh` 把 `out/inputs/kernel.macho.trustcache` 当 27.0.1 基础包，`make-trust.py` 的用法是"取基础包里最后三个之外的自有模块，再用 27.3 的 static/System/App 三个信任缓存替换最后三个"。本机 `~/Codex/k273-esp/kernel.macho.trustcache.3mod`（451,264 B，sha256 `9d225ea325b3b10eaed407afea100428b92fd8a790b9b8071110bba0f9accbb4`，2026-11-24 本机产物）正好是 3 个模块 = 只有 27.0.1 的三个信任缓存、零自有模块，放进那个路径即实现上游 G2 的第二选项（"让 make-trust.py 从没有自有模块起步，由 staging 工具补自己的模块"），不必改代码。
+
+**G3（Data seed）同样用我们自己的**：`~/Codex/k273-esp/scratch-data.img` 22,200,480 B、sha256 `48dbc08d5955a20255268aadc3f79660a62c395a68b358e349bbc3ea8f8b25e0`，与上游记的参考机 seed pin `cb50ceac...` 不同，即不是维护者的账号数据副本。
+
+**G6 的具体形状被量化了**（这是持久写入前唯一剩下的硬门槛）。设备上 `linux_rootfs`/`linux_data`/`esp` = `sda35/36/37` 已存在，存储准备这个依赖满足；`tooling/repro/unit-profile.py` 对我们 LUN0 头的结论是 `DIFFERENT`，但分区**号**全部一致（35/36/37），差异全在位置与容量：我们 `linux_rootfs` 为 5,242,880 LBA = 20 GiB、`linux_data` 16,777,216 LBA = 64 GiB，参考机分别是 60 GiB 与约 201 GiB，且我们的 ESP 已预先存在（参考机安装前没有）。LUN0 逻辑块 4096、总块数 124,552,192 与参考机一致。所以 profile 必须携带每台的起始 LBA 与容量，`tooling/persist/common.py` 目前把这些写死为参考机常量；上游 `tooling/persist/common.py` 另有 `INSTALLED_STORE_PAGES` 对 Data 布局的守卫（不一致时要求 `PIANO_DATA_STORE_RELAYOUT=1`），64 GiB 的 `linux_data` 会触发它。LUN4 的 GPT 头仍未采集（boot/vbmeta/dtbo/vendor_boot/init_boot 都在 LUN4），这是任何持久写入前必须先通过 RAM 维护镜像只读拿到的一份数据。
+
+设备侧本轮仍是只读（`adb shell ls /dev/block/by-name/`），没有写入、没有重启。
+
 ## 2026-11-26 - Mac 构建机解除硬阻塞：ld-classic 来自 CLT 26.6，fakeroot 通过，内核首链接
 
 上游 `upstream/main` 从 `3365412e` 推进到 `d70c16ce`（134 个提交，Mac 侧快照已同步；Mac 无 GitHub 权限，改用 `git bundle` 从本机增量传输）。维护者现在有一套装在盘上、从盘启动的日用的 macOS（v13.1y12m，2026-11-26），而 `docs/STATUS.md` 里 Android/macOS 切换仍是 RAM-only、只读，没有完整切换过一轮，正是本目标要实机验收的部分。
