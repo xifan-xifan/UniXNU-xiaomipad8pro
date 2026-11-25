@@ -30,11 +30,34 @@ parser.add_argument('--target', help='rewrite the recipe triple: a recipe kept f
 parser.add_argument('--compiler', help="the recipe names its own compiler; a host without that path (or with a clang that lacks Apple's warning spellings) builds with --compiler instead, as the Mac runs of 2026-11-21 did with xcrun -f clang")
 parser.add_argument('--c-recipe', default='bsd/DEVELOPMENT/bsd_init.o.json',
                     help="the kernel C file whose flags the C sources take (osfmk/DEVELOPMENT/startup.o.json for osfmk's private headers)")
+parser.add_argument('--probe-warnings', action='store_true', help="drop the appended warning switches the compiler does not know (two of them are Apple-fork spellings; an unknown switch is fatal under the kernel's -Werror)")
+
+def accepted(compiler, flag, cwd):
+    # One switch at a time: a compiler that lacks an Apple-fork spelling makes it a fatal error under -Werror.
+    probe = subprocess.run([compiler, flag, '-Werror', '-x', 'c', '-', '-c', '-o', os.devnull],
+                           input='', cwd=cwd, capture_output=True, text=True)
+    return probe.returncode == 0
+
+# Two of the switches below are Apple-fork spellings; a plain clang knows the diagnostic under the upstream name.
+AppleWarningSpellings = {'-Wno-missing-designated-field-initializers': '-Wno-missing-field-initializers'}
+
+
+def upstream_accepted(upstream, apple, compiler):
+    # Only substitute when the host clang reports the same diagnostic the fork's switch names.
+    probe = subprocess.run([compiler, '-Werror=' + apple[len('-Wno-'):], '-x', 'c', '-', '-c', '-o', os.devnull],
+                           input='', capture_output=True, text=True)
+    if probe.returncode == 0:
+        return False
+    probe = subprocess.run([compiler, upstream, '-Werror', '-x', 'c', '-', '-c', '-o', os.devnull],
+                           input='', capture_output=True, text=True)
+    return probe.returncode == 0
+
 args = parser.parse_args()
 tree = X / 'build/xnu' / args.obj / 'DEVELOPMENT_ARM64_BCM2837'
 recipes = {suffix: json.JSONDecoder().raw_decode((tree / name).read_text())[0]   # C sources build like the kernel's C files
            for suffix, name in (('.cpp', 'iokit/DEVELOPMENT/IOPlatformExpert.cpo.json'), ('.c', args.c_recipe))}
-out = args.out or PIANO / 'out/native-kexts' / args.name
+# Objects land in this repository; the compile runs in the recipe's own directory, so the output path is absolute.
+out = (args.out or PIANO / 'out/native-kexts' / args.name).resolve()
 out.mkdir(parents=True, exist_ok=True)
 objects = []
 for source in args.sources:
@@ -68,7 +91,19 @@ for source in args.sources:
                 '-Wno-deprecated-enum-enum-conversion', '-Wno-unnecessary-virtual-specifier', '-Wno-missing-designated-field-initializers']
     if args.target: command = [('--target=' + args.target if a.startswith('--target=') else a) for a in command]
     if args.compiler: command[0] = args.compiler
-    env = dict(os.environ, CCC_OVERRIDE_OPTIONS='+-Wno-error=missing-designated-field-initializers')
+    if args.probe_warnings:
+        tail = command[command.index('-Wall'):]
+        keep = [flag for flag in tail if accepted(command[0], flag, record['directory'])]
+        for apple, upstream in AppleWarningSpellings.items():
+            if apple not in keep and upstream not in keep and upstream_accepted(upstream, apple, command[0]):
+                keep.append(upstream)   # the same diagnostic under a non-fork clang, and it fires in XNU's own headers
+        command = command[:command.index('-Wall')] + keep
+    override = '+-Wno-error=missing-designated-field-initializers'
+    if args.probe_warnings and not accepted(command[0], '-Werror=missing-designated-field-initializers', record['directory']):
+        override = '+-Wno-error=missing-field-initializers'   # the same diagnostic, upstream spelling
+        if not accepted(command[0], '-Werror=missing-field-initializers', record['directory']):
+            override = ''
+    env = dict(os.environ, CCC_OVERRIDE_OPTIONS=override)
     # The kernel's recipe names its compiler and target (arm64e-apple-ios) but no sysroot: an SDKROOT from the caller's
     # environment (a macOS SDK) would become the sysroot and fail -Wincompatible-sysroot (host checklist run of 2026-11-13).
     env.pop('SDKROOT', None)

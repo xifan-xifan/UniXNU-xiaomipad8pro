@@ -341,3 +341,14 @@ See [the probe result](../docs/results-2026-11-25-acceptnewmedia-probe.md).
 
 See [the probe result](../docs/results-2026-11-25-startmatching-probe.md). The
 runner is `tooling/native/run-ufs266-smprobe.ps1`.
+
+## Upstream root-publication driver built from source (2026-11-25)
+
+| File | Bytes | SHA-256 | What |
+|---|---|---|---|
+| `out/native-kexts/NativeUfs-upstream/NativeUfs.o` | 190208 | e595a1433cea088265be16cd2b309fe7833f82f4971ca5ecad153acc11ee839c | `package/NativeUfs/NativeUfs.cpp` (the upstream publication sequence) compiled by the retained k27 recipe in WSL UbuntuPiano |
+| `out/upstream-pub-20261125/piano-ufs269.kc` | 135806976 | dafd48f127783c3348439457a76f7bb5a2daa1c3d298a49a398391ebf9426ab1 | macOS 27.3 kernel collection: the Apple base and the 25 other native drivers of the last booted source-built collection, plus that driver |
+| `out/upstream-pub-20261125/boot-piano-ufs269.img` | 185733120 | c6fc5b7aafff87b06341a06f065aa013c9cee441bd905175ed6d04a2e8f32ec5 | v2 RAM image carrying that collection (boot id `a870ecc5…`, ramdisk round-trip hash equals the collection); `fastboot boot` only, **built, to be run**: the tablet's ABL download path still refuses every RAM image |
+
+Built by `tooling/native/build-ufs269-upstream-pub.sh`; run it with `tooling/native/run-ufs269pub.ps1`.
+See [the build result](../docs/results-2026-11-25-upstream-publication-build.md).

@@ -1,3 +1,23 @@
+## 2026-11-25 — 上游发布序列的根驱动已编译并链成 27.3 内核集合，实机候选就绪（未运行）
+
+接着上一条：那条记录说"对象文件只差一个 Apple clang 主机"，这句现在作废——不需要 Apple clang。用保留的 k27 配方加本机的
+clang 18 就能出对象，卡点是两类编译参数，都已变成 `build-native-kext.py` 的开关：配方的 `--target`（配方自己把
+`--target=arm64e-apple-ios17.0.0` 和 `-mios-version-min=27.0` 放在一起，`-Werror` 下致命）和 `--probe-warnings`
+（逐个探测编译器认不认识追加的告警开关；真正会炸的那条诊断在 XNU 自己的 `kalloc` 宏里，非 fork 的 clang 用上游拼法
+`-Wno-missing-field-initializers`）。`NativeUfs.o` 190,208 B `e595a143…`，`llvm-nm` 静态核对：引入
+`IOService::registerService(unsigned)`，**全对象零引用** `startMatching` 与 `IOMedia`，与
+`docs/results-2026-11-25-upstream-publication-diff.md` 记的差异点正好对上（也是已发布集合的反面）。
+
+链接与打包走 `tooling/native/build-ufs269-upstream-pub.sh`：基座、内核、其余 25 个驱动描述符全部取上一次"源码构建且实机跑过"
+的那次记录（`out/no-demura-control/blendfix.argv.json`，2026-11-22），只换四处路径，所以驱动是唯一变量；构建器是
+`scripts/kc-build.py` 的包装并要读 `k27/segaddrs.json`，脚本把这几样一起复制进 `out/upstream-pub-20261125/`，链接不再依赖
+WSL 的临时目录。产物：`piano-ufs269.kc` 135,806,976 B `dafd48f1…`（26 个原生驱动、364,805 处链式指针、vtable 检查干净），
+打进 v2 RAM 镜像 `boot-piano-ufs269.img` 185,733,120 B `c6fc5b7a…`、boot id `a870ecc5…`，从镜像里回读的集合哈希与 KC 一致。
+无人值守运行器 `tooling/native/run-ufs269pub.ps1`（哈希门、ABL 槽位预检、`fastboot boot`、计时返回、reader 取控制台、正常回
+HyperOS）。**已构建、待运行**：平板要先断电重启一次让 ABL 重新接受 RAM 镜像。详见
+`docs/results-2026-11-25-upstream-publication-build.md`，工件哈希已记入 `artifacts/ARTIFACTS.md`。
+
+设备今天再复测一次仍是 `Booting FAILED (Load Error)`（连 8 MiB reader 也拒），`adb` 仍为空；本轮零写入、零分区改动。
 ## 2026-11-25 — k27 树在本机 WSL 里找到了：上游发布序列现在可以走源码级构建
 
 上午那条"本机和 Mac 都没有 k27 树、源码级候选编不出来"的结论只对了一半。`PIANO_K27_TREE` 在本机 WSL 发行版
