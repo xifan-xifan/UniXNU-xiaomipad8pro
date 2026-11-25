@@ -1,3 +1,21 @@
+## 2026-11-25 - ufs269 的基座内核没有定时器与 GIC 路径，这一发不能用来判读根卷发布（"驱动是唯一变量"对启动行为不成立）
+
+`out/upstream-pub-20261125/piano-ufs269.kc` 的内核是 2026-11-22 的 `out/no-demura-control/blendfix.macho`（28,034,000 B `459904b3…`）：
+按符号名扫这个 MachO，`piano_gicv3_init`、`piano_delay_timer_service`、`piano_gic_irq_handler`、`piano-gic` **零命中**；
+同一次扫描在 147 MB 探针系列 `piano-ufs266.kc` 里五个全在（它带着 `piano_boot_guard*`/`piano_cpuidle*`，所以不是命名扫错的假阴性）。
+上游发布序列整条都是等待：`package/NativeUfs/NativeUfs.cpp:2904` 先 `waitForMatchingService(…, 60 s)` 等 IOBSD，
+`2927-2946` 用 `IOSleep(100)` 轮询 `mediaWithUuidExists` 最多 300 次。而 `docs/results-2026-11-23-native-ufs-root-window.md`
+记着中断没开时 `IOSleep/IODelay` 永不返回，`docs/results-2026-11-24-timer-masked-polling.md` 记着只有 paclr168/169 之后的内核才有
+masked-polling 的定时器路径，且 `thread_block` 超时还要等真正的中断投递（PPI 27 走 Group 0 + 放开 DAIF.F）。
+所以 ufs269 只会卡在第一个等待里，看起来像发布失败，其实是基座没给等待任何时间：**按现状不要上机**。
+改法三条：同一个 `NativeUfs-upstream/NativeUfs.o` 走 `tooling/kc/build-kc-k27.sh --native` 链到带中断代码的 147 MB 那条线；
+Group-0 那半边在 `tooling/native/mkpaclr117-full.py:2207` 清 `IGROUPR0`、`:2247` 置 `ICC_IGRPEN0_EL1` 已经有了，缺的是 DAIF.F 的放开；
+等待目标 `84581E99…` 是 APFS **卷** UUID（`configs/k273-adt.toml`），不是容器 UUID（OS 窗口 `A7672058…`），窗口要活到 `IOAPFSFamily` 扫过它。
+另记一份两条路线的里程碑对照（iPadOS r98-r170 / DroidVM 27.0.1 已到桌面与三次关机读回 / 本线到 `bsd_init`+UFS 介质发布），
+详见 `docs/results-2026-11-25-route-progress-comparison.md`。设备本轮零写入：ABL 仍拒一切 RAM 镜像，
+`fastboot 37.0.1` 与 `out/pt33` 的 `33.0.3` 对 8 MiB reader 都是 `Sending OKAY` 后 `Booting FAILED (Load Error)`，
+不是 `docs/results-2026-11-24-ufs264.md` 记的那个 platform-tools 版本问题；解除条件仍是平板断电重启一次。
+详见 `docs/results-2026-11-25-ufs269-base-kernel.md`。
 ## 2026-11-25 — 宿主测试恢复可跑：NativeUfs 四套全过；工作区 68 个 bash 脚本曾是 CRLF 导致文档里的构建入口全部失效
 
 `bash package/NativeUfs/tests/run-tests.sh` 在 WSL 里跑出 **24 项 PASS、退出码 0**（`RootCommands`/`RootPower`/
