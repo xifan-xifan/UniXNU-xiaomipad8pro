@@ -352,3 +352,26 @@ runner is `tooling/native/run-ufs266-smprobe.ps1`.
 
 Built by `tooling/native/build-ufs269-upstream-pub.sh`; run it with `tooling/native/run-ufs269pub.ps1`.
 See [the build result](../docs/results-2026-11-25-upstream-publication-build.md).
+
+## Combined boot_a with the pre-UEFI selector (2026-11-26)
+
+| File | Bytes | SHA-256 | What |
+|---|---|---|---|
+| `out/selector/selector.bin` | 10912 | b4130d111f0b001167fa3a084795fcdc5f54b20e2853d5fd5b2c14e082f99ecd | pre-UEFI boot target selector (firmware/selector), the Android-boot + UEFI chain's first stage |
+| `out/switch/boot-a-combined-20261126.img` | 40853504 | ad24e08d025982a64e4e5a73cd1d8b158ce8cc7eaaceeb0129cc691aa24f46e8 | unsigned combined boot_a: stock 3.0.309 Android boot + selector at 0x23c0000 + macOS UEFI payload at 0x23d0000 (pack-selector.py) |
+| `out/switch/boot-a-combined-20261126-signed.img` | 100663296 | 375478f6c64110a952d44ca57b7c166f3c391729aafef351351a148390d8bed5 | the combined boot_a signed with this host's AVB key (piano-boot-v4-local.pem), stock 3.0.309 props and rollback 1788220800 from the .avb.json beside it |
+| `out/switch/boot-a-probe-android-20261126.img` | 40853504 | 84cc4af63743aa00d2b3dc590cd81353be0018f45089f73babe5968f26a9d56a | unsigned probe variant: the selector forced to hand off to Android, to prove the selector runs before either payload |
+| `out/switch/boot-a-probe-android-20261126-signed.img` | 100663296 | 8e8669ba44df25460d5f9222ddc758bc2aa3abd72792a7afe7934a7d95fbf859 | the probe variant signed the same way |
+
+`tooling/switch/pack-selector.py` packs them, `tooling/bootimg/sign-on-remote.sh` with `SIGN_HOST=local` signs them, and the host
+tests in `tooling/switch/run-tests.sh` pass on this host (19,705 boot-flag codec checks, the selector binary checks, the packer
+against the unit's own stock boot image, 14 `bootflag.sh` checks, the FD patch check).
+
+Two cautions carried with these files. The host key's AVB SHA-1 digest is `aae7ce67...` while the device's stock boot_a
+carries `f5151930...`, so these images verify under `--check-signed` but are not accepted by Android's dm-verity chain on a
+persistent write: they are `fastboot boot` candidates only until the stock key is in reach. And the probe selector is a
+thought-proof build only: with its forced Android handoff the compiler removes the PSCI and `dc civac` sequences, so two of
+the selector's binary checks fail on purpose. It is never a candidate for a persistent write; the selector of record is the
+`b4130d11...` binary above.
+
+None of these have been put on the tablet yet; the first run is a `fastboot boot` of the probe image, expected to land in HyperOS.
