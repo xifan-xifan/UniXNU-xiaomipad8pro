@@ -1477,3 +1477,18 @@ SyntaxError）；本次以 `/opt/homebrew/bin` 置前解决。
 `NativeSoftGpu` 保留，`PIANO_GPU=0`），GPU zap 两难留到 GPU 里程碑：要么拿到 303 zap 走上游原样，
 要么按 G11 以本机 309 zap 出每机构建（`piano-gpu` 打开前必须二选一并在文档记明）。
 15:22 起同一条 `build-k273-image.sh` 已过 A830 位，kext 逐个在编；日志 `out/build-k273-image-20261126.log`。
+
+22:32 内核侧判据查清（源码 + 反汇编双证，见 [owner Data 卷只按 IOMedia UUID 找](docs/results-2026-11-26-kernel-finds-data-volume-by-uuid-only.md)）：
+真正生效的 `native_verified_block_volume_device` 在 `iokit/bsddev/IOKitBSDInit.cpp:1988`，只做一次 `IOMedia` 的 `UUID` 属性匹配
+（`waitForMatchingService`，60 s），不查签名策略、不看 provider 类别；`NativeVirtioBlock.cpp:429` 那份要策略的没编进内核
+（调用集里是 `waitForMatchingService`/`snprintf`，不是 `getMatchingServices`/`makedev`）。昨天在 NativeRamBlock kext 里加
+census/sweep 的路线作废（内核绑自己 TU 的符号，kext 同名实现不参与），Mac 已 `git checkout --` 还原。
+22:25 用 UniXNU `d830d23` 的 `scripts/make-macos-data-seed.py --volume-uuid 8748FE31-7E7F-4BFA-A7E2-7A4F5E14D0F6`
+（另 `--gib 24 --skip-setup --user piano:<在 Mac 脚本内> --auto-login`；模板源 = `root.img` 按 `root.json` 的 OS 窗口
+`dd bs=1m skip=1 count=13822` 切出并只读挂载的 26C5035r 系统卷；packer = 钉版 DarwinBoot `8544957`）造出新 Data seed：
+20,992,144 B file `fc86cb25…`、identity `8e1a87e1…`，`diskutil apfs list` 认到 `8748FE31…`（卷名 Data，大小写不敏感）、
+`fsck_apfs -n` 卷与容器都 OK，`.AppleSetupDone`、`piano.plist`、`/Users/piano`、`autoLoginUser` 都在；
+逻辑/pages/store_blocks 与旧 seed 全同，本机窗口仍是 `117735999`。
+22:33 起 `out/build-verified-8748.sh`（= `build-verified-store.sh` 改 `K273_INPUTS=out/inputs/k273-8748` 加
+`PIANO_DATA_STORE_REPLACE=1`）在编。replace 是必须的：盘上 store 绑 identity `7e9bd39b`，不换 seed 身份就会被 guard 判"kept +
+Data volatile"；平板任务开始前已恢复出厂，盘上没有机主 Data（用户已授权"随便刷，后面不用问"）。
