@@ -1509,3 +1509,18 @@ launchd 起来跑 boot tasks。`offline scratch Data mount failed: 2` 消失。
 `PIANO_DENY_EXEC=<apfs.fs 里的 apfs_boot_util>`。
 23:20 装配修正两条已推：`d941d2f0` dump 镜像那次调用不带 `PIANO_DATA_STORE_REPLACE`（`data-persist=0` 的镜像按设计不该带），
 另把 `PIANO_ADT_IDENTITY` 改成可覆盖，换 ADT 身份不必改脚本。
+23:21/23:30 `mount-phase-1` 两个纯配置口子都在实机试过，都不通（详见
+[这一篇](docs/results-2026-11-26-mount-phase-1-two-config-variants.md)）：变体 A `osenvironment=darwinos-ramdisk`
+（`51321d79…`）确实把 launchd 的 boot-mode 改成了 darwinos-ramdisk，但该分支只管 ExclaveOS grafting，VM 卷照建照失败；
+变体 B `k27-deny-exec=…apfs_boot_util`（`a67cb2ff…`）让替身没起来，但 `mount` 打印 `apfs_boot_util exec failed` 后
+自己 `exit 77`，`RequireSuccess` 一样 panic（104 s 回 ABL，比 152 s 早）。
+23:40 现场勘查有实质发现：**SystemOS 镜像里本来就装了 `mount -P` 的替身**
+（`overlay/systemos-shims/sbin/{fsck,mount}` + `mount.real`；在 Mac 上只读挂 `out/inputs/k273/root/systemos.img`
+看到 `sbin/mount` 358 B、`sbin/fsck` 17 B、`sbin/mount.real` 206,992 B），上游设计里 `mount -P N` 本该直接 exit 0；
+而这几轮日志里 pid 4 是真 Apple mount（并真的跑了 fsck_apfs），说明联合挂载的 `/sbin` 这一层取的是 OS 窗口那份。
+ADT 侧排除嫌疑：`out/adt/piano-k27.adt` 里 SystemOS 的 UUID 与镜像实际值 `6678E466…` 一致
+（先前 HANDOFF 记的 `A8D7C405…` 是 `out/inputs/k273/root/root.json` 那份旧装配，不是本轮在用的 `k273-stock`）。
+下一轮第一个实验（既是判据也可能是修法）：`PIANO_DENY_EXEC=/sbin/mount.real` —— 替身若在生效，phase 1 会 exit 0 通过；
+若行为不变，就坐实"根 `/sbin` 来自 OS 层"，修法要落在让 SystemOS 层覆盖 `/sbin` 或按 UniXNU `d830d23` 补 `apfs-boot-shim=1`。
+23:45 按用户要求**暂停**：平板已自动回到 HyperOS（每轮都自己回来了，无需用户操作），Mac 侧临时镜像与挂载已清理，
+新 seed `fc86cb25…`/identity `8e1a87e1…` 留在 Mac `/private/tmp/seed8748/scratch-data.img`。
