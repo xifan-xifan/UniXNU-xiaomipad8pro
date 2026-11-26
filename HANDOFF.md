@@ -1,3 +1,23 @@
+## 2026-11-26 - VerifiedRoot 已按钉就位在 Mac 上（走 verified 根之前提）；路线 1 的确切输入清单
+
+Mac 直连 GitHub 只有 <1 KB/s（`git submodule update --init kits/VerifiedRoot` 两次失败），改在 WSL UbuntuPiano 里
+`git fetch --depth 1 origin 974f043d0c71ba2e60331483a41c6c6d35274ee3`（2.8 s）后 tar 传到 Mac，落位
+`~/Downloads/XiaomiPad8Pro-Ubuntu/unixnu-research/UniXNU/kits/VerifiedRoot`，`git submodule status` 报 clean（`974f043`）。
+包内：`src/verified_root.c`、`adapters/xnu_crypto.c`、`include/verified_root.h`、`tools/manifest.py`、`tools/verify_image.py`。
+
+**注意**：`tools/manifest.py` 是"用 owner 私钥给整盘块哈希表签名"的路径（要求 RSA-3072 exponent 65537 私钥），
+piano 不需要它 —— 11-21 那轮走的是**读厂商已签名的 SHNGROOT v2 头**：`results-2026-11-21-stock-policy-object-replay.md`、
+`-stock-root-v2-assembly.md`（对 root.img 的 3,538,432 个 OS 块与 712,192 个 SystemOS 块逐块验签，公锚取镜像内归档锚）。
+NativeUfs 侧对应 `package/NativeUfs/NativeUfs.cpp:2388 vr_open(verifiedStorage, manifestBytes, key, 1, ...)`
+与 `:2639 vr_verify_block(view, index, data, length, &vr_xnu_crypto)`，声明来自 `:20 #include "VerifiedBlockPolicy.h"`
+（在 k27 树 `overlay/droidvm/drivers/NativeVirtioBlock/` 里）。
+
+路线 1 的最小输入集（下一轮按此执行，不需要任何私钥）：
+1. `NativeVirtioBlock/VerifiedBlockPolicy.h` + `kits/VerifiedRoot/include/verified_root.h` 进 NativeUfs 头路径；
+2. 编 `kits/VerifiedRoot/src/verified_root.c` + `adapters/xnu_crypto.c`（arm64e 内核 ABI，参照 `tooling/k27/build-kext.sh`）；
+3. 从 `linux_rootfs` 上那份 root.img 的 SHNGROOT 清单 + 归档公锚生成 `verified_root_policies` 对象（11-21 的做法，脚本已失，需照文档重写）；
+4. `tooling/k27/build-native-ufs.sh` 去 `-D NATIVE_UFS_UNVERIFIED_ROOT=1`、加 `-D NATIVE_VERIFIED_BLOCK=1`，链接上述对象；
+5. 同一装配重装 RAM 图（`PIANO_RESET_AFTER=420`，`piano-reset-to=bootloader`）后无人值守启动判读 `owner cache` 阶段。
 ## 2026-11-26 - 27.3 集合挂上根后死在 owner cache 授权门（EAUTH=80）：我们的 NativeUfs 是 unverified 构建，没人应答 `native_ufs_block_authenticates`
 
 420 s 窗口版 `out/k273-ram420/boot-piano-macos-ram-A-420.img`（`0db5d160…`，与 `50d7b253…` 同装配只改窗口）：`17:09:44 fastboot boot`
