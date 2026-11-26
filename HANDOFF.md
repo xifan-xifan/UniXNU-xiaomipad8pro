@@ -1541,3 +1541,45 @@ SystemOS 卷 → 用**我们自己生成的 RSA-3072 密钥**经 `kits/VerifiedR
 `verified_root_key` 就是我们 kext 里嵌的那把公钥，不需要厂商私钥）→ 组 v2 根镜像 → 只写 `linux_rootfs` 根卷区（ESP 与
 store 窗口不动）→ RAM 判读 `mount-phase-1` 是否 `exit 0`。详见
 [这一篇](docs/results-2026-11-27-deny-mount-also-fails-upstream-g1b-is-our-wall.md)。
+## 2026-11-27 - G1b 不用重写垫片：带 `/sbin/mount` 的 SystemOS 卷已经造好、签好、两台主机各自组装出同一份根镜像；写入卡在主机防火墙
+
+**先说结论**：`mount-phase-1` 的解不需要在本仓库重写垫片。Mac 上 `PIANO_K27_TREE=/Users/zhangqi/Codex/k27-tree` 的
+`overlay/systemos-shims/sbin/{fsck,mount}` 是上游作者自己的提交 `abcbc18` 带进来的（`git status` 干净，不是哪个会话写的），
+而 `make-systemos.sh` 的产物 `out/inputs/k273/root/systemos.img`（6,442,450,944 B `1947ac49…`，卷 UUID `A8D7C405-7BF1-4ACA-94D0-5DE65E3A7D2B`）
+本来就在 Mac 上。挂只读逐个看过：`/sbin/fsck` 17 B、`/sbin/mount` 358 B（`[ "$1" = "-P" ] && exit 0`）、`mount.real` 206992 B。
+上游把 G1b 写成"自行重写并在 `make-systemos.sh` 加 `SYSTEMOS_SHIMS` 开关"，那是给没有 k27 树的人的路线；我们有树，直接用。
+
+**签名**：`make-root-policies.py` 一次签两个窗口（OS `40d8282e…` + 替身 SystemOS），一把新 owner key、锚
+`9cfab48d…`，VerifiedRoot 的 C 实现真做了 RSA 与逐块校验（OS 3,538,432 块、SystemOS 1,572,864 块）。要点：
+- `findRootLayout` 只把"块大小 4096 + flags 3"的条目当 vroot 表，所以清单必须是 v2。`make-root-manifest.py` 原来只会写窗口，
+  补了 `--object NAME=IMAGE`、窗口永远排在对象前，配 `tooling/native/test-root-manifest.py`（15 项 0 失败）。`make-root-image.sh`
+  改成按 `layout['entries']` 落盘，否则对象不会被写进去。
+- 旧锚 `896b3246…` 是上游归档签名的，私钥不在本机；但锚只被我们重编的 NativeUfs 固定（`make-root-policy-source.py` 把
+  `trusted-key.bin` 编进 kext），换一把新钥匙是自洽的。
+- OS 的哈希表算出来 `f10b77a0…`，与 11-21 记的 stock 根镜像里那份一模一样 —— 说明窗口字节和工具都对上了。
+
+**两台主机各自组装，逐字节相同**：Mac 用 IPSW 成员，Windows 从 `out/piano-stock-root-26C5035r.img`（整机哈希 `db3629e5…`
+= 设备上读回的那份）在 `0x100000` 切出 OS 窗口再拼。镜像 **21,100,494,848 B `9e4ef505…`**，清单 `c16d365e…`。本机
+`linux_rootfs` 是 4096 字节 LBA 102269696..107512575（5,242,880 块），写入 5,151,488 块、末尾 107421183，还剩 91,392 块；
+ESP（`68c28df1…`）与 Data store 窗口 117735999 都在范围外。RAM 镜像 `6001bc1c…`（ADT 的 SystemOS UUID 已是 `A8D7C405…`，
+其余参数与打开 owner Data 那一轮完全一致，根是唯一的变量）。脚本 `out/build-verified-8748-shim.sh`。
+
+**三处 Windows 侧不可用，都是代码问题，已改**：`maint-session.py` 顶层 `import fcntl`（`ca3e3a53`）；覆盖前置条件只有
+"备份后 clear" 或 "首块全零"，而 `rootfs-clear` 要求"ESP 里没有条目用 linux_rootfs"——那是参考机的情形，我们这台就是从
+`linux_rootfs` 挂根，所以这条路必然拒绝，先备份再清空在本机不可用。新增 `--root-overwrite-holds FILE`：介质丢页缓存后哈希
+必须等于本机持有的那份文件，新镜像更长的那段必须读出全零，于是"被覆盖的每个字节都是本机随时能写回去的"变成一条可验证的判据
+（`03bae942`）；`maint-shell.py` 是用 `python3` 这个名字调的，Windows 上没有（`234255b6`，改用 `sys.executable`）。
+
+**写入没成，卡在主机防火墙**：会话到了平板、`maint-boot` 全过（镜像 pin `54001a50…` 命中、`piano-maint idle 3600` 应答、
+镜像里 `/etc/piano-network` 的 `host_ip=192.168.88.10` 正是本机 USB 链路地址，所以取文件那条检查通过），装 `tablet.sh` 时
+`wget http://192.168.88.10:8000/tablet.sh` 超时。链路是好的：NCM 网卡（`以太网 3`）从平板（`192.168.88.2`，2323 是它的 shell）
+拿到 192.168.88.10 的租约；`tooling/native/probe-usb-net.py` 用最朴素的 `http.server` 复测，平板 `wget` 超时、服务器一条连接
+都没记到。超时（不是拒绝）+ 三个防火墙 profile 全开 + 整个规则集里没有任何 python 规则 = 入站被丢。**什么都没写**，会话在任何
+`restore` 之前就停了，分区没动。解开需要一条本机管理员命令（工具没法自己授权）：
+
+```
+netsh advfirewall firewall add rule name="piano-maint-usb-link" dir=in action=allow protocol=TCP localport=8000-9000 remoteip=192.168.88.0/24
+```
+
+8000 是平板 `wget` 的端口，9000 是导出/回灌流的端口，作用域只有 USB 链路那一网段；把 `add rule ... enable=yes` 换成
+`delete rule` 就能撤销。详见 [results-2026-11-27-shim-systemos-root-assembled.md](docs/results-2026-11-27-shim-systemos-root-assembled.md)。
