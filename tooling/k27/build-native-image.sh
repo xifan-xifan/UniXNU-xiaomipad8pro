@@ -180,7 +180,7 @@ COMMON=(--fd out/fd/piano-uefi-A-bundled.fd --fd-name A-bundled --kc out/k27/kc-
         --seed "${PIANO_SEED:-$BASE_SEED}" --adt "${PIANO_ADT:-$ADT_OUT}" --utc "$(date +%s)")
 # The dump image only lets our UEFI read the previous run's log; its XNU never touches the Data store (data-persist=0), so a dump
 # image with another seed cannot reset the store of the installed system (docs/persistent-boot.md).
-PIANO_RESET_AFTER=1 PIANO_DATA_PERSIST=0 python3 tooling/bootimg/build-ram-images.py "${COMMON[@]}" --out out/ram-dump > out/k27/build-ram-dump.log 2>&1 &
+PIANO_RESET_AFTER=1 PIANO_DATA_PERSIST=0 env -u PIANO_DATA_STORE_REPLACE -u PIANO_DATA_STORE_FLATTEN python3 tooling/bootimg/build-ram-images.py "${COMMON[@]}" --out out/ram-dump > out/k27/build-ram-dump.log 2>&1 &
 # RAM16G R1 uses an opt-in placeholder in the primary RAM payload.
 if [ "${PIANO_EXTRA_RAM:-0}" = 1 ]; then COMMON+=(--extra-ram); fi
 python3 tooling/bootimg/build-ram-images.py "${COMMON[@]}" --out out/ram | tail -1
