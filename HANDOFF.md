@@ -1269,3 +1269,41 @@ image that booted twice earlier today) and `fastboot reboot` came back to fastbo
 takeover leaves the link unusable for the next ABL download, the same symptom family as `Too many links`. Recovery
 needs one power cycle at the tablet; no partition was written, and `piano-usb=3` stays out of the main line until the
 storage stop is behind us.
+
+
+## 2026-11-26（续）- RAM verbose 探针拿到完整死亡现场：AMFI 的 `autda` PAC fault；上游 142 提交已合入
+
+`run-console-after-ram-boot.ps1`（新增，`ram-console-20261126-133355`）：RAM 镜像（`a56f132d…` 钉）默认条目 `macos-8cpu`、
+`-v`、`data-persist=0`、`pstore-console=0x9cb00000/0x700000`、`piano-reset-after=240 → ABL`；回 ABL 后 reader 冷 dump
+7 MiB（1,315,550 非零）后**自启装机系统回 HyperOS**（13:36:18 `hyperos=up`），全程无人值守、零持久写。
+这次 7 MiB 里有签名组，`xnu-log.py decode` 解出 15,139 B（592,323 字节多数表决修正）。死亡现场（新，比 ufs103 前进一大步）：
+`bsd_init` 走完 `IOKitBSDInit/loopattach/setconf`，root publisher 走完 media walk（`piu:` 行里 GIC 已使能、`pirq: iar 1b`
+中断真的进来了），然后 `mac101: initbsd AMFI thread run`，紧接着：
+
+    PAC failure from kernel with DA key while authing x16 at pc 0xfffffff00983c498, lr 0xfffffff00983c3c8
+    esr 0x72000002 ... MACH Reboot
+
+反汇编 `piano-ufs266.kc`（AMFI `__TEXT_EXEC+0x4f3e8`，文件 `0x2838498`）：pc 处是 `autda x16, x17`（x17 = x19|0xaea0<<48，
+x19 = AMFI `__DATA+0x5b5c758` 即 `AKS_services()` 用的那个全局），前一条 `blraa` 是 `AKS_kernel_services->open("AKSKernelServices")`，
+失败分支打印 `unable to get %s (0x%x)`。也就是说 AMFI 线程在"取 SEP 句柄→再调 vtable"这条链上，链式指针 PAC 与运行时 DA key
+对不上，直接内核 PAC fault。这是 ufs101 那条 SEP 死等的变体：**载荷里 AMFI 已经不阻塞在等，而是死在调**。quiet 装机集 40 s 死、
+pstore 无签名（没活到 mailbox），与此一致。修法候选（未定）：(a) 让 `AKS_services()` 的 open 失败路径走通（现在失败路径要
+`oslog`，怀疑 fault 其实先发生在 `blraa` 的 vtable 指针）；(b) 集合原位补丁把该线程整体 no-op（AMFI 已在 ufs101 移出串行路径，
+线程空转不影响其余 bsd_init，需验证 macpolicy 空表是否允许 exec）；(c) 借上游 —— 见下。
+
+**上游合并**：`codex/merge-upstream-20261126` 上 `5c2b9e75` 合入 `upstream/main` 全部 142 提交（含 v13.1y12m 装成套装机的
+showcase `23f6425f`）。4 个 add/add 冲突全在 boot-flag 交换工具：sysctl 后端取上游契约（kext 请求号 1..6 +
+`piano-bootflag-write=1`），保留本机两个增量（selector 测试的 `LLVM` 环境变量覆盖、0444-nvmem 测试的 root 跳过）；
+pack-selector 测试保留动态 stock props 对比。合并后 WSL UbuntuPiano 全绿：`test-bootflag-sh.sh` 15 项、
+`check-fd-patch.py`、`test-sign-props.sh`、`make -C firmware/selector test LLVM=/usr/bin`（selector.bin 10,912 B，
+无重定位/无 FP-SIMD/全 PC 相对）、`test-pack-selector.py --real out/backup-20261125/boot_a.img
+out/persistent/boot-piano-macos-persistent-v4-avb.img`（stock props patch level 2026-09-01、rollback 1788220800 保留，
+镜像止于 0x26f5000 < initrd 0xB6382000）。
+
+**锁被打开**：`unixnu.lock` 的 `[pin."k27"]` 上游已改为公开可取 —— `Droid-VM/macOS-DroidVM.git @ abcbc18f` +
+本仓库 `patches/k27-tree`（2 个 git-am 补丁），结果必须等于 git tree `544f9468…`；`11ac316b…` 降级为同内容维护者检出
+（`local`）。`tooling/k27/fetch-k27-tree.sh DEST` 一键复现并校验 tree id。之前"拿不到 native k27 源码"的头号缺口由上游
+自身关闭；下一轮先取树、核对 tree id，再决定 AMFI 走源码修复还是继续集合原位补丁。
+
+环境坑（新）：本机沙箱会把 git 读到的 LF 显示成 CRLF（`git status` 虚报 1641 个改动、`git checkout` 报
+index.lock Permission denied）；同一命令改在沙箱外执行即全部消失。别再去"修"这些假差异。
