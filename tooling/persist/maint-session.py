@@ -95,6 +95,7 @@ def maint_image():
     return None, tried
 PLATFORM_TOOLS = '/opt/homebrew/share/android-commandlinetools/platform-tools'
 B = common.LBA
+ZERO_BLOCK_SHA256 = hashlib.sha256(bytes(B)).hexdigest()   # a block the medium has never had anything written to it
 MiB = 1 << 20
 LUN0_BYTES = common.LUN0_BLOCKS * B
 TAIL_LBA = common.LUN0_BLOCKS - 5
@@ -961,7 +962,20 @@ def linux_data_root(s):
         # The whole-disk layout (2026-11-14): the 27.3 root on linux_rootfs, all of linux_data for Data. linux_rootfs held the
         # retired 27.0.1 system: write only after rootfs-clear (its backup verified) in this session or an earlier one.
         cleared = s.state.get('rootfs_cleared') or s.state.get('rootfs_clear') or {}
-        s.need(bool(cleared) if s.execute else None, 'linux_rootfs was cleared (rootfs-clear) after its verified backup')
+        if cleared:
+            s.need(bool(cleared) if s.execute else None, 'linux_rootfs was cleared (rootfs-clear) after its verified backup')
+        else:
+            # The other way this space can be free: it was never used. Read from the medium in this session, so it does not depend
+            # on any state file (docs/results-2026-11-26-root-image-and-esp-line.md: on this unit the installed ESP has always
+            # mounted its root from a partition no root image was ever written to, and no history in a JSON can make that safer or
+            # safer-than-it-is). A block 0 that is zero is nothing being overwritten; anything else and the backup path is required.
+            digest, image, magic = root_manifest(s, part)
+            s.need(digest == ZERO_BLOCK_SHA256 if s.execute else None,
+                   f'linux_rootfs block 0 is still zero ({ZERO_BLOCK_SHA256[:16]}...): nothing to overwrite and nothing of a system '
+                   'to back up (otherwise run rootfs-backup and rootfs-clear first)')
+            if s.execute:
+                s.save(rootfs_write_precondition={'block0_sha256': digest, 'manifest_image_bytes': image,
+                                                  'magic': magic.hex() if magic else None})
     if not s.a.root_image or not s.a.root_sha256:
         raise Stop('linux-data-root needs --root-image IMG and --root-sha256 HEX')
     img = Path(s.a.root_image).expanduser()

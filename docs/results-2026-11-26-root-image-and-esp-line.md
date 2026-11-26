@@ -76,3 +76,30 @@ reported as such either way.
 3. If the kernel refuses the pairing, that is the answer that the ESP must carry our own collection, which re-opens
    `storage-abi` as the blocker for a from-our-build boot, and the switch/persistence acceptance runs are reported against whatever
    boots, labelled accordingly.
+## Same day, after the write path was read: `linux-data-root` and a unit whose root partition was never used
+
+The write step this unit needs already exists - `tooling/persist/maint-session.py`'s `linux-data-root --root-part linux_rootfs
+--root-image IMG --root-sha256 HEX`, which streams the image to the partition's first block, hashes it on the host without the page
+cache and again on the medium, and changes nothing else. Its gate for `linux_rootfs` was written for the reference unit, where the
+partition held the retired 27.0.1 system: it required `rootfs-clear` in the session state, i.e. the space reclaimed after a verified
+backup. On a unit where nothing was ever written there, that gate blocks the write for the wrong reason, and no state file can
+legitimize it.
+
+The step now accepts the other evidence, read from the medium in the same session: block 0 of `linux_rootfs` equal to a zero block
+(`ZERO_BLOCK_SHA256`, the sha256 of 4096 zero bytes). It is the stronger statement of the two - nothing is being overwritten, so
+there is nothing to back up - and it is checked against the tablet rather than against history. Anything else in block 0 keeps the
+old requirement (backup, then clear) and the precondition it accepted is recorded (`rootfs_write_precondition`: the block-0 hash,
+the manifest's declared image size, its magic) so the session log says which way the space was shown to be free. `map` already
+printed the same fact (`zero (cleared)`); this makes the write follow what `map` saw.
+
+To be run on the tablet (the module imports `fcntl`, so this Windows checkout cannot exercise it; the session's own fake-tablet test
+`test-persist.py` needs a POSIX host): the dry run
+
+```sh
+PIANO_UNIT_PROFILE=out/unit-profile/piano-7ccdd855-root-on-rootfs.json \
+python3 tooling/persist/maint-session.py --dry-run maint-boot map linux-data-root check maint-exit \
+    --root-part linux_rootfs --root-image out/piano-stock-root-26C5035r.img \
+    --root-sha256 db3629e5da012ce76e64c0f42739ada9541ed8cca5adaab32256fc9b64b34ef7
+```
+
+must end with no `would stop a real run`, and the real run must show `linux_rootfs block 0 is still zero (...)` before any write.
