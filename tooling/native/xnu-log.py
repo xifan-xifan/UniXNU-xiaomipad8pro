@@ -5,7 +5,7 @@ Default ADDR 0x9cb00000 (cvp@9cb00000: no-map, unused by Ubuntu and the firmware
 2026-11-10), SIZE 0x200000. Layout: 12-byte header ("DBG3" signature, start, size) and the ring stored three times (majority vote: the DRAM flips
 scattered bits across a reset); "DBGC" (one copy, Linux persistent_ram_buffer) is still read. /dev/mem
 maps it as Device memory, so only aligned 8-byte accesses are used (unaligned ones raise SIGBUS)."""
-import mmap, os, struct, sys
+import mmap, os, re, struct, sys
 op = sys.argv[1]
 if op == 'decode':                       # a dump made elsewhere (fastboot -s piano-uefi oem dump 9cb00000 700000)
     raw = open(sys.argv[2], 'rb').read(); size = len(raw)
@@ -37,6 +37,19 @@ if matches(best) and best == 0x52474244:
     hdr = struct.unpack_from('<64I', raw, 0); base = 256
 if matches(best):
     n = copies[best]; cap = (size - (256 if base == 256 else 16)) // n
+    # The kernel mirrors into the region it printed: pstore-console-size less the retained reset-reason block (0071: PRR_BYTES =
+    # 0x10000), so a 7 MiB dump of a 0x700000 console has cap = (0x6f0000 - 256) / 11 = 661294 and not (0x700000 - 256) / 11.
+    # Copy 0 carries that line; keep whichever stride the copies actually agree on. decode accepts an explicit stride as argv[3].
+    if base == 256:
+        printed = re.search(rb'mirroring the console to 0x[0-9a-f]+ [(][+]0x([0-9a-f]{6,8})[)]', raw[base:base + 4096])
+        def agree(c):
+            return sum(1 for x, y in zip(raw[base:base + 8192], raw[base + c:base + c + 8192]) if x == y)
+        for want in ([int(sys.argv[3], 16)] if len(sys.argv) > 3 else []) + ([int(printed.group(1), 16) - base] if printed else []) + [size - base]:
+            if want // n * n + base > size:
+                continue
+            if agree(want // n) > agree(cap):
+                cap = want // n
+                break
     cs = [raw[base + k * cap:base + (k + 1) * cap] for k in range(n)]
     # Bitwise majority without numpy: a bit-sliced 4-bit counter over big integers (n <= 15).
     b0 = b1 = b2 = b3 = 0

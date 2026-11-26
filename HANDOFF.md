@@ -1,3 +1,25 @@
+## 2026-11-26 - 上游血统的 27.3 RAM 图挂上了 27.3 根，45 秒窗口到点自复位；旧集合的 AMFI 死法不在新集合里
+
+`tooling/native/run-console-ram-k273.ps1`（新增，直接沿用 `run-console-after-ram-boot.ps1` 的无人值守环）跑
+`out/k273-ram/boot-piano-macos-ram-A-bundled.img`（160,735,232 B `50d7b253…`，k273 重链核 + `kc-build273-piano.py`
+一次成型的 27.3 集合）。`16:48:41 fastboot boot` → **76 s 后自己回 ABL**（图自带 `piano-reset-after=45 piano-reset-to=bootloader`）
+→ reader 冷读 `oem dump 9cb00000 700000` `rc=0` → 暂存 7,340,032 B → 杀 fastboot 让 reader 自启装机系统 → `16:51:22 hyperos=up`。
+全程没碰平板。
+
+**解码器要改**：新图的 pstore 环步长不是 `(0x700000-256)/11`。0071 的 `PRR_BYTES` 从区里切走 64 KiB，核自己打了
+`mirroring the console to 0x9cb00000 (+0x6f0000)`，所以步长是 `(0x6f0000-256)/11 = 661294`；上午那份 0054 时代的图没有 0071，
+仍是 667252。`tooling/native/xnu-log.py` 现在从 copy 0 里那行读步长，并保留"副本真正吻合的那个"，`decode FILE STRIDE` 可覆盖。
+两份历史 dump 回归：新图 661294（阈值 6，文本干净）、上午那份 667252 不变。
+
+**45 秒内到哪**（`348af091…` 19,746 B / 289 行）：`AMFI: developer mode is force enabled` → `NativeUfs: SystemOS matched after 1600 ms`
+→ `Got boot device = .../Macintosh HD@1` → `disk5s1 vol-uuid 84581E99-85BE-4957-AC53-2947E887B3E4` = `root.json` 的 27.3 OS 卷
+→ **`apfs_log_op_with_proc: disk5s1 mount-complete volume Macintosh HD`** → `VM Swap Subsystem is ON` → `piano-reset-after: 45 s reached, PSCI SYSTEM_RESET`。
+**没有任何 panic/fault**：`9f276dff…` 集合那种 `mac101: initbsd AMFI thread run` 后 AMFI `autda` PAC fault 根本没出现，
+这条线就地结束，以后全用上游集合。45 秒是被两次 UFS 窗口匹配（2.3 s）+ 挂载吃掉的：`docs/boot-time.md` 第 2 节的首帧在 T 105-113 s。
+下一步同一装配 `PIANO_RESET_AFTER=420`（Mac 上重打包中），`piano-reset-to=bootloader` 保留，仍自回 ABL。
+详见 `docs/results-2026-11-26-k273-ram-45s.md`。
+
+设备侧本轮：**零持久写入**（一次 `fastboot boot`，Data `data-persist=0` 只在 RAM），结束在 HyperOS。
 ## 2026-11-26 - 装机集第一次带计时的从盘启动：72 秒回 ABL；pstore 控制台能读，XNU 文本拿到了
 
 `run-disk-boot-experiment.ps1`（新增）：写 macOS 集（`init_boot_a` `96057eb2`/`vendor_boot_a` `7cbb06b9`/`boot_a` `0d52dd5e`，
