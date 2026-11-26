@@ -77,3 +77,14 @@ PSCI 复位**进 ABL fastboot**（看到则把重启原因改回 normal，之后
 2. dump 之后的 `fastboot devices` 挂死要在 `run-ufs266-smprobe.ps1` 与普查脚本里一起堵掉，否则无人值守循环会卡住。
 3. 存储发布那一步的产物按 11-25 的更正清单做（带 `piano_gic*` 的谱系 + 上游 `NativeUfs` 对象 + PPI 27 到 Group 0 +
    解 `DAIF.F`），不再依赖只能产热会话转储的探针。
+## 追加（同日 12:14，同一轮）
+
+- 冷会话 `oem dump 8c0000000 0x4000000`（64 MiB）**被接受**（`OKAY [0.112s]`，rc=0），但 `get_staged` 没有产出：
+  暂存文件 0 字节，`fastboot.exe` 挂在传输上（12:17:24 那个进程）。所以窗口大小还有一条未定的上限：
+  8 KiB 可取回（12:00），64 MiB 取不回。下一次先试 0x100000（1 MiB）与 0x1000000（16 MiB）把它钉在中间某处。
+- `adb reboot bootloader` 不枚举是**常态而非例外**（12:14:33 与 11:57:49 两次都要靠脚本里那次重试；11:52 一次成功）。
+  无人值守脚本必须默认"第一次 reboot 进 loader 可能无效"，脚本已带重试。
+- reader（`piano-uefi` 的 fastboot，序列号在主机侧显示成一串乱码）在 host 侧不再发命令时会自己启动装机系统：
+  杀掉挂死的 `fastboot.exe` 后约 8 s，`adb` 就看到设备，`ensure-hyperos.ps1` 直接报 `hyperos=up serial=7ccdd855 slot=_a`。
+  这条对无人值守很重要：**dump 之后不要再用 fastboot 探测设备**，等它自己回到 Android 即可。
+- 本轮结束状态：HyperOS `OS3.0.309.0.WPYCNXM`，`sys.boot_completed=1`，slot A；全程只有 RAM 启动，无写入。
