@@ -44,18 +44,23 @@ STORE_SCRATCH_FIRST = 64711424
 # partitions are; it never relaxes a check that this unit *is* the reference unit, and it is applied only when the operator
 # names it on every command line.
 UNIT_PROFILE = None
+# A second unit's own Android slot-A pair (vendor_boot_a + init_boot_a), read off its own disk and named by its profile
+# (unit_profile.py --android-slot-a). The ANDROID_* constants further down are the reference unit's images, and a unit
+# shipping the same release can hold different bytes in those two partitions. Declared before the import-time
+# apply_unit_profile(), or that call's value is wiped by this line.
+UNIT_SLOT_A_PAIR = None
 # The reference unit's own values, snapshotted at import so they stay readable after a profile is applied (logs, tests,
 # and a host driving both units).
-REFERENCE = {n: v for n, v in (('GPT_PRIMARY_SHA256', GPT_PRIMARY_SHA256), ('ROOTFS_FIRST', ROOTFS_FIRST),
-                               ('ROOTFS_LAST', ROOTFS_LAST), ('DATA_FIRST', DATA_FIRST), ('DATA_LAST', DATA_LAST),
-                               ('ESP_FIRST', ESP_FIRST), ('ROOTFS_NEW_LAST', ROOTFS_NEW_LAST))}
+REFERENCE = {n: v for n, v in (('GPT_PRIMARY_SHA256', GPT_PRIMARY_SHA256), ('GPT_BACKUP_SHA256', GPT_BACKUP_SHA256),
+                               ('ROOTFS_FIRST', ROOTFS_FIRST), ('ROOTFS_LAST', ROOTFS_LAST), ('DATA_FIRST', DATA_FIRST),
+                               ('DATA_LAST', DATA_LAST), ('ESP_FIRST', ESP_FIRST), ('ROOTFS_NEW_LAST', ROOTFS_NEW_LAST))}
 
 
 def apply_unit_profile(path=None):
     """Read PIANO_UNIT_PROFILE (or PATH) and rebind the LUN 0 partition constants to that unit. Refuses a profile that is
     not a tooling/persist/unit_profile.py product, that disagrees about the disk's block size or length, or whose
     partitions overlap. Callers that already hold the constants read them as module attributes, so apply once at startup."""
-    global UNIT_PROFILE, REFERENCE, LBA, LUN0_BLOCKS, GPT_PRIMARY_SHA256
+    global UNIT_PROFILE, REFERENCE, LBA, LUN0_BLOCKS, GPT_PRIMARY_SHA256, GPT_BACKUP_SHA256, UNIT_SLOT_A_PAIR
     global ROOTFS_INDEX, ROOTFS_FIRST, ROOTFS_LAST, DATA_INDEX, DATA_FIRST, DATA_LAST
     global ESP_INDEX, ESP_FIRST, ROOTFS_NEW_LAST, BOOT_A_START_512, BOOT_A_SIZE_512
     if path is None:
@@ -79,15 +84,17 @@ def apply_unit_profile(path=None):
     if p['data_first'] >= p['data_last'] + 1 - RESERVE_BLOCKS:
         raise SystemExit(f"{path}: linux_data is smaller than NativeUfs's reserve")
     if REFERENCE.get('DATA_FIRST') is None:      # keep the first pristine reference set, for logs and tests
-        REFERENCE = {n: globals()[n] for n in ('GPT_PRIMARY_SHA256', 'ROOTFS_FIRST', 'ROOTFS_LAST', 'DATA_FIRST',
-                                               'DATA_LAST', 'ESP_FIRST', 'ROOTFS_NEW_LAST')}
+        REFERENCE = {n: globals()[n] for n in ('GPT_PRIMARY_SHA256', 'GPT_BACKUP_SHA256', 'ROOTFS_FIRST', 'ROOTFS_LAST',
+                                               'DATA_FIRST', 'DATA_LAST', 'ESP_FIRST', 'ROOTFS_NEW_LAST')}
     # ESP_TYPE and ESP_BLOCKS stay as the tooling defines them: a unit may move the ESP, but its type GUID and its 1 GiB
     # size are the tooling's own rule, not per-unit facts.
     for name, value in (('ROOTFS_INDEX', p['rootfs_index']), ('ROOTFS_FIRST', p['rootfs_first']),
                         ('ROOTFS_LAST', p['rootfs_last']), ('DATA_INDEX', p['data_index']), ('DATA_FIRST', p['data_first']),
                         ('DATA_LAST', p['data_last']), ('ESP_INDEX', p['esp_index']), ('ESP_FIRST', p['esp_first']),
-                        ('ROOTFS_NEW_LAST', p['rootfs_new_last']), ('GPT_PRIMARY_SHA256', p['unit_gpt_primary_sha256'])):
+                        ('ROOTFS_NEW_LAST', p['rootfs_new_last']), ('GPT_PRIMARY_SHA256', p['unit_gpt_primary_sha256']),
+                        ('GPT_BACKUP_SHA256', p.get('unit_gpt_backup_sha256') or GPT_BACKUP_SHA256)):
         globals()[name] = value
+    UNIT_SLOT_A_PAIR = p.get('android_slot_a') or None
     four = p.get('lun4') or {}
     if four.get('boot_a_start_512') is not None:
         BOOT_A_START_512, BOOT_A_SIZE_512 = four['boot_a_start_512'], four['boot_a_size_512']
@@ -97,12 +104,13 @@ def apply_unit_profile(path=None):
 
 def clear_unit_profile():
     """Undo apply_unit_profile (tests, and a host driving both a reference and another unit)."""
-    global UNIT_PROFILE, GPT_PRIMARY_SHA256, ROOTFS_INDEX, ROOTFS_FIRST, ROOTFS_LAST
+    global UNIT_PROFILE, GPT_PRIMARY_SHA256, GPT_BACKUP_SHA256, ROOTFS_INDEX, ROOTFS_FIRST, ROOTFS_LAST
     global DATA_INDEX, DATA_FIRST, DATA_LAST, ESP_INDEX, ESP_FIRST, ROOTFS_NEW_LAST
-    global BOOT_A_START_512, BOOT_A_SIZE_512
+    global BOOT_A_START_512, BOOT_A_SIZE_512, UNIT_SLOT_A_PAIR
     if REFERENCE.get('DATA_FIRST') is not None:
         for name, value in REFERENCE.items():
             globals()[name] = value
+    UNIT_SLOT_A_PAIR = None
     UNIT_PROFILE = None
 
 
@@ -123,10 +131,15 @@ ANDROID_INIT_BOOT_MAGISK_SHA256 = 'dce4a7520bf51e84506a4ff06a87afa6090747b0c69b9
 
 def slot_a_pairs():
     """The known slot-A (vendor_boot_a, init_boot_a) pairs ABL loads with boot_a -> their name. A function, so a test that patches
-    VENDOR_BOOT_A_SHA256 / INIT_BOOT_A_SHA256 (the Ubuntu-era pair of macos-set-v5) sees its own values."""
-    return {(VENDOR_BOOT_A_SHA256, INIT_BOOT_A_SHA256): 'the Ubuntu-era pair (macos-set-v5)',
-            (ANDROID_VENDOR_BOOT_SHA256, ANDROID_INIT_BOOT_MAGISK_SHA256): 'Android\'s pair with the Magisk init_boot (macos-set-v5a)',
-            (ANDROID_VENDOR_BOOT_SHA256, ANDROID_INIT_BOOT_SHA256): 'Android\'s stock pair (android-set)'}
+    VENDOR_BOOT_A_SHA256 / INIT_BOOT_A_SHA256 (the Ubuntu-era pair of macos-set-v5) sees its own values, and so a unit profile can
+    add the pair it was built from."""
+    pairs = {(VENDOR_BOOT_A_SHA256, INIT_BOOT_A_SHA256): 'the Ubuntu-era pair (macos-set-v5)',
+             (ANDROID_VENDOR_BOOT_SHA256, ANDROID_INIT_BOOT_MAGISK_SHA256): 'Android\'s pair with the Magisk init_boot (macos-set-v5a)',
+             (ANDROID_VENDOR_BOOT_SHA256, ANDROID_INIT_BOOT_SHA256): 'Android\'s stock pair (android-set)'}
+    if UNIT_SLOT_A_PAIR:
+        pairs[(UNIT_SLOT_A_PAIR['vendor_boot_a_sha256'], UNIT_SLOT_A_PAIR['init_boot_a_sha256'])] = \
+            'this unit\'s own Android pair, read off its disk' + (f' ({UNIT_PROFILE})' if UNIT_PROFILE else '')
+    return pairs
 
 
 def slot_a_pair_name(vendor_boot, init_boot):

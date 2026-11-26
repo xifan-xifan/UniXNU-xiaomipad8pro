@@ -22,8 +22,25 @@ sys.path.insert(0, str(D / 'tooling' / 'persist'))
 import common  # noqa: E402
 
 
-def parse_head(path):
+def parse_tail(path, data, lba=4096):
+    """The backup GPT: a file of the LUN's last blocks (5 x 4096 covers entries, header and the trailing reserve)."""
+    if data[-2 * lba:-2 * lba + 8] == b'EFI PART':
+        return {'path': str(path), 'lba': lba, 'blocks_back': 2, 'backup_sha256': hashlib.sha256(data).hexdigest()}
+    for back in range(1, 33):
+        if data[-back * lba:-back * lba + 8] == b'EFI PART':
+            return {'path': str(path), 'lba': lba, 'blocks_back': back, 'backup_sha256': hashlib.sha256(data).hexdigest()}
+    raise SystemExit(f'{path}: no GPT header in the last 32 blocks (give the LUN\'s last five blocks)')
+
+
+def parse_head(path, tail=None):
+    """The GPT head of a LUN, read from PATH: the first six blocks of the LUN, or the last five when TAIL is given.
+
+    A unit's own tables are what a write step compares the medium against, and a profile has to name both copies: the primary
+    sits at the start of the disk and the backup at its end, and only one of them is in the file a caller can hand over
+    without knowing where the disk ends."""
     data = Path(path).read_bytes()
+    if tail:
+        return parse_tail(path, data)
     for lba in (4096, 512):
         if data[lba:lba + 8] == b'EFI PART':
             break
@@ -120,7 +137,7 @@ def esp_write_target(path):
                                   'mounts_ufs_root': x['mounts_ufs_root'], 'data_persist': x['data_persist']}
                         for x in esp['entries']}}
 
-def build(head, image_bytes=None, boot_esp=None):
+def build(head, image_bytes=None, boot_esp=None, tail=None):
     """The profile of one unit, or a refusal naming what is not the expected shape."""
     if head['lba'] != common.LBA:
         raise SystemExit(f"LUN 0 logical block size {head['lba']} is not the tooling's {common.LBA}")
@@ -135,6 +152,7 @@ def build(head, image_bytes=None, boot_esp=None):
         raise SystemExit(f'linux_data ends at {data["last"]} at or past the end of LUN 0 ({head["blocks"]} blocks)')
     profile = {
         'unit_gpt_primary_sha256': head['primary_sha256'],
+        'unit_gpt_backup_sha256': (tail or {}).get('backup_sha256'),
         'lun0_blocks': head['blocks'], 'lba': head['lba'], 'disk_guid': head['disk_guid'],
         'rootfs_index': rootfs['index'], 'rootfs_first': rootfs['first'], 'rootfs_last': rootfs['last'],
         'data_index': data['index'], 'data_first': data['first'], 'data_last': data['last'],
@@ -205,13 +223,25 @@ def build(head, image_bytes=None, boot_esp=None):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--lun0', type=Path, required=True)
+    ap.add_argument('--lun0-tail', type=Path, help='the LUN 0 backup GPT (its last five blocks, tooling/native/fetch-lun0-tail.py):'
+                                             ' a profile without it cannot tell this unit\'s own tables from another unit\'s')
+    ap.add_argument('--android-slot-a', type=Path, help='this unit\'s own vendor_boot_a + init_boot_a digests, read off its own disk'
+                                             ' (tooling/native/fetch-slot-a-pair.py): a unit that ships the same Android release as'
+                                             ' another may hold different bytes, and the tooling knows only the other unit\'s pair')
     ap.add_argument('--lun4', type=Path)
     ap.add_argument('--image-bytes', type=int, help='the root image size, to turn the geometry into a write plan')
     ap.add_argument('--esp', type=Path, help='the ESP image this unit boots: the write plan then follows its default entry\'s '
                                              'native-ufs-root-part instead of the reference unit\'s linux_data')
     ap.add_argument('--json', type=Path)
     a = ap.parse_args(argv)
-    profile = build(parse_head(a.lun0), a.image_bytes, boot_esp=esp_write_target(a.esp) if a.esp else None)
+    profile = build(parse_head(a.lun0), a.image_bytes, boot_esp=esp_write_target(a.esp) if a.esp else None,
+                    tail=parse_head(a.lun0_tail, tail=True) if a.lun0_tail else None)
+    if a.android_slot_a:
+        pair = json.loads(a.android_slot_a.read_text())
+        for key in ('vendor_boot_a_sha256', 'init_boot_a_sha256'):
+            if not re.fullmatch(r'[0-9a-f]{64}', str(pair.get(key) or '')):
+                raise SystemExit(f'{a.android_slot_a}: no {key} (make it with tooling/native/fetch-slot-a-pair.py)')
+        profile['android_slot_a'] = pair
     if a.lun4:
         head4 = parse_head(a.lun4)
         boot = head4['parts'].get('boot_a')

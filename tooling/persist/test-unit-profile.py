@@ -243,5 +243,70 @@ with tempfile.TemporaryDirectory() as td:
     w = json.loads(esp_cli.read_text())['root_write_plan']
     check('the CLI with --esp writes the plan the ESP asks for', r.returncode == 2 and w['partition'] == 'linux_rootfs'
           and w['first_lba'] == 102269696 and json.loads(esp_cli.read_text())['boot_esp']['entry'] == 'macos', f'rc={r.returncode}')
+    # --- both GPT copies and this unit's own Android pair: the two facts a second unit cannot borrow from another -------
+    def tail(back=2, blocks_back=5, lba=LBA):
+        """The LUN's last blocks as tooling/native/fetch-lun0-tail.py hands them over, with the backup header BACK blocks
+        from the end. parse_tail's hash is over the whole region, which is what maint-session.py compares the medium's
+        s.region_sha(lun0, TAIL_LBA, 5) against, so a fixture has to keep the region length honest."""
+        t = bytearray(blocks_back * lba)
+        at = (blocks_back - back) * lba
+        t[at:at + 8] = b'EFI PART'
+        return bytes(t)
+
+    for back in (2, 1, 5):
+        p = write(tmp, f'tail-{back}.bin', tail(back))
+        g = unit_profile.parse_head(p, tail=True)
+        check(f'parse_head(tail=True) finds the backup header {back} blocks from the end',
+              g['blocks_back'] == back and g['backup_sha256'] == hashlib.sha256(p.read_bytes()).hexdigest(),
+              f"blocks_back={g['blocks_back']}")
+    try:
+        unit_profile.parse_tail('zeros.bin', b'\0' * (5 * LBA))
+        check('a tail with no GPT header is refused', False)
+    except SystemExit as ex:
+        check('a tail with no GPT header is refused', 'no GPT header' in str(ex), str(ex)[:70])
+
+    tail_bin = write(tmp, 'ours-tail.bin', tail())
+    tail_sha = hashlib.sha256(tail_bin.read_bytes()).hexdigest()
+    q = unit_profile.build(unit_profile.parse_head(ours), ROOT_IMG, tail=unit_profile.parse_head(tail_bin, tail=True))
+    check('a profile names the backup table read off this unit\'s own disk',
+          q['unit_gpt_backup_sha256'] == tail_sha, str(q['unit_gpt_backup_sha256'])[:16])
+    check('without --lun0-tail the profile cannot name it (None, never a guess)',
+          unit_profile.build(unit_profile.parse_head(ours), ROOT_IMG)['unit_gpt_backup_sha256'] is None)
+
+    VENDOR, INIT = 'a' * 64, 'b' * 64
+    pairp = tmp / 'slot-a.json'
+    pairp.write_text(json.dumps({'vendor_boot_a_sha256': VENDOR, 'init_boot_a_sha256': INIT}))
+    both = tmp / 'cli-both.json'
+    r = subprocess.run([sys.executable, str(D / 'tooling/persist/unit_profile.py'), '--lun0', str(ours),
+                        '--lun0-tail', str(tail_bin), '--image-bytes', str(ROOT_IMG), '--esp', str(esp_ok),
+                        '--android-slot-a', str(pairp), '--json', str(both)], capture_output=True, text=True)
+    w = json.loads(both.read_text())
+    check('the CLI takes --lun0-tail and --android-slot-a together',
+          r.returncode == 2 and w['unit_gpt_backup_sha256'] == tail_sha
+          and w['android_slot_a']['init_boot_a_sha256'] == INIT, f'rc={r.returncode}')
+    bad = tmp / 'slot-a-bad.json'
+    bad.write_text(json.dumps({'vendor_boot_a_sha256': VENDOR}))
+    r = subprocess.run([sys.executable, str(D / 'tooling/persist/unit_profile.py'), '--lun0', str(ours),
+                        '--android-slot-a', str(bad)], capture_output=True, text=True)
+    check('a slot-A file missing one of the two digests is refused',
+          r.returncode != 0 and 'no init_boot_a_sha256' in r.stderr, (r.stderr or r.stdout)[-70:])
+
+    common.clear_unit_profile()
+    common.apply_unit_profile(both)
+    check('apply_unit_profile rebinds the backup table with the primary', common.GPT_BACKUP_SHA256 == tail_sha)
+    named = common.slot_a_pair_name(VENDOR, INIT)
+    check('slot_a_pairs accepts the pair this unit was built from', named is not None and 'this unit' in named, str(named)[:60])
+    check('one digest of the pair swapped is still unknown', common.slot_a_pair_name(VENDOR, common.INIT_BOOT_A_SHA256) is None)
+    probe = ('import sys; sys.path.insert(0, {path!r}); import common;'
+             'print(common.slot_a_pair_name({v!r}, {i!r}) or "UNKNOWN")').format(path=str(D / 'tooling' / 'persist'), v=VENDOR, i=INIT)
+    r = subprocess.run([sys.executable, '-c', probe], capture_output=True, text=True, cwd=str(D),
+                       env={**__import__('os').environ, 'PIANO_UNIT_PROFILE': str(both)})
+    check('a profile applied at import reaches slot_a_pairs (the pair is known without an explicit apply)',
+          'this unit' in r.stdout, (r.stdout + r.stderr)[-70:])
+    common.clear_unit_profile()
+    check('clear_unit_profile forgets the unit pair and both tables',
+          common.UNIT_SLOT_A_PAIR is None and common.slot_a_pair_name(VENDOR, INIT) is None
+          and (common.GPT_PRIMARY_SHA256, common.GPT_BACKUP_SHA256) ==
+              (common.REFERENCE['GPT_PRIMARY_SHA256'], common.REFERENCE['GPT_BACKUP_SHA256']))
 print(f'\n{"FAILURES: " + ", ".join(FAILS) if FAILS else "all checks passed"} ({0 if not FAILS else len(FAILS)})')
 sys.exit(1 if FAILS else 0)
