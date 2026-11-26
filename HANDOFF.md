@@ -1338,3 +1338,19 @@ sha256 `ca55ea8c…`，Mach-O fileset）放入克隆树 `out/kc/kc27.bin`；`~/.
 若装配成功，下一步就是上游姿势的 RAM 启动：`fastboot boot out/ram/boot-piano-macos-ram-*.img`（RAM-only，零持久写，
 已总授权），对照 ufs266 的 AMFI `autda` PAC 死亡现场看 0075 集合是否天然免疫（我们的集合带 364797 链指针的旧基线
 与 200+ 原位补丁，上游集合由 `kc-build273-piano.py` 一次成型 —— 若上游集合活着，AMFI 线就地终结，别再喂自己的集合）。
+
+
+## 2026-11-26（续三）- 装配卡点是 GPU zap 钉（本机 309 与参考机 303 天然不同）；首轮改无-A830 软-GPU 装配
+
+装配（15:05/15:13 两轮）在 `PianoA830` 的固件固化处停：`stage-piano-gpu-firmware.py` 按
+`package/PianoA830/board/piano-gpu-firmware.json` 的钉要 `gen80000_zap.mbn` 12,088 B `bb942413…`，
+本机各树（WSL `piano-firmware-current` 等六处，11-02 从本机 Ubuntu 抽取）全是 12,088 B `e73f3a4c…`。
+钉文件自述出处是 **stock OS3.0.303.0.WPYCNXM vendor_a/odm_a** —— 参考机出厂 303；本机出厂即 309，
+zap 本来就不同代（正是 G11 说的"每机固件输入要取自自己的 stock 分区"）。无 root 读不到本机
+`apdp`（`/dev/block/sdb5`，user build），`/vendor|/odm/firmware_mnt` 下 shell 不可见。
+今晨 09:51 那次 A830 重编其实也没过（`gen-piano-gpu-inputs.py` 的 3.12 f-string 在旧 python3 上
+SyntaxError）；本次以 `/opt/homebrew/bin` 置前解决。
+决策（首轮只求控制台+桌面）：`PIANO_KEXT_LIST=out/kexts-no-a830.txt`（去掉 PianoA830 一行，软-GPU
+`NativeSoftGpu` 保留，`PIANO_GPU=0`），GPU zap 两难留到 GPU 里程碑：要么拿到 303 zap 走上游原样，
+要么按 G11 以本机 309 zap 出每机构建（`piano-gpu` 打开前必须二选一并在文档记明）。
+15:22 起同一条 `build-k273-image.sh` 已过 A830 位，kext 逐个在编；日志 `out/build-k273-image-20261126.log`。
