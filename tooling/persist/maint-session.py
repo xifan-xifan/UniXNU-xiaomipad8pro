@@ -104,6 +104,15 @@ def maint_image():
 PLATFORM_TOOLS = '/opt/homebrew/share/android-commandlinetools/platform-tools'
 B = common.LBA
 ZERO_BLOCK_SHA256 = hashlib.sha256(bytes(B)).hexdigest()   # a block the medium has never had anything written to it
+
+
+def zero_region_sha256(blocks):
+    """SHA-256 of BLOCKS untouched blocks of the medium (a whole number of B, in order): what a region reads when
+    nothing was ever written to it."""
+    h = hashlib.sha256()
+    for _ in range(blocks):
+        h.update(bytes(B))
+    return h.hexdigest()
 MiB = 1 << 20
 LUN0_BYTES = common.LUN0_BLOCKS * B
 TAIL_LBA = common.LUN0_BLOCKS - 5
@@ -987,12 +996,48 @@ def linux_data_root(s):
             # mounted its root from a partition no root image was ever written to, and no history in a JSON can make that safer or
             # safer-than-it-is). A block 0 that is zero is nothing being overwritten; anything else and the backup path is required.
             digest, image, magic = root_manifest(s, part)
-            s.need(digest == ZERO_BLOCK_SHA256 if s.execute else None,
-                   f'linux_rootfs block 0 is still zero ({ZERO_BLOCK_SHA256[:16]}...): nothing to overwrite and nothing of a system '
-                   'to back up (otherwise run rootfs-backup and rootfs-clear first)')
-            if s.execute:
-                s.save(rootfs_write_precondition={'block0_sha256': digest, 'manifest_image_bytes': image,
-                                                  'magic': magic.hex() if magic else None})
+            holds = getattr(s.a, 'root_overwrite_holds', None)
+            if digest == ZERO_BLOCK_SHA256:
+                s.need(digest == ZERO_BLOCK_SHA256 if s.execute else None,
+                       f'linux_rootfs block 0 is still zero ({ZERO_BLOCK_SHA256[:16]}...): nothing to overwrite and '
+                       'nothing of a system to back up')
+                if s.execute:
+                    s.save(rootfs_write_precondition={'block0_sha256': digest, 'manifest_image_bytes': image,
+                                                      'magic': magic.hex() if magic else None})
+            elif holds:
+                # The third way the space is free, for a unit that already carries a root of ours. rootfs-clear is written for
+                # the reference unit, where linux_rootfs held the retired 27.0.1 system that no ESP entry mounts; on this unit
+                # the installed ESP mounts its root from linux_rootfs, so that step rightly refuses and no backup of the tablet's
+                # bytes is needed that we do not already hold. What the write replaces must instead equal, block for block, a file
+                # the host has and can write back: the medium is hashed (caches dropped) over the held file's span and, past it, must
+                # read zero where the new image is longer. Rollback is the same step with that file as --root-image.
+                held = Path(holds).expanduser()
+                held_bytes = held.stat().st_size if held.is_file() else 0
+                new_bytes = Path(s.a.root_image).expanduser().stat().st_size if s.a.root_image else 0
+                s.need(held.is_file() and bool(new_bytes) if s.execute else None, f'{held.name}: held copy, the new image {new_bytes} bytes')
+                s.need(held_bytes % B == 0 and held_bytes <= (size or 0) if s.execute else None,
+                       f'{held.name}: {held_bytes} bytes, a whole number of {B}-byte blocks inside {part}')
+                held_sha = s.sha_nocache(held) if s.execute else None
+                got = s.region_sha(dev, 0, held_bytes // B, B, name='rootfs-held') if s.execute else None
+                s.need(got == held_sha if s.execute else None,
+                       f'{part} blocks 0..{held_bytes // B - 1} read back equal to {held.name} ({str(held_sha)[:16]}): every byte this '
+                       'write replaces is held on the host and can be streamed back')
+                spare_blocks = 0
+                if new_bytes > held_bytes:
+                    spare_blocks = (new_bytes - held_bytes) // B
+                    want = zero_region_sha256(spare_blocks)
+                    zero = s.region_sha(dev, held_bytes // B, spare_blocks, B, name='rootfs-spare') if s.execute else None
+                    s.need(zero == want if s.execute else None,
+                           f'{part} blocks {held_bytes // B}..{held_bytes // B + spare_blocks - 1}, which the longer image takes, read '
+                           f'zero ({str(want)[:16]}): nothing is displaced')
+                if s.execute:
+                    s.save(rootfs_write_precondition={'block0_sha256': digest, 'manifest_image_bytes': image,
+                                                      'magic': magic.hex() if magic else None,
+                                                      'held_file': held.name, 'held_sha256': held_sha, 'held_blocks': held_bytes // B,
+                                                      'spare_zero_blocks': spare_blocks})
+            else:
+                s.need(False, f'linux_rootfs block 0 is neither zero ({ZERO_BLOCK_SHA256[:16]}...) nor matched to a held copy: '
+                         'run rootfs-backup and rootfs-clear, or pass --root-overwrite-holds FILE')
     if not s.a.root_image or not s.a.root_sha256:
         raise Stop('linux-data-root needs --root-image IMG and --root-sha256 HEX')
     img = Path(s.a.root_image).expanduser()
@@ -2655,6 +2700,9 @@ def main():
     p.add_argument('--root-sha256', help='step linux-data-root: its sha256')
     p.add_argument('--root-part', default='linux_data', help='step linux-data-root: the partition (linux_data, or linux_rootfs for the '
                    'whole-disk layout after rootfs-clear)')
+    p.add_argument('--root-overwrite-holds', metavar='FILE', help='step linux-data-root on linux_rootfs: the host\'s exact copy of '
+                   'what the partition holds now, so the write replaces bytes it can stream back (use it with --root-part '
+                   'linux_rootfs where the installed ESP mounts its root from there and rootfs-clear rightly refuses)')
     p.add_argument('--esp-final', default='esp-base-macos.img', help='the ESP image of step esp-final')
     p.add_argument('--boot-image', default='boot-piano-macos-persistent-v4-signed.img', help='the boot_a image (out/persistent)')
     p.add_argument('--dump-image', default=str(D / 'out/ram-dump/boot-piano-macos-ram-A-bundled.img'))
