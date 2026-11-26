@@ -1,3 +1,29 @@
+## 2026-11-26（续）- verified 根打通：owner cache 门过了、launchd 起来、SystemOS cryptex 挂上；下一道门是 owner Data 卷（本机没有 store）
+
+路线 1（上游 verified 根）本机打通到用户层：镜像 `2ffa854c6a441e468b30642cc14347286b32c5ac327d6ea082b8b02ba973ef0c`
+（Mac `~/Codex/upstream-tip/out/ram-verified/`，Windows `out\k273-ram-verified2\`，身份校验走同目录 `.sha256` sidecar）。
+两个窗口走完 verified 流水线（`owner signature and hash table` → `signed window identities`，不再有 `UNVERIFIED`），
+`disk5s1 Macintosh HD` mount-complete，`init (pid 1)` 起来并挂了 `disk3s1 FizzSeedUpdate26C5035r.arm64eSystemCryptex`。
+死点前移到 `kern_exec.c:8681` `offline scratch Data mount failed: 2`（ENOENT）：`native_ram_block_volume_seed` 按卷 UUID
+找不到 NativeRamBlock 的 Data 卷，因为本机 `linux_data` 没有 store（控制台 `Data store state 0 … present 0`）。细节与依据见
+`docs/results-2026-11-26-k273-verified-root-owner-cache.md`。
+
+**这一轮修掉的真正卡点**：policy 不能用汇编 `.quad` 造（KC 收集器按普通 rebase 收，内核读到垃圾指针 → `Kernel data abort`
+at `stage policy selection`，镜像 `83109f8c…`）。改由 clang 编的 C 单元发出：`tooling/k27/make-root-policy-source.py` →
+`root-policies.cpp`，`build-native-ufs.sh` 的 verified 分支改吃 `PIANO_ROOT_POLICY_SOURCE`（不再 `--objects-extra`）。
+两处必须照上游声明匹配：`verified_root_key` 要 `extern "C"` 且定义前先写 `extern` 声明（C++ 顶层 `const` 是内部链接），
+且归档锚就是这把 key（`VROOTKEY`+384 模数+65537 = 395 B），别发两份。上机前的静态验收办法也记在那份文档里（natives.json
+的地址 + `VROOTKEY` 文件偏移差 `0xfffffff007004000`，两个指针低 48 位相差正好 544 且都落在 `VROOT01\0` 上）。
+
+**无人值守跑法的两处修正**（都是真故障，不是环境问题）：`Get-FileHash` 在 `powershell -NoProfile` 的新会话里可能
+`CommandNotFoundException`，脚本一进来就抛（run.log 里只剩 finally 那三行）；`run-console-ram-k273.ps1` 的 `ShaH` 已改为
+.NET `SHA256`，并把 `Line` 换成 `[IO.File]::AppendAllText`。镜像路径/tag/期望哈希改成参数
+（`-ImgRel`/`-Tag`/`-ImageSha`，缺省读 `<img>.sha256` sidecar），别为每轮新建脚本。另加
+`tooling/native/follow-ram-probe.ps1`：镜像已经在跑时，等它自复位回 ABL、一次 reader 冷读 mailbox、再放 HyperOS 自启。
+
+**下一步**：`out/build-verified-store.sh`（`PIANO_DATA_PERSIST=2` + `data-store-part=linux_data`）建 store；
+判读顺序仍是 Data 卷 → `k27: firmlink` → `owner cache` stage 6 → launchd 之后的桌面。GPU 仍未打开
+（`PIANO_GPU=0`、无 A830、无 Turnip），别把这次当成能进桌面。
 ## 2026-11-26 - VerifiedRoot 已按钉就位在 Mac 上（走 verified 根之前提）；路线 1 的确切输入清单
 
 Mac 直连 GitHub 只有 <1 KB/s（`git submodule update --init kits/VerifiedRoot` 两次失败），改在 WSL UbuntuPiano 里

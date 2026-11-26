@@ -417,3 +417,13 @@ The write plan for this unit is generated, not copied: `tooling/persist/unit_pro
 17547919360 --esp out/persistent/esp-device.img --json out/unit-profile/piano-7ccdd855-root-on-rootfs.json` -> root at
 `linux_rootfs` first block 102269696, 4284160 blocks, last 106553855, 958720 blocks free, tail reserve untouched, Data store on
 `linux_data` untouched. See [results-2026-11-26-root-image-and-esp-line.md](../docs/results-2026-11-26-root-image-and-esp-line.md).
+## 2026-11-26 - the verified-root RAM images (27.3, this unit)
+
+| File | Bytes | SHA-256 | What |
+|---|---|---|---|
+| `out/ram-verified/boot-piano-macos-ram-A-bundled.img` (Mac), `out/k273-ram-verified/boot-...-A-bundled.img` | 160735232 | 83109f8c07054611f43fc52250c719264fa09a860858b3af6a867e361 | first verified-root assembly: the policies linked as a pre-assembled object. Ran: dies `Kernel data abort` at `NativeUfs: stage policy selection` (the `.quad` pointers arrive as plain rebases). Do not reuse |
+| `out/ram-verified/boot-piano-macos-ram-A-bundled.img` (Mac), `out/k273-ram-verified2/boot-piano-macos-ram-A-bundled.img` | 160735232 | 2ffa854c6a441e468b30642cc14347286b32c5ac327d6ea082b8b02ba973ef0c | the same image with the policies compiled from `out/root-policy-src/root-policies.cpp` (`make-root-policy-source.py`). Ran 2026-11-26 20:12: both windows published from signed policies, root mounted, `init (pid 1)` up, SystemOS cryptex mounted; panics `offline scratch Data mount failed: 2` (no Data store on this unit) |
+| `out/ram-verified/boot-piano-uefi-ram-A-bundled.img` | 11837440 | eb570025859ee90f3b3fb96d3b41414ceda5bf34747a9e94a1ad6dca57e1d128 | the M1 half of both images above (unchanged between them) |
+
+Evidence: `logs/native-runs/ram-k273-verified2-20261126-201206/` (run.log + the 7 MiB pstore dump), decoded with
+`tooling/native/xnu-log.py`. Read [results-2026-11-26-k273-verified-root-owner-cache.md](../docs/results-2026-11-26-k273-verified-root-owner-cache.md).
