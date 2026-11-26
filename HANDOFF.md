@@ -10,6 +10,7 @@
 
 **下一步顺序**：(1) 设备回总线后维护 RAM 镜像只读：`linux_rootfs` 首块（先确认没有陈旧 SHNGROOT manifest）、`linux_data` 首块与 117735999 处 store（必须是 seed `48dbc08d...` 那份）；(2) 按 profile 写 stock-root 镜像、整区读回哈希、装机 ESP 从盘启动并抓控制台；(3) 若内核拒绝这个配对，则说明 ESP 必须换成我们自己的集合，`storage-abi` 就重新成为"自建产物启动"的阻塞点，切换/持久化验收按实际启动的东西如实标注。本轮设备不可达（需现场供电），未做任何写入。
 
+**顺带把写根的门槛改成看证据**：`maint-session.py` 的 `linux-data-root --root-part linux_rootfs` 本来就是我们要的步骤（流式写入分区首块、主机与介质各读回哈希一次、不动别的），但它对 `linux_rootfs` 的前提是按参考机写的——必须先有 `rootfs-clear`（备份校验后回收空间）。我们这台从没往那个分区写过东西，于是这条前提**因为错误的原因**挡住了写入，而状态文件无法把它洗白。现在接受另一种证据、且**当次会话从介质读取**：`linux_rootfs` 第 0 块等于全零块（`ZERO_BLOCK_SHA256` = 4096 个零字节的 sha256）；这反而是更强的说法——没有东西被覆盖，因此没有东西需要备份。第 0 块若是别的内容，仍旧要求先 `rootfs-backup` + `rootfs-clear`；走哪条都会记进 `rootfs_write_precondition`（首块哈希、manifest 声明的镜像字节数、magic）。`map` 早就打印过同一事实（`zero (cleared)`），这步只是让写入跟着 `map` 看到的走。`test-unit-profile.py` 39 项仍全绿；`maint-session.py` 要 `fcntl`，本机不能跑，标 built, to be run（干跑命令已写进结果文档）。
 详见 `docs/results-2026-11-26-root-image-and-esp-line.md`。
 ## 2026-11-26 - v5 的 RAM 启动后平板从 USB 总线消失（需现场供电）；顺带结掉两件事
 
