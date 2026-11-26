@@ -1492,3 +1492,20 @@ census/sweep 的路线作废（内核绑自己 TU 的符号，kext 同名实现�
 22:33 起 `out/build-verified-8748.sh`（= `build-verified-store.sh` 改 `K273_INPUTS=out/inputs/k273-8748` 加
 `PIANO_DATA_STORE_REPLACE=1`）在编。replace 是必须的：盘上 store 绑 identity `7e9bd39b`，不换 seed 身份就会被 guard 判"kept +
 Data volatile"；平板任务开始前已恢复出厂，盘上没有机主 Data（用户已授权"随便刷，后面不用问"）。
+23:05 新 seed 上机（`24656635…`，运行 `logs/native-runs/ram-k273-8748-20261126-225510`）：**owner Data 挂载全线通过**。
+`NativeRamBlock: data-store-lba=117735999 … store new, bound to it`、`Data store state 3 … seed 8e1a87e1, store seed 8e1a87e1`、
+`the store was started over on request`，`k27: firmlink /private|/Applications|/Library|/cores|/opt|/System/Library/Caches` 全 0
+（只有 `/System/Volumes/Hardware` 是 2，seed 里没这目录），`load_init_program: attempting to load /sbin/launchd` →
+launchd 起来跑 boot tasks。`offline scratch Data mount failed: 2` 消失。
+23:12 新卡点：launchd 内建 boot task `mount-phase-1`（`/sbin/mount -P 1` → `apfs_boot_util 1`）33 s 后 SIGABRT →
+`userspace panic: boot task failure: mount-phase-1` → 151 s 就回 ABL。原因写在它自己的串里：phase one 要 VM 角色卷，
+缺了就现建，而我们 `/` 所在的容器（`/dev/disk3`，SystemOS 联合后的 cryptex 窗口）只读且只有 System 卷，
+`create_vm_volume … Read-only file system` → `mount_phase_one:1887: VM volume mount failed`。详见
+[这一篇](docs/results-2026-11-26-k273-owner-data-mounts-launchd-stops-at-mount-phase-1.md)。
+上游正解（UniXNU `d830d23` 的 `macos-boot-shims/apfs_boot_util.c` + `apfs-boot-shim=1` 内核覆盖）在本 k27 树里找不到实现，
+`droidvm-disable-jobs` 本机线无效（docs/boot-time.md §4），OS 卷 426 个 LaunchDaemons 里没有 mount-phase 的 plist，
+所以 `disabled.plist` 也够不着。于是先试两个纯配置口子（并行在编）：ADT `/chosen/osenvironment=darwinos-ramdisk`
+（`kern_csr.c:124` 就比这个串；`apfs_boot_util` 有 `boot_is_darwinos_ramdisk` 分支）与
+`PIANO_DENY_EXEC=<apfs.fs 里的 apfs_boot_util>`。
+23:20 装配修正两条已推：`d941d2f0` dump 镜像那次调用不带 `PIANO_DATA_STORE_REPLACE`（`data-persist=0` 的镜像按设计不该带），
+另把 `PIANO_ADT_IDENTITY` 改成可覆盖，换 ADT 身份不必改脚本。
