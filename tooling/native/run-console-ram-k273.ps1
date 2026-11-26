@@ -5,25 +5,34 @@
 # piano-reset-to=bootloader) -> the image resets itself into ABL -> one reader boot -> one cold dump
 # of 9cb00000 700000 (the k273 mailbox; today proved readable from the session right after a stop,
 # 7 MiB staged fine) -> kill fastboot and let the reader boot the installed system (HyperOS now).
-param([string]$Serial='7ccdd855', [string]$Base='9cb00000', [string]$Size='700000', [int]$WaitBack=760, [int]$WaitReader=150)
+param([string]$Serial='7ccdd855', [string]$Base='9cb00000', [string]$Size='700000', [int]$WaitBack=760, [int]$WaitReader=150,
+      [string]$ImgRel='out\k273-ram-verified2\boot-piano-macos-ram-A-bundled.img', [string]$Tag='verified2', [string]$ImageSha='')
 $ErrorActionPreference='Continue'
 $root = Join-Path $PSScriptRoot '..\..'
 $pt = Join-Path $root 'out\pt33\platform-tools'
 $f = Join-Path $pt 'fastboot.exe'; $a = Join-Path $pt 'adb.exe'
-$img = Join-Path $root 'out\k273-ram420\boot-piano-macos-ram-A-420.img'
+$img = Join-Path $root $ImgRel
 $reader = Join-Path $root 'out\no-demura-control\reader.img'
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$dir = Join-Path $root ("logs\native-runs\ram-k273-420-$stamp")
+$dir = Join-Path $root ("logs\native-runs\ram-k273-$Tag-$stamp")
 New-Item -ItemType Directory -Force $dir | Out-Null
 $log = Join-Path $dir 'run.log'
-function Line($m){ $line = "$((Get-Date).ToString('HH:mm:ss.fff')) $m"; Add-Content -LiteralPath $log -Value $line; $line }
-function ShaH($p){ if(!(Test-Path $p)){ return '' }; (Get-FileHash -LiteralPath $p).Hash.ToLower() }
+function Line($m){ $line = "$((Get-Date).ToString('HH:mm:ss.fff')) $m"; [IO.File]::AppendAllText($log, $line + [Environment]::NewLine); Write-Output $m; $line }
+$h = [Security.Cryptography.SHA256]::Create()
+function ShaH($p){ if(!(Test-Path $p)){ return '' }
+  $s = [IO.File]::OpenRead($p); try { $b = $h.ComputeHash($s) } finally { $s.Dispose() }
+  (-join ($b | ForEach-Object { $_.ToString('x2') })) }
 function FastDevices { ((& $f devices 2>&1 | Out-String)) }
 function AdbDevices { ((& $a devices 2>&1 | Out-String)) }
 function WaitFast([string]$s,[int]$seconds){ $until=(Get-Date).AddSeconds($seconds); do{ if((FastDevices) -match "(?m)^$s\s+fastboot"){ return $true }; Start-Sleep -Milliseconds 800 }while((Get-Date) -lt $until); return $false }
 function WaitReader([int]$seconds){ $until=(Get-Date).AddSeconds($seconds); do{ if((FastDevices) -match '(?m)^piano-uefi\s+fastboot'){ return $true }; Start-Sleep -Milliseconds 500 }while((Get-Date) -lt $until); return $false }
 try {
-  if((ShaH $img) -ne '0db5d160f8ebe8797efa0cb67fefc147ad52c9588274be71ee5725d528be7784'){ Line 'probe image identity mismatch'; exit 1 }
+  $want = $ImageSha.Trim().ToLower()
+  $side = "$img.sha256"
+  if($want -eq '' -and (Test-Path $side)){ $want = (((Get-Content -LiteralPath $side -Raw) -split '\s+')[0]).ToLower() }
+  if($want -eq ''){ Line 'no expected image sha (pass -ImageSha or ship a .sha256 sidecar)'; exit 1 }
+  if((ShaH $img) -ne $want){ Line 'probe image identity mismatch'; exit 1 }
+  Line ("image " + $want.Substring(0,16) + " verified")
   if((ShaH $reader) -ne '708d0e79ffa8adae5227eae5dbdff27121da4fa7e9530db31f71dd5153570468'){ Line 'reader identity mismatch'; exit 1 }
   $s = ''
   if(!(WaitFast $Serial 5)){
