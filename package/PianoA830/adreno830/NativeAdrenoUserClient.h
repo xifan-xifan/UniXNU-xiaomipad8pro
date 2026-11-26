@@ -171,6 +171,7 @@ class NativeAdrenoUserClient final {
     NativeAdrenoAbiSubmit submit_request_{};   /* the submit request as copied in, for the same reason */
     uint32_t retry_fence_=0;   /* after a submit answered NativeAdrenoSubmitRetry: the fence to sleep on */
     uint64_t window_start_=0,window_bytes_=0,window_peak_=0;
+    uint64_t object_limit_=0;   /* UniXNU-piano (gpu/slots2): setObjectLimit's per-object cap below the window (0: none) */
     /* setReserve(): what this client's mappings leave of the VM's tables, and BO pool bytes its allocations leave (0: none kept). */
     size_t keep_objects_=0,keep_spans_=0,keep_pool_=0;
     uint64_t next_handle_=1;
@@ -250,7 +251,14 @@ public:
      * page aligned, at most NativeAdrenoMemoryMaxBytes; NativeAdrenoMemoryMaxBytes without a window. Upstream: 256 MiB
      * (NativeAdrenoAbiMaxBoBytesShift) whatever the window. */
     uint64_t maxObjectBytes() const
-    {const uint64_t w=window_bytes_&~UINT64_C(4095);return w && w<NativeAdrenoMemoryMaxBytes?w:uint64_t(NativeAdrenoMemoryMaxBytes);}
+    {
+        const uint64_t w=window_bytes_&~UINT64_C(4095),limit=w && w<NativeAdrenoMemoryMaxBytes?w:uint64_t(NativeAdrenoMemoryMaxBytes);
+        return object_limit_ && object_limit_<limit?object_limit_:limit;
+    }
+    /* UniXNU-piano (2026-11-25, gpu/slots2): a per-object limit below the window (page aligned; 0: the window's, as before), from the
+     * publish shell's table (NativeAdrenoClientObjectLimit: 1 GiB in the 256 GiB table's 4 GiB windows). Only while open with no live
+     * object; close() drops it. */
+    IOReturn setObjectLimit(uint64_t bytes);
 #else
     uint64_t maxObjectBytes() const {return UINT64_C(1)<<NativeAdrenoAbiMaxBoBytesShift;}
 #endif

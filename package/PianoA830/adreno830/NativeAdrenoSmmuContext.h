@@ -85,7 +85,8 @@ public:
     NativeAdrenoSmmuContext(const NativeAdrenoSmmuContext &)=delete;
     NativeAdrenoSmmuContext &operator=(const NativeAdrenoSmmuContext &)=delete;
     /* A 16 GiB lower aperture (the GPU's by default, ARCHITECTURE 4.6.1) is 4194304 leaves, the 4 GiB one (pagani-gpu-va=4) 1048576;
-     * the GMU's 2 GiB is 524288. UniXNU-piano: the 64 GiB one (pagani-gpu-va=64) 16777216. */
+     * the GMU's 2 GiB is 524288. UniXNU-piano: the 64 GiB one (pagani-gpu-va=64) 16777216; the paged 256 GiB one (gpu/slots2) passes
+     * MaxLeaves (a paged space has no fixed leaves: preparePaged only checks the bound). */
     enum : size_t {MaxLeaves=size_t(1)<<24};
     enum : size_t {MaxStreams=8};
     /* iova/bytes describe the aperture in the chosen region; the pool must be contiguous.

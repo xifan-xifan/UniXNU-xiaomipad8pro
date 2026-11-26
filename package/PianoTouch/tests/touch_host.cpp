@@ -1563,6 +1563,9 @@ static void testPower()
   q.followDisplay = false;
   CHECK(q.step(false, 0) == PowerStep::none && q.reporting() && q.step(true, 0) == PowerStep::suspend && q.step(false, 0) == PowerStep::resume &&
         q.reporting());
+  CHECK(q.step(false, 1, true) == PowerStep::mute && !q.reporting());  // the M5a hold overrides the reporting policy
+  CHECK(q.step(true, 1, true) == PowerStep::suspend && !q.reading());
+  CHECK(q.step(false, 1) == PowerStep::resume && q.reporting());       // the panel worker released the hold
   CHECK(restartPlan(true, true, 0) == Restart::relearn && restartPlan(false, true, 0) == Restart::keep);
   CHECK(restartPlan(true, false, 0) == Restart::download && restartPlan(false, false, 1) == Restart::download);
   CHECK(restartPlan(true, false, kResumeDownloads) == Restart::giveUp);

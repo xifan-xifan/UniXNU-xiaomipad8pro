@@ -75,6 +75,9 @@
 // (package/PianoBacklight/PianoBacklightClient.h); the reports still go to macOS.
 //   piano-keyboard-fnrow=1      Right Ctrl + 1..0 - = are F1..F12 (Wn8030Piano.h Keys; default 0: keys as the cover sends them)
 //   piano-keyboard-hall=0       do not read gpio80 at all
+//   piano-keyboard-hall-sim=1   machdep.piano_keyboard_hall_sim (root writes 0 closed, 1 open, -1 the sensor): a test's cover
+//                               (HallSim.h), accepted and published like gpio80's; a system wake gives the cover back to the
+//                               sensor. Default 0: the sysctl does not exist
 //   piano-keyboard-lid=1        tell IOPMrootDomain the hall state (kIOPMClamshellClosed/Opened), with clamshell sleep disabled
 //                               first (kIOPMDisableClamshell); =2 the same with clamshell sleep allowed (kIOPMEnableClamshell).
 //                               Default 0: nothing is sent (native sleep is untested and could hang)
@@ -108,10 +111,13 @@
 #include <kern/thread.h>
 #include <pexpert/pexpert.h>
 #include <stdarg.h>
+#include <sys/sysctl.h>
+#include <sys/errno.h>
 #include "Wn8030Piano.h"
 #include "BitI2c.h"
 #include "HidDescriptors.h"
 #include "CmdDb.h"
+#include "HallSim.h"                                 // machdep.piano_keyboard_hall_sim (piano-keyboard-hall-sim=1)
 #include "CoverPower.h"                              // the closed-cover gate, gpio95's sleep latch, the MCU following the display
 #include "../common/PianoIrq.h"                      // the TLMM summary interrupt (docs/power-irq.md)
 #include "../PianoBacklight/PianoBacklightClient.h"  // the panel's brightness keys (piano-backlight-keys=1)
@@ -123,6 +129,8 @@
 namespace { pianoperf::InputNotifier gPerfInput; }   // PianoThermal's input boost (PianoPerfInput.h)
 
 using namespace pianokeyboard;
+
+SYSCTL_DECL(_machdep);
 
 extern "C" {
 // Post-mortem breadcrumb (also in the console log): the last step reached, negative when it failed there.
@@ -136,7 +144,7 @@ namespace {
 
 struct Args {
   uint32_t level, stop, trace, halfUs, pollMs, rails, touchpad, backlight, tap, invert, divide, mouse, auth, raw, fnrow, hall, lid;
-  uint32_t hallPull, hallActiveLow, hallTrace;
+  uint32_t hallPull, hallActiveLow, hallTrace, hallSim;
   uint32_t dpi, scrollRes, scroll, scrollInvert, gestures, typing, backlightIdle, idlePoll, slowPoll, irq;
   uint32_t blank, lidDrop, resting, tapMs, tapTravel, tapVeto;
 };
@@ -177,6 +185,7 @@ void readArgs()
   if (gArgs.hallPull != 1 && gArgs.hallPull != 3) gArgs.hallPull = 0; // 0: preserve DT, 1: down, 3: up
   gArgs.hallActiveLow = bootArg("piano-keyboard-hall-active-low", 1) ? 1 : 0;
   gArgs.hallTrace = bootArg("piano-keyboard-hall-trace", 0);
+  gArgs.hallSim = bootArg("piano-keyboard-hall-sim", 0) == 1 ? 1 : 0;
   gArgs.dpi = touchpadDpi(bootArg("piano-keyboard-dpi", kTouchpadDpi));
   gArgs.scrollRes = touchpadScrollResolution(bootArg("piano-keyboard-scroll-res", kTouchpadScrollResolution));
   gArgs.scroll = clampArg(bootArg("piano-keyboard-scroll", 5), 1, 200);
@@ -228,6 +237,59 @@ uint64_t nowMs()
   uint64_t ns = 0;
   absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
   return ns / 1000000;
+}
+
+// machdep.piano_keyboard_hall_sim (piano-keyboard-hall-sim=1 only): HallSim.h under a lock (the sysctl writer, the serving thread).
+HallSim gHallSim;
+IOLock *gHallSimLock = nullptr;
+volatile uint32_t gHallPresent = 0;   // gpio80 is read (surveyHall): a simulation needs the hall logic running
+struct sysctl_oid gOidHallSim;
+
+const char *coverName(int level) { return level < 0 ? "the sensor" : level ? "open" : "closed"; }
+
+// Reads the requested state (-1 the sensor, 0 closed, 1 open); a root write sets it, the serving thread applies it at its next pass.
+int sysctlHallSim(struct sysctl_oid *oidp, void *, int, struct sysctl_req *req)
+{
+  IOLockLock(gHallSimLock);
+  int v = gHallSim.requested;
+  IOLockUnlock(gHallSimLock);
+  const int err = sysctl_handle_int(oidp, &v, 0, req);
+  if (err || !req->newptr) return err;
+  IOLockLock(gHallSimLock);
+  const HallSimSet r = gHallSim.set(gArgs.hallSim != 0, __atomic_load_n(&gHallPresent, __ATOMIC_ACQUIRE) != 0, v);
+  const uint32_t sets = gHallSim.sets, refused = gHallSim.refused;
+  IOLockUnlock(gHallSimLock);
+  if (r == HallSimSet::ok) {
+    note("hall sim %u: cover %s requested (machdep.piano_keyboard_hall_sim): applied at the serving thread's next pass", sets,
+         coverName(v));
+    return 0;
+  }
+  note("hall sim: value %d %s (%u refused)", v, hallSimSetName(r), refused);
+  return r == HallSimSet::off ? EPERM : r == HallSimSet::noSensor ? ENODEV : EINVAL;
+}
+
+void registerHallSim()
+{
+  gHallSimLock = IOLockAlloc();
+  if (!gHallSimLock) {
+    note("piano-keyboard-hall-sim=1: no lock: machdep.piano_keyboard_hall_sim not registered");
+    return;
+  }
+  // Filled in at run time rather than by SYSCTL_OID's static initializer: its parent and handler are signed pointers on arm64e.
+  gOidHallSim.oid_parent = &sysctl__machdep_children;
+  gOidHallSim.oid_number = OID_AUTO;
+  gOidHallSim.oid_kind = CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_OID2;
+  gOidHallSim.oid_arg1 = nullptr;
+  gOidHallSim.oid_arg2 = 0;
+  gOidHallSim.oid_name = "piano_keyboard_hall_sim";
+  gOidHallSim.oid_handler = sysctlHallSim;
+  gOidHallSim.oid_fmt = "I";
+  gOidHallSim.oid_descr = "PianoKeyboard: a simulated cover (0 closed, 1 open, -1 the sensor; root, piano-keyboard-hall-sim=1)";
+  gOidHallSim.oid_version = SYSCTL_OID_VERSION;
+  gOidHallSim.oid_refcnt = 0;
+  sysctl_register_oid(&gOidHallSim);
+  note("piano-keyboard-hall-sim=1: machdep.piano_keyboard_hall_sim registered (root writes 0 closed, 1 open, -1 the sensor): a "
+       "test's cover, published like gpio80's; a system wake gives the cover back to the sensor");
 }
 
 // Explicit ldr/str, as PianoDwc3 does; a barrier after each store, so a bus line has moved before the half-bit wait starts.
@@ -579,6 +641,7 @@ class PianoKeyboard : public IOService {
   void surveyHall();
   void armHallEdge();
   void pollHall(uint64_t now);
+  bool simHall(uint64_t now, bool edge);
   void hallOnly();
   void lidNotify(bool closed);
   void acceptHall(int level, uint64_t now, const char *when);
@@ -660,6 +723,7 @@ bool PianoKeyboard::start(IOService *provider)
        gArgs.blank ? "the MCU's power follows the display: 0x25 = 0 and the sleep line while it is off" : "the MCU always runs",
        gArgs.lidDrop, gArgs.lidDrop ? "key and touchpad input dropped while the cover is closed" : "input kept with the cover closed",
        gArgs.lid, gArgs.lid ? "this driver tells IOPMrootDomain the clamshell" : "the clamshell is PianoPolicy's (piano-policy-lid=1)");
+  if (gArgs.hallSim) registerHallSim();
   fSleepLock = IOLockAlloc();
   thread_t thread = nullptr;
   if (!fSleepLock || kernel_thread_start(threadMain, this, &thread) != KERN_SUCCESS) {
@@ -783,6 +847,7 @@ void PianoKeyboard::surveyHall()
        p.ctl, (p.ctl >> 2) & 15, p.ctl & 3, p.ctl & kOe ? "output" : "input", p.io, p.intrCfg, p.io & 1,
        fHall ? "open" : "closed", fHall, gArgs.lid ? "" : "; macOS is not told (piano-keyboard-lid=0)");
   setProperty("piano-keyboard-hall", uint64_t(fHall), 32);
+  __atomic_store_n(&gHallPresent, 1u, __ATOMIC_RELEASE);
 }
 
 // Ubuntu's gpio-keys switch-lid is an EDGE interrupt on gpio80. Keep the DT's pull and active-low level, but consume both edges
@@ -812,6 +877,7 @@ void PianoKeyboard::pollHall(uint64_t now)
       ++fHallEdges;
     }
   }
+  if (fHall >= 0 && gHallSimLock && simHall(now, edge)) return;
   if (fHall < 0 || (!edge && now < fHallNextMs)) return;
   fHallNextMs = now + fPoll.config().hallMs;
   const uint32_t raw = rd32(gHall.page.va + kIo) & 1u;
@@ -828,6 +894,29 @@ void PianoKeyboard::pollHall(uint64_t now)
   fHallSample = sample;
   if (!agreed || sample == fHall) return;
   acceptHall(sample, now, "");
+}
+
+// piano-keyboard-hall-sim=1 (HallSim.h): a requested simulated level accepted, or the sensor read again when one ends. True while a
+// simulation holds the cover (this pass's real sample is not taken).
+bool PianoKeyboard::simHall(uint64_t now, bool edge)
+{
+  IOLockLock(gHallSimLock);
+  const HallSimStep st = gHallSim.step(fHall);
+  IOLockUnlock(gHallSimLock);
+  if (st.accept >= 0) {
+    acceptHall(st.accept, now, " (simulated: machdep.piano_keyboard_hall_sim)");
+  } else if (st.readReal) {
+    const uint32_t raw = rd32(gHall.page.va + kIo) & 1u;
+    const int sample = int(hallOpenFromRaw(raw, gArgs.hallActiveLow));
+    fHallSample = sample;
+    fHallNextMs = now + fPoll.config().hallMs;
+    note("hall sim: ended: the sensor again (gpio80 raw %u -> %s; accepted %s)", raw, coverName(sample), coverName(fHall));
+    if (sample != fHall) acceptHall(sample, now, " (the sensor again after a simulation)");
+  } else if (st.changed) {
+    note("hall sim: cover %s: already the accepted level, nothing sent", coverName(fHall));
+  }
+  if (st.skipReal && edge) note("hall sim: a gpio80 edge while simulated (ignored; raw %u)", rd32(gHall.page.va + kIo) & 1u);
+  return st.skipReal;
 }
 
 // A new accepted hall level: logged, published (with its message), the clamshell (piano-keyboard-lid), the input gate.
@@ -1674,7 +1763,14 @@ void PianoKeyboard::sleepPark()
   wr32(status + kIntrCfg, fStatusCfg);
   const uint64_t now = nowMs();
   if (fHall >= 0) {
-    const int level = int(rd32(gHall.page.va + kIo) & 1);
+    if (gHallSimLock) {
+      IOLockLock(gHallSimLock);
+      const bool was = gHallSim.clearAtWake();
+      IOLockUnlock(gHallSimLock);
+      if (was) note("hall sim: cleared by the wake: the sensor owns the cover again");
+    }
+    // (the level through the polarity, as pollHall: the raw bit equalled "open" only with piano-keyboard-hall-active-low=1)
+    const int level = int(hallOpenFromRaw(rd32(gHall.page.va + kIo) & 1u, gArgs.hallActiveLow));
     fHallSample = level;
     fHallNextMs = now + fPoll.config().hallMs;
     if (level != fHall) acceptHall(level, now, " after the wake");

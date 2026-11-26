@@ -15,6 +15,12 @@ struct qbt_transport_ops {
 extern volatile uint32_t qbt_transport_activity[4];
 extern bool qbt_bt_trace_enabled;
 extern bool qbt_bt_wait_baseline;
+/* piano-bt-lemask (docs/drivers/bluetooth.md, "LE link ready"): OR LE Data Length Change and LE PHY Update Complete into the host LE event mask; 0 off, 1 on.
+ * The boot argument sets it; root may change it through machdep.piano_bt_lemask (applies to the next LE Set Event Mask). */
+extern volatile uint32_t qbt_bt_lemask;
+/* piano-bt-lerdy (HciH4.h LeReadyAssist): hand the host a no-change LE Data Length Change / PHY Update Complete for an LE link that
+ * stalls before GATT; 0 off, 1 on; the boot argument sets it, root may change it through machdep.piano_bt_lerdy. */
+extern volatile uint32_t qbt_bt_lerdy;
 uint64_t qbt_bt_uptime_ms(void);
 void qbt_transport_wait_for_baseline(void);
 int qbt_transport_init(const struct qbt_transport_ops *);

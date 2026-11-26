@@ -3,7 +3,8 @@
 //   GeniUart.h  what level 1 loads and when (GCC/TLMM always; the wrapper and SE6 only with all five branches running, never a FIFO
 //               window; the SMMU stream scan), the decoders (RCG and DFS rates, FIFO geometry, serial clock), the clock plan for
 //               115200 and 3.2 Mbit/s on both QUP generations, the UART set-up plan, FIFO word packing and the RX status decode
-//   HciH4.h     the encoder and the byte-stream decoder (split packets, IBS bytes between packets, resynchronisation, oversized)
+//   HciH4.h     the encoder and the byte-stream decoder (split packets, IBS bytes between packets, resynchronisation, oversized);
+//               the LE event mask patcher (bluetoothd's own command order, split at every offset, look-alike ACL payload, switch)
 //   QcaCodec.h  the commands' bytes, the reply parsers, the file names, the NVM tag patcher and its bounds, the download plan, and
 //               the whole set-up sequence against a simulated controller, with faults (no answer at the new speed, a missing board
 //               NVM, no NVM at all, a hardware error during the download, a failing reset, a malformed version, a stop request)
@@ -272,6 +273,253 @@ static void testH4()
   CHECK(parseCommandStatus(st, 6, cs) && cs.status == 0x0c && cs.opcode == 0xfc48);
   const uint8_t bad[5] = {0x0e, 0x04, 0x01, 0x03, 0x0c};
   CHECK(!parseCommandComplete(bad, 5, cc));   // its length byte says 4 parameters, only 3 are there
+}
+
+// ------------------------------------------------------------------------------------------------------------ LE event mask patch
+static std::vector<uint8_t> leMaskStream()
+{
+  // bluetoothd's own order on 11-20 (pklg): Set Event Mask 0x0c01 (also 8 bytes), Page 2, LE Set Event Mask 0x101f, an ACL packet
+  // whose payload looks like an LE Set Event Mask, an IBS byte, the sleep mask 0x61a7b (bits already there), a mask without LE
+  // Connection Complete, an LE Set Event Mask with a wrong length (left alone), a 300-byte ACL packet, a SCO and an ISO packet.
+  std::vector<uint8_t> s = {0x01, 0x01, 0x0c, 0x08, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x3f,
+                            0x01, 0x63, 0x0c, 0x08, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00,
+                            0x01, 0x01, 0x20, 0x08, 0x1f, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                            0x02, 0x40, 0x00, 0x0c, 0x00, 0x01, 0x01, 0x20, 0x08, 0x1f, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                            0xfd,
+                            0x01, 0x01, 0x20, 0x08, 0x7b, 0x1a, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00,
+                            0x01, 0x01, 0x20, 0x08, 0x02, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                            0x01, 0x01, 0x20, 0x07, 0x1f, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,
+                            0x02, 0x41, 0x20, 0x2c, 0x01};
+  for (unsigned i = 0; i < 300; ++i) s.push_back(i % 7 ? 0x01 : 0x20);
+  const uint8_t tail[] = {0x03, 0x05, 0x00, 0x02, 0xaa, 0xbb, 0x05, 0x01, 0x00, 0x02, 0x00, 0x01, 0x01,
+                          0x01, 0x01, 0x20, 0x08, 0x1f, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+  s.insert(s.end(), tail, tail + sizeof tail);
+  return s;
+}
+
+static void testLeMask()
+{
+  const std::vector<uint8_t> in = leMaskStream();
+  // Disabled: nothing changes; every LE Set Event Mask with 8 bytes is still reported (four of them).
+  {
+    H4LeMaskPatcher p;
+    std::vector<uint8_t> s = in;
+    std::vector<H4LeMaskPatcher::Seen> seen;
+    p.patch(s.data(), s.size(), false, [&](const H4LeMaskPatcher::Seen &x) { seen.push_back(x); });
+    CHECK(s == in && seen.size() == 4 && p.stats().masks == 4 && p.stats().patched == 0 && p.stats().resyncs == 0);
+    CHECK(seen.size() == 4 && seen[0].from == 0x101f && seen[0].to == 0x101f && seen[1].from == 0x061a7b);
+  }
+  // Enabled, whole and split at every offset: 0x101f -> 0x185f (twice), 0x61a7b and 0x1002 unchanged, no other byte touched.
+  for (size_t cut = 0; cut <= in.size(); ++cut) {
+    H4LeMaskPatcher p;
+    std::vector<uint8_t> s = in;
+    std::vector<H4LeMaskPatcher::Seen> seen;
+    auto sink = [&](const H4LeMaskPatcher::Seen &x) { seen.push_back(x); };
+    p.patch(s.data(), cut, true, sink);
+    p.patch(s.data() + cut, s.size() - cut, true, sink);
+    std::vector<size_t> diff;
+    for (size_t i = 0; i < s.size(); ++i)
+      if (s[i] != in[i]) diff.push_back(i);
+    const size_t first = 28, last = in.size() - 8;   // the two 0x101f masks' first parameter bytes
+    const bool ok = diff.size() == 4 && diff[0] == first && diff[1] == first + 1 && diff[2] == last && diff[3] == last + 1 &&
+                    s[first] == 0x5f && s[first + 1] == 0x18 && s[last] == 0x5f && s[last + 1] == 0x18;
+    const bool reports = seen.size() == 4 && seen[0].from == 0x101f && seen[0].to == 0x185f && seen[1].from == seen[1].to &&
+                         seen[1].to == 0x061a7b && seen[2].from == 0x1002 && seen[2].to == 0x1002 && seen[3].from == 0x101f && seen[3].to == 0x185f;
+    if (!ok || !reports || p.stats().patched != 2) {
+      std::printf("FAIL le mask split at %zu: %zu diff(s)\n", cut, diff.size());
+      ++failures;
+      break;
+    }
+  }
+  // Byte by byte, enabled: the same result.
+  {
+    H4LeMaskPatcher p;
+    std::vector<uint8_t> s = in;
+    unsigned reports = 0;
+    for (size_t i = 0; i < s.size(); ++i) p.patch(s.data() + i, 1, true, [&](const H4LeMaskPatcher::Seen &) { ++reports; });
+    CHECK(reports == 4 && p.stats().patched == 2 && s[28] == 0x5f && s[29] == 0x18);
+  }
+  // A switch between two commands takes effect at the next mask; one inside a command does not split it.
+  {
+    H4LeMaskPatcher p;
+    uint8_t a[] = {0x01, 0x01, 0x20, 0x08, 0x1f, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    p.patch(a, 6, false, [](const H4LeMaskPatcher::Seen &) {});
+    p.patch(a + 6, sizeof a - 6, true, [](const H4LeMaskPatcher::Seen &) {});
+    CHECK(a[4] == 0x1f && a[5] == 0x10);
+    uint8_t b[] = {0x01, 0x01, 0x20, 0x08, 0x1f, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    p.patch(b, sizeof b, true, [](const H4LeMaskPatcher::Seen &) {});
+    CHECK(b[4] == 0x5f && b[5] == 0x18 && p.stats().patched == 1);
+  }
+  // A junk byte between packets is counted and passed on; framing resumes at the next indicator.
+  {
+    H4LeMaskPatcher p;
+    uint8_t c[] = {0x99, 0x01, 0x01, 0x20, 0x08, 0x1f, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    p.patch(c, sizeof c, true, [](const H4LeMaskPatcher::Seen &) {});
+    CHECK(c[0] == 0x99 && c[5] == 0x5f && c[6] == 0x18 && p.stats().resyncs == 1);
+  }
+}
+
+// ------------------------------------------------------------------------------------------------------------ LE link-ready assist
+static void testLeReady()
+{
+  // Packets without the H4 indicator, as the decoders hand them over. The 11-20 owner device: LE Connection Complete handle 1, remote
+  // features 21 00 .. (encryption + data length extension, no 2M).
+  const uint8_t conn[] = {0x3e, 0x13, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 1, 2, 3, 4, 5, 6, 0x18, 0x00, 0x00, 0x00, 0x48, 0x00, 0x00};
+  const uint8_t feat[] = {0x3e, 0x0c, 0x04, 0x00, 0x01, 0x00, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+  const uint8_t feat2m[] = {0x3e, 0x0c, 0x04, 0x00, 0x01, 0x00, 0x21, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+  const uint8_t featBad[] = {0x3e, 0x0c, 0x04, 0x1a, 0x01, 0x00, 0x21, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+  const uint8_t dlc[] = {0x3e, 0x0b, 0x07, 0x01, 0x00, 0xfb, 0x00, 0x48, 0x08, 0xfb, 0x00, 0x48, 0x08};
+  const uint8_t phy[] = {0x3e, 0x06, 0x0c, 0x00, 0x01, 0x00, 0x02, 0x02};
+  const uint8_t disc[] = {0x05, 0x04, 0x00, 0x01, 0x00, 0x08};
+  const uint8_t mtuReq[] = {0x01, 0x00, 0x07, 0x00, 0x03, 0x00, 0x04, 0x00, 0x02, 0xf7, 0x00};
+  const uint8_t mtuRsp[] = {0x01, 0x00, 0x07, 0x00, 0x03, 0x00, 0x04, 0x00, 0x03, 0xf7, 0x00};
+  const uint8_t smpReq[] = {0x01, 0x00, 0x0b, 0x00, 0x07, 0x00, 0x06, 0x00, 0x01, 0x04, 0x00, 0x2d, 0x10, 0x0f, 0x0f};
+  const uint8_t smpRsp[] = {0x01, 0x00, 0x0b, 0x00, 0x07, 0x00, 0x06, 0x00, 0x02, 0x04, 0x00, 0x2d, 0x10, 0x0f, 0x0f};
+  const uint8_t contFrag[] = {0x01, 0x10, 0x07, 0x00, 0x03, 0x00, 0x04, 0x00, 0x02, 0xf7, 0x00};
+  const uint8_t wantLength[] = {0x04, 0x3e, 0x0b, 0x07, 0x01, 0x00, 0x1b, 0x00, 0x48, 0x01, 0x1b, 0x00, 0x48, 0x01};
+  const uint8_t wantPhy[] = {0x04, 0x3e, 0x06, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x01};
+  auto run = [](LeReadyAssist &a, uint64_t from, uint64_t to, bool on, std::vector<LeReadyAssist::Inject> &out) {
+    for (uint64_t t = from; t <= to; t += 10) {
+      LeReadyAssist::Inject i;
+      while (a.due(t, on, i)) out.push_back(i);
+    }
+  };
+  // The owner's case: no length change from anyone, no GATT: Data Length Change at +0.75 s and again at +2.25 s; no PHY (no 2M).
+  {
+    LeReadyAssist a;
+    a.onEvent(conn, sizeof conn, 1000);
+    a.onEvent(feat, sizeof feat, 1100);
+    std::vector<LeReadyAssist::Inject> got;
+    run(a, 1100, 9000, true, got);
+    CHECK(got.size() == 2 && got[0].step == 1 && got[1].step == 3 && got[0].kind == LeReadyAssist::kInjectLength);
+    CHECK(got.size() == 2 && got[0].len == sizeof wantLength && !memcmp(got[0].bytes, wantLength, sizeof wantLength) &&
+          !memcmp(got[1].bytes, wantLength, sizeof wantLength));
+    CHECK(a.stats().links == 1 && a.stats().features == 1 && a.stats().injectedLength == 2 && a.stats().injectedPhy == 0);
+    // Each injected event is a well-formed H4 event for the host's decoder.
+    H4Decoder d;
+    unsigned events = 0;
+    d.feed(got[0].bytes, got[0].len, [&](uint8_t type, const uint8_t *pk, size_t n) { events += pk && type == kH4Event && n == 13; });
+    CHECK(events == 1 && d.idle());
+  }
+  // The first step is not early: nothing before +0.75 s.
+  {
+    LeReadyAssist a;
+    a.onEvent(conn, sizeof conn, 0);
+    a.onEvent(feat, sizeof feat, 5000);
+    std::vector<LeReadyAssist::Inject> got;
+    run(a, 5000, 5740, true, got);
+    CHECK(got.empty());
+    run(a, 5750, 5750, true, got);
+    CHECK(got.size() == 1);
+  }
+  // A real length change (here before the features, as bluetoothd also accepts) cancels every length injection.
+  {
+    LeReadyAssist a;
+    a.onEvent(conn, sizeof conn, 0);
+    a.onEvent(dlc, sizeof dlc, 50);
+    a.onEvent(feat, sizeof feat, 100);
+    std::vector<LeReadyAssist::Inject> got;
+    run(a, 100, 9000, true, got);
+    CHECK(got.empty() && a.stats().realLength == 1);
+  }
+  // A 2M peer whose length change came but whose PHY procedure did not: one PHY Update Complete at +1.5 s, 1M both ways.
+  {
+    LeReadyAssist a;
+    a.onEvent(conn, sizeof conn, 0);
+    a.onEvent(feat2m, sizeof feat2m, 100);
+    a.onEvent(dlc, sizeof dlc, 150);
+    std::vector<LeReadyAssist::Inject> got;
+    run(a, 100, 9000, true, got);
+    CHECK(got.size() == 1 && got[0].kind == LeReadyAssist::kInjectPhy && got[0].step == 2 && got[0].len == sizeof wantPhy &&
+          !memcmp(got[0].bytes, wantPhy, sizeof wantPhy));
+    // With the real PHY update too, nothing.
+    LeReadyAssist b;
+    b.onEvent(conn, sizeof conn, 0);
+    b.onEvent(feat2m, sizeof feat2m, 100);
+    b.onEvent(phy, sizeof phy, 120);
+    b.onEvent(dlc, sizeof dlc, 150);
+    got.clear();
+    run(b, 100, 9000, true, got);
+    CHECK(got.empty() && b.stats().realPhy == 1);
+  }
+  // The host started GATT (an Exchange MTU request) or SMP (a Pairing Request): the link is ready, nothing is injected. Responses,
+  // a continuing fragment and another handle do not count.
+  {
+    LeReadyAssist a;
+    a.onEvent(conn, sizeof conn, 0);
+    a.onEvent(feat, sizeof feat, 100);
+    a.onHostAcl(mtuRsp, sizeof mtuRsp);
+    a.onHostAcl(smpRsp, sizeof smpRsp);
+    a.onHostAcl(contFrag, sizeof contFrag);
+    CHECK(a.stats().hostStarted == 0);
+    a.onHostAcl(mtuReq, sizeof mtuReq);
+    std::vector<LeReadyAssist::Inject> got;
+    run(a, 100, 9000, true, got);
+    CHECK(got.empty() && a.stats().hostStarted == 1);
+    LeReadyAssist b;
+    b.onEvent(conn, sizeof conn, 0);
+    b.onEvent(feat, sizeof feat, 100);
+    b.onHostAcl(smpReq, sizeof smpReq);
+    got.clear();
+    run(b, 100, 9000, true, got);
+    CHECK(got.empty() && b.stats().hostStarted == 1);
+    // GATT after the first injection stops the third step.
+    LeReadyAssist c;
+    c.onEvent(conn, sizeof conn, 0);
+    c.onEvent(feat, sizeof feat, 100);
+    got.clear();
+    run(c, 100, 900, true, got);
+    c.onHostAcl(mtuReq, sizeof mtuReq);
+    run(c, 900, 9000, true, got);
+    CHECK(got.size() == 1 && got[0].step == 1);
+  }
+  // Off: nothing, and no step is used up; switched on later, the due steps follow one per call.
+  {
+    LeReadyAssist a;
+    a.onEvent(conn, sizeof conn, 0);
+    a.onEvent(feat, sizeof feat, 100);
+    std::vector<LeReadyAssist::Inject> got;
+    run(a, 100, 9000, false, got);
+    CHECK(got.empty());
+    LeReadyAssist::Inject i;
+    CHECK(a.due(9000, true, i) && i.step == 1);
+    CHECK(a.due(9000, true, i) && i.step == 3);   // step 2 has nothing to do (no 2M) and is passed over
+    CHECK(!a.due(9000, true, i));
+  }
+  // Failed remote features, an unknown handle, a disconnection and a reconnection on the same handle.
+  {
+    LeReadyAssist a;
+    a.onEvent(conn, sizeof conn, 0);
+    a.onEvent(featBad, sizeof featBad, 100);
+    std::vector<LeReadyAssist::Inject> got;
+    run(a, 100, 9000, true, got);
+    CHECK(got.empty() && a.stats().features == 0);
+    a.onEvent(disc, sizeof disc, 9000);
+    a.onEvent(feat, sizeof feat, 9100);   // no link: ignored
+    run(a, 9100, 20000, true, got);
+    CHECK(got.empty() && a.stats().disconnects == 1);
+    a.onEvent(conn, sizeof conn, 20000);
+    a.onEvent(feat, sizeof feat, 20100);
+    a.onEvent(disc, sizeof disc, 20200);   // gone before the first step
+    run(a, 20100, 30000, true, got);
+    CHECK(got.empty() && a.stats().links == 2);
+  }
+  // Eight links fit, the ninth is counted; malformed lengths are ignored.
+  {
+    LeReadyAssist a;
+    for (uint8_t h = 1; h <= 9; ++h) {
+      uint8_t c[sizeof conn];
+      memcpy(c, conn, sizeof conn);
+      c[4] = h;
+      a.onEvent(c, sizeof c, 0);
+    }
+    CHECK(a.stats().links == 8 && a.stats().full == 1);
+    const uint8_t shortFeat[] = {0x3e, 0x05, 0x04, 0x00, 0x01, 0x00, 0x21};
+    a.onEvent(shortFeat, sizeof shortFeat, 10);
+    const uint8_t lying[] = {0x3e, 0x20, 0x04, 0x00, 0x01, 0x00, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    a.onEvent(lying, sizeof lying, 10);
+    CHECK(a.stats().features == 0);
+  }
 }
 
 // ------------------------------------------------------------------------------------------------------------ QCA codec
@@ -567,6 +815,86 @@ static void testRcgTable()
   CHECK(!planRcg(12345, 0, 0, 0, 0).ok);
 }
 
+// bt-radio1: RadioRssi buckets the RSSI of advertising and inquiry reports (layouts of the 11-22 trace, addresses zeroed).
+static std::vector<uint8_t> extAdv(const std::vector<std::pair<int, uint8_t>> &reports)
+{
+  std::vector<uint8_t> e = {0x3e, 0, 0x0d, uint8_t(reports.size())};
+  for (const auto &[rssi, dataLen] : reports) {
+    const uint8_t fixed[24] = {0x10, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0x01, 0x00, 0xff, 0x7f, uint8_t(int8_t(rssi)), 0, 0, 0, 0, 0, 0,
+                               0, 0, 0, dataLen};
+    e.insert(e.end(), fixed, fixed + 24);
+    for (uint8_t i = 0; i < dataLen; ++i) e.push_back(uint8_t(0xa0 + i));
+  }
+  e[1] = uint8_t(e.size() - 2);
+  return e;
+}
+
+static void testRadioRssi()
+{
+  CHECK(RadioRssi::bucket(-41) == 0 && RadioRssi::bucket(-60) == 0 && RadioRssi::bucket(-61) == 1 && RadioRssi::bucket(-75) == 1);
+  CHECK(RadioRssi::bucket(-76) == 2 && RadioRssi::bucket(-90) == 2 && RadioRssi::bucket(-91) == 3 && RadioRssi::bucket(-100) == 3);
+  CHECK(RadioRssi::bucket(-101) == 4 && RadioRssi::bucket(-128) == 4);
+  {
+    RadioRssi r;
+    const auto a = extAdv({{-114, 27}});   // the 11-22 trace's typical report: -114 dBm, 27 data bytes
+    const auto b = extAdv({{-50, 31}});
+    const auto c = extAdv({{-92, 18}, {-65, 17}});   // two reports in one event: the second's RSSI after the first's data
+    r.onEvent(a.data(), a.size());
+    r.onEvent(b.data(), b.size());
+    r.onEvent(c.data(), c.size());
+    const auto &s = r.stats();
+    CHECK(s.leReports == 4 && s.le[0] == 1 && s.le[1] == 1 && s.le[3] == 1 && s.le[4] == 1 && s.le[2] == 0);
+    CHECK(s.leBest == -50 && s.malformed == 0 && s.classicResults == 0);
+    auto cut = c;   // a report that runs past the event: counted malformed, the first report still counted
+    cut.resize(cut.size() - 20);
+    cut[1] = uint8_t(cut.size() - 2);
+    r.onEvent(cut.data(), cut.size());
+    CHECK(r.stats().malformed == 1 && r.stats().leReports == 5);
+    const auto bad = extAdv({{-50, 3}});
+    std::vector<uint8_t> wrongLen = bad;
+    wrongLen[1] = uint8_t(wrongLen[1] + 1);   // a length byte that does not match: ignored entirely
+    r.onEvent(wrongLen.data(), wrongLen.size());
+    CHECK(r.stats().leReports == 5);
+  }
+  {
+    RadioRssi r;
+    // Legacy LE Advertising Report: [3e][len][02][1][type][addr type][addr 6][data len][data][rssi].
+    std::vector<uint8_t> e = {0x3e, 0, 0x02, 1, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 3, 0x02, 0x01, 0x06, uint8_t(int8_t(-70))};
+    e[1] = uint8_t(e.size() - 2);
+    r.onEvent(e.data(), e.size());
+    std::vector<uint8_t> two = e;   // two legacy reports: field-wise layout, not guessed
+    two[3] = 2;
+    r.onEvent(two.data(), two.size());
+    std::vector<uint8_t> na = e;   // RSSI 127: not available
+    na.back() = 127;
+    r.onEvent(na.data(), na.size());
+    CHECK(r.stats().leReports == 2 && r.stats().le[1] == 1 && r.stats().unavailable == 1 && r.stats().malformed == 1);
+    CHECK(r.stats().leBest == -70);
+  }
+  {
+    RadioRssi r;
+    const uint8_t complete[] = {0x01, 0x01, 0x00};   // Inquiry Complete, status 0 (121 of them and no result on 11-22)
+    for (int i = 0; i < 3; ++i) r.onEvent(complete, sizeof complete);
+    // Inquiry Result with RSSI, one response: addr 6, page scan mode, reserved, class 3, clock offset 2, rssi.
+    const uint8_t withRssi[] = {0x22, 15, 1, 0, 0, 0, 0, 0, 0, 0x01, 0x00, 0x40, 0x05, 0x25, 0x00, 0x00, uint8_t(int8_t(-58))};
+    r.onEvent(withRssi, sizeof withRssi);
+    std::vector<uint8_t> eir(257, 0);   // Extended Inquiry Result: one response and 240 EIR bytes
+    eir[0] = 0x2f;
+    eir[1] = 255;
+    eir[2] = 1;
+    eir[16] = uint8_t(int8_t(-104));
+    r.onEvent(eir.data(), eir.size());
+    const uint8_t plain[] = {0x02, 15, 1, 0, 0, 0, 0, 0, 0, 0x01, 0x00, 0x00, 0x40, 0x05, 0x25, 0x00, 0x00};
+    r.onEvent(plain, sizeof plain);
+    const auto &s = r.stats();
+    CHECK(s.inquiries == 3 && s.classicResults == 2 && s.classicNoRssi == 1 && s.classic[0] == 1 && s.classic[4] == 1);
+    CHECK(s.classicBest == -58 && s.leReports == 0 && s.malformed == 0);
+    const uint8_t shortRssi[] = {0x22, 3, 1, 0, 0};   // a response shorter than 14 bytes
+    r.onEvent(shortRssi, sizeof shortRssi);
+    CHECK(r.stats().malformed == 1);
+  }
+}
+
 int main()
 {
   testSurveyGates();
@@ -575,6 +903,9 @@ int main()
   testClockPlan();
   testUartPlan();
   testH4();
+  testLeMask();
+  testLeReady();
+  testRadioRssi();
   testCodec();
   testSetup();
   testRcgTable();

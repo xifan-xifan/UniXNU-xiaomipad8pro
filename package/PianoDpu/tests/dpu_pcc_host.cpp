@@ -9,6 +9,7 @@
 //     a diagonal; curves, non-monotonic or empty tables refused).
 //   c++ -std=c++20 -Wall -Wextra -Werror -I.. dpu_pcc_host.cpp -o /tmp/dpu_pcc_host && /tmp/dpu_pcc_host
 #include "DpuPcc.h"
+#include "DpuNightShift.h"
 #include "dpu_model.h"
 #include <cmath>
 #include <cstdio>
@@ -178,6 +179,108 @@ static void testApply()
   }
 }
 
+struct ReadbackFault : model::Dpu {
+  bool corruptOnce = false;
+  uint32_t rd(uint64_t at)
+  {
+    const uint32_t value = model::Dpu::rd(at);
+    if (corruptOnce && at == pccReg(1, 0x1c)) {
+      corruptOnce = false;
+      return value ^ 1;
+    }
+    return value;
+  }
+};
+
+static void testNightShift()
+{
+  uint64_t warm[9] = {s3132(1), s3132(0.125), 0, s3132(-0.25), s3132(0.75), 0, 0, 0, s3132(0.5)};
+  const uint64_t unity[9] = {s3132(1), 0, 0, 0, s3132(1), 0, 0, 0, s3132(1)};
+  const uint64_t blank[9] = {};
+  NightShift state;
+  CHECK(state.neutral());
+  CHECK(state.setMatrix(warm) == NightShift::Input::accepted && !state.neutral());
+  CHECK(state.corrected().m[1][0] == -kOne / 4 && state.corrected().m[0][1] == kOne / 8);
+  warm[3] = signMagnitude(-0.25);
+  CHECK(state.setMatrix(warm) == NightShift::Input::invalid && state.corrected().m[1][0] == -kOne / 4);
+  warm[3] = s3132(-0.25);
+  CHECK(state.setMatrix(blank) == NightShift::Input::blank && state.corrected().m[1][0] == -kOne / 4);
+
+  // The first two rows of M1's location-9 callback.
+  const uint64_t m1[9] = {0xe93e9100, 0x135da6e0, 0x0363c8b8, 0xffffffffff14915cull, 0xd9047c00, 0x0071a374, 0, 0, 0};
+  auto d = decodeS3132(m1, false);
+  CHECK(d.ok && d.negativeTwos == 1);
+  auto words = pccWords(d.m, Negative::signMagnitude);
+  CHECK(words.w[0][0] == 0x74a0 && words.w[0][1] == 0x09af && words.w[1][0] == 0x20076 && words.w[1][1] == 0x6c82);
+  words = pccWords(diagonal(-4 * kOne, 0, 4 * kOne), Negative::signMagnitude);
+  CHECK(words.w[0][0] == 0x3ffff && words.w[2][2] == 0x1ffff && words.saturated == 2);
+
+  ReadbackFault io;
+  io.pccShadow[0][4] = io.pccActive[0][4] = 0x1234;   // disabled firmware state with different dormant coefficients
+  io.pccShadow[1][4] = io.pccActive[1][4] = 0x5678;
+  const LivePath path = readPath(io);
+  PanelPcc base;
+  CHECK(capturePanelPcc(io, path, base) && io.stores.empty());
+  PanelPcc last = base;
+  PanelPcc wanted = nightShiftPrograms(base, state);
+  io.corruptOnce = true;
+  auto update = updateNightShift(io, path, wanted, last, false);
+  CHECK(update.attempted && !update.result.ok && update.restored && same(last, base));
+  CHECK(io.pccActive[0][4] == 0x1234 && io.pccActive[1][4] == 0x5678);
+  const unsigned flushes = io.storesTo(ctlReg(0, kCtlFlush));
+  update = updateNightShift(io, path, wanted, last, false);
+  CHECK(update.result.ok && update.result.stores == 23 && same(last, wanted));
+  CHECK(io.storesTo(ctlReg(0, kCtlFlush)) == flushes + 1);
+  CHECK(io.storesTo(pccReg(2, 0)) == 0 && io.storesTo(pccReg(3, 0)) == 0);
+  for (unsigned d = 0; d < 2; ++d) {
+    const uint32_t *pcc = io.pccActive[d];
+    CHECK(pcc[0] == 1 && pcc[4] == 0x8000 && pcc[5] == 0x1000);
+    CHECK(pcc[7] == 0x22000 && pcc[8] == 0x6000 && pcc[12] == 0x4000);
+  }
+
+  // A slider operation with no callbacks leaves the last colour in place. A repeat also needs no stores.
+  CHECK(!updateNightShift(io, path, nightShiftPrograms(base, state), last, false).attempted);
+  state.setCorrection(kOne);
+  CHECK(!updateNightShift(io, path, nightShiftPrograms(base, state), last, false).attempted);
+  CHECK(state.setMatrix(warm) == NightShift::Input::accepted);
+  CHECK(!updateNightShift(io, path, nightShiftPrograms(base, state), last, false).attempted);
+  // Slot 314 alone updates the existing matrix. A later slot 309 update uses the retained correction.
+  state.setCorrection(kOne / 2);
+  CHECK(updateNightShift(io, path, nightShiftPrograms(base, state), last, false).result.ok);
+  CHECK(io.pccActive[0][4] == 0x4000 && io.pccActive[1][7] == 0x21000);
+  warm[8] = s3132(0.75);
+  CHECK(state.setMatrix(warm) == NightShift::Input::accepted);
+  wanted = nightShiftPrograms(base, state);
+  CHECK(updateNightShift(io, path, wanted, last, false).result.ok && io.pccActive[1][12] == 0x3000);
+
+  // Power blanking keeps the colour. Both wake and mode-set replay it after a hardware reset.
+  CHECK(state.setMatrix(blank) == NightShift::Input::blank);
+  for (unsigned event = 0; event < 2; ++event) {
+    for (unsigned d = 0; d < 2; ++d) io.pccShadow[d][0] = io.pccActive[d][0] = 0;
+    CHECK(updateNightShift(io, path, nightShiftPrograms(base, state), last, true).result.ok);
+    CHECK(io.pccActive[0][0] == 1 && io.pccActive[1][12] == 0x3000);
+  }
+  CHECK(state.setMatrix(unity) == NightShift::Input::accepted && state.neutral());
+  CHECK(updateNightShift(io, path, nightShiftPrograms(base, state), last, false).result.ok && same(last, base));
+  CHECK(io.pccActive[0][0] == 0 && io.pccActive[1][0] == 0);
+  CHECK(io.pccActive[0][4] == 0x1234 && io.pccActive[1][4] == 0x5678);
+
+  // An enabled base keeps its matrix when Night Shift is off. Active colour composes with the base.
+  base.dspp[0] = {pccWords(diagonal(kOne / 2, kOne, kOne), Negative::signMagnitude), true};
+  CHECK(nightShiftPrograms(base, state).dspp[0].words.w[0][0] == 0x4000);
+  CHECK(state.setMatrix(warm) == NightShift::Input::accepted);
+  CHECK(nightShiftPrograms(base, state).dspp[0].words.w[0][1] == 0x0800);
+  state.setCorrection(6 * kOne);
+  CHECK(nightShiftPrograms(base, state).dspp[0].words.w[0][0] == 0x18000);
+  state.setCorrection(UINT32_MAX);
+  CHECK(state.corrected().m[0][0] == 4 * kOne && state.corrected().m[1][0] == -4 * kOne);
+
+  LivePath incomplete = path;
+  incomplete.dspps = 1;
+  CHECK(!capturePanelPcc(io, incomplete, base));
+  CHECK(!updateNightShift(io, incomplete, wanted, last, true).attempted);
+}
+
 static void testState()
 {
   State s;
@@ -247,6 +350,7 @@ int main()
   testMath();
   testWords();
   testApply();
+  testNightShift();
   testState();
   testGamma();
   if (failures) {

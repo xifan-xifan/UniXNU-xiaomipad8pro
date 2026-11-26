@@ -113,12 +113,15 @@ the live stream reset the SoC on Linux); the bank itself is reprogrammed in plac
    synced, the first/last/guard page checked through our own tables; the surface and its memory retained while mapped. The clean
    (`piano-dpu-clean`, default 1): DC CVAC over the rows the DPU fetches through a read-only cacheable alias of the surface made once
    per window (when XNU refuses the alias, flipped without, counted; 2: refused instead) — the CPU may have drawn the frame
-   (CompositorSW). The flip: for each pipe/rect of the survey's path, SRC = window + offset + (rect's splash offset / 12800) × row bytes
+   (CompositorSW). The optional M2 path uses the DRAM aperture for a whole-backing first clean and skips later pixel cleans only
+   while the wired IOSurface still qualifies as WC. See [the M2 policy and RAM read list](dpu-m2-analysis.md).
+   The flip: for each pipe/rect of the survey's path, SRC = window + offset + (rect's splash offset / 12800) × row bytes
    + (offset % 12800) (VIG1 by SRC_XY or by its own address both work; multirect: SRC0 and SRC1, both YSTRIDE0 halves), YSTRIDE0 = the
    surface's row bytes, SRC_FORMAT with SRCC3_EN cleared when the path has per-pixel alpha (restored for the boot framebuffer); DSB,
    CTL_FLUSH = the pipes' bits (or `piano-dpu-flush`); FLUSH polled after each vsync interrupt (or every ~1 ms) until the pipes' bits
    read 0, at most `piano-dpu-latch` ms; then FSR and the underrun bits are checked. The previous window stays mapped (evictable) and
-   NativeGopDisplay completes the swap only after this returns. The same surface again: cleaned, no flush.
+   NativeGopDisplay completes the swap only after this returns. With M2, a re-show of the same window, offset and stride still takes
+   the eligibility check and DSB before returning.
 4. *Vblank*: SPI 83 (INTID 115) through `armcpu_spi_attach` (`package/common/PianoIrq.h`'s SpiLine and storm guard), attached once
    setup has turned the DPU's INTR_EN off and found MDSS HW_INTR_STATUS 0 (else polled: "another block holds the line"); the handler:
    MDSS status bit 0 → DPU INTR_STATUS & INTR_EN → INTR_CLEAR, the waiter kicked (no bit: a stray for the guard). The INTF1 vsync bit
@@ -156,7 +159,9 @@ the live stream reset the SoC on Linux); the bank itself is reprogrammed in plac
    LM split at x 1600 and off the right edge, 1 s each, over the boot framebuffer, then hidden; pass: visible at each place, the
    hole shows the panel through it, fsr 0, no underrun.
 
-**4.3 Refresh switching (B1c).** 120 ↔ 60 Hz is a VFP-only change: no DCS command (B2/B3 are the same), no clock change, no DSC or
+**4.3 Refresh switching (B1c).** The [M3 mode driver and RAM-boot checklist](dpu-m3.md) cover four selectable rates with
+programmable fetch enabled. The original B1c 120 ↔ 60 Hz experiment below requires programmable fetch off.
+120 ↔ 60 Hz is a VFP-only change: no DCS command (B2/B3 are the same), no clock change, no DSC or
 touch impact (SunUEFI ran 30/48/50/60/120 seamlessly). At a frame boundary, on both links: DSI DB_MODE = 1, TOTAL.V_TOTAL = 4620 − 1
 (2310 − 1 back), TIMING_FLUSH = 1; INTF1/INTF2 VSYNC_PERIOD_F0 = 4620·htotal; CTL_INTF_FLUSH (INTF1|INTF2) + CTL_FLUSH b31; DB_MODE =
 0 after the latch. Programmable fetch stays off (the 120 Hz family has 106 lines of VSYNC+VBP, more than the 24-line worst case, so
@@ -169,16 +174,16 @@ counting INTF1's frames (the halves in lockstep), no underrun (cleared first). A
 slice off for the boot. Refused before any store: not the 120 Hz family, a DSI TOTAL that disagrees with its INTF, programmable fetch
 on, a gate closed. Policy (`auto`): 60 Hz once no *burst* of swaps (2 within 250 ms) came for 1 s, 120 Hz at the next burst, 200 ms
 dwell: a blinking cursor (2 swaps/s) is no burst and stays at 60. NativeGopDisplay reports every frame it shows (`PianoDpuSwap`);
-WindowServer keeps seeing one timing (frames simply take two periods while idle) or, later, a 60/120 pair. 90/144 change HFP and the panel's rate group (B2/B3 over the DSI command path while video runs):
-a full modeset in both Linux ports, and more power, so not planned. Risks: a missed DSI/INTF pairing shows a grey or torn screen
+WindowServer keeps seeing one timing in the B1c experiment (frames simply take two periods while idle). 90/144 change HFP and the
+panel's rate group (B2/B3 over the DSI command path while video runs). Risks: a missed DSI/INTF pairing shows a grey or torn screen
 (Ubuntu's full-modeset 60 Hz was grey until the stock order was used); the TDDI touch follows display timing (watch touch at 60 Hz);
 the DSI shadow offsets are confirmed by B1a's raw `timing words`.
 
-**4.4 Night Light (B1d).** PCC in DSPP0 and DSPP1 (both halves, same matrix): output R from (R,G,B) at +0x10/+0x14/+0x18, G
+**4.4 Legacy PCC experiment (B1d).** PCC in DSPP0 and DSPP1 (both halves, same matrix): output R from (R,G,B) at +0x10/+0x14/+0x18, G
 +0x1c/+0x20/+0x24, B +0x28/+0x2c/+0x30 (msm's PCC_<input>_<output>_OFF names), S3.15; enable +0 bit 0; flush CTL_DSPP0/1_FLUSH bit 4
 + CTL_FLUSH b29, latched with the frame. A warm white point is a diagonal (e.g. 3400 K ≈ 1.0, 0.73, 0.45). macOS reaches the display through IOMFB's `swap_set_color_matrix` (slot
-343) and `set_gamma_table` (slot 307), both stubs in NativeGopDisplay unless `piano-dpu-pcc` is given: B1d-0 logs which one Night
-Shift calls; a per-channel linear gamma ramp maps exactly onto a PCC diagonal, a non-linear one needs GC v2 via REGDMA (later).
+343) and `set_gamma_table` (slot 307), both stubs in NativeGopDisplay unless `piano-dpu-pcc` is given.
+A per-channel linear gamma ramp maps onto a PCC diagonal. A non-linear one needs GC v2 via REGDMA.
 Re-applied at display-on; no CPU cost per frame. Needs the DSPP in ABL's path (B1a reads the PCC/GC enables; LM n → DSPP n is the
 catalog's wiring). *Implemented* (`DpuPcc.h`): the matrix decoded as S31.32 (each negative word read as two's complement or as
 sign-magnitude, whichever is within ±4; else refused), one per IOMFBColorMatrixFunction, their product; a diagonal is moved from
@@ -192,23 +197,57 @@ is written once: the write path checked with no visible change; a found non-iden
 before it. A matrix that arrives while the panel sleeps is kept and written at the wake (the light sleep keeps the DSPP's registers
 anyway).
 
-**4.5 Panel off/on (B1e).** Display sleep today only turns the backlight off: the DPU still fetches 3.28 GB/s and the panel scans.
-Off: backlight off (PianoBacklight) → DCS 0x28, 20 ms, 0x10, 100 ms (K:72cfce4c86e5) through the DSI command FIFO (no DMA buffer:
-`UniXNU-sm8750-common` PeripheralIO's DSI0 FIFO helper is the BSD template) → stop INTF2's timing engine, then INTF1's (slave
-first). Supplies, reset and MDSS stay on (no GDSC collapse, no CTL reset while anything scans). On: INTF1+INTF2 engines on, 0x11,
-120 ms, 0x29, backlight on. A full power-off (reset, supplies) needs the whole init and PPS: later, if the light sleep is not enough.
+**4.4.1 Night Shift (M4).** CoreBrightness sends the white point through WindowServer and CoreAnimation to IOMobileFramebuffer's
+location-9 `set_matrix` (slot 309) and its independent `setBrightnessCorrection` (slot 314). M1 passed 44/44 observation checks.
+It recorded a signed, general matrix, a unity correction, and all-zero matrices around display-off. Its slider and OFF
+windows contained no logged matrix changes. The M1 observer counted repeats and logged changes, so the test windows
+need both counts and PCC snapshots to distinguish a repeat from a missing callback.
+
+The Linux reference is the piano kernel at `b5100d5f2e0b`, under `drivers/gpu/drm/msm/disp/dpu1`.
+
+| Linux reference | M4 path | Comparison |
+|---|---|---|
+| `dpu_crtc.c:45–46,794–817` converts DRM's sign-magnitude S31.32 CTM to row-major PCC coefficients | `DpuPcc.h` and `DpuNightShift.h` decode Apple's two's-complement words and apply the unsigned Q16.16 correction | Same channel ordering. Linux's macro drops the input sign. M4 preserves it with bit 17 of the PCC word as the sign. The signed encoding and transfer domain need optical verification. |
+| `dpu_hw_dspp.c:15–26,58–76` programs the nine coefficients and enable or bypasses PCC | `DpuPcc.h` uses the same offsets and restores the captured enable and coefficient words | Same register sequence. M4 retains the firmware base when the input returns to neutral. |
+| `dpu_crtc.c:862–863,894–911` stages PCC for every mixer on a colour change or modeset | `DpuSlices.cpp` serializes colour, mode and wake requests on its worker | Same modeset replay, with display-wake replay and retention across silent slider changes. |
+| `dpu_hw_ctl.c:144–180,394–413` stages DSPP sub-block flushes and triggers CTL once | `DpuPcc.h` stages both DSPP PCC masks before one CTL flush, waits for its latch and reads back both halves | Same order. M4 checks the latch and both sets of register words. |
+
+M4 starts with `native-gop-display-night-shift=1` and `piano-dpu>=1`. M4 owns the two PCC blocks when the legacy PCC argument is
+also present. It captures the enable and nine coefficient words from each DSPP at startup. The worker multiplies the matrix by the
+unsigned correction gain (unity at `0x10000`) and composes it with an enabled firmware base. It retains the last matrix when a
+slider step only sends a correction or sends no callbacks. A location-9 identity restores the captured base, including disabled PCC
+and the original words. All-zero matrices are treated as blanking markers, preserving the last colour across wake.
+An OFF operation with no usable matrix or correction leaves the previous transform in effect. A unity correction preserves
+the selected matrix. M1 received unity alongside its non-identity matrix.
+
+Display wake, a successful `set_digital_out_mode`, and a successful PianoDpu refresh switch replay the desired state. The PCC
+transaction holds the same lock as the flip engine until the latch and read-back finish. On a failed transaction the worker
+attempts to restore the last verified words on both DSPPs.
+
+**4.5 Panel off/on (B1e, M5a).** With the default display sleep, the backlight goes dark and the DPU keeps scanning. M5a adds
+light sleep and stops fetch using the B1e command path. The DCS packet uses the host command FIFO described by the DSI0 FIFO
+helper in `UniXNU-sm8750-common` PeripheralIO. Light sleep retains supply, reset, PHY and MDSS state. With M4 on as well
+(lead/v131y12m merge), PianoDpu replays Night Shift inside the synchronous wake, before NativeGopDisplay releases the display;
+M4 alone keeps its notify from the display power gate.
+At startup the M5a worker checks the live dual-DSI video path, requests both INTF frame and line counters with `COUNT_EN = 3`
+where needed, and verifies that both frame and line counters actually advance. The qualification capture showed live counters on
+both links while `COUNT_EN` read back zero. The readback is diagnostic. If the live counter check fails, an M5a sleep request is
+logged and returns `kIOReturnNotReady` before queuing panel work. NativeGopDisplay uses backlight-only sleep, releases touch on
+wake, and requests the configured Night Shift replay. A failure during an accepted panel transition still uses the wake path to
+check recovery.
 *Implemented* (`DpuPanel.h`): per DCS command, on both links: refused unless the controller is enabled in video mode, its FIFO is
 free and its DMA is software-triggered; STATUS0's DMA busy bit waited for (20 ms); INTR_CTRL's done bit cleared, CTRL's command mode
 set beside video (msm's transfer), the FIFO selected and filled, CMD_DMA_CTRL low power (the panel's mode) without broadcast or
 master, +0x390 bit 1 cleared, the length; then TRIG_DMA on DSI0 and DSI1 back to back. The hardware holds the DMA out of the active
 frame (BLOCK_DMA_WITHIN_FRAME); where that bit is clear the trigger waits for INTF1's front porch. Done within 50 ms on both, every
 word restored as found (PeripheralIO's restore, its +0x1ec pulse included); a link whose DMA did not finish is left to its engine and
-the slice stops. Engines: EN = 0 on INTF2, INTF_STATUS bit 0 clear within 40 ms (Ubuntu's slave poll), then INTF1. Wake: the CTL's
-INTF flush, then INTF1 and INTF2 enabled with interrupts off (msm: flush before the engine, master first), both counting in lockstep,
-then 0x11, 120 ms, 0x29, 10 ms, the PCC re-applied. Failures undo what was done (engines on again, sleep-out, display-on); after a
-failed stop of INTF1 the stopped INTF2 is started at INTF1's frame start so the halves stay in phase. The order against the backlight:
-NativeGopDisplay records PianoBacklight's request first and PianoDpu's second; both run on their own threads, so at the wake the
-backlight may light ~150 ms before display-on (a lit black panel, no garbage: a panel in sleep or display-off shows black).
+the slice stops. Engines: EN = 0 on INTF2, INTF_STATUS bit 0 clear within 40 ms (Ubuntu's slave poll), then INTF1. Once both
+engines stop, clear INTF_CONFIG bit 31 on each link that had programmable fetch. Wake restores the saved fetch starts and enable
+bits before the CTL's INTF flush and enables INTF1 and INTF2 with interrupts off. Once the flush latches and both engines count in
+lockstep, send 0x11, wait 120 ms, send 0x29, wait 10 ms and re-apply the configured PCC. A recoverable failed stop restores
+the engines, fetch registers and panel. A partial DCS transfer or a failed wake holds pending swaps and keeps the backlight dark.
+NativeGopDisplay's copy worker drains a running job before the sleep sequence and waits for both backlight ICs and the configured
+touch driver. Its work loop releases the backlight only after the worker confirms the wake. See §8.4 for qualification.
 
 **4.6 External DisplayPort (B8) needs:** the DP controller `af54000` (INTF0, INTF3 for MST) and the USB/DP combo PHY (lanes 4,
 1.62–8.1 Gbit/s), AUX + link training (DPCD), HPD and orientation from the DSP's altmode service and the Type-C mux (B7, PianoPower's
@@ -238,11 +277,12 @@ request and wakes the slices' thread):
 | Function | Caller | Parameters |
 |---|---|---|
 | `PianoDpuSwap` | NativeGopDisplay's `program_hardware_gated`, each frame shown (`piano-dpu-refresh=auto`) | none |
+| `PianoDpuMode` | NativeGopDisplay's startup and timing selection, synchronously (`piano-dpu-modes=1`) | p1 = target rate in Hz |
 | `PianoDpuColorMatrix` | NativeGopDisplay's `swap_set_color_matrix`, each new matrix of a function (`piano-dpu-pcc`) | p1 = the 72 bytes, p2 = the function, p3 = the third argument |
 | `PianoDpuGammaTable` | NativeGopDisplay's `set_gamma_table`, each new table (`piano-dpu-pcc`) | p1 = the words, p2 = 771 with `piano-dpu-pcc=2`, else 0 (logged only) |
-| `PianoDpuPanel` | NativeGopDisplay's `do_power_state_change_gated`, each change (`piano-dpu-panel=1`) | p1 = on |
+| `PianoDpuPanel` | NativeGopDisplay's copy worker, synchronously, outside the display gate (`piano-dpu-panel=1`) | p1 = on |
 
-Properties: `piano-dpu-refresh-hz` (60/120), `piano-dpu-panel` (`awake`/`asleep`), `piano-dpu-pcc` (the diagonal in thousandths).
+Properties: `piano-dpu-refresh-hz` (60/90/120/144 with M3), `piano-dpu-panel` (`awake`/`asleep`/`fault`), `piano-dpu-pcc` (the diagonal in thousandths).
 All from the IOMobileFramebufferLegacy hooks (the 27.0.1 ABI generated at build time).
 
 ## 6. Boot args
@@ -254,6 +294,7 @@ All from the IOMobileFramebufferLegacy hooks (the 27.0.1 ABI generated at build 
 | `piano-dpu-flip=N` | 1 | B1b's steps (§8): 1 the boot framebuffer's addresses flushed again ×3; 2 + shifted 64 rows for 2 s and back; 3 + the DPU's SMMU bank in place, a test pattern through window 0 for 2 s, the fault status after a minute, the bank back as found; 4 the bank in place and flips served to NativeGopDisplay |
 | `piano-dpu-irq=0` | 1 | CTL_FLUSH polled every ~1 ms instead of the vsync interrupt (SPI 83) |
 | `piano-dpu-clean=N` | 1 | a surface's fetched rows cleaned from the CPU caches before each flip: 0 never, 1 through a cacheable alias when XNU makes one, 2 refuse a surface without one |
+| `piano-dpu-clean-skip=1` | 0 | at flip step 4, use strict aperture cleans and the verified-WC backing epoch. This selects the pixel-clean policy independently of `piano-dpu-clean` and `piano-dpu-clean-threads`. Root can select the full-clean control with `machdep.piano_dpu_clean_skip=0` and restore the conditional policy with `=1`. |
 | `piano-dpu-flush=MASK` | 0 | the CTL_FLUSH bits of a flip instead of the pipes' own (0x3 for VIG0+VIG1); e.g. 0x20003 adds the CTL's bit 17 if the pipes' bits alone do not latch |
 | `piano-dpu-underrun=0` | 1 | an underrun neither stops the ladder nor reverts |
 | `piano-dpu-latch=MS` | 50 | the latch timeout (10..500): past it, a revert and flips off for the boot |
@@ -265,15 +306,18 @@ All from the IOMobileFramebufferLegacy hooks (the 27.0.1 ABI generated at build 
 | `piano-dpu-measure=MS` | 1000 | the frame-counter interval (20..10000) |
 | `piano-dpu-delay=S`, `piano-dpu-repeat=S`, `piano-dpu-samples=N` | 0, 0, 3 | wait first; re-measure every S s, N times (after WindowServer starts, across display sleep) |
 | `piano-dpu-refresh=plan\|60\|120\|auto` | off | B1c (needs `piano-dpu` >= 1): plan = the verdict and the twelve stores logged, nothing written; 60/120 = switch once at the start; auto = the idle policy (NativeGopDisplay reports swaps with the same argument) |
+| `piano-dpu-modes=1` | 0 | M3 selectable 60/90/120/144 Hz on the internal display. Leave `piano-dpu-refresh` unset and select a DSI shadow layout with `piano-dpu-refresh-db=1` or `=2`. [M3 qualification](dpu-m3.md) |
 | `piano-dpu-refresh-db=0\|1\|2` | 1 | the DSI timing shadow: 1 SunUEFI's place (DB + 0x1ec, flush + 0x1e8), 2 downstream's (+ 0x1e8, + 0x1e4), 0 TOTAL written directly |
 | `piano-dpu-refresh-test=N` | 0 | first N round trips 120 → 60 → 120, a second at each rate; stops at an anomaly |
 | `piano-dpu-refresh-idle=MS`, `-burst=N`, `-window=MS`, `-dwell=MS` | 1000, 2, 250, 200 | the policy |
 | `piano-dpu-pcc=1\|2` | 0 | B1d: 1 the PCC as found written once, then macOS's colour matrices (NativeGopDisplay logs and forwards `swap_set_color_matrix` and `set_gamma_table`); 2 also fits gamma tables (reads 0xc0c bytes) |
+| `native-gop-display-night-shift=1` | 0 | M4 location-9 matrix and brightness correction on DSPP0/1 (§4.4.1) |
 | `piano-dpu-pcc-encode=0`, `piano-dpu-pcc-negative=1` | 1, 0 | a diagonal as sent (default: linear → encoded); negative coefficients as two's complement (default: clamped) |
 | `piano-dpu-pcc-test=R,G,B` | none | a test diagonal in thousandths written as the PCC's values after the start (0..4000 each) |
-| `piano-dpu-panel=1` | 0 | B1e: the panel's light sleep with display sleep (NativeGopDisplay forwards its display power) |
+| `piano-dpu-panel=1` | 0 | M5a: panel light sleep and scanout fetch stop, with `piano-backlight=2` and the configured touch driver |
 | `piano-dpu-panel-engines=0`, `piano-dpu-panel-hs=1` | 1, 0 | DCS only (engines keep running); DCS in high speed |
-| `piano-dpu-panel-test=N` | 0 | first N sleep/wake cycles, 5 s asleep and 5 s awake each; stops at a failure |
+| `piano-dpu-panel-test=N` | 0 | Standalone `piano-dpu=1` test, N cycles of 5 s asleep and 5 s awake. Use display power for flip-mode qualification. |
+| `piano-dpu-snapshot=1` | 0 | B1 milestone 1 (`DpuSnapshot.h`, `DpuSnapshot.cpp`): `sudo sysctl -n machdep.piano_dpu_snapshot` reads the path's registers at the call (loads only, behind the survey's gate; root; at most once per 100 ms): CTL, INTF1/2 timing, engines and counters, both DSI controllers' TOTAL/ACTIVE, timing-shadow words, command path and clock/lane state, the DSPPs' PCC/GC, the live mode classified against `DpuModes.h` and each mode's 144/120/90/60 Hz words, B1c's VFP verdict; each line also on the console (`PianoDpu: snap: ...`) |
 
 ## 7. Kernel collection
 
@@ -578,7 +622,7 @@ DSPP is not in ABL's path (the survey's dspp lines say what was found); `pcc: of
 PianoDpu: panel: dsi0 command path: ctrl ........ status ........ fifo ........ cmd-dma ........ dma1 ........ length ........ trig ........ (dma trigger 4 software, DMA blocked within the frame) intr ........ tpg 00000000 ack ........
 PianoDpu: panel: dsi1 command path: ...
 PianoDpu: panel: piano-dpu-panel=1: sleep with the display (low-power DCS, then the timing engines stopped); nothing of the panel's reset or supplies is touched
-PianoDpu: panel: sleep (display off 0x28, 20 ms, sleep in 0x10, 100 ms, INTF2 then INTF1 stopped): ok (step 4); dcs 28 sent in ... us, 10 sent in ... us; engines intf1 ... us intf2 ... us status 0/0; at 0/2./12./13. ms
+PianoDpu: panel: sleep (display off 0x28, 20 ms, sleep in 0x10, 100 ms, INTF2 then INTF1 stopped): ok (step 5); dcs 28 sent in ... us, 10 sent in ... us; engines intf1 ... us intf2 ... us status 0/0; at 0/2./12./13. ms
 PianoDpu: panel: wake (INTF flush, INTF1 + INTF2 on, sleep out 0x11, 120 ms, display on 0x29): ok (step 3); dcs 11 sent in ... us, 29 sent in ... us; engines intf1 ... us intf2 ... us status 1/1, counting in lockstep; at 0/1../2../2.. ms
 PianoDpu: panel: test cycle 1 of 3 done                                         (three times)
 ```
@@ -591,11 +635,67 @@ did not report running within 50 ms (step 1)` followed by `panel: WAKE FAILED: t
 (piano-reset-after)`.
 
 **e1** (with WindowServer, 50 cycles: `pmset displaysleepnow` in the root shell, wake with `piano-input.py key shift`):
-`NativeGopDisplay: display off` → PianoBacklight's `backlight OFF` lines and `PianoDpu: panel: sleep (...): ok (step 4)`; at the wake
+`NativeGopDisplay: display off` → PianoBacklight's `backlight OFF` lines and `PianoDpu: panel: sleep (...): ok (step 5)`. At the wake
 `NativeGopDisplay: display on` → `panel: wake (...): ok`, `pcc: re-applied at the wake [1000 0 0 | 0 1000 0 | 0 0 500]` and its
-apply line, then the backlight. Pass: no garbled frame, the tint survives every wake, touch and keyboard work after the wake,
-`slices: alive: ... panel awake (50 sleeps, ...)`. The panel may be lit black for ~150 ms before the picture (the backlight's thread is
-quicker than the panel's wake): expected.
+apply line, then the backlight. Check that the tint survives every wake, touch and keyboard work, and the frame appears whole.
+
+### 8.4. M5a display sleep qualification
+
+The daily display-power callback blanks the KTZ8866 backlight while INTF1 and INTF2 continue scanning the active framebuffer. M5a uses the existing `piano-dpu-panel=1` opt-in to stop fetch at that boundary. The path is WindowServer and IOKit power → NativeGopDisplay's gated power callback and copy worker → PianoBacklight and PianoTouch → PianoDpu's panel sequence → dual DPU INTF and DSI video → NT36532. Pending swaps stay in the display's retained job queue until scanout can latch them again.
+
+The qualification failure occurred before the first DCS command. INTF1 and INTF2 were scanning, programmable fetch was enabled,
+and subsequent M1 snapshots showed the frames and lines advancing with `count-en 0/0`. The slice requested the Linux enable bits
+and interpreted their zero readback as proof that the counters had stopped. It then advertised panel readiness after disabling
+M5a, so requests returned `kIOReturnIOError` from the worker and the engines stayed on in all ten cycles.
+
+Counter setup comparison for the Ubuntu v1.4.0 kernel (`83f0f89bed14`) and UniXNU-sheng (`00ba909`)
+
+| Reference | PianoDpu path | Comparison |
+| --- | --- | --- |
+| `dpu_encoder_phys_vid.c:317,467` and `dpu_hw_intf.c:243–259` program video timing, including `INTF_FRAME_LINE_COUNT_EN = 3` at `+0xa8` | `DpuSlices.cpp:754–775` initializes panel counters after `readPath` validates the clocks, active CTL and both video links. `DpuSlices.h:255–264` uses the same enable value on INTF1 and INTF2. | Same counter register and value. Piano inherits a running video mode and issues only the missing counter enables. |
+| `dpu_hw_intf.c:326–344` reads live frame and line counts when the timing engine is active. `ShengDpuObservation.c:24–34,64–67` records the counters and their enable bits in a read-only observation. | `DpuSnapshot.h:58–70` and `DpuSlices.h:103–116` read the live counts and raw enable bits. `DpuFlip.h:335–357` waits on CTL flush, with vsync for notification. | Same observation. Snapshot and flip paths leave the counter controls to the writing slice. M5a gates on measured progress on both links. |
+| `dpu_encoder_phys_vid.c:235–253` and `dpu_hw_intf.c:284–305` set the programmable fetch start and CONFIG bit 31. `dpu_hw_intf.c:275–282` controls timing-engine enable independently. | `DpuPanel.h::programFetch` and `startEngines` handle fetch and timing on sleep and wake. | Same separation. Counter initialization leaves fetch, timing and CTL flush words untouched. |
+
+| Reference | B1e baseline | M5a |
+| --- | --- | --- |
+| `drm_panel.c:764–862` blanks after notifying touch and enables the backlight before notifying touch | `NativeGopDisplay::do_power_state_change_gated` posts a backlight request in both directions before the panel request | Blank promptly at the logical display-off, then confirm both ICs and touch are quiet before DCS. Release the backlight only after the panel can display a frame. |
+| `nt36532e-thp/core.c:621–658` quiesces touch SPI before panel disable and starts it after panel enable | `PianoTouch::powerStep` mutes reporting and still reads announced frames | Park touch transfers before DCS and release the touch worker once video is ready. |
+| `panel-novatek-nt36532.c:169–198,821–853` sends display-off, waits 20 ms, sends sleep-in, waits 100 ms, then powers down | `DpuPanel.h::panelOff` uses the same DCS sequence | Keep the command order and retain reset, power and PHY state for light sleep. |
+| `32d04280` disables the slave first. `8b53b972` delays shared CTL cleanup until both engines stop. `dsi_manager.c:275–277,284–298` powers down the slave DSI host first | `DpuPanel.h::stopEngine` waits for INTF2 before stopping INTF1 | Keep the slave-first timing stop and keep the shared CTL and DSI hosts configured. |
+| `dpu_hw_intf.c:285–305` sets FETCH_START before setting CONFIG bit 31 | B1e only stops and starts timing | Save both live fetch configurations, clear their enable bits for sleep and restore the saved starts and enable state before the wake flush. |
+| `panel-novatek-nt36532.c:652–654` sends sleep-out, waits 120 ms, then sends display-on | `DpuPanel.h::panelOn` flushes and restarts timing before DCS | Verify both engines and the flush. Restore configured PCC before releasing the display-power clients. |
+
+RAM-boot read list for the lead session
+
+1. Use the daily flip profile on a volatile Data RAM boot with `piano-dpu-panel=1 piano-dpu-snapshot=1`. Record the boot args, DPU flip-serving line, `panel: INTF counters` (raw enable values before and after the enable request, plus the motion verdict), and `slices: serving` with `panel on`. Take two awake `sudo sysctl -n machdep.piano_dpu_snapshot` reads and record both backlight IC states. Verify both frame and line counters move with both engines running. A zero enable readback is acceptable with observed motion. If the live check fails, capture the `panel: sleep refused` line and verify the backlight-only wake, with both engines still running. Use a matched default-off run as the power control.
+2. With a working desktop and the C920 capturing continuously, start with ten cycles of `pmset displaysleepnow` and keyboard-cover wake. Take two snapshot reads at least 100 ms apart in each sleep after the `PianoDpu: panel: sleep` success line and before wake. Expect both INTF enable and status bits clear, programmable fetch disabled and frame counters unchanged across the reads. Pair each success with a wake and confirm both engines restart before the next cycle. Verify there was no flip timeout or permanent copy fallback. Extend to 50 cycles for the full qualification, sampling the remaining cycles.
+3. On wake compare the snapshot with the awake baseline, including both programmable fetch starts and enable bits. Verify scanout counters advance, a pending swap can latch, keyboard and trackpad work, and touch tap and scroll work. Check the C920 recording across all 50 wakes for garbled or split frames, flashes and stalls.
+4. Record awake and asleep steady-state power with the same brightness, CPU/GPU workload, peripherals and measurement interval for both runs. Use a USB-C meter with identical charger conditions, or run unplugged and sample `Voltage` and signed `InstantAmperage` from `ioreg -r -c AppleSmartBattery -l` (`piano-power-ps=1`). Compare asleep with M5a disabled and enabled. Save the per-cycle results and wattage, including the measurement source.
+
+### 8.4 M4 RAM-boot read list
+
+Use the ordinary volatile-Data RAM profile with `piano-dpu=2 piano-dpu-snapshot=1 native-gop-display-night-shift=1` and prove
+the GUI session and live flips before running the reads. Use M1's `nightshift.js` from the console user's session through
+`/usr/bin/osascript -l JavaScript`. Keep the full event windows from the console and the CoreBrightness/WindowServer log.
+
+1. Run `nightshift.js off` and `read` for the baseline. Confirm `NS_DONE` and `supports=true`. Save
+   `sudo sysctl -n machdep.piano_dpu_snapshot`, with the gate open, and the DSPP0/1 enable and nine coefficients. Record
+   `piano-dpu-night-shift-matrix-calls` and `piano-dpu-night-shift-correction-calls` from the PianoDpu IORegistry entry.
+   Capture a white window spanning both halves with the C920. Keep the window, exposure and white balance fixed.
+2. Run `nightshift.js on 1.0` and wait for the transition to settle. Save the same snapshot, callback counts and C920 frame.
+   Look for accepted `set_matrix #` at location 9, `setBrightnessCorrection #` if sent, and
+   `PianoDpu: night shift:` reporting one CTL flush and read-back on both DSPPs. Confirm that both halves warm consistently.
+3. Run `nightshift.js strength 0.5`, then `strength 1.0`. Take the same readings after each step. A new matrix or a changed
+   correction should update PCC. A repeated or absent callback should keep both sets of words and the measured colour stable.
+   Compare the IORegistry counters to distinguish repeats from no callbacks. Record the CoreBrightness log as the positive
+   control when its slider succeeds without a driver update.
+4. While warm, read both DSPPs after display sleep/wake and after each accepted mode set available in that build. Require the
+   `display wake` or mode-set replay line, the pre-transition PCC words on both halves, and a matching C920 frame. Record any
+   mode transition that the profile cannot exercise as pending.
+5. Run `nightshift.js off` and wait for the transition. Require the base words and enable states on both halves and a C920
+   frame matching the baseline. If CoreBrightness reports OFF and the counters show no driver update, record OFF as unresolved.
+   Separate changes caused by a dark or blank display from changes in the white window's colour. Collect final flip and
+   boot-session evidence.
 
 ## 9. Fallback
 
@@ -617,7 +717,8 @@ and the SPI 83 handler, which stays attached: ArmCpu has no detach); step 4's fa
 4. Is TCR2 PASize 36 bits enough, and does the walker accept tables above 4 GiB? → B1b(3) (sheng used 48-bit, tables in RAM).
 5. Exact DSI timing shadow offsets: SunUEFI's patch (base + 0x1ec DB, + 0x1e8 flush) and the downstream list (+ 0x1e8, + 0x1e4,
    + 0x1ec the TPG FIFO reset) disagree → c0's shadow words, then c1 (`piano-dpu-refresh-db=2` if the default underruns).
-6. Which IOMFB call carries Night Shift on this external-type display (`swap_set_color_matrix` or `set_gamma_table`)? → B1d-0 log.
+6. M1 identified the location-9 matrix and correction. The M4 RAM run checks the signed PCC encoding, the white point on both
+   halves, and callback delivery on slider and OFF (§8.4).
 7. Does WindowServer accept a refresh change under one advertised timing (frames at 60 while it paces at 120)? → B1c.
 8. Panel sleep via the DSI command FIFO while video runs: the panel driver sends in LP (MIPI_DSI_MODE_LPM), the default here;
    `piano-dpu-panel-hs=1` if LP fails. Is TRIG_CTRL's DMA trigger software and BLOCK_DMA_WITHIN_FRAME set as ABL left it? → e0.
@@ -637,6 +738,11 @@ and the SPI 83 handler, which stays attached: ArmCpu has no detach); step 4's fa
     flushes (INTF, DSPP) come from different threads, each waiting for its own bits only; a boot where one latch drops the other's
     bits would ask for one lock over every CTL_FLUSH writer. B1b's vsync handler clears underrun bits too, so with B1b running B1c's
     underrun check may see fewer (the rate and lockstep checks stay).
+17. **Programmable fetch is on as the boot stages leave it** (installed v13.1y12k's survey, 2026-11-25: INTF_CONFIG 80800000 on INTF1
+    and INTF2; bit 31 is msm's programmable-fetch enable, `dpu_hw_intf_setup_prg_fetch`), against §4.3's "stays off" (that is what
+    Linux programs on piano: 106 lines of VSYNC+VBP exceed the 24-line worst case). So B1c's `refuse()` rejects the real path as built,
+    and every porch switch (60 and 90/144 alike) must move INTF_PROG_FETCH_START (+0x170, counted from vsync in INTF clocks) with the
+    timing: `DpuModes.h` plans it ((vtotal - lines) x htotal + 1); the snapshot reads the live start (the console cut it off).
 
 ## 11. Licence note
 

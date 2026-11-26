@@ -26,6 +26,8 @@
 
 First step of [display.md](display.md) (M2a, GOP adoption); no DPU register is written.
 
+**2026-11-26 presentation-feedback audit:** [presented-time.md](presented-time.md) traces the 27.3 Metal/CA/SkyLight/IOMFB path and the supplied y12l all-zero `presentedTime` finding. The driver publishes `0x61a9/0x8750` in ProductAttributes, but CG can synthesize another identity depending on display type; those values are not an unconditional CG contract. Software VBL and job completion do not establish actual presentation timestamps. SupportedFrameInfo and absolute latch-time propagation are missing; the specific runtime cause remains open and the fix-image gate is HOLD.
+
 ## 1. Approach and why
 
 The panel already scans a linear BGRA buffer: ABL's splash region (`0xfc800000`, 3200x2136, stride 12800, `dts/piano.dts`),
@@ -71,8 +73,11 @@ relaunched 6 times in 240 s. Without it and without a display, WindowServer laun
 | `native-gop-display=0` / `=1` | the ADT marker (1 in `configs/k27-gop-display.toml`) | 0: NativeGopDisplay leaves the nub (no display); 1: it takes it even on a node without the marker |
 | `native-gop-display-hz=N` | ADT `refresh-hz`, else 60 | rate told to WindowServer and of the VBL timer (30..240). The panel stays at ABL's 120 Hz |
 | `native-gop-display-120=1` | 0 | the fixed refresh contract (`GopRefresh.h`): the panel's own 120 Hz told through every interface WindowServer reads: the timing element at 120 (or `native-gop-display-hz`), `get_timing_attributes_gated` (27.3 slot 423; the family's answers 1/60 s whatever the mode) at one period as both minimum and maximum, the registry dictionary `IOMFBDisplayRefresh` published from it before the service registers (`setDisplayRefreshProperties`), the VBL tick on absolute deadlines. Logs `refresh contract: 120 Hz ...`; a refused publication falls back to the whole 60 Hz contract. Off: the family's slot and the relative tick, unchanged |
+| `native-gop-display-color-log=1` | 0 | B1 milestone 1 (`GopColorLog.h`): Night Shift's two 27.3 entry points, `set_matrix` (slot 309: location, nine two's-complement S31.32 words, row-major) and `setBrightnessCorrection` (slot 314, 16.16), logged as they change (first 16, then every 100th); both answered `kIOReturnUnsupported` as the family's own do, with or without the argument, so nothing changes for WindowServer |
+| `native-gop-display-shot=1` | 0 | Root-only still capture of the internal panel's scanout backing, via `machdep.native_gop_display_shot` (§9) |
+| `native-gop-display-night-shift=1` | 0 | Routes location-9 `set_matrix` (nine row-major two's-complement S31.32 words) and `setBrightnessCorrection` (unsigned 16.16) to PianoDpu on the physical panel (`piano-dpu>=1`). Enables the call log and requests PCC replay on wake and mode set. See the [M4 test plan](dpu.md#84-m4-ram-boot-read-list). |
 | `native-gop-display-mm=WxH` | ADT, else 239x163 | physical size, so the density and macOS's HiDPI ("looks like 1600x1068") modes |
-| `native-gop-display-builtin=1` | 0 | the panel's IOMFB says `external` false (a Mac's internal panel): CGDisplayIsBuiltin and System Settings then call it built-in ("Built-in Display"). Not tried on the tablet: WindowServer treats a built-in display differently (CoreBrightness, [backlight.md](backlight.md) §5), so a RAM boot with it comes first. Without it the display is the external "Xiaomi Pad 8 Pro" (its ProductAttributes: ManufacturerID `XMI`, LegacyManufacturerID 0x61a9 since 2026-11-12, so CGDisplayVendorNumber is no longer 0; the new vendor is a new display identity to WindowServer, which then starts from its default mode once) |
+| `native-gop-display-builtin=1` | 0 | the panel's IOMFB says `external` false (a Mac's internal panel): CGDisplayIsBuiltin and System Settings then call it built-in ("Built-in Display"). WindowServer treats a built-in display differently (CoreBrightness, [backlight.md](backlight.md) §5). Without it the driver publishes an external "Xiaomi Pad 8 Pro" with ProductAttributes ManufacturerID `XMI`, LegacyManufacturerID `0x61a9` and ProductID `0x8750`. These attributes do not guarantee the same CG numbers on every 27.3 display path; see [the identity trace](presented-time.md#panel-identity-driver-attributes-versus-coregraphics). The supplied y12l report does not record this boot arg or its actual CG identity. |
 | `native-gop-display-bars=1` | off | 8 colour bars until the first frame (left to right: white, yellow, cyan, green, magenta, red, blue, black) to check channel order |
 | `native-gop-display-fill=0xRRGGBB` | none | a solid colour until the first frame, to see that the mapping reaches the panel (`0x203050`, the blue-grey every boot had before 2026-11-12). Without it: a verbose boot's framebuffer is left to the boot console, any other is cleared to black (§5b). Under `-v` the colour stays around the text, crossed by lines (§5b) |
 | `native-gop-display-refresh=0\|1\|2` | 1 | the refresh copies of the frame on screen on ticks 1, 2, 4, 8, 16 and 30 after a swap (for a GPU that finishes after the swap): 0 none; 1 all six after a frame no GPU fence covered (no PianoA830, or the wait gave up), only the last (tick 30) after one it did; 2 all six after every frame (the default before 2026-11-12) |
@@ -85,19 +90,17 @@ relaunched 6 times in 240 s. Without it and without a display, WindowServer laun
 | `native-gop-display-damage-full=S` | 10 | §5c: with damage copies, the whole panel is composed again when S seconds passed since the last whole composition and a frame comes (0: never, 1..3600) |
 | `native-gop-display-thumb=N` | 30 | a thumbnail of the frame on the panel (see §5) on the first frame and then every N s; 0: none |
 | `native-gop-display-copy=BITS` | 0 | the copy's cost (§6 risk 3): bit 0 skips the refresh copies of a frame whose copy waited for the GPU's fence and saw it retired (the last one, tick 30, still runs): since 2026-11-12 that is the default (`native-gop-display-refresh=1`), and bit 0 turns `=2` back into it; bit 1 maps surfaces cacheable and cleans/invalidates by VA exactly the rows (or row spans) each job reads, after its fence wait. Bit 1 not run on the tablet yet; the periodic `copy mode ...` line says what it cost |
-| `native-gop-display-copy-ab=1` | 0 | (2026-11-14, `docs/boot-time.md` §10) the one-boot A/B of bit 1: surface reads uncached and cached by turns, one report period (~10 s) each, switched on the copy thread before a job (its surface maps let go, so the next jobs map them the new way); each period's `copy A/B: uncached N copies, read mean X us, copy mean Y us; cached ...` line counts every whole-frame copy by the mode it really used. Starts uncached (or as `native-gop-display-copy` says) |
+| `native-gop-display-copy-ab=1` | 0 | (2026-11-14, `docs/boot-time.md` §11) the one-boot A/B of bit 1: surface reads uncached and cached by turns, one report period (~10 s) each, switched on the copy thread before a job (its surface maps let go, so the next jobs map them the new way); each period's `copy A/B: uncached N copies, read mean X us, copy mean Y us; cached ...` line counts every whole-frame copy by the mode it really used. Starts uncached (or as `native-gop-display-copy` says) |
 | `piano-backlight=2` | off | (PianoBacklight's argument) each display power change is also handed to PianoBacklight ([backlight.md](backlight.md)) |
 | `piano-dpu-pcc=1\|2` | off | (PianoDpu's, [dpu.md](dpu.md) §4.4) `swap_set_color_matrix` and `set_gamma_table` log each new matrix / table (raw words: B1d-0) and hand it to PianoDpu's PCC; without it both stay stubs |
-| `piano-dpu-panel=1` | off | (PianoDpu's, §4.5) each display power change also goes to PianoDpu (`PianoDpuPanel`: the panel's light sleep), after the backlight's request |
+| `piano-dpu-panel=1` | off | The copy worker drains the active job before M5a panel sleep, holds queued swaps and waits for PianoDpu before unblanking. See [DPU §4.5](dpu.md). |
 | `piano-dpu-refresh=auto` | off | (PianoDpu's, §4.3) each frame shown is reported to PianoDpu (`PianoDpuSwap`: its 60/120 Hz policy) |
 | `piano-dp=1` + `piano-dp-fake=S` / `piano-dp-fake-boot=1` | off | (PianoDp's D6, [displayport.md](displayport.md) §8.1) the nub reports 2 display ports and a second instance (`NativeGopDisplayExternal`, lines `NativeGopDisplay-ext:`) with a RAM surface, hot-plugged S s after its start (or connected from it); `-unplug`, `-cycles`, `-mode`, `-mm`, `-primary` shape it. No hardware, no `piano-display-power` of its own; the panel's instance is unchanged. Drivers that find this display by class may find the second one: D6 runs without them |
 
-**The display power for other drivers** (2026-11-11, `docs/policy.md` §5.6; built and linked, not run): every power change call
-publishes `piano-display-power` (boolean: on while both the system and WindowServer want the display on), whatever the boot
-arguments, and a change of it sends `kIOMessageServicePropertyChange` (argument: the property's name) to the service's interested
-clients (PianoPolicy, PianoKeyboard's `piano-keyboard-blank=1`). Before WindowServer's first call the property is absent, as before.
-Nothing else changed: the backlight callout still needs `piano-backlight=2`, the DPU's `piano-dpu-panel=1`. The clients' handlers
-run inside the framebuffer's gated power change, so they only record it (none may call back into this service there).
+**The display power for other drivers.** The work loop publishes `piano-display-power` and sends `kIOMessageServicePropertyChange`
+with the property name when it changes. PianoPolicy and PianoKeyboard's `piano-keyboard-blank=1` consume this message. With
+`piano-dpu-panel=1`, publishing on waits for the panel wake to finish. The backlight callout requires `piano-backlight=2`.
+Clients record the property change while running under the framebuffer's work-loop gate.
 Since 2026-11-12 the panel's instance also publishes `piano-display-power-messages` = true at its start, before it registers: the
 capability its readers check (PianoPolicy listens to the messages and drops its 5 s display tick when it is there; an older
 NativeGopDisplay without it is polled as before, `docs/policy.md` §4). D6's second instance publishes neither property.
@@ -560,3 +563,90 @@ the service. Allocation or publication failure fails hardware start. This matche
 desktop plane plus the existing cursor handling. Cursor capability properties remain unchanged. Ordinary desktop/video detachment
 must not move the composed frame to layer 1 or YUV video to ignored layer 2. Explicit forced-detach requests and capture results
 remain qualification questions; the property is not a new multi-plane renderer. Startup IOLog identifies `gpuoom-plane1`.
+
+## 9. Native still capture for the Showcase
+
+`native-gop-display-shot=1` registers `machdep.native_gop_display_shot` once the internal display starts. Only effective UID 0
+can read it. It is read-only and absent by default. The CLI reads the driver's scanout backing directly, so the path requires no
+Screen Recording grant or changes to TCC or SIP.
+
+The DPU records the address and stride once the hardware latches a flip. Under the flip lock, the readout takes a reference to
+that window's IOSurface, prepared descriptor and any CPU alias as a unit. It drops the lock before copying, releases the
+reference on return and checks for a presentation race. With the boot framebuffer selected, NativeGopDisplay reads its existing
+GOP mapping. No readable backing gives `ENXIO`. A changing scanout gives `EBUSY` and the CLI retries a bounded number of times.
+The binary sysctl reply is a version 1 header followed by 3200×2136 pixels. The header carries the FourCC of the pinned
+IOSurface for a flip and `BGRA` for the GOP fallback. Copyout uses at most 64 KiB at a time and skips any row padding.
+Capture reads the backing pixels before the DPU's colour-processing stages.
+
+The Showcase uses `gop-shot` with its default format detection. `BGRA` and the linear plane 0 of `&BGA` both decode as
+8-bit BGRA. CoreVideo's `CVPixelBuffer.h` defines `&BGA` as lossless 32BGRA, and the DPU flip path scans its plane 0 as
+linear BGRA. Previous version 1 replies use the same FourCCs and decode with the updated CLI.
+
+The CLI also accepts `l10r` (full-range little-endian ARGB2101010). It takes B from bits 0–9, G from 10–19 and R from
+20–29, and rounds each code to 8 bits. The current DPU flip path admits only linear BGRA, so it produces `BGRA` and `&BGA`
+replies. Both decoders write opaque sRGB PNGs. For diagnostics, pass `--bga8` or `--10bit` to the CLI or wrapper to override
+the decoder while retaining the reported source FourCC. The CLI rejects unsupported FourCCs and malformed replies.
+
+| Reference path | Native path | Comparison |
+|---|---|---|
+| Ubuntu v1.4.0 `device/boot/README.md:27` and Linux `arch/arm64/boot/dts/qcom/sm8750-xiaomi-piano.dts:91`, firmware `simple-framebuffer` | `NativeGopDisplay.cpp`, `readFramebuffer` and `shotRead` | Same firmware backing and 8-bit B, G, R bytes. The fourth byte is ignored in the still. |
+| Linux `drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c:60` and `include/uapi/drm/drm_fourcc.h:180`, `ARGB8888` and `XRGB2101010` | `DpuFlip.h`, `checkSurface` and `flushTo`, and `DpuFlip.cpp`, `scanoutRead` | Linux KMS supports distinct format IDs. Native flip uses the existing BGRA pipe and reads back the pinned IOSurface at its latched SMMU address. |
+| Android display `formats.json:420`, `RGBA_1010102` | `tooling/native/gop-shot/Pixels.h`, `gop_shot_rgbx` | Android's RGBA entry puts red in the low bits. CoreVideo's `l10r` puts blue there. |
+
+### Build and capture
+
+```sh
+make -C tooling/native/gop-shot all test
+tooling/native/gop-shot/capture-ssh.sh /path/to/gop-shot /path/to/tablet-still.png /path/to/mac-still.png
+```
+
+Stage `out/gop-shot/gop-shot` as an executable on the tablet using the RAM harness. Direct invocation on the tablet is
+`sudo /path/to/gop-shot /path/to/tablet-still.png`. The Mac wrapper uses the harness's `/tmp/tsudo --raw`
+(`GOP_SHOT_TSUDO` can name a different harness installation), then fetches and verifies the file with
+`tooling/persist/fetch-chunks.py`. Choose fresh output paths in private directories on both systems. The files have mode
+`0600`, and both programs refuse to overwrite an existing destination. The wrapper leaves the requested tablet PNG in
+place. Capture output reports the source and layout. Transfer output reports sizes and digests.
+
+### RAM-boot read list
+
+1. Use a volatile Data boot with the regular DPU flip profile and add `native-gop-display-shot=1`,
+   `native-gop-display-flip-lossless=1`, `native-gop-display-cursor=0` and `native-gop-display-thumb=0`. Confirm
+   `piano-dpu=2 piano-dpu-flip=4` and a `PianoDpu` latch on the internal panel. On a control boot with the switch absent,
+   root should receive the CLI's “shot sysctl absent” error. On the enabled boot the unprivileged CLI should report
+   “root required”. Both refusals should leave the requested path absent.
+2. After the graphical session settles, show this local test page in browser fullscreen at 100% zoom with neutral SDR settings.
+   Keep the page still and wait for fullscreen controls to disappear.
+
+   ```html
+   <!doctype html>
+   <meta name="color-scheme" content="light">
+   <style>
+   body { margin: 0; display: grid; width: 100vw; height: 100vh;
+          grid-template: 1fr 1fr / 1fr 1fr; }
+   </style>
+   <div style="background:#e02030"></div><div style="background:#2060e0"></div>
+   <div style="background:#10c040"></div><div style="background:#808080"></div>
+   ```
+
+3. Capture one still through the wrapper with no layout flag. Require `source=flip format=&BGA layout=8-bit` and all three
+   transport digests to match.
+   On the Mac, compare the four quadrant centers in the fetched PNG against the sRGB values. This example uses Pillow.
+
+   ```sh
+   python3 - /path/to/mac-still.png <<'PY'
+   from PIL import Image
+   import sys
+
+   with Image.open(sys.argv[1]) as png:
+       assert png.format == "PNG" and png.size == (3200, 2136)
+       rgb = png.convert("RGB")
+       for point, expected in {
+           (800, 534): (224, 32, 48), (2400, 534): (32, 96, 224),
+           (800, 1602): (16, 192, 64), (2400, 1602): (128, 128, 128),
+       }.items():
+           assert all(abs(a - b) <= 2 for a, b in zip(rgb.getpixel(point), expected)), point
+   print("known still matches all four expected pixels")
+   PY
+   ```
+
+   Record the reported format and layout alongside the four-color check. The Showcase uses the same default invocation.

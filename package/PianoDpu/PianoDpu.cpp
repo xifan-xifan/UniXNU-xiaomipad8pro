@@ -37,6 +37,7 @@
 #include "DpuSurvey.h"
 #include "DpuAhbVote.h"
 #include "DpuFlipKernel.h"
+#include "PianoDpuFlipClient.h"
 
 using namespace pianodpu;
 
@@ -44,6 +45,7 @@ using namespace pianodpu;
 bool dpuSlicesWanted();
 void dpuSlicesStart(IOService *dpu);
 bool dpuSlicesPlatformFunction(const OSSymbol *name, void *p1, void *p2, void *p3, IOReturn *result);
+void dpuSnapshotStart(uint32_t level, uint32_t ahbVote);   // DpuSnapshot.cpp: machdep.piano_dpu_snapshot with piano-dpu-snapshot=1
 
 extern "C" {
 // Post-mortem breadcrumb (also in the console log): the last stage reached, negative when it failed there.
@@ -587,7 +589,6 @@ bool PianoDpu::start(IOService *provider)
          gArgs.level >= 2 ? "; then B1b (piano-dpu=2): the flips of piano-dpu-flip" : "");
   else note("level 1: loads only, nothing written%s", gArgs.level >= 2 ? "; then B1b (piano-dpu=2): the flips of piano-dpu-flip" : "");
   setProperty("piano-dpu", gArgs.level, 32);
-  if (gArgs.level >= 2) registerService();   // NativeGopDisplay finds the flip function by this class
   thread_t t = nullptr;
   if (kernel_thread_start(&PianoDpu::thread, this, &t) != KERN_SUCCESS) {
     stage(-1, "no thread");
@@ -595,13 +596,17 @@ bool PianoDpu::start(IOService *provider)
   }
   thread_deallocate(t);
   dpuSlicesStart(this);
+  if (gArgs.level >= 2) registerService();   // publish after the slice callouts can accept requests
+  dpuSnapshotStart(gArgs.level, gArgs.ahbVote);
   return true;
 }
 
 IOReturn PianoDpu::callPlatformFunction(const OSSymbol *name, bool wait, void *p1, void *p2, void *p3, void *p4)
 {
   IOReturn result = kIOReturnUnsupported;
-  if (flipFunction(name, p1, &result)) return result;
+  if (flipFunction(name, p1, p2, &result)) return result;
+  if (name && name->isEqualTo(kPianoDpuScanoutFunction))
+    return scanoutRead(static_cast<PianoDpuScanoutRequest *>(p1));
   if (dpuSlicesPlatformFunction(name, p1, p2, p3, &result)) return result;
   return IOService::callPlatformFunction(name, wait, p1, p2, p3, p4);
 }

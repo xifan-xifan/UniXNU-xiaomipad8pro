@@ -423,3 +423,26 @@ would race). N5 `hostFlushPhys` relies on `dcache_incoherent_io_flush64` cleanin
 its disassembly: physical aperture or a CPU window per page, `FlushPoC_DcacheRegion`; `remaining` 0 never takes the set/way path).
 N6 perf accounting: a second's `max` depth starts from the depth in flight at the drain; direct reads count one iolog "read" per
 1 MiB piece, the bounce path one per copy.
+
+## 14. Device state and WriteBooster (`native-ufs-wb=1`, 2026-11-25)
+
+Every boot now logs, once after the bring-up and before any window is published (single-threaded, query requests on slot 0
+as the power-mode query of the bring-up; `RootDevice.h`):
+
+```
+NativeUfs: ufs-state: power 11 icc <bActiveICCLevel> wb <fWriteBoosterEn> wb-flush <0x0F> wb-flush-h8 <0x10> wb-avail <0x1D> wb-size <0x1F> wb-life <0x1E> wb-flush-status <0x1C> bkops <0x05> (ffffffff: not read; failed reads <mask>); native-ufs-wb absent: WriteBooster flags left as the boot firmware set them
+NativeUfs: ufs-clocks: axi cmd .. cfg .. (~N MHz) ice ... unipro ...     (GCC CMD/CFG_RCGR, read only; Linux's OPPs are 100 and 403 MHz)
+NativeUfs: perf link: tx gear 5 lanes 2 of 2, rx gear 5 lanes 2 of 2, pwrmode 11 ...                    (before: native-ufs-perf=1 only)
+```
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `native-ufs-wb=1` | absent | SET FLAG fWriteBoosterEn (0x0E), fWBBufferFlushDuringHibernate (0x10), fWriteBoosterBufferFlushEn (0x0F), index 0 (shared buffer), each only when it reads 0, then read back; the line ends `native-ufs-wb=1: wb 0->1 wb-flush-h8 0->1 wb-flush 0->1, 3 sets, 0 failed` |
+
+Reference (behaviour): Linux `ufshcd_configure_wb()` from `ufshcd_probe_hba()` on every probe and reset (ufs-qcom sets
+`UFSHCD_CAP_WB_EN`), same order. Android on this unit runs with all three flags on and a 100 % buffer
+(`private/host-checks/20261120-android-ref` root capture). A refused query (nonzero response code) is recorded and the boot goes
+on; a malformed answer quarantines the transport as any command does, after which nothing more is asked. Host tests:
+`package/NativeUfs/tests/RootDevice.cpp`. Analysis and measurement plan: `private/host-checks/20261125-disk-speed/ANALYSIS.md`.
+`machdep.piano_data_io` also reports the Data store's device commands since boot: `store_rd=OPS/USus store_wr=... store_sync=...
+store_max=USus` (NativeUfs's per-call time, without NativeRamBlock's gate and stage wait above it).

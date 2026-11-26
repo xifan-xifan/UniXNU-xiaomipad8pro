@@ -142,6 +142,58 @@ static void windows64()
     CHECK(total==0xE0000000ull+(4ull<<30)+54*(1ull<<30)+(1536ull<<20)-8192);
 }
 
+/* 2026-11-25 (gpu/slots2): the 256 GiB aperture's table (pagani-gpu-va=256, paged mode): all 64 slots have a window. Slots 0-3 as in the
+ * 64 GiB table, 59 ordinary 4 GiB windows on 4 GiB lines from 8 GiB (slot 62 ends at 244 GiB), the decoder's 1.5 GiB at the top below
+ * the 8 KiB guard; every window inside one 4 GiB block, every address attributed; the per-object limit 1 GiB but in slot 0; the slot
+ * choice: 57 apps in ordinary windows (2 kept), then two large ones borrowed; the decoder its own (slot 63). */
+static void windows256()
+{
+    const NativeAdrenoClientWindow *w=NativeAdrenoClientWindowsFor(0x20000000ull+0x3FE0000000ull);
+    CHECK(w==NativeAdrenoClientWindows256G && NativeAdrenoClientWindowsFor(0x1000000000ull)==NativeAdrenoClientWindows64G &&
+          NativeAdrenoClientWindowsFor(0x1000001000ull)==NativeAdrenoClientWindows256G);
+    CHECK(NativeAdrenoClientWindowsValid(w,0x20000000ull,0x3FFFFFE000ull) && !NativeAdrenoClientWindowsValid(w,0x20000000ull,0x3FFFFFD000ull));
+    CHECK(NativeAdrenoClientWindowsEnd(w)==0x3FFFFFE000ull && NativeAdrenoClientWindowsEnd(w)<=(UINT64_C(1)<<38) &&
+          NativeAdrenoClientWindowsEnd(w)>(UINT64_C(1)<<37) && NativeAdrenoClientWindowsStayBelowLines(w) &&
+          NativeAdrenoClientWindowCount(w)==64);
+    for(unsigned s=0;s<=NativeAdrenoLargeSlots;++s)
+        CHECK(w[s].start==NativeAdrenoClientWindows64G[s].start && w[s].bytes==NativeAdrenoClientWindows64G[s].bytes);
+    for(unsigned s=NativeAdrenoLargeSlots+1;s<NativeAdrenoDecoderSlot256G;++s)
+        CHECK(w[s].start==0x200000000ull+uint64_t(s-4)*(4ull<<30) && w[s].bytes==4ull<<30 && !(w[s].start&((4ull<<30)-1)));
+    CHECK(w[62].start==0x3C00000000ull && w[62].start+w[62].bytes==0x3D00000000ull);
+    CHECK(NativeAdrenoDecoderSlot256G==63 && w[63].start==0x3FA0000000ull && w[63].bytes==(1536ull<<20)-8192);
+    for(unsigned s=0;s<NativeAdrenoMaxClients;++s)
+        CHECK(NativeAdrenoClientSlotAt(w,w[s].start)==s && NativeAdrenoClientSlotAt(w,w[s].start+w[s].bytes-1)==s &&
+              (!s || w[s].start>=w[s-1].start+w[s-1].bytes));
+    CHECK(NativeAdrenoClientSlotAt(w,0x1FFFF000)==NativeAdrenoMaxClients && NativeAdrenoClientSlotAt(w,0x3D00000000ull)==NativeAdrenoMaxClients &&
+          NativeAdrenoClientSlotAt(w,0x3FFFFFE000ull)==NativeAdrenoMaxClients && NativeAdrenoClientSlotAt(w,0x4000000000ull)==NativeAdrenoMaxClients);
+    /* The per-object limit: 1 GiB in every slot but the render server's (whose window's 3.5 GiB stays its limit); none on the other tables. */
+    CHECK(!NativeAdrenoClientObjectLimit(w,0) && NativeAdrenoClientObjectLimit(w,NativeAdrenoMaxClients)==0);
+    for(unsigned s=1;s<NativeAdrenoMaxClients;++s)CHECK(NativeAdrenoClientObjectLimit(w,s)==1ull<<30);
+    for(unsigned s=0;s<NativeAdrenoMaxClients;++s)
+        CHECK(!NativeAdrenoClientObjectLimit(NativeAdrenoClientWindows64G,s) && !NativeAdrenoClientObjectLimit(NativeAdrenoClientWindows16G,s));
+    CHECK(NativeAdrenoIsDecoderSlot(w,NativeAdrenoDecoderSlot256G) && !NativeAdrenoIsDecoderSlot(w,NativeAdrenoDecoderSlot64G) &&
+          !NativeAdrenoIsDecoderSlot(NativeAdrenoClientWindows64G,NativeAdrenoDecoderSlot256G) && NativeAdrenoListedSmallKeep(w)==2);
+    bool taken[NativeAdrenoMaxClients]={};
+    CHECK(NativeAdrenoClientSlotFor(true,false,true,w,taken)==0 && NativeAdrenoClientSlotFor(false,true,true,w,taken)==1 &&
+          NativeAdrenoClientSlotFor(false,false,false,w,taken,true)==NativeAdrenoDecoderSlot256G &&
+          NativeAdrenoClientSlotFor(false,false,false,w,taken)==4 && NativeAdrenoClientSlotFor(false,false,true,w,taken)==4);
+    taken[0]=taken[1]=taken[NativeAdrenoDecoderSlot256G]=true;   /* WindowServer, iconservicesagent, the decoder */
+    unsigned count=0,last=0;
+    for(unsigned s;(s=NativeAdrenoClientSlotFor(false,false,false,w,taken))<NativeAdrenoMaxClients;taken[s]=true) {
+        CHECK(s!=NativeAdrenoDecoderSlot256G && s);
+        ++count;last=s;
+    }
+    CHECK(count==57+1 && last==2 && NativeAdrenoClientSmallFree(w,taken)==2 && !taken[3]);   /* 57 ordinary, large 2; 3 kept */
+    CHECK(NativeAdrenoClientSlotFor(false,false,false,w,taken,true)==NativeAdrenoMaxClients);
+    CHECK(NativeAdrenoClientSlotFor(false,true,true,w,taken)==3);
+    count=0;
+    for(unsigned s;(s=NativeAdrenoClientSlotFor(false,false,true,w,taken))<NativeAdrenoMaxClients;taken[s]=true)++count;
+    CHECK(count==3 && !NativeAdrenoClientSmallFree(w,taken));
+    uint64_t total=0;
+    for(unsigned s=0;s<NativeAdrenoMaxClients;++s)total+=w[s].bytes;
+    CHECK(total==0xE0000000ull+(4ull<<30)+59*(4ull<<30)+(1536ull<<20)-8192);
+}
+
 static void refusalLines()
 {
     char line[NativeAdrenoMapLineBytes];
@@ -304,7 +356,7 @@ static void submitLines()
 int main()
 {
 #ifdef ADRENO830_MACOS
-    failureSnapshots();windows();windows64();
+    failureSnapshots();windows();windows64();windows256();
     refusalLines();
     submitLines();
     allocLines();
@@ -313,6 +365,7 @@ int main()
     eventCounts();
     std::printf("PASS: macOS GPU address space: the 16 GiB windows (3.5 GiB render server, 768 MiB large, 320 MiB small, none across 4 GiB), "
                 "the 64 GiB windows (59 of 64 slots: 54 ordinary 1 GiB, large 2/1/1 GiB, apps borrow large but the last), "
+                "the 256 GiB windows (64 slots: 59 ordinary 4 GiB on 4 GiB lines, 1 GiB per-object limit but slot 0, the decoder's 63), "
                 "BoMap, BoAlloc, BoImport and Submit refusal lines for every reason within the ring's line, the address-space totals and "
                 "per-connection lines, the objects by size, failure counts per process (%u checks)\n",checks);
 #else

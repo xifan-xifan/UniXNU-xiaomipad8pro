@@ -396,8 +396,9 @@ def add_bluetooth_runtime(plan):
                          'scripts/piano-bluetooth-start': '/usr/local/libexec/piano-bluetooth-start',
                          'launchd/com.unixnu.piano-bluetooth-path1.plist':
                          '/Library/LaunchDaemons/com.unixnu.piano-bluetooth-path1.plist'})
+    # pinned: its job file is staged byte for byte as the runtime's report records it (no BTM_LAUNCHER rewrite)
     unit = {'name': 'piano-bluetooth-path1', 'about': 'opt-in piano-bt=5 POSIX controller runtime',
-            'on': True, 'default_on': True, 'planned': False, 'files': []}
+            'on': True, 'default_on': True, 'planned': False, 'pinned': True, 'files': []}
     problems = []
     existing = {f['dest'] for u in plan['units'] for f in u['files']}
     for name, dest in destinations.items():
@@ -444,6 +445,33 @@ def check_jobs(plan, built):
         f['label'] = label or '-'
     if problems:
         raise SystemExit('launchd jobs:\n  ' + '\n  '.join(problems))
+
+
+# BTM_LAUNCHER: the first words of a job whose program is one of the manifest's own files (docs/userland.md section 3a).
+BTM_LAUNCHER = ['/bin/sh', '-c', 'exec "$0" "$@"']
+
+
+def plan_unit_pinned(plan, f):
+    """True for a file of a pinned unit (the Bluetooth runtime: staged exactly as its build report records)."""
+    return any(u.get('pinned') for u in plan['units'] if u['name'] == f['unit'])
+
+
+def btm_stable(job, dests):
+    """A job whose program the manifest installs is started through BTM_LAUNCHER instead (in place, True when changed).
+
+    Background Task Management (backgroundtaskmanagementd, macOS 13+) keeps one record per legacy launchd job with the plist's
+    sha256 and modification date and the executable's path and modification date (Program, or ProgramArguments[0]). When either
+    file changes, it logs "registerLaunchItem: plist or executable is modified", replaces the record "not notified" and shows
+    "Background Items Added" again. Our programs are rebuilt and replaced by every layer update, so every update re-announced
+    every changed job. With /bin/sh (on the sealed system volume) as the executable, only a change of the job file itself
+    announces the job again. `exec "$0" "$@"` replaces the shell with the program: the same pid, argv and exit status as before."""
+    argv = list(job.get('ProgramArguments') or [])
+    program = job.get('Program') or (argv[0] if argv else None)
+    if not isinstance(program, str) or program not in dests:
+        return False
+    job.pop('Program', None)
+    job['ProgramArguments'] = BTM_LAUNCHER + [program] + argv[1:]
+    return True
 
 
 # ---- building ----------------------------------------------------------------------------------------------------------------
@@ -530,12 +558,17 @@ def build_all(plan, build_dir):
             f['cdhash'] = cdhash if f['trust'] else None
             built.append((f, data))
     check_jobs(plan, built)
+    dests = {f['dest'] for u in plan['units'] if not u['planned'] for f in u['files']}
     out = []
     for f, data in built:
-        if f['kind'] != 'file' and not f['on']:
+        if f['kind'] != 'file':
             job = plistlib.loads(data)
-            job['Disabled'] = True   # off in this profile: launchd loads it only once the owner says launchctl enable
-            data = plistlib.dumps(job, fmt=plistlib.FMT_XML)
+            changed = not plan_unit_pinned(plan, f) and btm_stable(job, dests)
+            if not f['on']:
+                job['Disabled'] = True   # off in this profile: launchd loads it only once the owner says launchctl enable
+                changed = True
+            if changed:
+                data = plistlib.dumps(job, fmt=plistlib.FMT_XML)
         f['sha256'] = sha(data)
         out.append((f, data))
     return out
@@ -642,6 +675,174 @@ def seed_gpu_files(mount, staging, built):
         sh(['xattr', '-c', str(target)], timeout=60, check=False)
         installed.append(f['dest'])
     return installed
+
+
+# gpu/safari1 (2026-11-24, private/host-checks/20261124-browser-gpu/ANALYSIS.md section 10): PIANO_GPU_ADDON=copy|move (seed mode
+# only) puts a clone of the seed's own Metal plugin, /Library/GPUBundles/<PIANO_GPU_ADDON_NAME, default NativeAdrenoMetal>.bundle, at
+# /private/var/ngpu/addons/<name>.bundle before launchd. With boot-arg sheng-gpu-addon=1 the k27 kernel mounts that directory read-only
+# as a bindfs union view over /System/Library/Extensions after the Data mount (kern_exec.c native_gpu_addon_prepare, patches 0002/0038/
+# 0039): the one plugin directory WebKit's GPU process may map executable (GPUProcess.sb `file-map-executable (subpath
+# "/System/Library/Extensions")`; /Library/GPUBundles has no such rule). copy keeps the /Library/GPUBundles copy, which is searched
+# first (libsystem_sandbox GPU_BUNDLE_SEARCH_PATHS), so a test hides it at run time on the volatile Data for an A/B in one boot; move
+# removes it from the seed, so every process, WindowServer included, loads the view. The bytes are the seed's own (clones): their
+# Mach-Os' CDHashes must already be in the output trust cache, else the copy is refused. Nothing else changes; unset, nothing happens.
+GPU_ADDONS = '/private/var/ngpu/addons'
+# LT-B3 (ANALYSIS.md section 11): PIANO_GPU_ADDON_PLACE=app puts the bundle's real files in /private/var/ngpu/app-library/Frameworks/,
+# which kernel patch 0074 shows as a union view over the App cryptex's System/Library, and makes the /S/L/E view's entry an absolute
+# symlink to /System/Volumes/Preboot/Cryptexes/App/System/Library/Frameworks/<name>.bundle. Chrome's GPU sandbox maps code only from
+# cryptex paths and matches a symlink's real path. Needs a 0074 kernel: without the view the symlink dangles (no Metal device).
+GPU_APP_LIBRARY = '/private/var/ngpu/app-library'
+GPU_APP_POINT = '/System/Volumes/Preboot/Cryptexes/App/System/Library'
+# Frameworks, not Extensions (cryptex1-qual1, 11-25 10:5x: under App/System/Library/Extensions Safari's GPU process lost WebGPU): the one
+# App-cryptex directory both sandboxes map code from: Chrome common.sb (subpath Preboot/Cryptexes/App/System), WebKit GPUProcess.sb
+# (subpath Preboot/Cryptexes/App/System/Library/Frameworks).
+GPU_APP_DIR = 'Frameworks'
+GPU_ADDON_NAME = re.compile(r'[A-Za-z0-9_-]+')
+
+
+# LT-B3 (gpu/cryptex2, private/host-checks/20261124-browser-gpu/ANALYSIS.md section 14): the INSTALLED layer's app2 layout, the one
+# cryptex1-ctl3 qualified (seed mode PIANO_GPU_ADDON_PLACE=app2 with the /Library/GPUBundles copy gone): the whole bundle real under
+# kernel 0074's view source (GPU_APP_LIBRARY/GPU_APP_DIR, shown at GPU_APP_POINT/GPU_APP_DIR), and in the /S/L/E view's source
+# (GPU_ADDONS) the same bundle with its Info.plist real (what Metal's discovery and CFBundle read) and every Mach-O a link (install.sh
+# kind link) to that file's App-cryptex path (what dyld maps: both browsers' GPU sandboxes allow file-map-executable there, judged on the
+# view's mount path). Needs a 0074 kernel and sheng-gpu-addon=1: without the App view the links dangle (no Metal device).
+GPU_LINK_DIR = 'links'
+
+
+def gpu_app2_layer(unit, name, files):
+    """FILES: [(path inside the bundle, bytes)] of the plugin bundle NAME (Contents/Info.plist, Contents/MacOS/<file>, ...). Returns the
+    rows [(f, data)] for staging_tree: first every file real at GPU_APP_LIBRARY/GPU_APP_DIR/<name>.bundle/<path> (staged
+    files/<unit>/<path>, root:wheel, 0755 for a Mach-O, 0644 otherwise), then at GPU_ADDONS/<name>.bundle/<path> the same staged file
+    for a non-Mach-O and, for a Mach-O, a link to GPU_APP_POINT/GPU_APP_DIR/<name>.bundle/<path> (kind link, staged
+    files/<unit>/links/<path> holding the target, its sha256 the target's)."""
+    if not GPU_ADDON_NAME.fullmatch(name):
+        raise SystemExit(f'gpu_app2_layer: bundle name {name!r}')
+    real, links = [], []
+    for inside, data in sorted(files):
+        if not re.fullmatch(r'Contents/(?:Info\.plist|(?:MacOS|Resources)/[A-Za-z0-9_+-][A-Za-z0-9._+-]*)', inside):
+            raise SystemExit(f'gpu_app2_layer: {inside} is not a plugin bundle file')
+        macho = data[:4] == b'\xcf\xfa\xed\xfe'
+        staged = f'files/{unit}/{inside}'
+        mode = '0755' if macho else '0644'
+        row = {'unit': unit, 'name': inside.rsplit('/', 1)[1], 'owner': 'root:wheel', 'on': True, 'label': '-'}
+        real.append(({**row, 'kind': 'file', 'mode': mode, 'staged': staged, 'sha256': sha(data),
+                      'dest': f'{GPU_APP_LIBRARY}/{GPU_APP_DIR}/{name}.bundle/{inside}'}, data))
+        if macho:
+            target = f'{GPU_APP_POINT}/{GPU_APP_DIR}/{name}.bundle/{inside}'.encode()
+            links.append(({**row, 'kind': 'link', 'mode': '0755', 'staged': f'files/{unit}/{GPU_LINK_DIR}/{inside}',
+                           'sha256': sha(target), 'dest': f'{GPU_ADDONS}/{name}.bundle/{inside}'}, target))
+        else:
+            links.append(({**row, 'kind': 'file', 'mode': mode, 'staged': staged, 'sha256': sha(data),
+                           'dest': f'{GPU_ADDONS}/{name}.bundle/{inside}'}, data))
+    if not any(f['kind'] == 'link' for f, _ in links):
+        raise SystemExit(f'gpu_app2_layer: {name}.bundle has no Mach-O')
+    return real + links
+
+
+def gpu_addon_request():
+    """(mode, name) from PIANO_GPU_ADDON / PIANO_GPU_ADDON_NAME; mode None when unset."""
+    mode = os.environ.get('PIANO_GPU_ADDON', '')
+    name = os.environ.get('PIANO_GPU_ADDON_NAME', 'NativeAdrenoMetal')
+    if not mode:
+        return None, name
+    if mode not in ('copy', 'move'):
+        raise SystemExit(f'PIANO_GPU_ADDON={mode!r}: copy or move')
+    if os.environ.get('PIANO_GPU_ADDON_PLACE', 'sle') not in ('sle', 'app', 'app2', 'view3'):
+        raise SystemExit('PIANO_GPU_ADDON_PLACE: sle, app, app2 or view3')
+    if not GPU_ADDON_NAME.fullmatch(name):
+        raise SystemExit(f'PIANO_GPU_ADDON_NAME={name!r}: letters, digits, _ and - only')
+    return mode, name
+
+
+def seed_gpu_addon(mount, mode, name, trust, built):
+    """The PIANO_GPU_ADDON step on the mounted seed (after seed_gpu_files, so a staged --gpu-bundle is what gets copied). Returns the
+    record: mode, name, every file with its sha256 (and CDHash for a Mach-O), and whether the /Library/GPUBundles copy stays."""
+    place = os.environ.get('PIANO_GPU_ADDON_PLACE', 'sle')
+    source = mount / GPU_BUNDLES.lstrip('/') / f'{name}.bundle'
+    link = mount / GPU_ADDONS.lstrip('/') / f'{name}.bundle'
+    target = mount / GPU_APP_LIBRARY.lstrip('/') / GPU_APP_DIR / f'{name}.bundle' if place in ('app', 'app2') else link
+    if not (source / 'Contents/Info.plist').is_file():
+        raise SystemExit(f'PIANO_GPU_ADDON: the seed has no {GPU_BUNDLES}/{name}.bundle (Contents/Info.plist)')
+    reinstalled = [f['dest'] for f, _ in built if f['dest'].startswith(f'{GPU_BUNDLES}/{name}.bundle/')]
+    if mode == 'move' and reinstalled:
+        raise SystemExit(f'PIANO_GPU_ADDON=move: the boot installer would put {GPU_BUNDLES}/{name}.bundle back ({reinstalled[0]}); '
+                         'use copy, or stage the plugin without --gpu-bundle')
+    have = common.trust_hashes(trust)
+    files = []
+    for path in sorted(p for p in source.rglob('*') if p.is_file()):
+        cd = soft_metal().cdhash(path)
+        if cd is not None and bytes(cd) not in have:
+            raise SystemExit(f'PIANO_GPU_ADDON: {path.relative_to(mount)} has CDHash {bytes(cd).hex()}, not in the trust cache')
+        files.append({'path': path.relative_to(source).as_posix(), 'sha256': common.sha(path),
+                      'cdhash': bytes(cd).hex() if cd is not None else None})
+    for old in {target, link}:
+        if old.is_symlink():
+            old.unlink()
+        elif old.exists():
+            shutil.rmtree(old)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    for directory in (target.parent.parent, target.parent):
+        os.chmod(directory, 0o755)
+    if place in ('app', 'app2'):
+        link.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(link.parent, 0o755)
+    sh(['cp', '-cR', str(source), str(target)], timeout=120, check=True)
+    # the seed's com.apple.macl tag stays with the original; this macOS puts its com.apple.provenance tag back on what it writes
+    # (the recipe seed's plugin carries it too)
+    sh(['xattr', '-cr', str(target)], timeout=60, check=False)
+    for path in [target, *target.rglob('*')]:
+        if path.is_dir():
+            os.chmod(path, 0o755)
+    for f in files:
+        if common.sha(target / f['path']) != f['sha256']:
+            raise SystemExit(f'PIANO_GPU_ADDON: {GPU_ADDONS}/{name}.bundle/{f["path"]} differs from the seed\'s plugin')
+    record = {'mode': mode, 'name': name, 'dest': f'{GPU_ADDONS}/{name}.bundle', 'boot_arg': 'sheng-gpu-addon=1',
+              'gpu_bundles_copy_kept': mode == 'copy', 'files': files, 'place': place}
+    if place == 'app2':
+        # cryptex1-qual2..4: with the whole bundle a symlink, late Metal clients (system_profiler, Safari) never dlopen it (discovery
+        # refuses the resolved bundle). app2 keeps the bundle a real directory in the /S/L/E view (what Metal's discovery and trust check
+        # see) and makes only its Mach-Os symlinks into the App-cryptex view (what dyld maps: the sandboxes' realpath rule).
+        view = f'{GPU_APP_POINT}/{GPU_APP_DIR}/{name}.bundle'
+        for path in sorted(p for p in target.rglob('*') if p.is_file()):
+            rel = path.relative_to(target)
+            dest = link / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            for d in [dest.parent, *dest.parent.parents]:
+                if d == link.parent: break
+                os.chmod(d, 0o755)
+            if soft_metal().cdhash(path) is not None:
+                os.symlink(f'{view}/{rel.as_posix()}', dest)
+            else:
+                shutil.copy2(path, dest); os.chmod(dest, 0o644)
+        record.update({'real': f'{GPU_APP_LIBRARY}/{GPU_APP_DIR}/{name}.bundle', 'link': f'{GPU_ADDONS}/{name}.bundle: Mach-Os -> {view}',
+                       'kernel': '0074 (app-library view)'})
+    if place == 'app':
+        view = f'{GPU_APP_POINT}/{GPU_APP_DIR}/{name}.bundle'
+        os.symlink(view, link)
+        if os.readlink(link) != view:
+            raise SystemExit(f'PIANO_GPU_ADDON_PLACE=app: {link} is not a symlink to {view}')
+        record.update({'real': f'{GPU_APP_LIBRARY}/{GPU_APP_DIR}/{name}.bundle', 'link': f'{GPU_ADDONS}/{name}.bundle -> {view}',
+                       'kernel': '0074 (app-library view)'})
+    if place == 'view3':
+        # LT-B3 control (ANALYSIS.md 11, cryptex1-ctl2): the plugin stays a REAL bundle in the /S/L/E view (the layout Safari's WebGPU works
+        # with, ctl1), and a copy goes to the app-library source so kernel 0074 still mounts its view over App/System/Library. Safari WebGPU
+        # false here = the view itself (over WebKit's own directory) costs it; true = the plugin's code resolving into the view does.
+        copy = mount / GPU_APP_LIBRARY.lstrip('/') / GPU_APP_DIR / f'{name}.bundle'
+        if copy.exists():
+            shutil.rmtree(copy)
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        for directory in (copy.parent.parent, copy.parent):
+            os.chmod(directory, 0o755)
+        sh(['cp', '-cR', str(target), str(copy)], timeout=120, check=True)
+        sh(['xattr', '-cr', str(copy)], timeout=60, check=False)
+        for f in files:
+            if common.sha(copy / f['path']) != f['sha256']:
+                raise SystemExit(f'PIANO_GPU_ADDON_PLACE=view3: {copy}/{f["path"]} differs')
+        record.update({'view_copy': f'{GPU_APP_LIBRARY}/{GPU_APP_DIR}/{name}.bundle (not used by Metal: the view only)',
+                       'kernel': '0074 (app-library view)'})
+    if mode == 'move':
+        shutil.rmtree(source)
+    return record
 
 
 def seed_camera_apps(mount, staging, built):
@@ -895,6 +1096,7 @@ def stage_seed(a, plan):
     built = build_all(plan, out.parent / 'build')
     tree = staging_tree(plan, built)
     command = boot_wifi_profile(tree, boot_command(plan))
+    addon_mode, addon_name = gpu_addon_request()
     seed_info_in = common.seed_info(seed_in)
     trust_bytes = trust_in.read_bytes()
     trusted_cdhashes = sorted({f['cdhash'] for f, _ in built if f['cdhash']})
@@ -903,6 +1105,7 @@ def stage_seed(a, plan):
                             'camera_approval': bake['record'] if bake else None,
                             **({'camera_directory_mode': '0755'} if bake else {}),
                             'trusted_cdhashes': trusted_cdhashes,
+                            **({'gpu_addon': [addon_mode, addon_name]} if addon_mode else {}),
                             'staging': plan['staging'], 'tree': {k: [sha(v), m] for k, (v, m) in sorted(tree.items())}},
                            sort_keys=True).encode())
     record_path, seed_out, trust_out = out / 'userland.json', out / 'scratch-data.img', out / 'kernel.macho.trustcache'
@@ -944,6 +1147,7 @@ def stage_seed(a, plan):
                     raise SystemExit(f'{f["dest"]}: staged camera bytes differ')
             print('Camera app seals, staged bytes and trust-cache policy verified')
         gpu_files = seed_gpu_files(mount, staging, built)
+        addon = seed_gpu_addon(mount, addon_mode, addon_name, trust_out, built) if addon_mode else None
         camera_files = seed_camera_apps(mount, staging, built) if bake else []
         if bake:
             plan['camera_bake_module'].seed(mount, bake)
@@ -954,6 +1158,9 @@ def stage_seed(a, plan):
         print(f'{volume}: /{staging}: {len(written)} written, {len(removed)} removed{": " + " ".join(removed) if removed else ""}\n'
               f'{listing.strip()}')
         print(f'seed GPU files ready before launchd: {len(gpu_files)}')
+        if addon:
+            print(f'seed GPU addon ({addon["mode"]}): {addon["dest"]}, {len(addon["files"])} files; boot with '
+                  f'{addon["boot_arg"]}' + ('' if addon['gpu_bundles_copy_kept'] else f'; {GPU_BUNDLES}/{addon_name}.bundle removed'))
         print(f'the boot job {"now runs" if changed else "already ran"}: {script}')
     seed_info_out = common.seed_info(seed_out)
     record = {
@@ -962,6 +1169,7 @@ def stage_seed(a, plan):
                    'trust': {'path': rel(trust_in), 'sha256': sha(trust_bytes)}},
         'files': files_record(built),
         'seed_gpu_files': gpu_files,
+        **({'seed_gpu_addon': addon} if addon else {}),
         'seed_camera_files': camera_files,
         'camera_approval': bake['record'] if bake else None,
         'compaction': {key: packed[key] for key in ('zero_filled_bytes', 'zero_sparsified_bytes') if key in packed},
@@ -1023,6 +1231,8 @@ def stage_live(a, plan):
     and the trust check against the trust cache the running kernel has (the installed ESP's)."""
     if plan.get('camera_bake'):
         raise SystemExit('Camera approval baking is seed-only; it cannot modify the installed system through --live')
+    if gpu_addon_request()[0]:
+        raise SystemExit('PIANO_GPU_ADDON is seed-only (a RAM test of the /System/Library/Extensions view); not in a live layer')
     out = a.live.resolve()
     out.mkdir(parents=True, exist_ok=True)
     built = build_all(plan, out.parent / 'build')

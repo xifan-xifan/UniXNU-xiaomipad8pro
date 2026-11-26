@@ -2,10 +2,12 @@
 // Copyright (c) 2026 Leo Zhang.
 // Geometry vectors include padding-heavy small pictures and the cropped 1080
 // allocation. Check capacities, the two scratch generations and DMA guard gaps.
+// c++ -std=c++20 -O2 -Wall -Wextra -Werror -I .. geometry_host.cpp -o /tmp/video_geometry_host && /tmp/video_geometry_host
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
 #include "VideoArena.h"
+#include "../../include/PianoExtraRam.h"
 using namespace pianovideo;
 using namespace pianovideo::session;
 static unsigned failures;
@@ -59,6 +61,7 @@ static constexpr HevcVector hevcVectors[] = {
   {3840,2176,8,3840,2176,8355840,12533760,12591104,50135040,8355840,1766144,5960192},
   {3840,2176,10,7680,2176,16711680,25067520,16818176,50135040,8355840,1766144,5960192},
 };
+static unsigned extraArenas = 0;
 static void verifyArena(const Layout &l) {
   const unsigned pageCount = l.arenaBytes() / 4096;
   const unsigned tableCount = vsmmu::sessionTablePages(l.arenaBytes());
@@ -91,11 +94,38 @@ static void verifyArena(const Layout &l) {
   t.pageCount = savedCount;
   const unsigned last = (l.buf[l.used - 1].off + l.buf[l.used - 1].capacity - 1) / 4096;
   const uint64_t saved = pages[last];
-  for (uint64_t bad : {saved + 1, kXnuDramBase - 4096, kXnuDramEnd}) {
+  for (uint64_t bad : {saved + 1, kXnuDramBase - 4096, kXnuDramEnd, kExtraArenaBase - 4096, kExtraArenaEnd, kExtraArenaBase + 1,
+                       0x9c300000ull /* the video carve-out */, 0x9d200000ull /* cdsp */}) {
     pages[last] = bad;
     CHECK(!buildArena(t, l, pages.data()));
   }
   pages[last] = saved;
+  CHECK(buildArena(t, l, pages.data()));
+  // RAM16G: the same arena backed by the region0 run (2 MiB slabs, here in reverse slab order), and mixed with XNU pages; only
+  // arenas the run holds (the AVC 256 MiB one; HEVC's larger ones stay XNU-backed).
+  if (uint64_t(pageCount) * 4096 <= kExtraArenaEnd - kExtraArenaBase) {
+    using namespace pianoxram;
+    const uint8_t property[kMaxRuns * kRecordBytes] = {
+        0, 0, 0, 0x80, 8, 0, 0, 0, 0, 0, 0x20, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, // GPU
+        0, 0, 0xe0, 0x89, 0, 0, 0, 0, 0, 0, 0x20, 0x11, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, // modem
+        0, 0, 0xe0, 0x9e, 0, 0, 0, 0, 0, 0, 0x60, 4, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, // pil-tail
+    };
+    Pool pool;
+    CHECK(pool.load(property, sizeof property, Config{UseVideo}) == 1 && pool.count == 3);
+    CHECK(pool.runs[0].state == StateOtherUse && pool.runs[2].state == StateOtherUse);
+    const auto &modem = pool.runs[1];
+    CHECK(modem.state == StateOurs && modem.first == kExtraArenaBase && modem.slabs == 137);
+    ++extraArenas;
+    std::vector<uint64_t> extra(pageCount);
+    const unsigned slabs = (pageCount + 511) / 512;
+    CHECK(slabs <= modem.slabs);
+    for (unsigned i = 0; i < pageCount; ++i) extra[i] = modem.slab(slabs - 1 - i / 512) + (i % 512) * 4096ull;
+    CHECK(extra.back() < kExtraArenaEnd);
+    CHECK(buildArena(t, l, extra.data()));
+    for (unsigned i = 0; i < pageCount; ++i) CHECK(vsmmu::walk(t, kArenaBase + i * 4096 + 8) == (l.mapped(i) ? extra[i] + 8 : 0));
+    extra[0] = pages[0];
+    CHECK(buildArena(t, l, extra.data()));
+  }
   CHECK(buildArena(t, l, pages.data()));
   // Rebuilding with fewer allocated slots must not leave an old valid PTE.
   Layout shortened = l;
@@ -260,6 +290,7 @@ int main() {
   CHECK(legacy.init(1920,1088) && legacy.init() && !legacy.general && legacy.bytes == 56623104);
   hevcTests();
   residentArenaTest();
-  std::printf("geometry: %s (%u failures)\n", failures ? "FAIL" : "PASS", failures);
+  CHECK(extraArenas > 0);   // the RAM16G region0 backing was exercised
+  std::printf("geometry: %s (%u failures, %u arenas also on region0 slabs)\n", failures ? "FAIL" : "PASS", failures, extraArenas);
   return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }

@@ -585,7 +585,7 @@ void NativeAdrenoVm::attributes(const NativeAdrenoMemory &memory,unsigned permis
     (void)requested_shareability;
     const unsigned level=coherence();
     bool cached=false;
-    if(memory.scanout())cached=false;                                       /* the scanout: non-cacheable, the GPU writes it */
+    if(memory.scanout() || memory.tier())cached=false;                                       /* the scanout: non-cacheable, the GPU writes it */
     else if(memory.imported())
         cached=(permissions&ArmSmmu4KWrite)?level>=NativeAdrenoCoherenceCached:level>=NativeAdrenoCoherenceReadImports;
     else cached=level>=NativeAdrenoCoherenceCached && requested_writeback;   /* own BOs: write-combined for the CPU below 2 */

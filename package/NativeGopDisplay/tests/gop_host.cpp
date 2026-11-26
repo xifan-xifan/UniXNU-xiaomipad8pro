@@ -1905,6 +1905,12 @@ static void testRefreshContract()
     // QuartzCore's heartbeat from displayMinRefreshInterval: value * 2^-32 seconds
     CHECK(std::fabs(double(w[kMinFixed]) / 4294967296.0 - 1.0 / 120) < 1e-9);
     CHECK(fixedAttributes(60, toAbs, w) && w[kMinFixed] == 0x04444444ull);
+    for (const unsigned hz : {90u, 144u}) {
+        CHECK(fixedAttributes(hz, toAbs, w));
+        CHECK(std::fabs(double(w[kMinFixed]) / 4294967296.0 - 1.0 / hz) < 1e-9);
+        CHECK(w[kMaxFixed] == w[kMinFixed] && w[kMaxAbs] == w[kMinAbs] && !w[kStepFixed] && !w[kStepAbs]);
+        CHECK(nextDeadline(0, 1000, w[kMinAbs]) == 1000 + toAbs(periodNs(hz)));
+    }
     CHECK(!fixedAttributes(29, toAbs, w) && !fixedAttributes(241, toAbs, w) && !fixedAttributes(0, toAbs, w));
     // the VBL tick: P = 200000 ticks (120 Hz at 24 MHz)
     const uint64_t P = 200000;
@@ -1929,9 +1935,36 @@ static void testRefreshContract()
     CHECK(prev == P * 1200 && due == P * 1201);
 }
 
+// The Night Shift observer's helpers (GopColorLog.h): two's-complement S31.32 as QuartzCore sends set_matrix's words, 16.16 corrections.
+#include "../GopColorLog.h"
+static void testColorLog()
+{
+    using namespace gopcolor;
+    CHECK(!nightShiftEnabled(0, false) && !nightShiftEnabled(1, true) && !nightShiftEnabled(2, false));
+    CHECK(nightShiftEnabled(1, false) && kNightShiftLocation == 9);
+    CHECK(s3132ToMilli(0x0000000100000000ull) == 1000);          // 1.0
+    CHECK(s3132ToMilli(0xffffffff00000000ull) == -1000);         // -1.0 (two's complement, not sign-magnitude)
+    CHECK(s3132ToMilli(0x0000000080000000ull) == 500);           // 0.5
+    CHECK(s3132ToMilli(0xffffffffc0000000ull) == -250);          // -0.25
+    CHECK(s3132ToMilli(0) == 0);
+    CHECK(s3132ToMilli(0x00000000d1eb851full) == 820);           // 0.82, rounded
+    CHECK(s3132ToMilli(0x8000000000000000ull) == -2147483648000ll);   // no overflow at the extreme
+    CHECK(u1616ToMilli(0x10000) == 1000 && u1616ToMilli(0x8000) == 500 && u1616ToMilli(0) == 0);
+    const uint64_t I[9] = {1ull << 32, 0, 0, 0, 1ull << 32, 0, 0, 0, 1ull << 32};
+    const uint64_t blank[9] = {};
+    const uint64_t warm[9] = {1ull << 32, 0, 0, 0, 0x00000000d1eb851full, 0, 0, 0, 0x0000000099999999ull};
+    uint64_t gen[9];
+    for (unsigned k = 0; k < 9; ++k) gen[k] = warm[k];
+    gen[1] = 0xfffffffff0000000ull;   // a small negative off-diagonal term (a chromatic-adaptation matrix may have them)
+    CHECK(shape(blank) == Shape::zero && shape(I) == Shape::identity && shape(warm) == Shape::diagonal && shape(gen) == Shape::general);
+    CHECK(matrixHash(9, I) == matrixHash(9, I) && matrixHash(9, I) != matrixHash(8, I) && matrixHash(9, I) != matrixHash(9, warm));
+    CHECK(logged(1) && logged(16) && !logged(17) && logged(100) && !logged(101));
+}
+
 int main()
 {
     testRefreshContract();
+    testColorLog();
   testGeometry();
   testParallelRows();
   testPixels();

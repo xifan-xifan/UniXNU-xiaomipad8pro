@@ -38,6 +38,7 @@ The tablet side is tooling/persist/tablet.sh (served over HTTP from the host's U
 checked); commands go through tooling/native/maint-shell.py (PIANO_MAINT_HOST). State: out/persistent/session/state.json.
 """
 import argparse
+import errno
 import fcntl
 import hashlib
 import http.server
@@ -56,6 +57,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common  # noqa: E402
+import localnet  # noqa: E402
 
 D = common.DEVICE
 # PIANO_PERSIST_OUT: the out/persistent this session's images, records, installed.json and (by default) session/ live in. Default
@@ -803,14 +805,21 @@ class Session:
         self.log(f'  host  wait up to {seconds} s for the maintenance shell (PIANO_MAINT_HOST port 2323)')
         if not self.execute:
             return
-        t0 = time.time()
+        t0, checked = time.time(), False
         while time.time() - t0 < seconds:
             try:
                 socket.create_connection((host, 2323), timeout=3).close()
                 return
-            except OSError:
+            except OSError as e:
+                # LT-D6: errno 65 from python while nc reaches the port is macOS Local Network privacy, not the link: stop now
+                if not checked and e.errno == errno.EHOSTUNREACH:
+                    checked = True
+                    why = localnet.classify_connect_error(host, 2323, e)
+                    if why:
+                        raise Stop(why)
                 time.sleep(2)
-        raise Stop('no maintenance shell (USB NCM link up?)')
+        raise Stop('no maintenance shell (USB NCM link up? if nc reaches PIANO_MAINT_HOST port 2323, this shell lacks the macOS '
+                   'Local Network grant: run it via open -a Terminal)')
 
     def esp_reset_after(self):
         """The reset time of the default entry of the ESP on the tablet (the one written, else --esp). An ESP whose default does not
@@ -2609,6 +2618,21 @@ def rootfs_clear_back(s):
 
 
 # ------------------------------------------------------------------------------------------------------------------------
+def localnet_preflight(s):
+    """LT-D6: refuse at once when this process may not open sockets to the local network (macOS Local Network privacy: python under
+    tmux or a tool shell gets errno 65 for the tablet; Terminal.app works) instead of waiting 180 s for a shell it can never reach.
+    A dry run only reports it. PIANO_LOCALNET_PREFLIGHT=off skips the probe (logged)."""
+    if os.environ.get('PIANO_LOCALNET_PREFLIGHT', '') == 'off':
+        s.log('  host  Local Network preflight skipped (PIANO_LOCALNET_PREFLIGHT=off)')
+        return
+    state, detail = localnet.preflight(s.env.get('PIANO_MAINT_HOST'))
+    s.log(f'  host  Local Network preflight: {state}: {detail}')
+    if state == 'denied':
+        if s.execute:
+            s.log(f'\nSTOPPED: {detail}')
+            sys.exit(3)
+        s.log('        (dry run: a real run from this shell would stop here)')
+
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -2649,6 +2673,7 @@ def main():
         return
     s = Session(a)
     s.log(f'== {time.strftime("%Y-%m-%d %H:%M:%S")} {"RUN" if s.execute else "DRY RUN"}: {" ".join(a.steps)}')
+    localnet_preflight(s)
     todo = [('rollback', n) for n in a.steps[1:]] if a.steps[0] == 'rollback' else [('step', n) for n in a.steps]
     try:
         for kind, name in todo:

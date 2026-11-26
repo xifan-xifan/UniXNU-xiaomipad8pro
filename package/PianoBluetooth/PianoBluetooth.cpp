@@ -29,6 +29,12 @@
 // (no WCN7860 peripheral baud frame), piano-bt-ibs=1 (keep the NVM's in-band sleep bit), piano-bt-reset0=0 (no HCI_Reset before
 // the version), piano-bt-loop=0 (no loopback self test), piano-bt-release=0 (never withdraw a rail enable), piano-bt-blind=1 (vote a
 // rail whose PMIC state could not be read), piano-bt-addr=0 (keep the NVM's default address), piano-bt-stop=N (return after step N).
+// Level 5 (on by default since bt/hid1; piano-bt-lemask=0 turns it off): the kext ORs LE Data Length Change and LE PHY Update Complete into the host's LE Set Event Mask (bluetoothd's
+// type-zero mask lacks both, and its LE link-ready state machine waits for them: docs/drivers/bluetooth.md, "LE link ready"); machdep.piano_bt_lemask changes it at run time.
+// Level 5: piano-bt-lerdy=1 hands bluetoothd a no-change LE Data Length Change / PHY Update Complete for an LE link that has its
+// remote features but no such event and no GATT/SMP start from the host after 0.75 / 1.5 / 2.25 s (HciH4.h LeReadyAssist);
+// machdep.piano_bt_lerdy changes it at run time (new links' next step).
+// Level 5: bt-radio1 buckets the RSSI of every advertising and inquiry report (HciH4.h RadioRssi; piano-bt-radio-* properties).
 #include <IOKit/IOService.h>
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/IOLib.h>
@@ -62,6 +68,8 @@ extern "C" {
 volatile int32_t piano_bt_stage = 0;
 bool qbt_bt_trace_enabled = false;
 bool qbt_bt_wait_baseline = false;
+volatile uint32_t qbt_bt_lemask = 0;
+volatile uint32_t qbt_bt_lerdy = 0;
 
 uint64_t qbt_bt_uptime_ms(void)
 {
@@ -968,6 +976,7 @@ class PianoBluetooth : public IOService {
   bool publishRadio();
   void transportResult();
   void pump();
+  void linkEvent(const uint8_t *event, size_t bytes);
   static void transportWake(void *);
   static int transportPower(void *, bool);
   static void thread(void *self, wait_result_t);
@@ -979,8 +988,16 @@ class PianoBluetooth : public IOService {
   IOService *fRadio = nullptr;
   uint64_t fNextStats = 0;
   uint64_t fTxPackets = 0, fRxPackets = 0, fCompletions = 0, fLeReports = 0;
+  // The LE link's events (bt-lemask1): connections (LE [Enhanced] Connection Complete), Data Length Change, PHY Update Complete,
+  // Disconnection Complete; the first few are logged with status/handle/reason only (never an address).
+  uint64_t fLeConnections = 0, fLeLengthChanges = 0, fLePhyUpdates = 0, fDisconnections = 0, fLinkEventsLogged = 0;
   bool fFirstTx = false, fFirstRx = false;
   H4Decoder fTxDecoder, fRxDecoder;
+  H4LeMaskPatcher fLeMask;
+  LeReadyAssist fLeReady;
+  uint64_t fLeReadyLogged = 0;
+  RadioRssi fRssi;             // bt-radio1: the RSSI of every advertising and inquiry report
+  uint64_t fRadioLoggedAt = 0, fRadioLoggedReports = ~0ull;
   size_t fObserved = 0;
 
  public:
@@ -990,6 +1007,7 @@ class PianoBluetooth : public IOService {
   IOReturn setPowerState(unsigned long state, IOService *device) override;
   void systemWillShutdown(IOOptionBits specifier) override;
   void quiesce(const char *why);
+  void radioStats();
 };
 
 OSDefineMetaClassAndStructors(PianoBluetooth, IOService)
@@ -1007,6 +1025,12 @@ bool PianoBluetooth::start(IOService *provider)
   qbt_bt_trace_enabled = bootArg("piano-bt-reset-trace", 0) == 1;
   qbt_bt_wait_baseline = gArgs.level == 5 && qbt_bt_trace_enabled &&
                         bootArg("piano-bt-wait-baseline", 0) == 1;
+  // On by default at level 5 since bt/hid1 (2026-11-26): the mask fix ran on the tablet on 11-22 (owner-am2: both of bluetoothd's
+  // masks patched to 0x185f, no HCI error) and is the only way an LE link reaches GATT. piano-bt-lemask=0 restores the host's mask.
+  qbt_bt_lemask = bootArg("piano-bt-lemask", gArgs.level == 5 ? 1 : 0) == 1 ? 1 : 0;
+  if (gArgs.level == 5) note("bt-lemask1: piano-bt-lemask=%u (machdep.piano_bt_lemask changes it for the next LE Set Event Mask)", qbt_bt_lemask);
+  qbt_bt_lerdy = bootArg("piano-bt-lerdy", 0) == 1 ? 1 : 0;
+  if (gArgs.level == 5) note("bt-lerdy1: piano-bt-lerdy=%u (machdep.piano_bt_lerdy changes it at run time)", qbt_bt_lerdy);
   if (qbt_bt_trace_enabled) {
     thread_t sampler = nullptr;
     const kern_return_t rc = kernel_thread_start(watchdogTrace, nullptr, &sampler);
@@ -1139,6 +1163,64 @@ void PianoBluetooth::transportResult()
   note("bt-path1: H4 controller %s error=%d (fixed 3200000, IBS disabled)", fBootError ? "unavailable" : "ready", fBootError);
 }
 
+// LE Meta 0x3e: [0x3e][len][subevent][status][handle lo][handle hi]...; Disconnection Complete 0x05: [05][04][status][handle][reason].
+void PianoBluetooth::linkEvent(const uint8_t *ev, size_t bytes)
+{
+  const char *what = nullptr;
+  unsigned status = 255, handle = 0xffff, extra = 0;
+  if (bytes >= 6 && ev[0] == 0x3e && (ev[2] == 0x01 || ev[2] == 0x0a || ev[2] == 0x29)) {
+    ++fLeConnections;
+    what = "LE connection complete";
+    status = ev[3];
+    handle = le16(ev + 4) & 0xfffu;
+    extra = bytes >= 7 ? ev[6] : 255;   // role
+  } else if (bytes >= 13 && ev[0] == 0x3e && ev[2] == 0x07) {
+    ++fLeLengthChanges;
+    what = "LE data length change";
+    status = 0;
+    handle = le16(ev + 3) & 0xfffu;
+    extra = le16(ev + 5);   // max TX octets
+  } else if (bytes >= 8 && ev[0] == 0x3e && ev[2] == 0x0c) {
+    ++fLePhyUpdates;
+    what = "LE PHY update complete";
+    status = ev[3];
+    handle = le16(ev + 4) & 0xfffu;
+    extra = ev[6];   // TX PHY
+  } else if (bytes >= 6 && ev[0] == 0x05) {
+    ++fDisconnections;
+    what = "disconnection complete";
+    status = ev[2];
+    handle = le16(ev + 3) & 0xfffu;
+    extra = ev[5];   // reason
+  }
+  if (what && ++fLinkEventsLogged <= 32)
+    note("bt-lemask1: %s status=%02x handle=%03x %s=%u", what, status, handle,
+         ev[0] == 0x05 ? "reason" : ev[2] == 0x07 ? "tx-octets" : ev[2] == 0x0c ? "tx-phy" : "role", extra);
+}
+
+// bt-radio1: the receiver's health in properties at every stats turn, and in one console line when the report count changed and
+// 30 s have passed (a deaf radio shows as almost every report in the last bucket; docs/drivers/bluetooth.md, "Radio health").
+void PianoBluetooth::radioStats()
+{
+  const RadioRssi::Stats &r = fRssi.stats();
+  char le[96], classic[96];
+  snprintf(le, sizeof le, "%llu/%llu/%llu/%llu/%llu", r.le[0], r.le[1], r.le[2], r.le[3], r.le[4]);
+  snprintf(classic, sizeof classic, "%llu/%llu/%llu/%llu/%llu", r.classic[0], r.classic[1], r.classic[2], r.classic[3], r.classic[4]);
+  setProperty("piano-bt-radio-le-rssi", le);
+  setProperty("piano-bt-radio-classic-rssi", classic);
+  setProperty("piano-bt-radio-le-reports", r.leReports, 64);
+  setProperty("piano-bt-radio-classic-results", r.classicResults + r.classicNoRssi, 64);
+  setProperty("piano-bt-radio-inquiries", r.inquiries, 64);
+  const uint64_t reports = r.leReports + r.classicResults + r.classicNoRssi + r.inquiries;
+  const uint64_t now = nowUs();
+  if (reports == fRadioLoggedReports || (fRadioLoggedAt && now - fRadioLoggedAt < 30000000)) return;
+  fRadioLoggedAt = now;
+  fRadioLoggedReports = reports;
+  note("bt-radio1: LE reports=%llu rssi>=-60/-75/-90/-100/below=%s best=%d; classic results=%llu (no rssi %llu) rssi=%s best=%d "
+       "inquiries=%llu; rssi-unavailable=%llu malformed=%llu",
+       r.leReports, le, r.leBest, r.classicResults, r.classicNoRssi, classic, r.classicBest, r.inquiries, r.unavailable, r.malformed);
+}
+
 void PianoBluetooth::pump()
 {
   Port &p = gB.port;
@@ -1163,8 +1245,26 @@ void PianoBluetooth::pump()
           }
         }
         if (type == kH4Event && bytes >= 3 && packet[0] == 0x3e && (packet[2] == 2 || packet[2] == 0x0d)) ++fLeReports;
+        if (type == kH4Event) {
+          linkEvent(packet, bytes);
+          fLeReady.onEvent(packet, bytes, nowUs() / 1000);
+          fRssi.onEvent(packet, bytes);
+        }
       });
       fObserved = p.rawHave;
+    }
+    // The link-ready assist hands its event to the host between two controller packets only (the decoder idle at the end of
+    // what it has seen), after every byte received so far, so the stream stays well formed; a full buffer waits for the next pass.
+    LeReadyAssist::Inject inj;
+    if (fRxDecoder.idle() && fObserved == p.rawHave && p.rawCap - p.rawHave >= sizeof inj.bytes &&
+        fLeReady.due(nowUs() / 1000, qbt_bt_lerdy == 1, inj)) {
+      memcpy(gStream + p.rawHave, inj.bytes, inj.len);
+      p.rawHave += inj.len;
+      fObserved = p.rawHave;
+      if (++fLeReadyLogged <= 32)
+        note("bt-lerdy1: injected %s handle=%03x step=%u (no %s from the controller, no GATT/SMP start from the host)",
+             inj.kind == LeReadyAssist::kInjectLength ? "LE data length change 27/328" : "LE PHY update complete 1M/1M", inj.handle,
+             inj.step, inj.kind == LeReadyAssist::kInjectLength ? "length change" : "PHY update");
     }
     const uint32_t taken = qbt_transport_receive(gStream, uint32_t(p.rawHave));
     if (taken) {
@@ -1179,9 +1279,16 @@ void PianoBluetooth::pump()
   flush();
   const uint32_t n = qbt_transport_tx_take(gTransportTx, sizeof gTransportTx);
   if (n) {
+    const bool lemask = qbt_bt_lemask == 1;
+    fLeMask.patch(gTransportTx, n, lemask, [&](const H4LeMaskPatcher::Seen &seen) {
+      if (fLeMask.stats().masks <= 16)
+        note("bt-lemask1: LE event mask %016llx -> %016llx (piano-bt-lemask=%u)", (unsigned long long)seen.from,
+             (unsigned long long)seen.to, lemask ? 1u : 0u);
+    });
     fTxDecoder.feed(gTransportTx, n, [&](uint8_t type, const uint8_t *packet, size_t bytes) {
       if (!packet) return;
       ++fTxPackets;
+      if (type == kH4Acl) fLeReady.onHostAcl(packet, bytes);
       if (qbt_bt_trace_enabled && fTxPackets <= 24 && type == kH4Command && bytes >= 3)
         note("bt-reset-phase: HCI TX queued opcode=%04x bytes=%zu", le16(packet), bytes);
     });
@@ -1207,11 +1314,25 @@ void PianoBluetooth::pump()
     setProperty("piano-bt-h4-tx-bytes", p.txBytes, 64);
     setProperty("piano-bt-h4-completions", fCompletions, 64);
     setProperty("piano-bt-h4-le-reports", fLeReports, 64);
+    setProperty("piano-bt-h4-le-connections", fLeConnections, 64);
+    setProperty("piano-bt-h4-le-length-changes", fLeLengthChanges, 64);
+    setProperty("piano-bt-h4-le-phy-updates", fLePhyUpdates, 64);
+    setProperty("piano-bt-h4-disconnections", fDisconnections, 64);
+    setProperty("piano-bt-h4-le-masks", fLeMask.stats().masks, 64);
+    setProperty("piano-bt-h4-le-masks-patched", fLeMask.stats().patched, 64);
+    setProperty("piano-bt-h4-le-mask-resyncs", fLeMask.stats().resyncs, 64);
+    setProperty("piano-bt-lemask", (unsigned long long)qbt_bt_lemask, 32);
+    setProperty("piano-bt-lerdy", (unsigned long long)qbt_bt_lerdy, 32);
+    setProperty("piano-bt-h4-lerdy-features", fLeReady.stats().features, 64);
+    setProperty("piano-bt-h4-lerdy-host-started", fLeReady.stats().hostStarted, 64);
+    setProperty("piano-bt-h4-lerdy-injected-length", fLeReady.stats().injectedLength, 64);
+    setProperty("piano-bt-h4-lerdy-injected-phy", fLeReady.stats().injectedPhy, 64);
     setProperty("piano-bt-h4-backpressure", p.backpressurePolls, 64);
     const auto &framing = fRxDecoder.stats();
     setProperty("piano-bt-h4-resyncs", framing.resyncs, 64);
     setProperty("piano-bt-h4-oversized", framing.oversized, 64);
     setProperty("piano-bt-h4-ibs", framing.ibs, 64);
+    radioStats();
     note("bt-path1: H4 stats rx=%llu tx=%llu packets=%llu/%llu completions=%llu LE-reports=%llu retained=%lu backpressure=%llu TX-timeouts=%u resyncs=%llu oversized=%llu IBS=%llu",
          p.rxBytes, p.txBytes, fRxPackets, fTxPackets, fCompletions, fLeReports, (unsigned long)p.rawHave, p.backpressurePolls, p.txTimeouts,
          framing.resyncs, framing.oversized, framing.ibs);

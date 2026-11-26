@@ -242,6 +242,10 @@ The success lines, in order (`stderr-log=1` keeps the first 159 bytes of each wr
   lift it.
 - **First boot**: shader translation and compilation for every client (about 40 s cold in the VM). Caches go to
   `<user cache>/com.apple.metal/<bundle>/m2v` and persist with `data-persist=2`.
+  A process that may write in none of the plugin's five candidates (Chrome's GPU helper: its `gpu.sb` allows only Apple's Metal cache
+  names) opens its device without the disk cache since plugin 0012 (`tooling/metal/turnip-a830/plugin/0012-*.patch`, the runtime's
+  `METAL2VULKAN_SHADER_CACHE_OPTIONAL`) and says `NativeAdrenoMetal: <prog>: no writable cache directory: opening without the m2v disk
+  cache`; its translations are then kept in memory only. Host check: `tooling/metal/turnip-a830/test-cache-fallback-host.sh`.
 
 ## 7. CPU fallback (lavapipe): not built
 

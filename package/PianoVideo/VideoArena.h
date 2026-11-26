@@ -23,7 +23,7 @@ inline bool buildArena(vsmmu::Tables &t, const Layout &layout, const uint64_t *p
   static_assert(vsmmu::kSessionTablePages == 4 + kAvcArenaBytes / (2 * 1024 * 1024), "AVC arena L3 table coverage");
   static_assert(vsmmu::kMaxSessionTablePages == 4 + kArenaBytes / (2 * 1024 * 1024), "HEVC arena L3 table coverage");
   for (unsigned i = 0; i < arenaPages; ++i)
-    if (layout.mapped(i) && ((pages[i] & 4095) || pages[i] < kXnuDramBase || pages[i] >= kXnuDramEnd))
+    if (layout.mapped(i) && !arenaPagePa(pages[i]))   // XNU pages or the RAM16G extra-RAM run (VideoHw.h)
       return false;
   // A resident core keeps the UC mappings and L2 links. Each changed leaf
   // either becomes invalid or maps the same reserved PA for that slot.

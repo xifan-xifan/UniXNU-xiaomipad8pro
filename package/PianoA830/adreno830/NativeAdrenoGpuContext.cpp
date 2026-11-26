@@ -32,7 +32,8 @@ IOReturn NativeAdrenoGpuContext::bringUp(const NativeAdrenoGpuContextConfig &con
     const NativeAdrenoSmmuProgrammer *programmer=config.programmer;
     if(!programmer || config.bank>63 || !config.asid || config.asid>0xffff || config.slot>127 || config.lpac_slot>127 ||
         config.slot==config.lpac_slot || config.sid==config.lpac_sid || config.sid>0x7fff || config.lpac_sid>0x7fff ||
-        (config.aperture_gib!=2 && config.aperture_gib!=4 && config.aperture_gib!=16 && config.aperture_gib!=64) || config.output_bits>48)
+        (config.aperture_gib!=2 && config.aperture_gib!=4 && config.aperture_gib!=16 && config.aperture_gib!=64 &&
+         config.aperture_gib!=256) || config.output_bits>48)
         return kIOReturnBadArgument;
     used_=true;
     IOReturn status=kIOReturnSuccess;
@@ -48,10 +49,15 @@ IOReturn NativeAdrenoGpuContext::bringUp(const NativeAdrenoGpuContextConfig &con
     /* UniXNU-piano (2026-11-22, private GPU-SLOTS.md): pagani-gpu-va=64 (the macOS default) asks for a 64 GiB aperture, 32833 table pages
      * (128 MiB) with a 36-bit input, for 64 client windows of which 59 are 1 GiB: without IDR2.UBS >= 36 bits or its tables it is the 16
      * GiB aperture, then 4 GiB, as before. */
-    const bool wider=config.aperture_gib==64 && smmuInputBits(programmer->id2)>=36;
-    const bool wide=(config.aperture_gib==16 || config.aperture_gib==64) && smmuInputBits(programmer->id2)>=34;
-    aperture_=config.aperture_gib==2?uint64_t(GpuApertureBytes2G):wider?uint64_t(GpuApertureBytes64G):wide?uint64_t(GpuApertureBytes16G):
-        uint64_t(GpuApertureBytes);
+    /* UniXNU-piano (2026-11-25, gpu/slots2, private 20261125-metal4032/ANALYSIS.md): pagani-gpu-va=256 (the macOS default) asks for a
+     * 256 GiB aperture with a 38-bit input in paged mode only (tables on demand: the space costs table pages for what it maps; the
+     * root stays a level-1 table, 256 of its 512 slots, which the annibale TCR's T0SZ 25 walks unchanged). Without paged mode, or
+     * without IDR2.UBS >= 38 bits, it is the 64 GiB request with its fallbacks. */
+    const bool widest=config.aperture_gib==256 && config.paged && smmuInputBits(programmer->id2)>=38;
+    const bool wider=(config.aperture_gib==64 || config.aperture_gib==256) && smmuInputBits(programmer->id2)>=36;
+    const bool wide=(config.aperture_gib==16 || config.aperture_gib==64 || config.aperture_gib==256) && smmuInputBits(programmer->id2)>=34;
+    aperture_=config.aperture_gib==2?uint64_t(GpuApertureBytes2G):widest?uint64_t(GpuApertureBytes256G):wider?uint64_t(GpuApertureBytes64G):
+        wide?uint64_t(GpuApertureBytes16G):uint64_t(GpuApertureBytes);
     size_t pages=config.aperture_gib==2?TablePages2G:wider?TablePages64G:wide?TablePages16G:TablePages;
     /* The BO pool first, while the VM still has long contiguous runs (normally the orchestrator reserved it before CB2; then this
      * only reports it). Not fatal: without it each BO is scattered and changes its own pages' attribute. */
@@ -90,7 +96,19 @@ IOReturn NativeAdrenoGpuContext::bringUp(const NativeAdrenoGpuContextConfig &con
             pc.alias_scratch=alias_scratch_;pc.alias_scratch_entries=AliasScratchEntries;
             uint64_t root=0;
             status=vm_.preparePaged(pc,&root);
-            if(!status)status=smmu_.preparePaged(root,aperture_,size_t(aperture_/4096),config.bank,config.asid,4000,bits,inputBits());
+            /* UniXNU-piano (gpu/slots2): the aperture's fallback chain, 256 -> 64 -> 16 -> 4 GiB, for a paged space the VM refused
+             * (its undo leaves it preparable again); the S3/S9 note "gpu aperture GiB" names the aperture built, as for the pools. */
+            while(status && config.aperture_gib!=2 && aperture_>GpuApertureBytes) {
+                aperture_=aperture_>GpuApertureBytes64G?uint64_t(GpuApertureBytes64G):aperture_>GpuApertureBytes16G?
+                    uint64_t(GpuApertureBytes16G):uint64_t(GpuApertureBytes);
+                pc.input_bits=inputBits();pc.aperture=aperture_;
+                status=vm_.preparePaged(pc,&root);
+            }
+            /* The leaf budget is the live kit's mapping bound (prepare); a paged space has no fixed leaves, and 256 GiB of them would
+             * be past MaxLeaves: the bound stays at most MaxLeaves (16777216, the 64 GiB aperture's). */
+            const size_t leaves=size_t(aperture_/4096)<size_t(NativeAdrenoSmmuContext::MaxLeaves)?size_t(aperture_/4096):
+                size_t(NativeAdrenoSmmuContext::MaxLeaves);
+            if(!status)status=smmu_.preparePaged(root,aperture_,leaves,config.bank,config.asid,4000,bits,inputBits());
         } else {
         status=smmu_.prepare(&tables_,0,0,aperture_,size_t(aperture_/4096),config.bank,config.asid,4000,bits,inputBits());
         if(!status)smmu_.setAliasScratch(alias_scratch_,AliasScratchEntries);

@@ -19,6 +19,8 @@ flips, a ladder of four steps (`piano-dpu-flip=1..4`), the last of which serves 
   SMMU bank in place (identity blocks for 2-4 GiB plus four 32 MiB windows below 2 GiB, never moving the stream) and shows a test
   pattern through a window, step 4 maps each IOSurface NativeGopDisplay hands over into a window and flips to it. Any missed latch,
   SMMU fault or underrun puts the boot framebuffer back, the bank as found, and turns flips off for the boot (NativeGopDisplay copies).
+- `piano-dpu-clean-skip=1` opts step 4 into strict clean handling and an acquisition clean for verified write-combined backings.
+  The flip summary and `machdep.piano_dpu_snapshot` report the clean counters. See the [M2 RAM-boot read list](../../docs/drivers/dpu-m2-analysis.md#ram-boot-read-list).
 - Writing slices, each inert without its own argument (and all on top of `piano-dpu` >= 1): `piano-dpu-refresh=plan|60|120|auto`
   (B1c: 120 <-> 60 Hz by the vertical front porch, verified, reverted on an anomaly, an idle policy), `piano-dpu-pcc=1|2` (B1d: Night
   Light in the DSPPs' PCC from macOS's colour matrices), `piano-dpu-panel=1` (B1e: the panel's light sleep with display sleep over the
@@ -35,6 +37,7 @@ Design, hardware facts, the staged plan, the boot arguments and the test plan wi
 | `DpuSmmu.h` | portable (B1b): the DPU's SMMU bank in place: geometry and plan (stage 1 or 2 from the bank), the table and windows, the enable and its exact undo, the TLB sync, the window slots |
 | `DpuFlip.h` | portable (B1b): the flip path from the survey, program and latch, the ladder steps, the `PianoDpuFlip` service, the reverts, the rate-limited log |
 | `DpuFlip.cpp`, `DpuFlipKernel.h` | B1b's kernel side: MMIO and SMMU pages, SPI 83, table and surface memory, cache cleans, the test pattern, the watch, the boot arguments |
+| `DpuClean.h`, `tests/dpu_clean_host.cpp` | effective page-attribute predicate, initialized-backing epoch, strict fallback and host tests |
 | `PianoDpuFlipClient.h` | the `PianoDpuFlip` request NativeGopDisplay sends (header only, no link dependency) |
 | `tests/dpu_host.cpp` | host tests of level 1 against register models (the gate, what is and is never loaded, decoders, verdicts, SMMU, walk) |
 | `tests/dpu_flip_host.cpp` | host tests of B1b against DPU/MDSS/SMMU/RAM models (`dpu_flip_host N` prints step N's lines) |

@@ -797,7 +797,7 @@ thermal limits) and of 2026-11-22 (macOS Low Power Mode is the one performance s
 
 The owner's decision of 2026-11-22 22:43: the CPU on Android's whole frequency table and Android's thermal policy, as the GPU's
 full-table line. `Perf.h` (host-tested in `thermal_host` testFullopp), at run time `machdep.piano_cpufreq_fullopp` (root, 0/1;
-boot default `piano-cpufreq-fullopp`, 0), acting with `piano-cpufreq=3` and the perf policy >= 1 (§14); 0 = §14 unchanged.
+boot default `piano-cpufreq-fullopp`, 1 since 2026-11-24 gpu/throttle1), acting with `piano-cpufreq=3` and the perf policy >= 1 (§14); 0 = §14 unchanged.
 
 - **Table**: the firmware's 16 + 16 levels (NCC0 384..3532.8 MHz, NCC1 1017.6..4320 MHz, the same lists the stock Android's cpufreq
   policies show); with the full table every level is allowed, 4204.8 / 4320 above NCC1's sustained 4089.6 too (a refusal turns

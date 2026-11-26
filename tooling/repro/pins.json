@@ -1,0 +1,247 @@
+{
+ "schema": 1,
+ "comment": "Pins of every input the 27.3 line's images are built from that comes from Apple or another public release, and of every intermediate derived from them. Hashes and sizes only: nothing here is an Apple payload. Checked by tooling/repro/test-repro.py against the constants in tooling/k273/ipsw-members.py, decompress-kernelcache.py and make-root-image.sh.",
+ "ipsw": {
+  "product_version": "27.3",
+  "build": "26C5035r",
+  "identity": "k114cap",
+  "url": "https://updates.cdn-apple.com/2026FallSeed/53df7654-4865-4259-8dae-30177b76f104/UniversalMac_27.3_26C5035r_Restore.ipsw",
+  "size": 27206093542,
+  "server_sha256": "1f372fa17c2a6c7e10fd135213b928028e9fbe73d54b949deb6c04bea57c93fa",
+  "server_sha256_note": "Apple's CDN x-amz-meta-digest-sha256 header of the whole IPSW; the kit never downloads the whole file, it checks the header and every member it fetches",
+  "build_manifest_sha256": "58f18ab4195aef17c4d398bc8d9275b64f245730f637cea935343b4dfc2dff4a"
+ },
+ "members": [
+  {
+   "component": "KernelCache",
+   "path": "kernelcache.release.mac17j",
+   "file": "kernelcache.release.mac17j",
+   "size": 32709948,
+   "crc32": "e783c9a4",
+   "sha256": "66bbe2fa3edfae6fe7b479ce78a7e3935ea29ae2f155e0f4ef45cd5b03594720"
+  },
+  {
+   "component": "DeviceTree",
+   "path": "Firmware/all_flash/DeviceTree.k114cap.im4p",
+   "file": "DeviceTree.k114cap.im4p",
+   "size": 106603,
+   "crc32": "624973a0",
+   "sha256": "7810505c5da4894725aed79b21ba673d651fc9fddaf04aafce58ab6f8cd65797"
+  },
+  {
+   "component": "StaticTrustCache",
+   "path": "Firmware/141-22233-021.dmg.aea.trustcache",
+   "file": "141-22233-021.dmg.aea.trustcache",
+   "size": 445681,
+   "crc32": "8ffc0d47",
+   "sha256": "6bc49e0dffade1c61401fd3e087636627f1ae7eca26df9b8890b1cb78ffb2963"
+  },
+  {
+   "component": "Cryptex1,SystemTrustCache",
+   "path": "Firmware/141-22145-021.dmg.aea.trustcache",
+   "file": "141-22145-021.dmg.aea.trustcache",
+   "size": 3503,
+   "crc32": "82cd0ced",
+   "sha256": "613d7972025f35c9b22993032fb4643fc7d9df9253778d6cd0734af9a19dff99"
+  },
+  {
+   "component": "Cryptex1,AppTrustCache",
+   "path": "Firmware/141-22106-021.dmg.trustcache",
+   "file": "141-22106-021.dmg.trustcache",
+   "size": 2135,
+   "crc32": "dbf9acc8",
+   "sha256": "ec5028bf90a6341a267f37356573a007fdbb9b5a2574eb9eae019715b589523c"
+  },
+  {
+   "component": "SystemVolume",
+   "path": "Firmware/141-22233-021.dmg.aea.root_hash",
+   "file": "141-22233-021.dmg.aea.root_hash",
+   "size": 229,
+   "crc32": "9fd26103",
+   "sha256": "a5b7765a61ce908c1b228109865a665e9f4699f8b1636decfd0458f3fd83c786"
+  },
+  {
+   "component": "Cryptex1,SystemVolume",
+   "path": "Firmware/141-22145-021.dmg.aea.root_hash",
+   "file": "141-22145-021.dmg.aea.root_hash",
+   "size": 229,
+   "crc32": "80ea970c",
+   "sha256": "678e8f6eb6a8720ffff60eca7c52ded20a09a3733b5d3a32743dd7f8d50b4d09"
+  },
+  {
+   "component": "Cryptex1,AppVolume",
+   "path": "Firmware/141-22106-021.dmg.root_hash",
+   "file": "141-22106-021.dmg.root_hash",
+   "size": 229,
+   "crc32": "4d5b98ac",
+   "sha256": "4062a8eab4e71f373a1977c9ed6b04d75a153f895f19b6abd1c6f27cacd1180f"
+  },
+  {
+   "component": "Cryptex1,AppOS",
+   "path": "141-22106-021.dmg",
+   "file": "141-22106-021.dmg",
+   "size": 54525952,
+   "crc32": "964de463",
+   "sha256": "797bb1e07e354e80e75d3be2658d8f586b343dbdc05cb93cb880e772ab0d23d1"
+  },
+  {
+   "component": "Cryptex1,SystemOS",
+   "path": "141-22145-021.dmg.aea",
+   "file": "141-22145-021.dmg.aea",
+   "size": 2483027968,
+   "crc32": "ae9d2e86",
+   "sha256": "00f80636bede8b709d0f6342ebefef3ec25ac43b3db03e544f4ccf692ada736d",
+   "decrypted": {
+    "file": "141-22145-021.dmg",
+    "size": 2917138432,
+    "sha256": "14330ed990fe7022114b10718f4defe3049d49b6e5d52fd3ac71a487541cd1f3"
+   }
+  },
+  {
+   "component": "OS",
+   "path": "141-22233-021.dmg.aea",
+   "file": "141-22233-021.dmg.aea",
+   "size": 11408506880,
+   "crc32": "52d83cc7",
+   "sha256": "b7dbb5c6c3ee18ba43fcccb2e865aee008e4388f634bcfbd611b93bf9907d434",
+   "decrypted": {
+    "file": "141-22233-021.dmg",
+    "size": 14493417472,
+    "sha256": "40d8282eb8650da9b4d7437a981764c48d47ee4bdc5b8b362248f25ecbce0e70"
+   }
+  }
+ ],
+ "kernelcache": {
+  "from": "kernelcache.release.mac17j",
+  "file": "kc/kc273-mac17j.bin",
+  "size": 124518400,
+  "sha256": "d1003b5143ffd88439b4d45b6017f587171cfe6855660bed05370a2ea5db9fe9",
+  "note": "the IM4P payload decoded by /usr/bin/compression_tool (LZFSE): tooling/k273/decompress-kernelcache.py PIN; the UniXNU macos-27.3-26C5035r profile's [kernel.prelink] kernelcache_sha256"
+ },
+ "root": {
+  "os_window": {
+   "from": "141-22233-021.dmg",
+   "offset": 1048576,
+   "size": 14493417472,
+   "sha256": "40d8282eb8650da9b4d7437a981764c48d47ee4bdc5b8b362248f25ecbce0e70",
+   "volume_uuid": "84581E99-85BE-4957-AC53-2947E887B3E4",
+   "reproducible": true
+  },
+  "systemos": {
+   "size": 6442450944,
+   "offset": 14494466048,
+   "reproducible": false,
+   "why": "make-systemos.sh runs newfs_apfs (a random container and volume UUID) and ditto into the new volume (creation times, allocation order, compression choices of the host): no two runs give the same bytes. Check the file-level manifest instead (tooling/repro/volume-manifest.py). The volume UUID of a local rebuild is its own: it flows into root.json and from there into the ADT and ESP arguments (PIANO_SYSTEMOS_UUID), so it never has to equal ours.",
+   "reference_build": {
+    "sha256": "a5346509f5a6db99a4b317c91a25494f47c36cab06d3a1f8d431bb6804ae68f7",
+    "volume_uuid": "07AD53B3-7565-4004-B574-F45FAC3753FB",
+    "date": "2026-11-12"
+   },
+   "file_manifest": {
+    "digest": "070934ff823d86a008489dac8e03a24d9f12252c6a942e8cbe7ea25a1e225635",
+    "entries": 27352,
+    "counts": {
+     "d": 6661,
+     "f": 20552,
+     "l": 139,
+     "o": 0
+    },
+    "file_bytes": 8820199767,
+    "groups": {
+     "Applications": "dd9aa465be1dd84c154cb50680eedc3a6781d2fb822af6fc678b3e60754fe015",
+     "Library": "e5fc1de1b5bd702753f9412504a9fca2d93c4a7712c16f31f45a7580a9f4e354",
+     "System": "f36e73569e54abc9f665380e30926a2ef9ce4b6394be7f8c396333934b92ba87",
+     "System/DriverKit": "5a1169b1170e23538294aadcf08314853db735be5c7414ed16b52253a79205cc",
+     "System/DriverKit/System": "2aae6a43f3c401233495690ea4909b941c0305743b5c1c5289b53003c21938e5",
+     "System/Library": "554a4ef7d804ec91a41ef74537d1ee1e76ad1bcb5ae5ac5ea49c0de517da3a06",
+     "System/Library/Assets": "c028a2d9a846948735d43c7dcef747164a2adc16871d96ba1596c8e23982a602",
+     "System/Library/AssetsV2": "01427493e78795a6af6aac06d569ff16dc9238c09563df96c7aa83ad95ff9d43",
+     "System/Library/Caches": "15b1927cb669a86920c21decbca7fdfbbbbb53b533b397a12a9c07d5f07d7ba3",
+     "System/Library/CoreServices": "580812a39a2a6a5a8e8b4ae05bf06accb913c51650fb3fd92875f6632b91ba36",
+     "System/Library/DroidVMData": "7e327f58a47273e3074e6e90a08d79f1ddcfb50d9726ecc96b481c21866414be",
+     "System/Library/Extensions": "175ab7128711355a58222b99a61f2a8c84118a3e4859906a5dad3dd7f7ef405a",
+     "System/Library/Frameworks": "9b9041ee5452ff523640c7f91ded22cbc366540b477e532ba826bcc67e38c28e",
+     "System/Library/PreinstalledAssets": "ee57814fa67331635c77428ac3711abb0d93c951dc33bd77755bbef828d818f7",
+     "System/Library/PreinstalledAssetsV2": "2860b31d9e251402ffe91079a63a0adca3001f9953d15bfb7cc8d37a5fbcda59",
+     "System/Library/PrivateFrameworks": "9e7300ec060296f0e88fb5a111d5b101148cb66c1eb8ec3fc1a0d89d1a5a31c5",
+     "System/Library/Speech": "0ad6e3d7f636a86661952658dc28b4b3d761654f2c423d9af2d9cdc3f8c1282d",
+     "System/Library/dyld": "3217db22e3712e206022312188720e01d9c9bbd88fc159d3f46f2ca41222333f",
+     "System/Volumes": "8067e00694b16929fba1454e56e729e45a961db6cb7ddfc84bdf4316d794a94d",
+     "System/Volumes/Data": "231d53e8d9be4fa8ca8859f85ba792e30e23d203eaac0e9d2a9f7a656a566c0a",
+     "System/Volumes/Hardware": "c2fbab260a8e6bc7cbf151864864467883c6cfc5b639c43539b703ba0a8562bc",
+     "System/Volumes/Preboot": "4b2049fb4bbb39c299e346f9729a1c1c262a5614f367239b1963d93dedb9ec0f",
+     "System/iOSSupport": "e1cc386d079c8cf07f8f4746f841a0b1138d5187c7f32c61793e0ac0027cd16a",
+     "System/iOSSupport/Helpers": "3597729cb9c4e546d92df4afb72ce6b2d5c7935acdd533a9017996b51254b63f",
+     "System/iOSSupport/System": "302ff16fd463f908e0070abb5a6ecf86e9be1917ac6d986d51f7717150a7b913",
+     "System/iOSSupport/usr": "4fc618f6b2416364f19fe415bb7371944a805477a91000685f9d456a771f0ef9",
+     "Users": "2c87fbc5fb81e1e17047d91047a0952b3d3decb00a025c7f44da0024401c2f6e",
+     "Volumes": "d742036b70d777851177f945b004aa7bf03449e4482420749148283528237b85",
+     "cores": "72008c7d9494cd22f61112df3071a50dadd5e67b9e735cc8e0c0e8c0a0211d9e",
+     "etc": "9a966824263b2169c578bee327ce99ec730a7a58aebe1409cd4cc20858716c7d",
+     "opt": "95738850a508026f545756a04e5171aed9c7a28607a0df5762bf5ff5e8c2d57e",
+     "pkg": "808712d23c0cffddf7e3f104534d7af84af9433651e1621ef946008b5a501152",
+     "private": "47848ba25f31ba12251e65088ef4ea5677d8d285cce54eeb5d90508bb3002ce3",
+     "private/etc": "9d084beb1364357b71859a98ba3ff7aa547fdb2fdd4178d8eba113fe9c25b2fb",
+     "private/tmp": "23e37007f63aa8e221a13f3597c10f418890eb7ad330089fb3b20b97ec8ff9db",
+     "private/var": "6476fb3bd17093022dff820489952619d6b9d01ab91824388dc843e98adccae9",
+     "sbin": "860e5b9be0ca060499f170e2b4ae945eb7b0c67183f746002ec2c7024e0fd992",
+     "sbin/fsck": "4e2fc613b6ddc7d19c8f35b5a1cc1e22adc324be7906fac0583b905b62413851",
+     "sbin/mount": "f70efcee1568de89f3836450cbbf0e0178d90b85654eb89dd8ccfb2d763c383a",
+     "sbin/mount.real": "326ede44211e54a7d629565ac39d463560b8075d5a4256d3b0c62451a8e114e3",
+     "tmp": "2842585976ce2829b7d2174e9b2074f892b04407b5e1f34dae9e0045f7f45ca8",
+     "usr": "14729fa7a88a5a0e6bd1eadd26f1efeb930030d7e15041d236a80b283fac9f7b",
+     "usr/lib": "118b00ca879cdec69836e25c57eaa8c34e94d69df2b029e20e2e0b810ceb2398",
+     "usr/lib/libBacktraceRecording.dylib": "2b45bd4d7d9e267123687ce779bc384691061c7a325f9d46db394005d0a81732",
+     "usr/lib/libBasebandServicesRestResources.dylib": "03596726fd9a3ed5a7496b32638caa37f7e8433f8ed8793adfa2f181abc70492",
+     "usr/lib/libLaunchServicesSupport.dylib": "61045508afc95326916f3daa51403635769d095152b59136e501af3cc662188b",
+     "usr/lib/libLogRedirect.dylib": "a326381e8ada107a4e11272efbb81ce97fe111539b88aa8c271f488b339a197b",
+     "usr/lib/libMTLHud.dylib": "74d361952fe8546d2e48774444949b4630dae40bb4442d9f7fde5d436fb8a345",
+     "usr/lib/libMainThreadChecker.dylib": "f96e83518b5cf5195bfac6803a96ed4add6d9e5e702c1e2ff844fb11cb17780e",
+     "usr/lib/libMetalMetricsInterpose.dylib": "df16b75fc2bc5938ac3bbc259bd4f868152b9dcd8d9b1946ef3e6bb8ba5a22cd",
+     "usr/lib/libhunspell-1.2.0.dylib": "66b3f7e26028e39bdbed99a284e80d1578704f06fb6722dc88db0f7294b4cb2c",
+     "usr/lib/libhunspell-1.2.dylib": "43f03e8ee8cb91e1087e100ea9300829754529e82afc2e9058b2a38b73ad1390",
+     "usr/lib/libruby.dylib": "3ac58ee61d588d31d6ef553a4e59c91358052b3d763c3c019719771776e736e4",
+     "usr/lib/libstdc++.6.dylib": "110dc8cd1bbc872aa75ce59bd3f8b4464cd94fed21bfca79e81656d628c7ba5c",
+     "usr/lib/libstdc++.dylib": "2540b115e95a9e81fd8a07b501cb0ec030ced1c06c8561beb25b15335a9daef0",
+     "usr/lib/objc": "9273f713de3928f69af653175f34c3b34b47b78d351bf0d9824f6ec2bd65fc1f",
+     "usr/lib/swift": "504c2e1054e99978bfd06bb03c32abba084dea9c9aaa9af6da21bc78f44214a8",
+     "usr/lib/system": "9f562096ddbdfcbe6182d131dc26dbbd532e76990ae7f23cb019773842627a83",
+     "usr/libexec": "b770efe1c1387896a3cc25b4a36645de2ee03b52febd63c26dff71be83f71427",
+     "usr/libexec/cups": "b90bb7effe8adf5cf931952d0c34ad203ca75c2e743679a5439aed901c21ed03",
+     "usr/local": "e06f6000e7b32bd772c2dd58ef5403d87d48c913ac76b67d77c152555769caae",
+     "usr/share": "5ce87f433ba9903f2a951caf3532699e36a0e6f3efcf373bf05386e1eab4d5ec",
+     "usr/share/snmp": "1432613ad3cd426d03d3e7d0a3faa1a1db318cca296383e7209dd2aecadcde8a",
+     "var": "97ff3aada6cd07875d97a6fea199b705a0860cda0d098b2d052867d07ecc74f5"
+    },
+    "tool": "tooling/repro/volume-manifest.py --image systemos.img (as root)",
+    "verified": "2026-11-25: the 2026-11-12 window (a5346509...) and a fresh make-systemos.sh rebuild from the same pinned members (image sha256 30818f46..., another volume UUID) give this same digest"
+   }
+  },
+  "image": {
+   "size": 20936916992,
+   "manifest": "tooling/native/make-root-manifest.py OS=<OS window> SystemOS=<systemos.img>: deterministic from the two windows' sizes and sha256s",
+   "reference_build": {
+    "sha256": "2f8ef3550f5c94bb831676e1e8a3894416563c08297c0192f8e29971fd5db1b8",
+    "manifest_sha256": "089b937daa0d4e8390c80d9ce5ee498b3298c5290642de96f125258fcd938a6e"
+   }
+  },
+  "trust": {
+   "tool": "tooling/k273/make-trust.py BASE STATIC SYSTEM APP OUT",
+   "base_bundle_sha256": "2b87b2241090c90508f26c8ca33129f7540922481a102359e99cf0adf00d10d6",
+   "base_bundle_note": "out/inputs/kernel.macho.trustcache, the 27.0.1 line's bundle; its own modules come from the k27 tree (a known gap)",
+   "sha256": "726c71ba25f8b6e515eee485742eb30a45db166a909a7edc7bc552ce4c6f8fc2"
+  }
+ },
+ "maintenance_image": {
+  "release": "https://github.com/yzddmr6/xiaomipad-8pro-mainline/releases/tag/v1.1.0",
+  "asset": "piano-ubuntu-v1.1.0-boot.zip",
+  "member": "boot/boot-ram-maintenance.img",
+  "sha256": "54001a50a13fe80c3bd8e926161608b71d91e57e2d6be6b83cdc2bc62b5f6fbc",
+  "note": "the RAM-only Linux every write session runs in (tooling/persist/maint-session.py MAINT_IMAGE_SHA256); PIANO_V110 names the unpacked release"
+ },
+ "boot_dtb": {
+  "size": 147436,
+  "sha256": "50636effb5f54306ec0ab9a3061cd163d7f003d8797e04585a33205918856840",
+  "from": "the maintenance image's v2 dtb section (tooling/repro/boot-dtb.py); = out/inputs/piano-boot.dtb, Ubuntu's vendor_boot_a DTB"
+ }
+}

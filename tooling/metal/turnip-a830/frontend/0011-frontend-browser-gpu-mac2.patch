@@ -1,0 +1,57 @@
+SPDX-License-Identifier: MIT
+Copyright (c) 2026, Leo Zhang.
+
+MTLGPUFamilyMac2 for the browsers' GPU images alone (ANGLE, Dawn, the Chromium frameworks): ANGLE's Metal display exists on macOS only for a
+default device in Mac2, so Chrome lost GL, WebGL and WebGPU. Every other caller keeps the device's own answer (private analysis
+20261124-browser-gpu section 9; host check tooling/metal/turnip-a830/family_host.mm).
+
+--- NativeBridgeMetalFrontend.mm
++++ NativeBridgeMetalFrontend.mm
+@@ -5840,7 +5840,17 @@
+  return [NSString stringWithUTF8String:text.c_str()];
+ }
+ static BOOL (*gFamilyAnswer)(id,SEL,NSInteger);
+-enum FamilyCaller {FamilyCallerOther,FamilyCallerRenderBox,FamilyCallerWebGPU};
++enum FamilyCaller {FamilyCallerOther,FamilyCallerRenderBox,FamilyCallerWebGPU,FamilyCallerBrowserGPU};
++// UniXNU-piano (0011): the images that hold ANGLE's Metal display or Dawn's Metal backend (the browsers' GL, WebGL and WebGPU), matched
++// by path: WebKit's ANGLE, a standalone ANGLE or Dawn, and the Chromium frameworks that link both in (Chrome, Chromium, Edge, Brave,
++// Electron apps). private host-checks 20261124-browser-gpu ANALYSIS.md section 9.
++static bool browserGpuImage(const char *path) {
++ static const char *const images[]={"/libANGLE-shared.dylib","/libGLESv2.dylib","/libwebgpu_dawn.dylib",
++  "/Google Chrome Framework.framework/","/Chromium Framework.framework/","/Microsoft Edge Framework.framework/",
++  "/Brave Browser Framework.framework/","/Electron Framework.framework/"};
++ for(const char *image:images)if(strstr(path,image))return true;
++ return false;
++}
+ // The framework whose code is at a return address, looked up once per address: dladdr searches the image's symbol table, and
+ // QuartzCore's pixel-format queries ask supportsFamily: for every surface it makes (a masked corner, a backdrop, a blur's mips) and every
+ // IOSurface it checks -- the render server's display thread spent 15% of its running time in that search during page swipes.
+@@ -5853,6 +5863,7 @@
+  if(dladdr(address,&caller) && caller.dli_fname) {
+   if(strstr(caller.dli_fname,"/RenderBox.framework/"))kind=FamilyCallerRenderBox;
+   else if(strstr(caller.dli_fname,"/WebGPU.framework/"))kind=FamilyCallerWebGPU;
++  else if(browserGpuImage(caller.dli_fname))kind=FamilyCallerBrowserGPU;
+  }
+  std::lock_guard<std::mutex> hold(lock);
+  if(known.size()<4096)known.emplace(address,kind);
+@@ -5862,9 +5873,18 @@
+ // feature set tables list no WebGPU limits for Apple1 to Apple3, so requestAdapter() answered null and every page saw no WebGPU. The rows
+ // Apple4 adds that this device refuses (gfxprobe families: imageblocks, tile shaders, raster order groups, post-depth coverage) are the
+ // Apple GPUs' tile-memory features, which WebGPU has no API for, so WebGPU alone is told Apple4 (the family its tables start at).
+-static BOOL familyForCaller(id self,SEL _cmd,NSInteger family) {
+- if(family>=1003 && family<2000) {   // MTLGPUFamilyApple3 to Apple10
++// UniXNU-piano (0011): ANGLE's Metal display exists on macOS only for a default device in MTLGPUFamilyMac2 (IsMetalRendererAvailable), so
++// Chrome's GPU process failed "Initialization of all (1) EGL display types failed" on this device and lost GL, WebGL and WebGPU with it;
++// WebKit's ANGLE has the same check. The Mac2 rows this device does not meet beyond the ones its Apple3 answer already waives are mesh
++// shading, tessellation through indirect arguments, texture barriers, device notifications and some stencil resolves (droidvmFamilyBlockers:
++// 2002 against 1003); ANGLE on arm64 and Dawn use none of them, and each feature they take from Mac2 is either asked apart (BC compression,
++// sample counts, depth24Stencil8, raster order groups, argument-buffer and read-write-texture tiers) or within what the runtime builds
++// (stencil resolve through Vulkan 1.2's subpass resolve, passes without attachments). So these images alone are told Mac2; every other
++// caller (WindowServer, QuartzCore, RenderBox, games that would take mesh shading or tessellation from it) keeps the device's own answer.
++static BOOL familyForCaller(id self,SEL _cmd,NSInteger family) {
++ if((family>=1003 && family<2000) || family==2002) {   // MTLGPUFamilyApple3 to Apple10, MTLGPUFamilyMac2
+   const FamilyCaller kind=familyCaller(__builtin_return_address(0));
++  if(family==2002)return kind==FamilyCallerBrowserGPU ? YES : gFamilyAnswer(self,_cmd,family);
+   if(kind==FamilyCallerRenderBox)return NO;
+   if(kind==FamilyCallerWebGPU && family==1004)return YES;   // MTLGPUFamilyApple4
+  }

@@ -659,6 +659,8 @@ class PianoTouch : public IOService {
   TouchPower fPower;
   pianoirq::Waiter fWake = {};
   volatile bool fSystemOff = false, fParked = false, fServing = false, fFramesStopped = false;
+  enum PanelHold : uint32_t { panelReleased, panelRequested, panelHeld };
+  uint32_t fPanelHold = panelReleased;
   bool fJoined = false;
   IOService *fDisplay = nullptr;
   uint64_t fDisplayReadMs = 0, fDisplayLookupMs = 0;
@@ -1564,6 +1566,24 @@ bool PianoTouch::publishMt()
 // recorded; the frame thread takes it at the next touch-down.
 IOReturn PianoTouch::callPlatformFunction(const OSSymbol *name, bool wait, void *p1, void *p2, void *p3, void *p4)
 {
+  if (name && name->isEqualTo(pianotouch::kFunctionPanel)) {
+    if (p1) {
+      __atomic_store_n(&fPanelHold, panelReleased, __ATOMIC_RELEASE);
+      fWake.kick();
+      return kIOReturnSuccess;
+    }
+    if (!__atomic_load_n(&fServing, __ATOMIC_ACQUIRE)) return kIOReturnNotReady;
+    uint32_t released = panelReleased;
+    __atomic_compare_exchange_n(&fPanelHold, &released, panelRequested, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    fWake.kick();
+    const uint64_t end = nowMs() + 600;
+    do {
+      if (__atomic_load_n(&fPanelHold, __ATOMIC_ACQUIRE) == panelHeld ||
+          __atomic_load_n(&fParked, __ATOMIC_ACQUIRE)) return kIOReturnSuccess;
+      IOSleep(1);
+    } while (nowMs() < end);
+    return kIOReturnTimeout;
+  }
   if (name && name->isEqualTo(pianotouch::kFunctionContact)) {   // PianoTouchClient.h: one word, no lock, no wait
     if (!p1) return kIOReturnBadArgument;
     *static_cast<uint64_t *>(p1) = __atomic_load_n(&fLastContactMs, __ATOMIC_ACQUIRE);
@@ -2275,8 +2295,24 @@ void PianoTouch::serve()
   __atomic_store_n(&fServing, true, __ATOMIC_RELEASE);
   for (;;) {
     const uint64_t now = nowMs();
+    const uint32_t seen = fWake.now();
+    const uint32_t hold = __atomic_load_n(&fPanelHold, __ATOMIC_ACQUIRE);
+    if (hold != panelReleased) {
+      if (hold == panelRequested) {
+        if (fPower.mode != PowerMode::suspended) powerStep(fPower.step(false, 0, true), mc, now);
+        if (fIrqLive) fPin.mask();
+        uint32_t requested = panelRequested;
+        if (__atomic_compare_exchange_n(&fPanelHold, &requested, panelHeld, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+          note("panel sleep: touch SPI parked");
+      }
+      if (__atomic_load_n(&fSystemOff, __ATOMIC_ACQUIRE)) powerStep(fPower.step(true, 0, true), mc, now);
+      if (__atomic_load_n(&fPanelHold, __ATOMIC_ACQUIRE) != panelReleased) fWake.wait(seen, 1000);
+      continue;
+    }
     // The power states (TouchPower.h): the system's (setPowerState; a suspend parks the thread in powerStep) and the display's.
-    powerStep(fPower.step(__atomic_load_n(&fSystemOff, __ATOMIC_ACQUIRE), displayState(now)), mc, now);
+    const PowerStep step = fPower.step(__atomic_load_n(&fSystemOff, __ATOMIC_ACQUIRE), displayState(now));
+    powerStep(step, mc, now);
+    if (step == PowerStep::suspend) continue;
     if (fNativeDeferredMs) nativeDeferred(now);
     if (fFramesStopped) {   // a controller that did not come back after a resume: no reads until the next one
       const uint32_t seen = fWake.now();

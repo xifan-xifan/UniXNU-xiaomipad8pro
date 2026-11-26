@@ -60,7 +60,7 @@ struct Decoded {
   Matrix m{};
   unsigned negativeTwos = 0, negativeSignMagnitude = 0;   // how each negative word was read
 };
-inline Decoded decodeS3132(const uint64_t raw[9])
+inline Decoded decodeS3132(const uint64_t raw[9], bool acceptSignMagnitude = true)
 {
   Decoded d;
   for (unsigned k = 0; k < 9; ++k) {
@@ -73,12 +73,12 @@ inline Decoded decodeS3132(const uint64_t raw[9])
       magnitude = ~v + 1;
       negative = true;
       ++d.negativeTwos;
-    } else if ((v & ~(1ull << 63)) <= kS3132Limit) {   // sign-magnitude
+    } else if (acceptSignMagnitude && (v & ~(1ull << 63)) <= kS3132Limit) {   // sign-magnitude
       magnitude = v & ~(1ull << 63);
       negative = true;
       ++d.negativeSignMagnitude;
     } else {
-      d.why = "a word is outside +-4.0 read either way";
+      d.why = "a negative coefficient is outside +-4.0";
       return d;
     }
     if (magnitude > kS3132Limit) {
@@ -93,8 +93,8 @@ inline Decoded decodeS3132(const uint64_t raw[9])
   return d;
 }
 
-// a * b (b applied first), Q16.16, rounded, clamped to +-8.
-inline Matrix multiply(const Matrix &a, const Matrix &b)
+// a * b (b applied first), Q16.16, rounded and clamped.
+inline Matrix multiply(const Matrix &a, const Matrix &b, int32_t limit = 8 * kOne)
 {
   Matrix r{};
   for (unsigned o = 0; o < 3; ++o)
@@ -102,8 +102,8 @@ inline Matrix multiply(const Matrix &a, const Matrix &b)
       int64_t s = 0;
       for (unsigned k = 0; k < 3; ++k) s += int64_t(a.m[o][k]) * b.m[k][i];
       s = (s + (s >= 0 ? kOne / 2 : -kOne / 2)) / kOne;
-      if (s > 8 * kOne) s = 8 * kOne;
-      if (s < -8 * kOne) s = -8 * kOne;
+      if (s > limit) s = limit;
+      if (s < -limit) s = -limit;
       r.m[o][i] = int32_t(s);
     }
   return r;
@@ -214,13 +214,14 @@ struct Words {
   uint32_t w[3][3] = {};
   unsigned clampedNegative = 0, saturated = 0;
 };
-inline Words pccWords(const Matrix &m, bool allowNegative)
+enum class Negative { clamp, twosComplement, signMagnitude };
+inline Words pccWords(const Matrix &m, Negative negative)
 {
   Words r;
   for (unsigned o = 0; o < 3; ++o)
     for (unsigned i = 0; i < 3; ++i) {
       int32_t q = m.m[o][i];
-      if (q < 0 && !allowNegative) {
+      if (q < 0 && negative == Negative::clamp) {
         q = 0;
         ++r.clampedNegative;
       }
@@ -229,14 +230,25 @@ inline Words pccWords(const Matrix &m, bool allowNegative)
         v = 0x1ffff;
         ++r.saturated;
       }
-      if (v < -0x20000) {
-        v = -0x20000;
+      const int32_t min = negative == Negative::signMagnitude ? -0x1ffff : -0x20000;
+      if (v < min) {
+        v = min;
         ++r.saturated;
       }
-      r.w[o][i] = uint32_t(v) & 0x3ffffu;
+      r.w[o][i] = v < 0 && negative == Negative::signMagnitude ? 0x20000u | uint32_t(-v) : uint32_t(v) & 0x3ffffu;
     }
   return r;
 }
+
+inline Words pccWords(const Matrix &m, bool allowNegative)
+{
+  return pccWords(m, allowNegative ? Negative::twosComplement : Negative::clamp);
+}
+
+struct Program {
+  Words words{};
+  bool enabled = false;
+};
 
 struct Apply {
   bool ok = false;
@@ -246,10 +258,9 @@ struct Apply {
   int32_t latchUs = -1;
   uint32_t enable[kDsppCount] = {};
 };
-// The matrix (encoded space) into every DSPP of the path, enable, flush, latch, read back. The engines must run (the latch is a
-// frame start): the caller keeps a matrix that arrives while the panel sleeps and applies it at the wake.
+// Stage all DSPPs before the CTL flush at the next frame start, then read back each DSPP.
 template <class Io>
-Apply apply(Io &io, const LivePath &p, const Matrix &encoded, bool allowNegative)
+Apply applyPrograms(Io &io, const LivePath &p, const Program (&programs)[kDsppCount])
 {
   Apply a;
   a.dspps = p.dspps;
@@ -261,7 +272,6 @@ Apply apply(Io &io, const LivePath &p, const Matrix &encoded, bool allowNegative
     a.why = "the CTL's LMs have no DSPP (LM4..7)";
     return a;
   }
-  a.words = pccWords(encoded, allowNegative);
   auto wr = [&](uint64_t pa, uint32_t v) {
     ++a.stores;
     if (!io.wr(pa, v)) ++a.refused;
@@ -269,20 +279,24 @@ Apply apply(Io &io, const LivePath &p, const Matrix &encoded, bool allowNegative
   for (unsigned d = 0; d < kDsppCount; ++d) {
     if (!((a.dspps >> d) & 1u)) continue;
     for (unsigned o = 0; o < 3; ++o)
-      for (unsigned i = 0; i < 3; ++i) wr(pccReg(d, kPccCoef[o][i]), a.words.w[o][i]);
-    wr(pccReg(d, 0), 1);
+      for (unsigned i = 0; i < 3; ++i) wr(pccReg(d, kPccCoef[o][i]), programs[d].words.w[o][i]);
+    wr(pccReg(d, 0), programs[d].enabled);
   }
   for (unsigned d = 0; d < kDsppCount; ++d)
     if ((a.dspps >> d) & 1u) wr(ctlReg(unsigned(p.ctl), kCtlDspp0Flush + 4 * d), kDsppFlushPcc);
+  if (a.refused) {
+    a.why = "a PCC staging store was refused";
+    return a;
+  }
   wr(ctlReg(unsigned(p.ctl), kCtlFlush), kFlushDspp);
   a.latchUs = waitFlush(io, unsigned(p.ctl), kFlushDspp, 60000);
   bool same = true;
   for (unsigned d = 0; d < kDsppCount; ++d) {
     if (!((a.dspps >> d) & 1u)) continue;
     a.enable[d] = io.rd(pccReg(d, 0));
-    same &= (a.enable[d] & 1u) != 0;
+    same &= (a.enable[d] & 1u) == unsigned(programs[d].enabled);
     for (unsigned o = 0; o < 3; ++o)
-      for (unsigned i = 0; i < 3; ++i) same &= (io.rd(pccReg(d, kPccCoef[o][i])) & 0x3ffffu) == a.words.w[o][i];
+      for (unsigned i = 0; i < 3; ++i) same &= (io.rd(pccReg(d, kPccCoef[o][i])) & 0x3ffffu) == programs[d].words.w[o][i];
   }
   if (a.refused) a.why = "the store guard refused a store";
   else if (a.latchUs < 0) a.why = "CTL_FLUSH bit 29 did not clear within 60 ms (are the engines running?)";
@@ -291,6 +305,17 @@ Apply apply(Io &io, const LivePath &p, const Matrix &encoded, bool allowNegative
     a.ok = true;
     a.why = "ok";
   }
+  return a;
+}
+
+template <class Io>
+Apply apply(Io &io, const LivePath &p, const Matrix &encoded, bool allowNegative)
+{
+  const Words words = pccWords(encoded, allowNegative);
+  Program programs[kDsppCount];
+  for (Program &program : programs) program = {words, true};
+  Apply a = applyPrograms(io, p, programs);
+  a.words = words;
   return a;
 }
 

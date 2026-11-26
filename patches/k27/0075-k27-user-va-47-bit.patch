@@ -1,0 +1,403 @@
+From 2066f65a41552ec15f3d6dfe12bfdb1807812e04 Mon Sep 17 00:00:00 2001
+From: k27 <k27@localhost>
+Date: Wed, 25 Nov 2026 22:27:51 +0800
+Subject: [PATCH] k27 0075: user VA 47-bit: every user pmap takes a 4 KiB
+ level-0-rooted 47-bit geometry (pmap_pt_attr_4k_u47, T0SZ_HW 17; TTBR0 = the
+ root, no 0010 shim), the kernel pmap stays native; MACH_VM_MAX_ADDRESS
+ 0x7FFFFE000000; piano-uva47=0 restores the 39-bit attribute, the shim and
+ 0x7FFE000000
+
+---
+ bsd/dev/arm64/sysctl.c             |   4 +-
+ osfmk/arm/pmap/pmap.c              | 119 +++++++++++++++++++++++++----
+ osfmk/arm/pmap/pmap_uva47_policy.h | 110 ++++++++++++++++++++++++++
+ osfmk/mach/arm/vm_param.h          |  10 ++-
+ pexpert/pexpert/arm64/BCM2837.h    |   6 ++
+ 5 files changed, 231 insertions(+), 18 deletions(-)
+ create mode 100644 osfmk/arm/pmap/pmap_uva47_policy.h
+
+diff --git a/bsd/dev/arm64/sysctl.c b/bsd/dev/arm64/sysctl.c
+index dca63a2..bb3566f 100644
+--- a/bsd/dev/arm64/sysctl.c
++++ b/bsd/dev/arm64/sysctl.c
+@@ -425,7 +425,9 @@ static int
+ virtual_address_size SYSCTL_HANDLER_ARGS
+ {
+ #pragma unused(arg1, arg2, oidp)
+-	int return_value = 64 - T0SZ_BOOT;
++	/* k27 0075: the width the hardware walks and strips TTBR0 addresses with (T0SZ_HW 17: 47 bits; the pmap's own 4 KiB user
++	 * geometry is 47 bits too, unless piano-uva47=0), not the 39-bit T0SZ_BOOT. CoreSymbolication and crashpad read it. */
++	int return_value = 64 - T0SZ_HW;
+ 	return SYSCTL_OUT(req, &return_value, sizeof(return_value));
+ }
+ 
+diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
+index 609b521..ad6e887 100644
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -100,6 +100,8 @@
+ #include <san/kasan.h>
+ #include <sys/cdefs.h>
+ 
++#include "pmap_uva47_policy.h"   /* k27 0075 (UniXNU-piano tooling/k27/piano-uva47, host-tested) */
++
+ #if defined(HAS_APPLE_PAC)
+ #include <ptrauth.h>
+ #endif
+@@ -327,6 +329,43 @@ const struct page_table_attr * const native_pt_attr = &pmap_pt_attr_16k;
+ const struct page_table_attr * const native_pt_attr = &pmap_pt_attr_4k;
+ #endif /* !__ARM_16K_PG__ */
+ 
++#if !__ARM_16K_PG__ && ARM_PARAMETERIZED_PMAP
++/*
++ * k27 0075 "user VA 47-bit": the user pmaps' geometry (task, shared region, commpage pmaps). 0010 already runs TTBR0 at T0SZ_HW
++ * 17, a level-0 walk, through a one-entry level-0 shim in front of the 39-bit level-1 root; this attribute makes the pmap's own
++ * root that level-0 table: 4 KiB granule, root level (T0SZ_HW - 16) / 9 = 0 (256 entries, 2048 bytes, a page from
++ * pmap_tt1_allocate), 4 levels, the valid mask of T0SZ_HW (2^47 - 1, pmap->max 2^47), the commpage nested at level 1 as before.
++ * TTBR0 then takes the root itself. The kernel pmap keeps native_pt_attr (TTBR1, T1SZ_BOOT 25, level-1 root). It is the geometry
++ * stock XNU gives 4 KiB Rosetta pmaps on 16 KiB kernels. piano-uva47=0 gives user pmaps native_pt_attr and 0010's shim again
++ * (pmap_bootstrap). Decisions: pmap_uva47_policy.h.
++ */
++extern const struct page_table_attr pmap_pt_attr_4k_u47;
++const struct page_table_attr pmap_pt_attr_4k_u47 = {
++	.pta_level_info = pmap_table_level_info_4k,
++	.pta_root_level = (T0SZ_HW - 16) / 9,
++	.pta_commpage_level = PMAP_TT_L1_LEVEL,
++	.pta_max_level  = PMAP_TT_L3_LEVEL,
++	.pta_ops = &native_pt_ops,
++	.ap_ro = ARM_PTE_AP(AP_RORO),
++	.ap_rw = ARM_PTE_AP(AP_RWRW),
++	.ap_rona = ARM_PTE_AP(AP_RONA),
++	.ap_rwna = ARM_PTE_AP(AP_RWNA),
++	.ap_xn = ARM_PTE_PNX | ARM_PTE_NX,
++	.ap_x = ARM_PTE_PNX,
++	.pta_tcr_value  = (TCR_EL1_4KB & ~(TCR_T0SZ_MASK << TCR_T0SZ_SHIFT)) | (T0SZ_HW << TCR_T0SZ_SHIFT),
++	.pta_page_size  = 4096,
++	.pta_pagezero_size = 4096,
++	.pta_page_shift = 12,
++	.pta_va_valid_mask = ARM_PTE_REGION_MASK(T0SZ_HW),
++};
++_Static_assert(T0SZ_HW == PIANO_UVA_T0SZ_HW && T0SZ_BOOT == PIANO_UVA_T0SZ_LEGACY, "k27 0075: the policy's T0SZ values");
++_Static_assert((T0SZ_HW - 16) / 9 == PMAP_TT_L0_LEVEL, "k27 0075: the 47-bit user root is level 0");
++_Static_assert(MACH_VM_MAX_ADDRESS == PIANO_UVA47_MAX_ADDRESS, "k27 0075: vm_param.h's 64-bit map end is the policy's");
++
++/* piano-uva47 (default 1): user pmaps take pmap_pt_attr_4k_u47; =0: native_pt_attr behind 0010's shim, maps end at 0x7FFE000000. */
++SECURITY_READ_ONLY_LATE(bool) piano_uva47 = true;
++#endif /* !__ARM_16K_PG__ && ARM_PARAMETERIZED_PMAP */
++
+ 
+ #if DEVELOPMENT || DEBUG
+ int vm_footprint_suspend_allowed = 1;
+@@ -522,6 +561,8 @@ _Static_assert((ARM64_MAX_OFFSET_DEVICE_SMALL > ARM64_MIN_MAX_ADDRESS) && (ARM64
+ 
+ #  ifdef XNU_TARGET_OS_OSX
+ SECURITY_READ_ONLY_LATE(vm_map_offset_t) arm64_pmap_max_offset_default = MACH_VM_MAX_ADDRESS;
++/* k27 0075: the largest 64-bit map end (ARM_PMAP_MAX_OFFSET_MAX): MACH_VM_MAX_ADDRESS, or 0x7FFE000000 with piano-uva47=0. */
++SECURITY_READ_ONLY_LATE(static vm_map_offset_t) piano_uva_max_offset = MACH_VM_MAX_ADDRESS;
+ #  else
+ SECURITY_READ_ONLY_LATE(vm_map_offset_t) arm64_pmap_max_offset_default = 0x0;
+ #  endif
+@@ -2381,6 +2422,17 @@ pmap_bootstrap(
+ 
+ 
+ 
++#if !__ARM_16K_PG__ && ARM_PARAMETERIZED_PMAP && defined(XNU_TARGET_OS_OSX)
++	{
++		/* k27 0075: before any user pmap (the commpage pmaps come later, in pmap_create_commpages) and before arm64_maxoffset. */
++		uint32_t uva47_arg = 1;
++		const bool uva47_present = PE_parse_boot_argn("piano-uva47", &uva47_arg, sizeof(uva47_arg));
++		piano_uva47 = piano_uva47_on(uva47_present, uva47_arg);
++		piano_uva_max_offset = piano_uva_max_address(piano_uva47);
++		arm64_pmap_max_offset_default = piano_uva_max_offset;
++		/* the console line comes from pmap_create_commpages: this early, no capture (USB console, kernel ring) keeps it */
++	}
++#endif /* !__ARM_16K_PG__ && ARM_PARAMETERIZED_PMAP && XNU_TARGET_OS_OSX */
+ 	if (PE_parse_boot_argn("arm_maxoffset", &maxoffset, sizeof(maxoffset))) {
+ 		maxoffset = trunc_page(maxoffset);
+ 		if ((maxoffset >= pmap_max_offset(FALSE, ARM_PMAP_MAX_OFFSET_MIN))
+@@ -3078,6 +3130,12 @@ pmap_create_options_internal(
+ #if ARM_PARAMETERIZED_PMAP
+ 	/* Default to the native pt_attr */
+ 	p->pmap_pt_attr = native_pt_attr;
++#if !__ARM_16K_PG__
++	if (piano_uva47) {
++		/* k27 0075: every user pmap (task, nested shared region, commpage) takes the 47-bit level-0 geometry */
++		p->pmap_pt_attr = &pmap_pt_attr_4k_u47;
++	}
++#endif /* !__ARM_16K_PG__ */
+ #endif /* ARM_PARAMETERIZED_PMAP */
+ #if __ARM_MIXED_PAGE_SIZE__
+ 	if (flags & PMAP_CREATE_FORCE_4K_PAGES) {
+@@ -3108,25 +3166,36 @@ pmap_create_options_internal(
+ 	}
+ 
+ 	p->ttep = ml_static_vtop((vm_offset_t)p->tte);
+-	p->hw_tte = pmap_tt1_allocate(p, pmap_root_alloc_size(p), 0);
+-	if (!p->hw_tte) {
+-		pmap_tt1_deallocate(p, p->tte, pmap_root_alloc_size(p), 0);
+-		p->tte = NULL;
+-		local_kr = KERN_RESOURCE_SHORTAGE;
+-		goto tt1_alloc_fail;
++	if (piano_uva_needs_shim(pt_attr_root_level(pmap_get_pt_attr(p)))) {
++		/* 0010: a level-1 root behind a one-entry level-0 table, since the hardware walks TTBR0 from level 0 (T0SZ_HW 17) */
++		p->hw_tte = pmap_tt1_allocate(p, pmap_root_alloc_size(p), 0);
++		if (!p->hw_tte) {
++			pmap_tt1_deallocate(p, p->tte, pmap_root_alloc_size(p), 0);
++			p->tte = NULL;
++			local_kr = KERN_RESOURCE_SHORTAGE;
++			goto tt1_alloc_fail;
++		}
++		p->hw_ttep = ml_static_vtop((vm_offset_t)p->hw_tte);
++	} else {
++		/* k27 0075: a level-0 root is the table TTBR0 walks; no shim */
++		p->hw_tte = NULL;
++		p->hw_ttep = p->ttep;
+ 	}
+-	p->hw_ttep = ml_static_vtop((vm_offset_t)p->hw_tte);
+ 	PMAP_TRACE(4, PMAP_CODE(PMAP__TTE), VM_KERNEL_ADDRHIDE(p), VM_KERNEL_ADDRHIDE(p->min), VM_KERNEL_ADDRHIDE(p->max), p->ttep);
+ 
+-	/* nullify the translation table */
+-	for (i = 0; i < tte_index_max; i++) {
++	/* nullify the translation table (k27 0075: all of the allocation, a page also for the 2048-byte level-0 root) */
++	const unsigned tte_alloc_max = (unsigned)(piano_uva_tt1_alloc_bytes(pmap_root_alloc_size(p), PAGE_SIZE, PMAP_ROOT_ALLOC_SIZE) /
++	    sizeof(tt_entry_t));
++	for (i = 0; i < tte_alloc_max; i++) {
+ 		p->tte[i] = ARM_TTE_TYPE_FAULT;
+ 	}
+ 
+-	for (i = 0; i < tte_index_max; i++) {
+-		p->hw_tte[i] = ARM_TTE_TYPE_FAULT;
++	if (p->hw_tte != NULL) {
++		for (i = 0; i < tte_index_max; i++) {
++			p->hw_tte[i] = ARM_TTE_TYPE_FAULT;
++		}
++		p->hw_tte[0] = (p->ttep & ARM_TTE_TABLE_MASK) | ARM_TTE_TYPE_TABLE | ARM_TTE_VALID;
+ 	}
+-	p->hw_tte[0] = (p->ttep & ARM_TTE_TABLE_MASK) | ARM_TTE_TYPE_TABLE | ARM_TTE_VALID;
+ 
+ 	FLUSH_PTE();
+ 
+@@ -3414,8 +3483,8 @@ pmap_destroy_internal(
+ 	if (pmap->hw_tte) {
+ 		pmap_tt1_deallocate(pmap, pmap->hw_tte, pmap_root_alloc_size(pmap), 0);
+ 		pmap->hw_tte = (tt_entry_t *) NULL;
+-		pmap->hw_ttep = 0;
+ 	}
++	pmap->hw_ttep = 0;
+ 
+ 	assert((tt_free_entry_t*)pmap->tt_entry_free == NULL);
+ 
+@@ -7982,7 +8051,9 @@ pmap_switch_user_ttb(pmap_t pmap, pmap_cpu_data_t *cpu_data_ptr)
+ 
+ 
+ 	if (pmap != kernel_pmap) {
+-		set_mmu_ttb((pmap->hw_ttep & TTBR_BADDR_MASK) | (((uint64_t)pmap->hw_asid) << TTBR_ASID_SHIFT));
++		/* k27 0075: a level-0 root (no shim) is TTBR0 itself; a level-1 root goes through 0010's shim */
++		const pmap_paddr_t ttb = (pmap->hw_tte != NULL) ? pmap->hw_ttep : pmap->ttep;
++		set_mmu_ttb((ttb & TTBR_BADDR_MASK) | (((uint64_t)pmap->hw_asid) << TTBR_ASID_SHIFT));
+ 	} else if (!pmap_user_ttb_is_clear()) {
+ 		pmap_clear_user_ttb_internal();
+ 	}
+@@ -11444,6 +11515,16 @@ pmap_create_commpages(vm_map_address_t *kernel_data_addr, vm_map_address_t *kern
+ 	*kernel_text_addr = 0;
+ 	*user_text_addr = 0;
+ 
++#if !__ARM_16K_PG__ && ARM_PARAMETERIZED_PMAP && defined(XNU_TARGET_OS_OSX)
++	/* k27 0075: the mode pmap_bootstrap chose, printed once the console is up (kernel_bootstrap_thread, before the first user pmap
++	 * that is not the commpage's), with the map end the exec maps get */
++	if (piano_uva47) {
++		printf("piano-uva47: user VA 47 bits (T0SZ 17, L0 root), map end 0x%llx\n", (unsigned long long)arm64_pmap_max_offset_default);
++	} else {
++		printf("piano-uva47: user VA 39 bits (piano-uva47=0), map end 0x%llx\n", (unsigned long long)arm64_pmap_max_offset_default);
++	}
++#endif
++
+ #if XNU_MONITOR
+ 	data_pa = pmap_alloc_page_for_kern(0);
+ 	assert(data_pa);
+@@ -11956,7 +12037,11 @@ pmap_max_64bit_offset(
+ 	} else if (option == ARM_PMAP_MAX_OFFSET_MIN) {
+ 		max_offset_ret = min_max_offset;
+ 	} else if (option == ARM_PMAP_MAX_OFFSET_MAX) {
++#ifdef XNU_TARGET_OS_OSX
++		max_offset_ret = piano_uva_max_offset;  /* k27 0075 */
++#else
+ 		max_offset_ret = MACH_VM_MAX_ADDRESS;
++#endif
+ 	} else if (option == ARM_PMAP_MAX_OFFSET_DEVICE) {
+ 		if (arm64_pmap_max_offset_default) {
+ 			max_offset_ret = arm64_pmap_max_offset_default;
+@@ -12986,6 +13071,12 @@ pmap_user_va_bits(pmap_t pmap __unused)
+ #if __ARM_MIXED_PAGE_SIZE__
+ 	uint64_t tcr_value = pmap_get_pt_attr(pmap)->pta_tcr_value;
+ 	return 64 - ((tcr_value >> TCR_T0SZ_SHIFT) & TCR_TSZ_MASK);
++#elif ARM_PARAMETERIZED_PMAP
++	/* k27 0075: from the pmap's attribute (47 with pmap_pt_attr_4k_u47, 39 native): pmap->max, core files, user_core */
++	if (pmap == PMAP_NULL) {
++		return 64 - T0SZ_BOOT;
++	}
++	return piano_uva_bits_from_mask(pt_attr_va_valid_mask(pmap_get_pt_attr(pmap)));
+ #else
+ 	return 64 - T0SZ_BOOT;
+ #endif
+diff --git a/osfmk/arm/pmap/pmap_uva47_policy.h b/osfmk/arm/pmap/pmap_uva47_policy.h
+new file mode 100644
+index 0000000..5f936d9
+--- /dev/null
++++ b/osfmk/arm/pmap/pmap_uva47_policy.h
+@@ -0,0 +1,110 @@
++/*
++ * piano (k27 0075): the user address width decisions of the 4 KiB k27 pmap (osfmk/arm/pmap/pmap.c), as plain inline C so that they
++ * are host-tested (UniXNU-piano tooling/k27/piano-uva47: this file byte for byte, test_uva47_geometry.c, test_uva47_walk.c).
++ * No kernel headers.
++ *
++ * k27 0010 runs the hardware's TTBR0 at T0SZ 17 (47 bits, a level-0 walk) through a one-entry level-0 shim per pmap, while the pmap
++ * itself stays the 39-bit full-page level-1 root (T0SZ_BOOT 25) and the VM map ends at 0x7FFE000000. 0075 gives every user pmap
++ * (task, shared region, commpage) its own 47-bit geometry instead: 4 KiB granule, root level 0, the valid mask from T0SZ_HW 17, TTBR0
++ * = the root itself (no shim); the kernel pmap keeps the native 39-bit level-1 attribute. piano-uva47=0 restores 0010's course (the
++ * native attribute, the shim, 0x7FFE000000) for an A/B on one image.
++ */
++#ifndef PMAP_UVA47_POLICY_H
++#define PMAP_UVA47_POLICY_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++/* TCR_EL1.T0SZ the hardware runs TTBR0 with since k27 0010 (proc_reg.h T0SZ_HW), and the 4 KiB build's pmap T0SZ_BOOT. */
++#define PIANO_UVA_T0SZ_HW               17u
++#define PIANO_UVA_T0SZ_LEGACY           25u
++
++/* The 64-bit user VM map's end: macOS's MACH_VM_MAX_ADDRESS (2^47 less 32 MiB), and 0010's 39-bit one (2^39 less 32 MiB). */
++#define PIANO_UVA47_MAX_ADDRESS         0x00007FFFFE000000ULL
++#define PIANO_UVA39_MAX_ADDRESS         0x0000007FFE000000ULL
++
++#define PIANO_UVA_4K_PAGE               4096ULL
++#define PIANO_UVA_TTE_BYTES             8ULL
++
++/* The 4 KiB granule's root level for a T0SZ: (T0SZ - 16) / 9, pmap.c's pmap_pt_attr_4k formula (17 -> 0, 25 -> 1). */
++static inline unsigned int
++piano_uva_root_level_4k(unsigned int t0sz)
++{
++	return (t0sz - 16u) / 9u;
++}
++
++/* The valid VA mask for a T0SZ: proc_reg.h's ARM_PTE_REGION_MASK(SZ) = 2^(64 - SZ) - 1. */
++static inline uint64_t
++piano_uva_va_mask(unsigned int t0sz)
++{
++	return (1ULL << (64u - t0sz)) - 1ULL;
++}
++
++/* pmap_user_va_bits() from an attribute's valid mask (a nonzero 2^n - 1): n. */
++static inline unsigned int
++piano_uva_bits_from_mask(uint64_t va_valid_mask)
++{
++	return 64u - (unsigned int)__builtin_clzll(va_valid_mask);
++}
++
++/* The 4 KiB granule's index shift at a level: L0 39, L1 30, L2 21, L3 12. */
++static inline unsigned int
++piano_uva_4k_shift(unsigned int level)
++{
++	return 39u - 9u * level;
++}
++
++/* pmap_root_alloc_size(): the root table's bytes, ((mask >> root shift) + 1) entries (T0SZ 17 at L0: 256 entries, 2048 bytes). */
++static inline uint64_t
++piano_uva_root_alloc_size(uint64_t va_valid_mask, unsigned int root_shift)
++{
++	return ((va_valid_mask >> root_shift) + 1ULL) * PIANO_UVA_TTE_BYTES;
++}
++
++/* pmap_tt1_allocate()/pmap_tt1_deallocate()'s rounding: a root smaller than a page and not PMAP_ROOT_ALLOC_SIZE takes a whole page. */
++static inline uint64_t
++piano_uva_tt1_alloc_bytes(uint64_t size, uint64_t page_bytes, uint64_t pmap_root_alloc_size_const)
++{
++	if ((size < page_bytes) && (size != pmap_root_alloc_size_const)) {
++		size = page_bytes;
++	}
++	return size;
++}
++
++/* ttn_index() for the 4 KiB granule: the address under the valid mask, 9 index bits at the level's shift. */
++static inline unsigned int
++piano_uva_ttn_index(uint64_t va_valid_mask, uint64_t addr, unsigned int level)
++{
++	const unsigned int shift = piano_uva_4k_shift(level);
++	return (unsigned int)(((addr & va_valid_mask) & (0x1FFULL << shift)) >> shift);
++}
++
++/* piano-uva47: absent or nonzero = the 47-bit user geometry (the default), =0 = 0010's 39-bit pmap behind the shim. */
++static inline bool
++piano_uva47_on(bool arg_present, uint32_t arg_value)
++{
++	return !arg_present || arg_value != 0;
++}
++
++/* arm64_pmap_max_offset_default (the exec map's end, pmap_max_offset(DEVICE / JUMBO / MAX)) for the switch. */
++static inline uint64_t
++piano_uva_max_address(bool uva47)
++{
++	return uva47 ? PIANO_UVA47_MAX_ADDRESS : PIANO_UVA39_MAX_ADDRESS;
++}
++
++/* A pmap whose root is not level 0 needs 0010's level-0 shim under TTBR0 (the hardware always starts at level 0, T0SZ 17). */
++static inline bool
++piano_uva_needs_shim(unsigned int root_level)
++{
++	return root_level != 0u;
++}
++
++/* machdep.virtual_address_size: the width the hardware strips and walks TTBR0 addresses with, 64 - T0SZ_HW (47 in both modes). */
++static inline int
++piano_uva_virtual_address_size(unsigned int t0sz_hw)
++{
++	return (int)(64u - t0sz_hw);
++}
++
++#endif /* PMAP_UVA47_POLICY_H */
+diff --git a/osfmk/mach/arm/vm_param.h b/osfmk/mach/arm/vm_param.h
+index bb62cdd..cd01da4 100644
+--- a/osfmk/mach/arm/vm_param.h
++++ b/osfmk/mach/arm/vm_param.h
+@@ -136,8 +136,12 @@ extern int PAGE_SHIFT_CONST;
+ #if defined(XNU_PLATFORM_MacOSX) || defined(XNU_PLATFORM_DriverKit)
+ #define MACH_VM_MAX_ADDRESS_RAW 0x00007FFFFE000000ULL
+ #else
+-/* macOS 27's libmalloc reserves fixed ranges up to 0x7d80000000+: use the whole 39-bit (T0SZ 25) user space, 32 MiB short of its end. */
+-#define MACH_VM_MAX_ADDRESS_RAW 0x0000007FFE000000ULL
++/*
++ * k27 0075: 64-bit tasks get macOS's 47-bit user space (the pmap's 4 KiB level-0 root, T0SZ_HW 17), 32 MiB short of 2^47; V8's
++ * 1 TiB sandbox needs it. piano-uva47=0 caps the exec maps at 0010's 39-bit end, 0x7FFE000000, at run time (pmap.c,
++ * arm64_pmap_max_offset_default); macOS 27's libmalloc fixed ranges (up to 0x7d80000000+) lie under both.
++ */
++#define MACH_VM_MAX_ADDRESS_RAW 0x00007FFFFE000000ULL
+ #endif
+ 
+ /*
+@@ -294,7 +298,7 @@ extern int PAGE_SHIFT_CONST;
+ 
+ #if XNU_KERNEL_PRIVATE
+ #define VM_KERNEL_STRIP_MASK            (-1ULL << (64 - T1SZ_BOOT))
+-#define VM_USER_STRIP_MASK              (-1ULL >> (T0SZ_BOOT))
++#define VM_USER_STRIP_MASK              (-1ULL >> (T0SZ_HW))   /* k27 0075: the hardware TTBR0 width (47 bits), not the 39-bit pmap T0SZ_BOOT */
+ #define _VM_KERNEL_STRIP_PTR(_va)       ({((_va) & 1ULL << 55) ? ((_va) | VM_KERNEL_STRIP_MASK) : ((_va) & VM_USER_STRIP_MASK);})
+ #else /* XNU_KERNEL_PRIVATE */
+ 
+diff --git a/pexpert/pexpert/arm64/BCM2837.h b/pexpert/pexpert/arm64/BCM2837.h
+index e6e180a..6696d58 100644
+--- a/pexpert/pexpert/arm64/BCM2837.h
++++ b/pexpert/pexpert/arm64/BCM2837.h
+@@ -35,6 +35,12 @@
+ #define __ARM_COHERENT_CACHE__    1
+ #define __ARM_DEBUG__             7
+ #define __ARM64_PMAP_SUBPAGE_L1__ 1
++/*
++ * k27 0075: per-pmap page-table attributes (osfmk/arm/pmap): every user pmap takes the 4 KiB, level-0-rooted, 47-bit geometry
++ * (pmap_pt_attr_4k_u47, T0SZ_HW 17) while the kernel pmap keeps the native 39-bit level-1 one; piano-uva47=0 gives users the native
++ * one again behind 0010's shim. The configuration stock XNU runs 4 KiB Rosetta pmaps with on 16 KiB kernels.
++ */
++#define ARM_PARAMETERIZED_PMAP    1
+ 
+ /* Explicit native ARMv8.1+ bring-up; the original A53 target has no PAN. */
+ #if defined(XNU_NATIVE_PAN) && XNU_NATIVE_PAN

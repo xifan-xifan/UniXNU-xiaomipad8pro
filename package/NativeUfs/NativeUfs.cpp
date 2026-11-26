@@ -1066,6 +1066,7 @@ static uint64_t hostPerfNow (void);
 static void hostPerfSpan (unsigned kind, uint64_t start, uint64_t bytes);
 static void hostPerfDepth (int delta);
 #include "RootCommands.h"
+#include "RootDevice.h"
 
 #if defined(NATIVE_UFS_SM8750) && NATIVE_UFS_SM8750
 // UniXNU-piano: the power contract's UFS side (RootPower.h: native-ufs-suspend=1, native-ufs-ahit=MS) and its port.
@@ -3078,8 +3079,32 @@ static void perfLines (unsigned second, uint64_t windowTicks, bool print)
          second, cs[0], cs[0] >> 6, cs[1], cs[2], cs[3]);
 }
 
-// native-ufs-perf=1, once after the bring-up (no command is in flight then): the link as the boot firmware left it (UniPro PA
-// attributes through DME_GET), the slots and the DMA reach.
+// UniXNU-piano 2026-11-25: the UFS clock roots as the boot firmware left them (read only; nothing here writes the GCC). CMD_RCGR
+// bit 31 ROOT_OFF; CFG_RCGR SRC_SEL [10:8], SRC_DIV [4:0] (divide by (n+1)/2). Sources (Linux gcc-sm8750.c gcc_parent_map_3):
+// 0 TCXO 19.2 MHz, 1 GPLL0 600 MHz, 5 GPLL4 806 MHz, 6 GPLL0_EVEN 300 MHz. Linux's OPPs: 100 and 403 MHz (sm8750.dtsi ufs_opp_table).
+static void ufsClockLine (void)
+{
+#if defined(NATIVE_UFS_SM8750) && NATIVE_UFS_SM8750
+  OSSharedPtr<IOMemoryMap> gccMap;
+  const uintptr_t gcc = mapPhys (GCC_BASE + 0x77000, 0x1000, gccMap);
+  if (!gcc) { IOLog ("NativeUfs: ufs-clocks: GCC map failed\n"); return; }
+  static const struct { uint32_t cmd; const char *name; } kRoot[] = { { 0x034, "axi" }, { 0x08c, "ice" }, { 0x0a4, "unipro" } };
+  static const uint32_t kSourceKHz[8] = { 19200, 600000, 0, 0, 0, 806000, 300000, 0 };
+  char text[256]; int n = 0;
+  for (const auto &root : kRoot) {
+    const uint32_t cmd = read32 (gcc, root.cmd), cfg = read32 (gcc, root.cmd + 4);
+    const uint32_t source = (cfg >> 8) & 7, div = cfg & 0x1f, khz = kSourceKHz[source];
+    const uint32_t mhz = khz ? static_cast<uint32_t> ((uint64_t (khz) * 2 / (div + 1)) / 1000) : 0;
+    n += snprintf (text + n, sizeof (text) - n, " %s cmd %08x cfg %08x (~%u MHz%s)", root.name, cmd, cfg, mhz,
+                   (cmd & 0x80000000U) ? ", root off" : "");
+    if (n < 0 || size_t (n) >= sizeof (text)) break;
+  }
+  IOLog ("NativeUfs: ufs-clocks:%s\n", text);
+#endif
+}
+
+// Once after the bring-up (no command is in flight then; every boot since 2026-11-25, before only with native-ufs-perf=1): the
+// link as the boot firmware left it (UniPro PA attributes through DME_GET), the slots and the DMA reach.
 static void perfLinkLine (void)
 {
   static const uint16_t kAttr[] = { 0x1568, 0x1560, 0x1561, 0x1583, 0x1580, 0x1581, 0x1571, 0x156a, 0x1569, 0x1584 };
@@ -3504,7 +3529,19 @@ bool NativeUfs::startRoot (IOService *provider)
   }
   native_ufs_root_step = 2;
   captureXblLog ();
-  if (gPerf) perfLinkLine ();
+  // UniXNU-piano 2026-11-25 (disk-speed lane): every boot logs the device's state and the link (both were native-ufs-perf only or
+  // never read), and native-ufs-wb=1 turns WriteBooster on as Linux does (RootDevice.h). Still single-threaded, nothing published.
+  {
+    uint32_t wb = 0;
+    const bool wantWb = PE_parse_boot_argn ("native-ufs-wb", &wb, sizeof (wb)) && wb == 1;
+    UfsDeviceState state;
+    hostDeviceState (wantWb, &state);
+    char line[640];
+    hostDeviceStateLine (state, line, sizeof (line));
+    IOLog ("NativeUfs: %s\n", line);
+    ufsClockLine ();
+  }
+  perfLinkLine ();
   RootLayout *layout = static_cast<RootLayout *> (IOMalloc (sizeof (RootLayout)));
   if (!layout || !findRootLayout (layout, &why)) {
     rootDiagnosticFailure (layout ? why : "root layout allocation failed");

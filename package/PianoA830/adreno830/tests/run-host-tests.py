@@ -68,6 +68,7 @@ KNOWN = {
     'test_p1wire': (['NativeAdrenoMemory.cpp'], [], None, 'GPU-PAGED P1b'),
     # UniXNU-piano (2026-11-22, GPU-PAGED P0b): the pool bypass through the user client (test_userclient's fixture and doubles)
     'test_poolbypass': (SUBMIT + ['NativeAdrenoUserClient.cpp', 'NativeAdrenoTimer.cpp'], ['smmu', 'pm4', 'proc'], None, 'GPU-PAGED P0b'),
+    'test_tier_boalloc': (SUBMIT + ['NativeAdrenoUserClient.cpp', 'NativeAdrenoTimer.cpp'], ['smmu', 'pm4', 'proc'], None, 'RAM16G R1'),
     'test_timer': (['NativeAdrenoTimer.cpp'], [],
         'PASS: GMU AO counter at gmu +0x47100/+0x47104 and CP 0x8E7/0x8E8, 19 high-low-high reads (rollovers included), 12 '
         'refusals over a software counter peer', 'M6'),

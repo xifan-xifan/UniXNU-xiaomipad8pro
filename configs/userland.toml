@@ -131,6 +131,23 @@ dest = "/Library/LaunchDaemons/com.unixnu.pianousb-shell.plist"
 mode = "0644"
 
 [[unit]]
+name = "piano-lw-quiet"
+about = "holds Apple's audiomxd (SIGSTOP) while nobody is logged in: its BTAudioRoutingRequest retry loop at the login window burns ~1.3 cores (LT-D10); continued at login; off with piano-lw-quiet=0"
+default_on = true
+
+[[unit.file]]
+source = "tooling/native/piano-lw-quiet/piano-lw-quiet.sh"
+build = "copy"
+dest = "/usr/local/libexec/piano-lw-quiet"
+mode = "0755"
+
+[[unit.file]]
+source = "tooling/native/piano-lw-quiet/com.unixnu.piano-lw-quiet.plist"
+build = "copy"
+dest = "/Library/LaunchDaemons/com.unixnu.piano-lw-quiet.plist"
+mode = "0644"
+
+[[unit]]
 name = "piano-usbnet-address"
 about = "the USB network's debug address 169.254.80.2/16 kept through configd's own configuration of the interface (its SystemConfiguration service set Manual, then 600 s of re-checks; docs/drivers/usb-device-debug.md section 14.9); exits at once without piano-usb-net"
 default_on = true

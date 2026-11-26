@@ -209,7 +209,7 @@ static void respond(int stream, uint16_t txn, int ok)
 
 // A report 0x21 {TLV 0x01 client id, TLV 0x02 u16 n + sns_client_event_msg {suid, events {msg_id, timestamp, payload}...}}.
 typedef struct {uint32_t msg_id; uint8_t payload[96]; uint32_t length;} HubEvent;
-static void report(int stream, const SscSuid *suid, const HubEvent *events, unsigned count)
+static void report_at(int stream, const SscSuid *suid, const HubEvent *events, unsigned count, const uint64_t *sample_ms)
 {
     uint8_t body[700], ind[800];
     SpbOut o;
@@ -221,7 +221,8 @@ static void report(int stream, const SscSuid *suid, const HubEvent *events, unsi
     for (unsigned i = 0; i < count; ++i) {
         mark = spb_open(&o, 2);
         spb_put_fixed32(&o, 1, events[i].msg_id);
-        spb_put_fixed64(&o, 2, clock_ms * 19200ull);         // QTimer ticks
+        const uint64_t ms = sample_ms ? sample_ms[i] : clock_ms;
+        if (ms) spb_put_fixed64(&o, 2, ms * 19200ull);      // QTimer ticks; omit the field for a missing timestamp
         spb_put_bytes(&o, 3, events[i].payload, events[i].length);
         spb_close(&o, mark);
     }
@@ -236,6 +237,11 @@ static void report(int stream, const SscSuid *suid, const HubEvent *events, unsi
     memcpy(ind + n, body, b);
     n += b;
     deliver(stream, ind, n);
+}
+
+static void report(int stream, const SscSuid *suid, const HubEvent *events, unsigned count)
+{
+    report_at(stream, suid, events, count, NULL);
 }
 
 // sns_std_sensor_event {data 1 (repeated float, packed or one tag per value), status 2}
@@ -659,10 +665,12 @@ static void hold_pose(float x, float y, float z, uint64_t ms)
     run(ms);
 }
 
-static void test_accel(void)
+static void test_accel(int sample_time)
 {
     SsConfig cfg;
     ss_defaults(&cfg);
+    CHECK(cfg.accel_sample_time == 0);
+    cfg.accel_sample_time = sample_time;
     fresh(&cfg);
     bring_up(0);
     conditions(0, 1, 1, 1, 0);                   // the agent reads the edge, the display is on, the cover detached
@@ -705,7 +713,58 @@ static void test_accel(void)
     run(200);
     CHECK(!hub[SS_ACCEL].enabled && out.edge == PS_EDGE_NONE && hub[SS_ACCEL].enables == hub[SS_ACCEL].disables);
     CHECK(clean() == 0 && results_bad == 0 && hub[SS_LIGHT].requests == 0);
-    printf("PASS accel: 513 at 10 Hz (the hub's 12.5 Hz logged), the four edges, flat, tilted; off with the cover, the display, the agent\n");
+    printf("PASS accel (%s time): 513 at 10 Hz (the hub's 12.5 Hz logged), four edges, flat, tilted, stream teardown\n",
+           sample_time ? "sample" : "receive");
+}
+
+static void test_accel_sample_time(int sample_time)
+{
+    SsConfig cfg;
+    ss_defaults(&cfg);
+    cfg.accel_sample_time = sample_time;
+    const float left[3] = {0, 9.81f, 0};
+    const float top[3] = {9.81f, 0, 0};
+    const HubEvent event = sensor_event(left, 3, 3, 1);
+    const HubEvent top_event = sensor_event(top, 3, 3, 0);
+    const HubEvent batch[] = {event, event, top_event, event};
+    const uint64_t dense[] = {1100, 1300, 1300, 1350};   // 200 ms gap allowed at 10 Hz, then exact 250 ms dwell
+
+    fresh(&cfg);
+    bring_up(0);
+    conditions(0, 1, 1, 1, 0);
+    run(40);   // enable answered; no accelerometer sample delivered yet
+    clock_ms = 1600;
+    // The duplicate's conflicting vector at 1300 must not replace the candidate.
+    report_at(SS_ACCEL, &kAccel, batch, 4, dense);
+    CHECK(out.edge == (sample_time ? PS_EDGE_LEFT : PS_EDGE_NONE));
+
+    fresh(&cfg);
+    bring_up(0);
+    conditions(0, 1, 1, 1, 0);
+    run(40);
+    clock_ms = 1200;
+    report_at(SS_ACCEL, &kAccel, &event, 1, dense);
+    CHECK(out.edge == PS_EDGE_NONE);
+    clock_ms = 1600;
+    const uint64_t late = 1301;   // 201 ms: must restart the candidate, despite 400 ms of receive-time dwell
+    report_at(SS_ACCEL, &kAccel, &event, 1, &late);
+    CHECK(out.edge == (sample_time ? PS_EDGE_NONE : PS_EDGE_LEFT));
+    if (!sample_time) return;
+
+    const uint64_t discontinuities[] = {1301, 1401, 0, 1500, 1600, 1550, 1650, 1750, 1799, 1800};
+    for (unsigned i = 0; i < sizeof discontinuities / sizeof discontinuities[0]; ++i) {
+        const uint64_t tick_ms = discontinuities[i];
+        report_at(SS_ACCEL, &kAccel, &event, 1, &tick_ms);
+        CHECK(out.edge == (tick_ms == 1800 ? PS_EDGE_LEFT : PS_EDGE_NONE));
+    }
+    // A timestamp discontinuity clears only the candidate; it must not publish a new edge.
+    const uint64_t seq = out.seq;
+    const uint64_t after_gap = 2300;
+    clock_ms = 2600;
+    report_at(SS_ACCEL, &kAccel, &top_event, 1, &after_gap);
+    CHECK(out.edge == PS_EDGE_LEFT && out.seq == seq);
+    CHECK(clean() == 0 && results_bad == 0 && hub[SS_LIGHT].requests == 0);
+    printf("PASS accel sample time: batched dwell, gap boundary, missing, duplicate and backwards timestamps\n");
 }
 
 // ---------------------------------------------------------------- guard and strikes
@@ -1113,7 +1172,10 @@ int main(int argc, char **argv)
     test_light();
     test_light_cycles();
     test_accel_gate_contract();
-    test_accel();
+    test_accel(0);
+    test_accel(1);
+    test_accel_sample_time(0);
+    test_accel_sample_time(1);
     test_accel_cover_acquisition();
     test_guard();
     test_sleep();

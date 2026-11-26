@@ -176,7 +176,9 @@ static inline void Adreno830KnobDefaults(Adreno830Board::Adreno830Knobs *knobs)
     knobs->stop=Adreno830StopNever;knobs->status=1;knobs->rails=1;knobs->ddr_boot=11;knobs->ddr_floor=11;knobs->actlr=0x303;
     knobs->dcvs=1;knobs->dcvs_min_mhz=160;knobs->dcvs_max_mhz=734;knobs->perf=2;knobs->va=16;
 #ifdef ADRENO830_MACOS
-    knobs->va=64;   /* UniXNU-piano (2026-11-22, GPU-SLOTS): the 64 GiB aperture, 64 client windows; falls back to 16 GiB, then 4 GiB */
+    /* UniXNU-piano (2026-11-25, gpu/slots2): the 256 GiB aperture (38-bit input, paged mode only), ordinary client windows of 4 GiB; falls
+     * back to 64, 16, then 4 GiB. pagani-gpu-va=64 is the 2026-11-22 table (1 GiB ordinary windows), the A/B switch. */
+    knobs->va=256;
 #endif
     knobs->profile=A830ProfileAnnibale;knobs->hwsched=0;knobs->trace=1;knobs->ttarget=95;knobs->kopt=NativeAdrenoKoptAll;
 }

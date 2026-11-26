@@ -79,7 +79,9 @@ kernel side must provide (2026-11-11).
 | `piano-gpu-status=0..3` | 2 at N=2 | status rows (2: the diagnostic page) |
 | other `piano-gpu-*`, `piano-screenoff`, `piano-diag` | driver's | Adreno830's `pagani-*` knobs renamed (README of `package/PianoA830/adreno830`), e.g. `piano-gpu-profile`, `piano-gpu-dcvs-max` |
 | `piano-screenoff=2` (driver's, bit 1) | 0 | the DCVS screen rule: the GPU slumbers (CX kept; with bit 3 the full collapse) once the display has been off and the GPU quiet for 1 s. Since 2026-11-12 the board feeds the rule's word (`pagani_screen_state`: bit 0 off, the changes above it) from NativeGopDisplay's display power, so the rule can act natively; without the bit nothing reads it (default unchanged). Proposed default after a run: 2 (`docs/power.md` "Idle wakeups by driver") |
+| `piano-gpu-tier=0/1/2` | 0 | Region1 GPU RAM. 1 tries qualified 2 MiB slabs for BOs of at least 2 MiB, and 2 tries them for every non-contiguous BO. Requires write-combined CPU views and the DarwinBoot reservation handoff. See [RAM16G R1](ram-extra.md). |
 | `piano-gpu-pool=<MiB>` | a quarter of the RAM, 512..2048 (2048 on piano: XNU reports 8192 MiB, about 13300 MiB with the 13 GiB window; S0 takes at most 2048, but XNU maps no block of 2 GiB, so S3 starts at 1024: `NativeAdrenoContiguousMaxBytes`) | the write-combined BO pool S3 reserves (halved until it succeeds, 64..2048); §8, "The BO pool" |
+| `piano-gpu-va=256/64/16/4/2` | 256 (macOS) | the GPU aperture and its client window table (driver's `pagani-gpu-va`). 256 (gpu/slots2, 2026-11-25): a 256 GiB aperture with a 38-bit SMMU input, in paged mode (`piano-gpu-mem=paged`) only: WindowServer 3.5 GiB, large 2/1/1 GiB, 59 ordinary 4 GiB windows on 4 GiB lines, the decoder's 1.5 GiB at the top; the per-object limit (Query's `max_bo_bytes`, Metal's maxBufferLength) stays 1 GiB in every slot but WindowServer's. Without paged mode 256 is the 64 GiB request. 64: the 2026-11-22 table (36-bit input, 54 ordinary 1 GiB windows), the A/B switch. Falls back 256 -> 64 -> 16 -> 4 GiB (the S3/S9 note `gpu aperture GiB, table pages`); ioreg `NativeAdrenoGpu`: `NativeAdrenoClientSlots`, `NativeAdrenoClientVaEndMiB`, `NativeAdrenoClientWindowMiB`, `NativeAdrenoClientObjectMiB`, `NativeAdrenoClientInputBits` |
 | `piano-gpu-metal-opens=<n>` | 0 (no limit) | connections ever granted to the plugin |
 | `piano-gpu-hang-ms=<ms>` | 0 (2000) | the time without progress (fence, ring read pointer, BR's IB1) the fence and recovery watchdogs call a hang, 1000..60000; 10000 for the first desktop sessions ([gpu-userspace.md](gpu-userspace.md), desktop section) |
 | `piano-gpu-idle=0/1/2` | 1 | the GPU's idle power (§8, "GPU idle power"): 0 as before; 1 the DCVS floor (no wake boost, a 250 ms window while idle at 160 MHz, no touch pre-wake); 2 also the boot DDR vote dropped to the display's floor at S10, the host CX/MX votes lowered after `piano-gpu-idle-ms` quiet, and P1's full slumber |
@@ -525,3 +527,20 @@ separate from WORK queue residence and service costs.
 In R3b with exit-test mode off, `piano-gpu-dcvs-min=607` selects the sustained-residency qualification. The request
 floor follows the effective guard ceiling, including the initial 342 MHz cap. Its absolute 625-second permit includes
 time for the four guarded up-steps and at least 600 seconds of acknowledged level-7 residency when conditions allow.
+
+### Docked skin table, the binding limit and the Android-curve default (gpu/throttle1, 2026-11-24)
+
+- **Android-curve preset** (`package/include/PianoGpuAndroidPreset.h`): with `piano-gpu` >= 2 and none of the 15 GPU qualification
+  arguments on the command line (`piano-gpu-r3b`, `-daily`, `-fullopp`, `-governor`, `-profile`, `-speedbin`, `-dcvs`, `-maxlevel`,
+  `-dcvs-max`, `-dcvs-min`, `-acd`, `-hfi`, `-rails`, `-ddr`, `-ddr-floor`) they read as the installed line gives them (R3b daily
+  guard, bin-2 curve 222..1100 MHz, ACD, KGSL-style governor). One given argument turns the whole preset off (a test image is never a
+  mix); `piano-gpu-android-curve=0` turns it off. PianoPolicy reads the same preset for the GPU maximum Power Saver's 342 MHz acts on.
+- **Skin table** (`piano-gpu-skin-table`, default 1; root `machdep.piano_gpu_skin_table`, fullopp only): 1 = docked, one GMU level
+  per 2 C band of the virtual skin: 1050 MHz from 35 C (clear < 33), 967 from 45 (< 43), 900 from 47 (< 45), 832 from 49 (< 47), 734
+  from 51 (< 49), 607 from 53 (< 51), 525 from 55 (< 53); 0 = Android's normal scene (1050 from 25 C, 734 from 45 C). Both: no usable
+  reading and XO >= 78 C cap 734, the die ladder (95 / 90 C), the guard exit (raw 100 C, XO 90 C) and the unsafe exit (105 C).
+- **Binding limit** (`adreno830/A830Bind.h`): the LV line ends with `bind=` (lpm, thermal, sweep, top, ladder, skin25, skin45, skinband,
+  xo, skin-unknown, hard, startup, permit, knob, boostcap), `why=` (`demand` when the governor votes below the cap) and `tab=`; its
+  `cap=` is `A830Dcvs::ceiling()` (it could not exceed 7 before). `machdep.piano_gpu_state` (read only, once a second): `at_us lvl mhz
+  cap cap_mhz why bind want table band step ext skin_dC skin_ok raw_dC filt_dC xo_dC latched high`.
+- Analysis and the Android / Ubuntu / docked comparison: private host-check `20261124-gpu-throttle` (ANALYSIS.md, TABLE.md).

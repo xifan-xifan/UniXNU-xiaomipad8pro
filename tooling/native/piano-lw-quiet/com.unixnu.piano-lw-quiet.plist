@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- UniXNU-piano: audiomxd held while nobody is logged in (LT-D10). /Library/LaunchDaemons/com.unixnu.piano-lw-quiet.plist (root:wheel
+     644), script /usr/local/libexec/piano-lw-quiet (root:wheel 755): configs/userland.toml. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.unixnu.piano-lw-quiet</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>/usr/local/libexec/piano-lw-quiet</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ProcessType</key><string>Background</string>
+</dict>
+</plist>

@@ -8,10 +8,12 @@
 set -euo pipefail
 P=$(cd "$(dirname "$0")/.." && pwd)
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-for t in scm_lock_host wcn_rails_host mm_votes_host spmi_lock_host; do
+for t in scm_lock_host wcn_rails_host mm_votes_host spmi_lock_host gpu_preset_host extra_ram_host; do
   "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -I "$P" "$P/tests/$t.cpp" -o "$T/$t"
   "$T/$t"
 done
+# PianoExtraRam.h's allow/never tables against firmware/patches/darwinboot/region0-allow.json (docs/extra-ram.md).
+python3 "$P/tests/region0_allow_check.py"
 # The protocol halves are plain C too.
 printf '#include "PianoScmLock.h"\n#include "PianoWcnRails.h"\n#include "PianoMmVotes.h"\n#include "PianoSpmi.h"\nint main(void) { return piano_scm_lock_owner(0) == 0 && piano_wcn_rails_owners(0) == 0 && piano_mm_need(0, 0, 0) == 0 && piano_spmi_owner(0) == 0 ? 0 : 1; }\n' > "$T/c.c"
 "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -I "$P" "$T/c.c" -o "$T/c" && "$T/c"

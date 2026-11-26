@@ -36,6 +36,7 @@ struct MemoryFixture {
     size_t contiguous_limit=0;   /* nonzero: physically contiguous requests above this many bytes fail (a fragmented tablet) */
     unsigned imported=0,imports_live=0;
     unsigned physical_calls=0;size_t physical_bytes=0;   /* NativeAdrenoMaintainPhysicalPages doubles */
+    void (*zero_physical)(uint64_t,size_t)=nullptr;
     void (*allocation_hook)(unsigned options,size_t bytes)=nullptr;   /* sees every IOBufferMemoryDescriptor request, refused ones too */
     /* UniXNU-piano (GPU-PAGED P1b): prepare() of a pageable object spends this long per 4 KiB page (the tablet's wiring is 0.5-3 us per
      * page); prepare call number prepare_fail_at (1-based, all objects) fails. prepare() may run on several threads at once. */

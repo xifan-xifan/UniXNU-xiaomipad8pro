@@ -132,7 +132,7 @@ struct Args {
   uint32_t rddm, defer, wake;
   uint32_t deadlineMs;
   uint32_t l7, l7wait, l7hold, l7tries, l7scans, l7frame, l7step, l7file, l7cands;
-  bool nativeBoot;
+  bool nativeBoot, currentJoinReceipt;
   uint32_t l8, l8status, l8blocks, l8tracems;
   uint32_t sleepOff, rejoin, dropTest, clientWaitMs;
   uint32_t restart, restartCap, crashTest, fastRestart, haltWatch, en0, ps, psIdleMs, l8stats, bgScanS, phy, apple80211;
@@ -244,6 +244,7 @@ void readArgs()
   // Daily Wi-Fi starts from airportd's SET20. The file is still available to
   // the userland helper and to kernel-only RAM probes.
   gArgs.nativeBoot = bootArg("piano-wifi-native-boot", 0) != 0;
+  gArgs.currentJoinReceipt = bootArg("piano-wifi-join-current", 0) == 1;
   gArgs.l7file = !gArgs.nativeBoot && bootArg("piano-wifi-l7file", 1);
   gArgs.l7cands = bootArg("piano-wifi-l7cands", 4);
   if (!gArgs.l7cands || gArgs.l7cands > kStaCandidatesMax) gArgs.l7cands = 4;
@@ -3242,6 +3243,7 @@ bool gProfileSet;
 piano_wifi_profile_stamp gProfileStamp;   // the file's at the last read (profileFileCheck)
 bool gProfileStampValid, gProfileFromFile, gProfileFromMenu, gProfileReadOnce;
 WifiJoinRequest gJoinRequest;  // under gProfileLock
+uint32_t gRestarts;            // written by the ladder, sampled atomically for the join receipt
 
 WifiJoinRequest joinRequest()
 {
@@ -3321,6 +3323,8 @@ int sysctlJoin(struct sysctl_oid *, void *, int, struct sysctl_req *req)
 // Filled in at run time rather than by SYSCTL_OID's static initializer: its parent and handler are signed pointers on arm64e
 // (the same pattern as PianoPolicy's).
 struct sysctl_oid gOidJoin;
+struct sysctl_oid gOidCurrentJoin;
+int sysctlCurrentJoin(struct sysctl_oid *, void *, int, struct sysctl_req *);
 
 extern volatile uint32_t gPsWanted;   // (level 8's, below)
 volatile uint32_t gPhyWanted, gPhyRejoinAsked;   // boot 10r: machdep.piano_wifi_phy (read at each join)
@@ -3469,7 +3473,7 @@ extern "C" int piano_wifi_net_menu_join_profile(const struct piano_wifi_profile 
   gProfileFromFile = false;
   gProfileFromMenu = true;
   const uint32_t generation = ++gProfileGeneration;
-  gJoinRequest.accept(generation, nowMs());
+  gJoinRequest.accept(generation, nowMs(), __atomic_load_n(&gRestarts, __ATOMIC_ACQUIRE));
   IOLockUnlock(gProfileLock);
   note("PianoWifiBootJoinReceiptV1: SET20 accepted; PianoWifiSET20Generation=%u", generation);
   note("PianoWifiMenuJoinProfile: menu join profile set (generation %u): a network name of %u byte(s), %s%s, the access point %s (none of it is logged)",
@@ -3617,6 +3621,16 @@ void registerJoinSysctl()
   gOidJoin.oid_version = SYSCTL_OID_VERSION;
   gOidJoin.oid_refcnt = 0;
   sysctl_register_oid(&gOidJoin);
+  if (!gArgs.currentJoinReceipt) return;
+  gOidCurrentJoin.oid_parent = &sysctl__machdep_children;
+  gOidCurrentJoin.oid_number = OID_AUTO;
+  gOidCurrentJoin.oid_kind = int(CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_OID2);
+  gOidCurrentJoin.oid_name = PIANO_WIFI_CURRENT_JOIN_OID;
+  gOidCurrentJoin.oid_handler = sysctlCurrentJoin;
+  gOidCurrentJoin.oid_fmt = "Q";
+  gOidCurrentJoin.oid_descr = "Current pending or authorized Apple SET20 generation, or zero";
+  gOidCurrentJoin.oid_version = SYSCTL_OID_VERSION;
+  sysctl_register_oid(&gOidCurrentJoin);
 }
 
 // ============================================================================================ level 7: the join (WifiSta.h)
@@ -3632,7 +3646,7 @@ StaDma gReoPoolMem;
 ReoPool gReoPool;
 bool gL7EndedOnRequest;
 bool gStaPlanned;
-uint32_t gRestarts, gRestartRun, gRestartsWake, gRestartsCrash, gRestartsFail;   // gRestartRun: in a row, without a port open
+uint32_t gRestartRun, gRestartsWake, gRestartsCrash, gRestartsFail;   // gRestartRun: in a row, without a port open
 uint64_t gRestartBegan;
 const char *gRestartWhy = "";
 bool gLinkPublished, gDropDone, gCrashTestDone;
@@ -3674,7 +3688,7 @@ void recordAppleJoin(uint32_t generation, uint32_t result, uint64_t now)
 {
   if (!generation || !gProfileLock) return;
   IOLockLock(gProfileLock);
-  const bool done = gJoinRequest.finish(generation, result, now);
+  const bool done = gJoinRequest.finish(generation, result, now, gRestarts);
   const uint32_t terminal = gJoinRequest.result(now);
   IOLockUnlock(gProfileLock);
   if (done) note("PianoWifiAppleJoinV1 terminal generation %u result %u", generation, terminal);
@@ -4068,6 +4082,32 @@ struct Level8 {
 Level8 gL8;
 uint8_t gL8Out[kStaOutBytes + 64];   // a command of level 8's own (a key is 25 words and its bytes)
 
+bool stationLinkLive()
+{
+  return gSta.assocAnswered && gSta.assocStatus == kDot11StatusSuccess && !gSta.disconnect &&
+         (gSta.step == kStaPeerAssoc || gSta.step == kStaVdevUp || gSta.step == kStaAuthorize ||
+          gSta.step == kStaAssociated);
+}
+
+int sysctlCurrentJoin(struct sysctl_oid *, void *, int, struct sysctl_req *req)
+{
+  uint64_t generation = 0;
+  IOLockLock(gProfileLock);
+  const uint32_t user = gUserControl.read();
+  if ((user & (WifiUserControl::kPower | WifiUserControl::kJoin | WifiUserControl::kCycle)) ==
+          (WifiUserControl::kPower | WifiUserControl::kJoin) &&
+      __atomic_load_n(&gRadioUsable, __ATOMIC_ACQUIRE) &&
+      !__atomic_load_n(&gStopRequested, __ATOMIC_ACQUIRE)) {
+    // Sample the same worker state as the Apple80211 snapshot. The pending
+    // request may be waiting for old-station teardown, so it need not yet be allowed().
+    const bool active = !staFinished(gSta) && !gSta.disconnect && staAppleAssociateResult(gSta) <= 1;
+    const bool authorized = gUserControl.allowed(user) && stationLinkLive() && gSta.vdevUp && gSta.authorized;
+    generation = gJoinRequest.currentReceipt(nowMs(), __atomic_load_n(&gRestarts, __ATOMIC_ACQUIRE),
+                                             gStaProfileGeneration, active, authorized);
+  }
+  IOLockUnlock(gProfileLock);
+  return SYSCTL_OUT(req, &generation, sizeof generation);
+}
 // The apple80211 personality consumes the station's state through this fixed
 // snapshot instead of reaching into the supplicant's mutable objects.  It is
 // intentionally a read-only, best-effort view: the front end polls it and
@@ -4108,10 +4148,7 @@ extern "C" int piano_wifi_assoc_snapshot(struct piano_wifi_assoc_snapshot *out)
   // ASSOCIATE_RESULT is a public progress/result code: 0 while the station or
   // its WPA2 port is still running, 1 only after authorization, 9 for a
   // timeout/no-answer, and 2 for every other completed failure.
-  const bool live = gUserControl.allowed(gUserControl.read()) &&
-                    gSta.assocAnswered && gSta.assocStatus == kDot11StatusSuccess && !gSta.disconnect &&
-                    (gSta.step == kStaPeerAssoc || gSta.step == kStaVdevUp || gSta.step == kStaAuthorize ||
-                     gSta.step == kStaAssociated);
+  const bool live = gUserControl.allowed(gUserControl.read()) && stationLinkLive();
   out->associated = live && gSta.vdevUp;
   out->authorized = out->associated && gSta.authorized && (!request.nativeOwner || nativeResult == 1);
   if (out->associate_result == 1 && !out->authorized) out->associate_result = 2;
@@ -4802,10 +4839,7 @@ void level8Follow(uint64_t now)
   // Live from the association's answer on: the access point sends message 1 of the handshake right after it, before the
   // peer's association and the station's up have gone out, and the port must have the association's generation by then. The
   // transmit side waits for the station's up (a frame before it is the firmware's to drop): EAPOL_TX frames wait in the queue.
-  const bool live = matchesRequest && gUserControl.allowed(gUserControl.read()) &&
-                    gSta.assocAnswered && gSta.assocStatus == kDot11StatusSuccess && !gSta.disconnect &&
-                    (gSta.step == kStaPeerAssoc || gSta.step == kStaVdevUp || gSta.step == kStaAuthorize ||
-                     gSta.step == kStaAssociated);
+  const bool live = matchesRequest && gUserControl.allowed(gUserControl.read()) && stationLinkLive();
   const bool up = live && gSta.vdevUp;
   if (live && !gL8.live) {
     gL8.live = true;
@@ -6704,7 +6738,7 @@ bool PianoWifi::restartWait(uint32_t pass, PowerState &power, const Options &opt
     return false;
   }
   // The restart.
-  ++gRestarts;
+  __atomic_add_fetch(&gRestarts, 1u, __ATOMIC_RELEASE);
   if (woke || userRestart) {
     ++gRestartsWake;
     gRestartRun = 0;   // a wake is a fresh start: the cap counts again from here

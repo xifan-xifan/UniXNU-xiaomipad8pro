@@ -15,6 +15,7 @@
 #include "Adreno830Status.h"
 #include "NativeAdrenoPwrup.h"
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <set>
@@ -471,10 +472,11 @@ int main()
         CHECK(A830Cp::stageMicrocode(fw.data(),fw.size(),dst.data(),63,&copied)==kIOReturnBadArgument && !copied);
         CHECK(A830Cp::stageMicrocode(fw.data(),4,dst.data(),dst.size(),&copied)==kIOReturnBadArgument);
         CHECK(A830Cp::stageMicrocode(nullptr,fw.size(),dst.data(),dst.size(),&copied)==kIOReturnBadArgument);
-        const char *dir="/Users/xiaochoumao/unixnu-13t/一加13T原厂备份/GPU固件/";   /* read at test time, never copied */
+        const char *dir=std::getenv("A830_FW_DIR");   /* the GPU firmware folder (gen80000_*.fw), read at test time, never copied */
         const struct {const char *name;size_t image,buffer;} images[]={{"gen80000_sqe.fw",0x1b510,0x1c000},{"gen80000_aqe.fw",0x62f8,0x7000}};
         for(auto &image:images) {
-            std::string path=std::string(dir)+image.name;
+            if(!dir)break;
+            std::string path=std::string(dir)+"/"+image.name;
             FILE *file=std::fopen(path.c_str(),"rb");
             if(!file)continue;
             std::vector<uint8_t> bytes(image.image+4);

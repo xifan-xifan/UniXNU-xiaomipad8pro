@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "NativeAdrenoMemory.h"
+#include "A830GpuTier.h"
 #include "NativeAdrenoMeter.h"
 /* Where a call that never returns is stuck: the free/unmap/release path stores a stage number here, the board page shows it. */
 extern "C" {volatile uint32_t native_adreno_trace_stage;}
@@ -26,6 +27,7 @@ void NativeAdrenoMemory::setKopt(uint32_t bits) {native_adreno_kopt=bits;}
 #include <IOKit/IOMultiMemoryDescriptor.h>
 #include <IOKit/IOLocks.h>
 #include <kern/thread.h>
+#include <machine/machine_routines.h>
 #include <mach/thread_policy.h>
 #endif
 /* UniXNU-piano (2026-11-22, GPU-PAGED P0b): the pool bypass and its figures (NativeAdrenoPoolBypass.h). */
@@ -533,6 +535,121 @@ IOReturn NativeAdrenoMemory::reservePoolBestEffort(unsigned bits,uint32_t mib,ui
     if(write_combined && !pool.write_combined)native_adreno_pool_wc=(uint32_t)writeCombinePool()|1u<<31;
     return kIOReturnSuccess;
 }
+namespace {
+constexpr unsigned TierMaxSpans=64;
+struct GpuTier {
+    a830tier::Tier slabs;
+    a830tier::Run runs[a830tier::kMaxRuns];
+    unsigned mode=0,active=0,count=0;
+    uint64_t refusals=0,allocations=0;
+    const char *state="off";
+};
+GpuTier gpuTier;
+#ifdef ADRENO830_HOST_TEST
+std::mutex tierLock;
+using TierLocked=std::lock_guard<std::mutex>;
+#else
+IOLock *tierLock;
+struct TierLocked {
+    IOLock *lock;
+    explicit TierLocked(IOLock *l):lock(l) {IOLockLock(lock);}
+    ~TierLocked() {IOLockUnlock(lock);}
+};
+#endif
+}
+
+a830tier::Parse NativeAdrenoMemory::configureTier(unsigned mode,const uint8_t *property,size_t length,
+    uint64_t xnuBase,uint64_t xnuSize)
+{
+    using namespace a830tier;
+    if (mode != 1 && mode != 2) return Parse::absent;
+#ifndef ADRENO830_HOST_TEST
+    IOLock *lock=IOLockAlloc();
+    if (!lock) return Parse::absent;
+    __atomic_store_n(&tierLock,lock,__ATOMIC_RELEASE);
+#endif
+    TierLocked locked(tierLock);
+    __atomic_store_n(&gpuTier.active,0u,__ATOMIC_RELEASE);
+    gpuTier.mode=mode;
+    gpuTier.slabs=Tier();
+    gpuTier.refusals=gpuTier.allocations=0;
+    const Parse result=loadRuns(property,length,xnuBase,xnuSize,gpuTier.runs,gpuTier.count);
+    gpuTier.state=result!=Parse::ok?parseName(result):gpuTier.count?"pending":"empty";
+    return result;
+}
+
+void NativeAdrenoMemory::qualifyTier(unsigned bits,bool wc,bool cached_coherent,
+    a830tier::Tier::ProbeFn probe,void *ctx,a830tier::Tier::LineFn line)
+{
+#ifndef ADRENO830_HOST_TEST
+    if (!__atomic_load_n(&tierLock,__ATOMIC_ACQUIRE)) return;
+#endif
+    if (!gpuTier.count) return;
+    if (!wc || cached_coherent || !outputWidth(bits)) {
+        TierLocked locked(tierLock);
+        gpuTier.state=cached_coherent?"cached-coherent":!wc?"write-combine-disabled":"output-width";
+        return;
+    }
+    // Keep the tier closed throughout the probe, which can sleep waiting for the CP.
+    a830tier::Tier checked;
+    checked.init(gpuTier.runs,gpuTier.count,UINT64_C(1)<<bits,probe,ctx,line);
+    TierLocked locked(tierLock);
+    gpuTier.slabs=checked;
+    gpuTier.state=checked.totalBytes()?"ready":"closed";
+    __atomic_store_n(&gpuTier.active,gpuTier.mode,__ATOMIC_RELEASE);
+}
+
+NativeAdrenoTierStats NativeAdrenoMemory::tierStats()
+{
+#ifndef ADRENO830_HOST_TEST
+    if (!__atomic_load_n(&tierLock,__ATOMIC_ACQUIRE)) return {"off",0,0,0,0,0,0,0,0,0};
+#endif
+    TierLocked locked(tierLock);
+    unsigned passed=0,pass_mask=0;
+    for (unsigned i=0;i<gpuTier.slabs.runs();++i) {
+        if (gpuTier.slabs.runPassed(i)) {
+            ++passed;
+            pass_mask|=1u<<i;
+        }
+    }
+    const uint64_t free=gpuTier.slabs.freeBytes();
+    return {gpuTier.state,gpuTier.mode,gpuTier.count,gpuTier.slabs.runs(),passed,pass_mask,free,
+        gpuTier.slabs.totalBytes()-free,gpuTier.refusals,gpuTier.allocations};
+}
+
+bool NativeAdrenoMemory::tierEligible(size_t bytes)
+{
+    return a830tier::eligible(__atomic_load_n(&gpuTier.active,__ATOMIC_ACQUIRE),bytes);
+}
+
+IOReturn NativeAdrenoMemory::allocateTier(size_t bytes,unsigned bits)
+{
+    using namespace a830tier;
+    if (!tierEligible(bytes)) return kIOReturnNoResources;
+    if (backed() || spans_ || quarantined_) return kIOReturnBusy;
+    if (!bytes || (bytes & (kPage-1)) || bytes>NativeAdrenoMemoryMaxBytes || !outputWidth(bits))
+        return kIOReturnBadArgument;
+    a830tier::Span pieces[TierMaxSpans];
+    TierLocked locked(tierLock);
+    const unsigned count=gpuTier.slabs.alloc(bytes,pieces,TierMaxSpans,UINT64_C(1)<<bits);
+    if (count) {
+        spans_=NativeAdrenoNewMeta(NativeAdrenoPhysicalSpan,count);
+        if (spans_) {
+            span_count_=span_capacity_=count;
+            asPieces(pieces,count,spans_);
+            // The last slab belongs wholly to this BO. Expose only the requested bytes to both VMs.
+            spans_[count-1].bytes=bytes-spans_[count-1].offset;
+            bytes_=bytes;
+            tier_=prepared_=unzeroed_=write_combined_=true;
+            ++gpuTier.allocations;
+            return kIOReturnSuccess;
+        }
+        gpuTier.slabs.release(pieces,count);
+    }
+    ++gpuTier.refusals;
+    return kIOReturnNoResources;
+}
+
 /* A BO from the pool: kIOReturnNoResources when the pool cannot take it (none, too small, no room: counted as fell back when the pool
  * could have held it), else what the pooled allocation returned. The pool's free list and figures: under the Memory lock. */
 IOReturn NativeAdrenoMemory::takePooled(size_t bytes,uint64_t limit,bool contiguous)
@@ -574,6 +691,22 @@ IOReturn NativeAdrenoMemory::takePooled(size_t bytes,uint64_t limit,bool contigu
 IOReturn NativeAdrenoMemory::finishPooled()
 {
     if(!unzeroed_)return kIOReturnSuccess;
+    if (tier_) {
+        for (size_t i=0;i<span_count_;++i) {
+            const auto &span=spans_[i];
+            const size_t bytes=a830tier::slabBytes(span.bytes);
+#ifdef ADRENO830_HOST_TEST
+            if (fixture.zero_physical) fixture.zero_physical(span.physical,bytes);
+#else
+            bzero_phys(span.physical,bytes);
+#endif
+        }
+#if defined(__aarch64__)
+        __asm__ volatile("dsb sy":::"memory");
+#endif
+        unzeroed_=false;
+        return kIOReturnSuccess;
+    }
 #ifdef ADRENO830_MACOS
     if(!mapping_) {   /* UniXNU-piano: cut from several extents (poolTakeMany, a write-combined pool only): each through the pool's mapping */
         for(size_t i=0;i<span_count_;++i)bzero(pool.virt+(spans_[i].physical-pool.physical),(size_t)spans_[i].bytes);
@@ -744,6 +877,8 @@ IOReturn NativeAdrenoMemory::importTask(void *task,uint64_t address,size_t bytes
     IOReturn status=NativeAdrenoQueryCpu4K(&cpu);
     if(status!=kIOReturnSuccess) {failure_={"import-cpu-abi",status};return status;}
     const uint64_t limit=UINT64_C(1)<<bits;
+    // Pinning a CPU view does not pin its slab. The owning BO's CPU lease controls that lifetime.
+    const bool tierActive=__atomic_load_n(&gpuTier.active,__ATOMIC_ACQUIRE)!=0;
     imported_=importRange(address,bytes,kIODirectionInOut,task);
     native_adreno_import_stage=14;
     failure_={"import-descriptor-create",kIOReturnNoMemory};
@@ -776,7 +911,8 @@ IOReturn NativeAdrenoMemory::importTask(void *task,uint64_t address,size_t bytes
     for(size_t offset=0;offset<bytes;offset+=4096) {
         IOByteCount length=0;
         addr64_t physical=imported_->getPhysicalSegment(offset,&length,kIOMemoryMapperNone);
-        if(!physical || (physical&4095) || length<4096 || physical>=limit || 4096>limit-physical)
+        if(!physical || (physical&4095) || length<4096 || physical>=limit || 4096>limit-physical ||
+           (tierActive && physical>=a830tier::kRegionLo && physical<a830tier::kRegionHi && gpuTier.slabs.owns(physical)))
             {native_adreno_import_stage=18;native_adreno_import_fail_pa=physical;native_adreno_import_fail_offset=offset;
              status=kIOReturnUnsupported;goto failed;}
         if(span_count_ && physical==spans_[span_count_-1].physical+spans_[span_count_-1].bytes)
@@ -816,6 +952,8 @@ IOReturn NativeAdrenoMemory::importDevice(IOMemoryDescriptor *scanout,uint64_t o
 }
 IOReturn NativeAdrenoMemory::makeWriteCombined()
 {
+    if (tier_) return prepared_ && !unzeroed_ && !quarantined_ && !device_references_?
+        kIOReturnSuccess:kIOReturnNotReady;
     /* A VM object owns its cache attribute, including its user mappings. It was chosen before prepare(). */
     if(unmapped_)return prepared_ && !quarantined_ && write_combined_?kIOReturnSuccess:kIOReturnNotReady;
     /* A write-combined pool's BO only takes the flag (a BO cut from several of its extents has no kernel mapping). */
@@ -834,7 +972,7 @@ IOReturn NativeAdrenoMemory::release()
     native_adreno_trace_stage=30;
     if(device_references_ || quarantined_)return kIOReturnBusy;
     if(write_combined_ && pooled_ && pool.write_combined)write_combined_=false;   /* the pool's pages keep the attribute */
-    if(write_combined_ && !unmapped_) {
+    if(write_combined_ && !unmapped_ && !tier_) {
         /* The pages go back to the VM cacheable, as they came. */
         const IOReturn status=NativeAdrenoSetPagesCacheMode(spans_,span_count_,false);
         if(status) {quarantined_=true;return status;}
@@ -879,6 +1017,17 @@ IOReturn NativeAdrenoMemory::release()
         for(size_t i=0;i<span_count_;++i)poolGive(size_t(spans_[i].physical-pool.physical),size_t(spans_[i].bytes));
         pooled_=false;prepared_=false;pool_offset_=0;unzeroed_=false;
     }
+    if (tier_) {
+        a830tier::Span pieces[TierMaxSpans];
+        for (size_t i=0;i<span_count_;++i)
+            pieces[i]={spans_[i].physical,a830tier::slabBytes(spans_[i].bytes)};
+        TierLocked locked(tierLock);
+        if (!gpuTier.slabs.release(pieces,unsigned(span_count_))) {
+            quarantined_=true;
+            return kIOReturnIOError;
+        }
+        tier_=prepared_=unzeroed_=false;
+    }
     if(accounted_) {
         __atomic_fetch_sub(unmapped_?&ownedUnmapped:&ownedMapped,bytes_,__ATOMIC_RELAXED);
         __atomic_fetch_add(&backingFrees,1ull,__ATOMIC_RELAXED);accounted_=false;
@@ -904,7 +1053,7 @@ IOReturn NativeAdrenoMemory::publishForDevice(size_t offset,size_t bytes,bool wr
 {
     if(!backed() || !prepared_ || quarantined_)return kIOReturnNotReady;
     if(!bytes || ((offset|bytes)&4095) || offset>bytes_ || bytes>bytes_-offset)return kIOReturnBadArgument;
-    if(device_)return kIOReturnSuccess;   /* device memory (the scanout): no CPU cache holds it */
+    if(device_ || tier_)return kIOReturnSuccess;   /* only uncached CPU views */
     if(imported_ || (unmapped_ && !write_combined_))return maintainImported(offset,bytes,writes?NativeAdrenoCleanInvalidate:NativeAdrenoClean);
     if(write_combined_)   /* no CPU mapping should cache these pages; if one does, reach its lines through the physical pages */
         return include_write_combined?maintainImported(offset,bytes,writes?NativeAdrenoCleanInvalidate:NativeAdrenoClean):kIOReturnSuccess;

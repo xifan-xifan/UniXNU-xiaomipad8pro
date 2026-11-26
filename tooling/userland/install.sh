@@ -26,6 +26,10 @@
 #     --check reports such a directory.
 #   - A file this installer put in place earlier (the receipt) that the manifest no longer lists is removed, its job booted out,
 #     when it is unchanged since; anything else is left alone.
+#   - kind link (LT-B3, gpu/cryptex2): DEST is a symbolic link; the staged file holds its absolute target (no newline) and the
+#     sha256 column is that target's. It is made as DEST.piano-link and renamed over DEST (mv -fh: a regular file there, ours or a
+#     kept one, is replaced; a running program keeps its mapping); owner set with chown -h. --check and the receipt compare the
+#     link's target, never the bytes behind it; a file row whose DEST is a symlink is replaced by the file, never adopted through it.
 #   - A file already there that this installer did not put in place (not in its receipt: the base seed's Metal plugin, an owner's
 #     own file) is copied to $STATE/prev/<its path> before it is taken over (replaced, or adopted with the same bytes), once; when the
 #     manifest no longer lists it, that copy is put back instead of the file being removed (docs/data-store.md section 9). A file
@@ -79,6 +83,21 @@ sum() {
   else echo unknown; fi
 }
 
+# lsum LINK: the sha256 of a symbolic link's target string (what a link row's sha256 column holds); "none" when LINK is not a link
+lsum() {
+  [ -L "$1" ] || { echo none; return; }
+  lt=$(readlink "$1")
+  if command -v shasum > /dev/null 2>&1; then printf '%s' "$lt" | shasum -a 256 | cut -d' ' -f1
+  elif command -v openssl > /dev/null 2>&1; then printf '%s' "$lt" | openssl dgst -sha256 -r | cut -d' ' -f1
+  else echo unknown; fi
+}
+
+# placed KIND DEST WANT: 0 when DEST is in place as the row says (a link with that target; a regular file, not a link, with those bytes)
+placed() {
+  if [ "$1" = link ]; then [ -L "$2" ] && [ "$(lsum "$2")" = "$3" ]
+  else [ -f "$2" ] && [ ! -L "$2" ] && [ "$(sum "$2")" = "$3" ]; fi
+}
+
 # The owner and mode a file has: "user:group mode" (mode in octal, as the manifest writes it, e.g. 0755).
 has() {
   stat -f '%Su:%Sg 0%Lp' "$1" 2> /dev/null
@@ -97,10 +116,11 @@ ours() { [ -f "$STATE/receipt.tsv" ] && cut -f9 "$STATE/receipt.tsv" | grep -qxF
 # keep DEST DST: before the first take-over of a file this installer did not put in place, a copy of it in $STATE/prev/DEST (cp -p:
 # its owner, mode and times). Never replaced once made: it is the file of before.
 keep() {
-  [ -e "$2" ] || return 0
+  [ -e "$2" ] || [ -L "$2" ] || return 0
   ! ours "$1" || return 0
-  [ ! -e "$STATE/prev$1" ] || return 0
-  mkdir -p "$(dirname "$STATE/prev$1")" && cp -p "$2" "$STATE/prev$1.new" && mv -f "$STATE/prev$1.new" "$STATE/prev$1" || return 1
+  [ ! -e "$STATE/prev$1" ] && [ ! -L "$STATE/prev$1" ] || return 0
+  if [ -L "$2" ]; then cpflags=-pPR; else cpflags=-p; fi
+  mkdir -p "$(dirname "$STATE/prev$1")" && cp $cpflags "$2" "$STATE/prev$1.new" && mv -fh "$STATE/prev$1.new" "$STATE/prev$1" || return 1
   say "$1: the file in place was not installed by this installer: kept as $STATE/prev$1 (back when the manifest drops it)"
 }
 
@@ -150,7 +170,15 @@ while IFS=$TAB read -r unit kind on mode owner group want staged dest label; do
   case "$unit" in ''|'#'*) continue ;; esac
   src=$S/$staged
   dst=$R$dest
+  if [ "$MODE" = --check ] && [ "$kind" = link ]; then
+    if [ ! -L "$dst" ]; then say "$dest: not a symbolic link ($unit)"; FAILED=1; continue; fi
+    got=$(lsum "$dst")
+    [ "$got" = "$want" ] || [ "$got" = unknown ] || { say "$dest: link target $(readlink "$dst"), sha256 $got, the manifest's $want ($unit)"; FAILED=1; }
+    if [ "$NOCHOWN" != 1 ]; then now=$(has "$dst" | cut -d' ' -f1); [ "$now" = "$owner:$group" ] || { say "$dest: link owner $now, the manifest's $owner:$group ($unit)"; FAILED=1; }; fi
+    continue
+  fi
   if [ "$MODE" = --check ]; then
+    if [ -L "$dst" ]; then say "$dest: a symbolic link, the manifest's is a file ($unit)"; FAILED=1; continue; fi
     if [ ! -f "$dst" ]; then say "$dest: missing ($unit)"; FAILED=1; continue; fi
     got=$(sum "$dst")
     [ "$got" = "$want" ] || [ "$got" = unknown ] || { say "$dest: sha256 $got, the manifest's $want ($unit)"; FAILED=1; }
@@ -169,7 +197,38 @@ while IFS=$TAB read -r unit kind on mode owner group want staged dest label; do
   fi
   dir=$(dirname "$dst")
   mkdirs "$dir" || { say "$dest: its directory could not be made: $unit not installed"; FAILED=1; continue; }
+  if [ "$kind" = link ]; then
+    target=$(cat "$src")
+    case "$target" in /*) ;; *) say "$dest: link target $target is not absolute: $unit not installed"; FAILED=1; continue ;; esac
+    if [ -L "$dst" ] && [ "$(readlink "$dst")" = "$target" ]; then
+      if [ "$NOCHOWN" != 1 ] && [ "$(has "$dst" | cut -d' ' -f1)" != "$owner:$group" ]; then
+        chown -h "$owner:$group" "$dst" && say "$dest: link owner -> $owner:$group"
+      fi
+      continue
+    fi
+    if [ -d "$dst" ] && [ ! -L "$dst" ]; then say "$dest: a directory is there: link not installed ($unit)"; FAILED=1; continue; fi
+    keep "$dest" "$dst" || { say "$dest: no copy of what it replaces could be kept: link not installed ($unit)"; FAILED=1; continue; }
+    rm -f "$dst.piano-link"
+    if ln -s "$target" "$dst.piano-link" && { [ "$NOCHOWN" = 1 ] || chown -h "$owner:$group" "$dst.piano-link"; } &&
+       mv -fh "$dst.piano-link" "$dst"; then
+      say "$dest: link -> $target"
+      CHANGED="$CHANGED$unit "
+    else
+      rm -f "$dst.piano-link"; say "$dest: link install failed ($unit)"; FAILED=1
+    fi
+    continue
+  fi
   bundle_fix "$dest" || FAILED=1
+  if [ -L "$dst" ]; then
+    # a link where the manifest has a file (a link row of an earlier layer, or anything else): the file replaces the link itself
+    keep "$dest" "$dst" || { say "$dest: no copy of the link in place could be kept: not installed ($unit)"; FAILED=1; continue; }
+    rm -f "$dst.piano-new"
+    if [ "$NOCHOWN" = 1 ]; then install -m "$mode" "$src" "$dst.piano-new"; else install -o "$owner" -g "$group" -m "$mode" "$src" "$dst.piano-new"; fi &&
+      mv -fh "$dst.piano-new" "$dst" || { rm -f "$dst.piano-new"; say "$dest: install over the link failed ($unit)"; FAILED=1; continue; }
+    say "$dest: installed over a symbolic link (sha256 ${want%"${want#????????????????}"})"
+    CHANGED="$CHANGED$unit "
+    continue
+  fi
   if [ -f "$dst" ] && cmp -s "$src" "$dst"; then
     keep "$dest" "$dst" || { say "$dest: no copy of the file in place could be kept: not taken over ($unit)"; FAILED=1; continue; }
     if [ "$NOCHOWN" = 1 ]; then now=$(has "$dst" | cut -d' ' -f2); exp=$mode
@@ -202,6 +261,23 @@ if [ "$MODE" != --check ] && [ -f "$STATE/receipt.tsv" ]; then
     cut -f9 "$S/manifest.tsv" | grep -qxF "$dest" && continue
     dst=$R$dest
     prev=$STATE/prev$dest
+    if [ "$kind" = link ]; then
+      if [ -L "$dst" ] && [ "$(lsum "$dst")" = "$want" ]; then
+        if [ -e "$prev" ] || [ -L "$prev" ]; then
+          if cp -pPR "$prev" "$dst.piano-prev" && mv -fh "$dst.piano-prev" "$dst"; then
+            rm -f "$prev" && say "$dest: no longer in the manifest: what the link had replaced is back"
+          else
+            rm -f "$dst.piano-prev"; say "$dest: no longer in the manifest; putting back $prev failed: left as it is"; FAILED=1
+          fi
+        else
+          rm -f "$dst" && say "$dest: link removed (no longer in the manifest)"
+        fi
+      elif [ -e "$dst" ] || [ -L "$dst" ]; then
+        say "$dest: no longer in the manifest, but not the link it installed: left"
+      fi
+      continue
+    fi
+    if [ -L "$dst" ]; then say "$dest: no longer in the manifest, but a symbolic link now: left"; continue; fi
     if [ -f "$dst" ] && [ "$(sum "$dst")" != "$want" ]; then say "$dest: no longer in the manifest, but changed since it was installed: left"; continue; fi
     if [ -f "$dst" ] && [ "$kind" != file ]; then
       d=$(domain_of "$kind")
@@ -224,7 +300,7 @@ if [ "$MODE" != --check ]; then
   : > "$STATE/receipt.tsv.new"
   while IFS=$TAB read -r unit kind on mode owner group want staged dest label; do
     case "$unit" in ''|'#'*) continue ;; esac
-    [ -f "$R$dest" ] && [ "$(sum "$R$dest")" = "$want" ] &&
+    placed "$kind" "$R$dest" "$want" &&
       printf '%s\n' "$unit$TAB$kind$TAB$on$TAB$mode$TAB$owner$TAB$group$TAB$want$TAB$staged$TAB$dest$TAB$label" >> "$STATE/receipt.tsv.new"
   done < "$S/manifest.tsv"
   if [ "$PASSD_KEEP" = 1 ] && [ -f "$STATE/receipt.tsv" ]; then

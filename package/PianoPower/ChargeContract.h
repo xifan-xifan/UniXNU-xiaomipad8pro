@@ -164,13 +164,19 @@ static inline uint32_t piano_contract_firmware_pdo_word(uint32_t min_mv, uint32_
 /* A complete firmware list in source object order: vSafe5V first, fixed
  * objects strictly ascending, all of them before the APDOs (USB PD's own
  * Source_Capabilities order). Returns the count encoded, 0 for a list that
- * cannot be the source's object list. */
+ * cannot be the source's object list. Object positions are the firmware's
+ * (charge/mipps2): an all-zero slot after vSafe5V is an empty position,
+ * encoded 0 (it decodes as nothing), and the objects after it keep theirs
+ * (a verified MiPPS adapter's vendor objects, MIPPS-RDO.md). */
 static inline unsigned piano_contract_firmware_pdos(const uint32_t pdo[][3], unsigned n, uint32_t out[7]) {
     unsigned i; uint32_t last_fixed = 0; int apdo = 0;
     if (!pdo || !n || n > 7) return 0;
     if (pdo[0][0] != 5000 || pdo[0][1] != 5000) return 0;
+    if (!pdo[n - 1][0] && !pdo[n - 1][1] && !pdo[n - 1][2]) return 0;   /* the count ends at an object */
     for (i = 0; i != n; ++i) {
-        uint32_t w = piano_contract_firmware_pdo_word(pdo[i][0], pdo[i][1], pdo[i][2]);
+        uint32_t w;
+        if (i && !pdo[i][0] && !pdo[i][1] && !pdo[i][2]) {out[i] = 0; continue;}
+        w = piano_contract_firmware_pdo_word(pdo[i][0], pdo[i][1], pdo[i][2]);
         if (!w) return 0;
         if (pdo[i][0] == pdo[i][1]) {
             if (apdo || pdo[i][0] <= last_fixed) return 0;

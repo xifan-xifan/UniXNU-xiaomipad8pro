@@ -215,12 +215,12 @@ struct Disk {
   const uint8_t digest[32] = {1};
   std::atomic<unsigned> callbacks{0}, bitmapWrites{0};
 
-  explicit Disk(unsigned depth = 8, uint64_t pages = kPages)
+  explicit Disk(unsigned depth = 8, uint64_t pages = kPages, bool startParallel = true)
     : medium(pages), bits(persist::bitmapBlocks(pages) * kBlock) {
     seed.bytes = pages * kBlock;
     Store store{medium, state, false};
     assert(overlay.open(store, pages, digest, false, bits.data(), false, 0, 1000) == persist::Open::Fresh);
-    admission.configure(depth);
+    admission.configure(depth, startParallel);
     for (unsigned i = 0; i < depth; ++i) stages[i].resize(32 * kBlock);
     medium.checkCuts = true;
   }
@@ -299,6 +299,38 @@ struct Disk {
     Medium::valid(medium.durable, medium.pages);
   }
 };
+
+static void armedSerialStart()
+{
+  Disk disk(2, kPages, false);
+  DirectAdmission::Request first(0, kBlock, true), second(kBlock, kBlock, false);
+  disk.env.lock();
+  assert(disk.admission.online && !disk.admission.parallel && disk.admission.depth == 2);
+  assert(disk.admission.take(disk.env, first) == DirectAdmission::kSerial);
+  assert(disk.admission.inflight == 0);
+  disk.env.unlock();
+
+  Buffer original(kBlock, 0x42);
+  assert(disk.io(true, 0, original) == kBlock);
+  assert(disk.fence(3) && disk.admission.parallel);
+
+  disk.env.lock();
+  const int writer = disk.admission.take(disk.env, first);
+  const int reader = disk.admission.take(disk.env, second);
+  assert(writer >= 0 && reader >= 0 && writer != reader && disk.admission.peak == 2);
+  disk.admission.give(disk.env, reader, false);
+  disk.admission.give(disk.env, writer, false);
+  disk.env.unlock();
+
+  Buffer result(kBlock), added(kBlock, 0x84);
+  assert(disk.io(false, 0, result) == kBlock && result.data == original.data);
+  assert(disk.io(true, kBlock, added) == kBlock);
+  assert(disk.fence(2) && !disk.admission.parallel);
+  assert(disk.io(false, kBlock, result) == kBlock && result.data == added.data);
+  disk.verifyReopen(2);
+  assert(!memcmp(disk.medium.durable.at(persist::pageBlock(kPages, 0)).data(), original.data.data(), kBlock));
+  assert(!memcmp(disk.medium.durable.at(persist::pageBlock(kPages, 1)).data(), added.data.data(), kBlock));
+}
 
 static void depthAndStop()
 {
@@ -612,6 +644,7 @@ int main()
   assert(control.write(block, 1, page.data(), live, false));
   assert(control.cache.count(block) == 1 && control.durable.count(block) == 0);
   assert(control.sync() && control.durable.count(block) == 1);
+  armedSerialStart();
   depthAndStop();
   overlap();
   mergeAndCut(false);
@@ -624,5 +657,5 @@ int main()
   Buffer last(kBlock, 0x94);
   assert(large.io(true, (kLargePages - 1) * kBlock, last) == kBlock);
   large.verifyReopen(1);
-  puts("OK depth/stop, shared/exclusive ranges and 512-byte RMW, merged bitmap FUA/cuts, drains/wake/veto, errors and quarantine");
+  puts("OK armed serial start/switch, depth/stop, shared/exclusive ranges and 512-byte RMW, merged bitmap FUA/cuts, drains/wake/veto, errors and quarantine");
 }

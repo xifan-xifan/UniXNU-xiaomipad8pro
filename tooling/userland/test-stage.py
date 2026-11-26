@@ -504,6 +504,100 @@ CUSTOM_BATTERY = 'Battery Power:\n Sleep On Power Button 1\n standby            
 CUSTOM_AC = 'AC Power:\n Sleep On Power Button 1\n hibernatemode        3\n displaysleep         10\n sleep                1\n'
 
 
+def link_tests(tmp):
+    """2c. install.sh kind link (LT-B3, gpu/cryptex2): the y12j -> y12k transition of the plugin rows (three real files under
+    /private/var/ngpu/addons -> stage.gpu_app2_layer's app2 rows: the bundle real under app-library, the addons Mach-Os links), the
+    check, the receipt, a tampered link repaired, the way back to files, a non-installer file kept and put back, under sh and dash."""
+    print('2c. installer: link rows (app2 layout)')
+    macho = b'\xcf\xfa\xed\xfe' + b'plugin' * 10
+    vk = b'\xcf\xfa\xed\xfe' + b'vulkan' * 10
+    info = b'<plist>info</plist>\n'
+    files = [('Contents/Info.plist', info), ('Contents/MacOS/NativeAdrenoMetal', macho), ('Contents/MacOS/libvulkan_freedreno.dylib', vk)]
+    unit = 'gpu-nativeadrenometal'
+    base = f'{stage.GPU_ADDONS}/NativeAdrenoMetal.bundle'
+    app = f'{stage.GPU_APP_LIBRARY}/{stage.GPU_APP_DIR}/NativeAdrenoMetal.bundle'
+    view = f'{stage.GPU_APP_POINT}/{stage.GPU_APP_DIR}/NativeAdrenoMetal.bundle'
+    plain = [({'unit': unit, 'name': i.rsplit('/', 1)[1], 'owner': 'root:wheel', 'on': True, 'label': '-', 'kind': 'file',
+               'mode': '0755' if d[:4] == b'\xcf\xfa\xed\xfe' else '0644', 'staged': f'files/{unit}/{i}', 'sha256': sha(d),
+               'dest': f'{base}/{i}'}, d) for i, d in files]
+    app2 = stage.gpu_app2_layer(unit, 'NativeAdrenoMetal', files)
+    check([f['kind'] for f, _ in app2] == ['file'] * 3 + ['file', 'link', 'link'] and
+          [f['dest'] for f, _ in app2][:3] == [f'{app}/{i}' for i, _ in files] and
+          [d for f, d in app2 if f['kind'] == 'link'] == [f'{view}/Contents/MacOS/NativeAdrenoMetal'.encode(),
+                                                          f'{view}/Contents/MacOS/libvulkan_freedreno.dylib'.encode()],
+          'gpu_app2_layer: the real bundle under app-library first, then the addons Info.plist real and both Mach-Os links into the App view')
+    tree = stage.staging_tree({'staging': '/private/var/piano/userland'}, app2)
+    check(tree[f'files/{unit}/links/Contents/MacOS/NativeAdrenoMetal'][0] == f'{view}/Contents/MacOS/NativeAdrenoMetal'.encode() and
+          sum(1 for n in tree if n.startswith(f'files/{unit}/')) == 5,
+          'the staging: the three bundle files once (shared by both trees) and the two link targets')
+    refused(stage.gpu_app2_layer, unit, 'NativeAdrenoMetal', [('Contents/Info.plist', info)], match='no Mach-O')
+    for shell in [s for s in ('/bin/sh', '/bin/dash') if Path(s).exists()]:
+        tag = Path(shell).name
+        rig = Rig(tmp / tag, shell)
+
+        def stage_rows(rows):
+            stage.sync_tree(rig.tmp / 'stage', stage.staging_tree({'staging': '/private/var/piano/userland'}, rows))
+
+        receipt = rig.root('/private/var/db/piano-userland/receipt.tsv')
+        stage_rows(plain)
+        code, out = rig.run()
+        check(code == 0 and rig.root(f'{base}/Contents/MacOS/NativeAdrenoMetal').read_bytes() == macho, f'{tag}: base: the y12j files')
+        stage_rows(app2)
+        code, out = rig.run('--live')
+        lk = rig.root(f'{base}/Contents/MacOS/NativeAdrenoMetal')
+        check(code == 0 and lk.is_symlink() and os.readlink(lk) == f'{view}/Contents/MacOS/NativeAdrenoMetal' and
+              os.readlink(rig.root(f'{base}/Contents/MacOS/libvulkan_freedreno.dylib')) == f'{view}/Contents/MacOS/libvulkan_freedreno.dylib',
+              f'{tag}: app2: the addons Mach-Os replaced by links into the App view\n{out}')
+        check(rig.root(f'{app}/Contents/MacOS/NativeAdrenoMetal').read_bytes() == macho and
+              not rig.root(f'{base}/Contents/Info.plist').is_symlink() and rig.root(f'{base}/Contents/Info.plist').read_bytes() == info,
+              f'{tag}: app2: the real bundle under app-library, the addons Info.plist still a real file')
+        check(not list(rig.root(base).rglob('*.piano-link')) and
+              not rig.root('/private/var/db/piano-userland/prev').exists(),
+              f'{tag}: app2: no temporary link left, nothing kept in prev/ (the replaced files were the installer\'s own)')
+        rows = [l.split('\t') for l in receipt.read_text().splitlines()]
+        check(sorted((r[1], r[8]) for r in rows) == sorted((f['kind'], f['dest']) for f, _ in app2),
+              f'{tag}: app2: the receipt lists the six rows with their kinds')
+        code, out = rig.run('--check')
+        check(code == 0, f'{tag}: app2: --check passes\n{out}')
+        code, out = rig.run('--boot')
+        check(code == 0 and 'link ->' not in out and 'changed:)' in out, f'{tag}: app2: a second run changes nothing\n{out}')
+        lk.unlink(); os.symlink('/elsewhere/NativeAdrenoMetal', lk)
+        code, out = rig.run('--check')
+        check(code == 1 and 'link target /elsewhere/NativeAdrenoMetal' in out, f'{tag}: a tampered link: --check fails')
+        code, out = rig.run('--boot')
+        check(code == 0 and os.readlink(lk) == f'{view}/Contents/MacOS/NativeAdrenoMetal', f'{tag}: a tampered link is put right')
+        lk.unlink(); lk.write_bytes(macho)
+        code, out = rig.run('--check')
+        check(code == 1 and 'not a symbolic link' in out, f'{tag}: a file where a link belongs: --check fails')
+        rig.run('--boot')
+        check(lk.is_symlink(), f'{tag}: a file where a link belongs is replaced by the link')
+        stage_rows(plain)
+        code, out = rig.run('--live')
+        check(code == 0 and not lk.is_symlink() and lk.read_bytes() == macho and
+              rig.root(f'{base}/Contents/MacOS/libvulkan_freedreno.dylib').read_bytes() == vk,
+              f'{tag}: back to the y12j rows: the links replaced by the files (not adopted through the link)\n{out}')
+        check(not rig.root(f'{app}/Contents/MacOS/NativeAdrenoMetal').exists() and
+              not rig.root(f'{app}/Contents/Info.plist').exists(),
+              f'{tag}: back to the y12j rows: the app-library files removed (no longer in the manifest)')
+        code, out = rig.run('--check')
+        check(code == 0, f'{tag}: back to the y12j rows: --check passes\n{out}')
+        # a link row taken out of the manifest: the link is removed; a non-installer file it replaced comes back
+        rig2 = Rig(tmp / (tag + '-own'), shell)
+        own = rig2.root(f'{base}/Contents/MacOS/NativeAdrenoMetal')
+        own.parent.mkdir(parents=True); own.write_bytes(b'owner file')
+        stage.sync_tree(rig2.tmp / 'stage', stage.staging_tree({'staging': '/private/var/piano/userland'}, app2))
+        code, out = rig2.run()
+        check(code == 0 and own.is_symlink() and
+              rig2.root(f'/private/var/db/piano-userland/prev{base}/Contents/MacOS/NativeAdrenoMetal').read_bytes() == b'owner file',
+              f'{tag}: a file the installer did not place is kept in prev/ before the link replaces it\n{out}')
+        stage.sync_tree(rig2.tmp / 'stage', stage.staging_tree({'staging': '/private/var/piano/userland'}, []))
+        code, out = rig2.run()
+        check(code == 0 and not own.is_symlink() and own.read_bytes() == b'owner file' and
+              not rig2.root(f'{base}/Contents/MacOS/libvulkan_freedreno.dylib').exists() and
+              not rig2.root(f'{base}/Contents/MacOS/libvulkan_freedreno.dylib').is_symlink(),
+              f'{tag}: the unit taken out: the kept file is back, the other link removed\n{out}')
+
+
 def pmset_tests(tmp):
     print('3. pmset defaults')
     script = HERE / 'piano-pmset-defaults.sh'
@@ -620,6 +714,30 @@ def keyboard_tests(tmp):
 
 
 # ---- 4-7: trust cache, cdhash, seed, live ------------------------------------------------------------------------------------
+
+def btm_tests(tmp):
+    print('3a. BTM-stable launcher (docs/userland.md section 3a)')
+    dests = {'/usr/local/libexec/tool', '/usr/local/libexec/tool.sh'}
+    job = {'Label': 'x', 'ProgramArguments': ['/usr/local/libexec/tool', '--run', 'a b']}
+    check(stage.btm_stable(job, dests) and job['ProgramArguments'] == stage.BTM_LAUNCHER + ['/usr/local/libexec/tool', '--run', 'a b'],
+          'a job running our program: /bin/sh -c exec, then the program and its arguments unchanged')
+    job = {'Label': 'x', 'Program': '/usr/local/libexec/tool', 'ProgramArguments': ['tool', '-v']}
+    check(stage.btm_stable(job, dests) and 'Program' not in job and job['ProgramArguments'][3:] == ['/usr/local/libexec/tool', '-v'],
+          'Program + ProgramArguments: Program goes, the program is the exec target')
+    for argv in (['/bin/sh', '/usr/local/libexec/tool.sh'], ['/usr/bin/notifyutil', '-p', 'n'], stage.BTM_LAUNCHER + ['/usr/local/libexec/tool']):
+        job = {'Label': 'x', 'ProgramArguments': list(argv)}
+        check(not stage.btm_stable(job, dests) and job['ProgramArguments'] == argv, f'left as it is: {argv[0]} {argv[1][:20]}')
+    # The launcher really is transparent: the same pid (exec), argv[0] the program's path, arguments with spaces, the exit status.
+    prog = write(tmp / 'prog', '#!/bin/sh\necho "pid=$$ argv0=$0 n=$# a1=$1 a2=$2"\nexit 7\n', 0o755)
+    for shell in SHELLS:
+        r = sh([shell, '-c', 'echo "outer=$$"; exec "$0" "$@"', str(prog), '--run', 'a b'], capture_output=True, text=True)
+        lines = r.stdout.split()
+        outer = r.stdout.split()[0].split('=')[1] if r.stdout else '?'
+        check(r.returncode == 7 and f'pid={outer}' in lines and f'argv0={prog}' in lines and 'n=2' in lines and 'a1=--run' in lines
+              and r.stdout.rstrip().endswith('a2=a b'), f'{shell} -c exec: same pid, argv, exit 7 ({r.stdout.strip()!r})')
+    r = sh(['/bin/sh', '-c', stage.BTM_LAUNCHER[2], str(tmp / 'missing')], capture_output=True, text=True)
+    check(r.returncode in (126, 127), f'a missing program: the job exits {r.returncode} (launchd sees a failed exit, as before)')
+
 
 def trust_cache(hash_lists):
     """A trust cache bundle of version 2 modules, one per list of 20-byte hashes."""
@@ -754,9 +872,97 @@ def test_manifest(tmp):
     return write(tmp / 'userland.toml', text)
 
 
-def stage_run(*args):
-    r = sh([sys.executable, str(HERE / 'stage.py'), *map(str, args)], timeout=720, capture_output=True, text=True)
+def stage_run(*args, env=None):
+    environment = {k: v for k, v in os.environ.items() if not k.startswith('PIANO_GPU_ADDON')}
+    environment.update(env or {})
+    r = sh([sys.executable, str(HERE / 'stage.py'), *map(str, args)], timeout=720, capture_output=True, text=True, env=environment)
     return r.returncode, r.stdout + r.stderr
+
+
+def addon_tests(tmp):
+    """PIANO_GPU_ADDON (gpu/safari1): the seed's own plugin cloned to /private/var/ngpu/addons/<name>.bundle, the view's source for
+    sheng-gpu-addon=1; copy keeps /Library/GPUBundles, move removes it; a Mach-O outside the trust cache, move against a staged
+    --gpu-bundle, a bad mode and a live layer are refused."""
+    print('6b. GPU addon (PIANO_GPU_ADDON, a 64 MiB APFS image)')
+    seed = make_seed(tmp)
+    manifest = test_manifest(tmp)
+    trust = write(tmp / 'seed/kernel.macho.trustcache', trust_cache([[bytes([0x11]) * 20]]))
+    bundle = tmp / 'T.bundle'
+    write(bundle / 'Contents/Info.plist', plistlib.dumps({'CFBundleExecutable': 'T'}))
+    exe = build_c(tmp, 'T', '#include <stdio.h>\nint main(void) { puts("plugin"); return 0; }\n')
+    write(bundle / 'Contents/MacOS/T', exe.read_bytes(), 0o755)
+    want_cd = stage.soft_metal().cdhash(bundle / 'Contents/MacOS/T').hex()
+    base = tmp / 'out/base'   # a seed whose /Library/GPUBundles/T.bundle holds a trusted Mach-O, as the recipe seed holds the plugin
+    code, text = stage_run('--manifest', manifest, '--seed', seed, '--trust', trust, '--out', base, '--gpu-bundle', bundle)
+    check(code == 0, 'the base seed with a trusted plugin' + ('' if code == 0 else ':\n' + text[-2000:]))
+    if code:
+        return
+    seed_a, trust_a = base / 'scratch-data.img', base / 'kernel.macho.trustcache'
+    copy = tmp / 'out/copy'
+    code, text = stage_run('--manifest', manifest, '--seed', seed_a, '--trust', trust_a, '--out', copy,
+                           env={'PIANO_GPU_ADDON': 'copy', 'PIANO_GPU_ADDON_NAME': 'T'})
+    check(code == 0 and 'seed GPU addon (copy): /private/var/ngpu/addons/T.bundle' in text,
+          'copy: staged' + ('' if code == 0 else ':\n' + text[-2000:]))
+    if code == 0:
+        rec = json.loads((copy / 'userland.json').read_text())['seed_gpu_addon']
+        with attached(unpack(copy / 'scratch-data.img', tmp / 'copy.raw'), readonly=True) as mnt:
+            view, kept = mnt / 'private/var/ngpu/addons/T.bundle', mnt / 'Library/GPUBundles/T.bundle'
+            same = all((view / f).read_bytes() == (kept / f).read_bytes() for f in ('Contents/Info.plist', 'Contents/MacOS/T',
+                                                                                  'Contents/MacOS/retained.dylib'))
+            check(same and os.access(view / 'Contents/MacOS/T', os.X_OK), 'copy: the addon holds the seed plugin\'s bytes and modes')
+            names = set(sh(['xattr', str(view)], timeout=30, capture_output=True, text=True).stdout.split())
+            check(names <= {'com.apple.provenance'}, f'copy: no xattrs carried but the build Mac\'s provenance tag ({sorted(names)})')
+            check(oct((mnt / 'private/var/ngpu/addons').stat().st_mode & 0o777) == '0o755', 'copy: the addons directory 0755')
+        check(rec['mode'] == 'copy' and rec['gpu_bundles_copy_kept'] and rec['boot_arg'] == 'sheng-gpu-addon=1' and
+              {f['path']: f['cdhash'] for f in rec['files']}.get('Contents/MacOS/T') == want_cd,
+              'copy: the record names the mode, the boot argument and the Mach-O\'s CDHash')
+    move = tmp / 'out/move'
+    code, text = stage_run('--manifest', manifest, '--seed', seed_a, '--trust', trust_a, '--out', move,
+                           env={'PIANO_GPU_ADDON': 'move', 'PIANO_GPU_ADDON_NAME': 'T'})
+    check(code == 0, 'move: staged' + ('' if code == 0 else ':\n' + text[-2000:]))
+    if code == 0:
+        with attached(unpack(move / 'scratch-data.img', tmp / 'move.raw'), readonly=True) as mnt:
+            check((mnt / 'private/var/ngpu/addons/T.bundle/Contents/MacOS/T').read_bytes() == exe.read_bytes() and
+                  not (mnt / 'Library/GPUBundles/T.bundle').exists(), 'move: the addon present, /Library/GPUBundles/T.bundle gone')
+    app = tmp / 'out/app'   # LT-B3: PIANO_GPU_ADDON_PLACE=app (kernel 0074's App cryptex view)
+    code, text = stage_run('--manifest', manifest, '--seed', seed_a, '--trust', trust_a, '--out', app,
+                           env={'PIANO_GPU_ADDON': 'move', 'PIANO_GPU_ADDON_NAME': 'T', 'PIANO_GPU_ADDON_PLACE': 'app'})
+    check(code == 0, 'app place: staged' + ('' if code == 0 else ':\n' + text[-2000:]))
+    if code == 0:
+        rec = json.loads((app / 'userland.json').read_text())['seed_gpu_addon']
+        with attached(unpack(app / 'scratch-data.img', tmp / 'app.raw'), readonly=True) as mnt:
+            real = mnt / 'private/var/ngpu/app-library/Frameworks/T.bundle'
+            link = mnt / 'private/var/ngpu/addons/T.bundle'
+            check((real / 'Contents/MacOS/T').read_bytes() == exe.read_bytes() and os.access(real / 'Contents/MacOS/T', os.X_OK),
+                  'app place: the real bundle in app-library/Frameworks with the seed plugin\'s bytes')
+            check(link.is_symlink() and os.readlink(link) == '/System/Volumes/Preboot/Cryptexes/App/System/Library/Frameworks/T.bundle',
+                  'app place: the addons entry is the absolute symlink into the App cryptex view')
+            check(all(oct(d.stat().st_mode & 0o777) == '0o755' for d in (real.parent, real.parent.parent, link.parent)),
+                  'app place: app-library, Frameworks and addons are 0755')
+            check(not (mnt / 'Library/GPUBundles/T.bundle').exists(), 'app place + move: /Library/GPUBundles/T.bundle gone')
+        check(rec['place'] == 'app' and rec['real'] == '/private/var/ngpu/app-library/Frameworks/T.bundle' and
+              {f['path']: f['cdhash'] for f in rec['files']}.get('Contents/MacOS/T') == want_cd, 'app place: the record')
+    code, text = stage_run('--manifest', manifest, '--seed', seed_a, '--trust', trust_a, '--out', tmp / 'out/badplace',
+                           env={'PIANO_GPU_ADDON': 'copy', 'PIANO_GPU_ADDON_NAME': 'T', 'PIANO_GPU_ADDON_PLACE': 'x'})
+    check(code != 0 and 'sle, app, app2 or view3' in text, 'PIANO_GPU_ADDON_PLACE=x: refused')
+    code, text = stage_run('--manifest', manifest, '--seed', seed_a, '--trust', trust_a, '--out', tmp / 'out/move2', '--gpu-bundle',
+                           bundle, env={'PIANO_GPU_ADDON': 'move', 'PIANO_GPU_ADDON_NAME': 'T'})
+    check(code != 0 and 'would put /Library/GPUBundles/T.bundle back' in text, 'move with a staged --gpu-bundle of that name: refused')
+    code, text = stage_run('--manifest', manifest, '--seed', seed_a, '--trust', trust, '--out', tmp / 'out/untrusted',
+                           env={'PIANO_GPU_ADDON': 'copy', 'PIANO_GPU_ADDON_NAME': 'T'})
+    check(code != 0 and 'not in the trust cache' in text, 'a plugin Mach-O outside the trust cache: refused')
+    code, text = stage_run('--manifest', manifest, '--seed', seed_a, '--trust', trust_a, '--out', tmp / 'out/bad',
+                           env={'PIANO_GPU_ADDON': 'yes'})
+    check(code != 0 and 'copy or move' in text, 'PIANO_GPU_ADDON=yes: refused')
+    code, text = stage_run('--manifest', manifest, '--seed', seed_a, '--trust', trust_a, '--out', tmp / 'out/none',
+                           env={'PIANO_GPU_ADDON': 'copy'})
+    check(code != 0 and 'no /Library/GPUBundles/NativeAdrenoMetal.bundle' in text, 'the default name without that plugin: refused')
+    code, text = stage_run('--manifest', manifest, '--live', tmp / 'out/live', env={'PIANO_GPU_ADDON': 'copy'})
+    check(code != 0 and 'seed-only' in text, 'a live layer with PIANO_GPU_ADDON: refused')
+    unset = tmp / 'out/unset'
+    code, text = stage_run('--manifest', manifest, '--seed', seed_a, '--trust', trust_a, '--out', unset)
+    rec = json.loads((unset / 'userland.json').read_text()) if code == 0 else {}
+    check(code == 0 and 'seed_gpu_addon' not in rec and 'seed GPU addon' not in text, 'unset: no addon, no record entry')
 
 
 def seed_tests(tmp):
@@ -888,8 +1094,21 @@ def live_tests(tmp):
         machos = {f['dest']: f['cdhash'] for f in real['files'] if f['cdhash']}
         check(set(machos) == {'/usr/local/libexec/pianousb-shell', '/usr/local/libexec/piano-rotated', '/usr/local/bin/piano-torch',
                               '/usr/local/libexec/piano-wifi-join', '/usr/local/bin/piano-camera-grab',
-                              '/usr/local/libexec/piano-wifi-supplicant'},
-              'six Mach-Os with CDHashes: ' + ', '.join(f'{Path(d).name} {h[:12]}' for d, h in sorted(machos.items())))
+                              '/usr/local/libexec/piano-wifi-supplicant', '/usr/local/bin/piano-camera-default',
+                              '/usr/local/bin/piano-camera-runtime', '/usr/local/bin/piano-charge-config',
+                              '/usr/local/bin/piano-coreimage-compat', '/usr/local/libexec/piano-brightness-sync',
+                              '/usr/local/libexec/piano-login-readiness', '/usr/local/libexec/piano-wifi-controls'},
+              'thirteen Mach-Os with CDHashes: ' + ', '.join(f'{Path(d).name} {h[:12]}' for d, h in sorted(machos.items())))
+        jobs = {}
+        for f in real['files']:
+            if f['kind'] in ('daemon', 'agent'):
+                jobs[f['dest']] = plistlib.loads((tmp / 'real/live/staging/files' / f['unit'] / Path(f['dest']).name).read_bytes())
+        ours = {f['dest'] for f in real['files']}
+        bad = [d for d, j in jobs.items() if (j.get('Program') or j['ProgramArguments'][0]) in ours]
+        wrapped = [d for d, j in jobs.items() if j['ProgramArguments'][:3] == stage.BTM_LAUNCHER]
+        check(jobs and not bad and len(wrapped) >= 10 and all(jobs[d]['ProgramArguments'][3] in ours for d in wrapped),
+              f'every staged job\'s executable is a system program, never a file of the layer ({len(wrapped)} of {len(jobs)} through '
+              f'the BTM-stable launcher; bad: {bad})')
         archs = {d: sh(['lipo', '-archs', str(tmp / 'real/live/staging/files' / f['unit'] / Path(d).name)], timeout=60,
                        capture_output=True, text=True).stdout.strip() for d in machos for f in real['files'] if f['dest'] == d}
         check(set(archs.values()) == {'arm64'}, 'each one thin arm64')
@@ -904,11 +1123,14 @@ def live_tests(tmp):
                 'system/com.unixnu.piano-still-wallpaper', 'system/com.unixnu.piano-wifi-join', 'system/com.unixnu.piano-camera-grab',
                 'system/com.unixnu.piano-wifi-supplicant', 'system/com.unixnu.piano-airportd-kick', 'system/com.unixnu.piano-usbnet-address',
                 f'gui/{rig.uid}/com.unixnu.piano-rotated', f'gui/{rig.uid}/com.unixnu.piano-login-front',
-                f'gui/{rig.uid}/com.unixnu.piano-passd-policy', f'gui/{rig.uid}/com.unixnu.piano-slim-session'}
+                f'gui/{rig.uid}/com.unixnu.piano-passd-policy', f'gui/{rig.uid}/com.unixnu.piano-slim-session',
+                f'gui/{rig.uid}/com.unixnu.piano-camera-default', f'gui/{rig.uid}/com.unixnu.piano-coreimage-restore',
+                'system/com.unixnu.piano-brightness-sync', 'system/com.unixnu.piano-charge-config', 'system/com.unixnu.piano-keyboard-type',
+                'system/com.unixnu.piano-lw-quiet', 'system/com.unixnu.piano-wifi-controls'}
         check(code == 0 and rig.loaded() == want and rig.root('/usr/local/bin/piano-torch').is_file() and
               rig.root('/usr/local/share/piano/wallpaper/still.png').read_bytes()[:8] == b'\x89PNG\r\n\x1a\n',
-              f'the real staging installed on a scratch root ({sorted(rig.loaded() ^ want) or "as wanted"}): nine daemons (the '
-              'airportd-kick of 88f4171e counted) and the four agents loaded (the slim session poster counted), piano-torch in /usr/local/bin, '
+              f'the real staging installed on a scratch root ({sorted(rig.loaded() ^ want) or "as wanted"}): fourteen daemons (the '
+              'airportd-kick of 88f4171e counted) and the six agents loaded (the slim session poster counted; the retired coreimage-compat off), piano-torch in /usr/local/bin, '
               'the still picture in /usr/local/share/piano/wallpaper')
         code, out = rig.run('--check')
         check(code == 0, 'and --check passes on it')
@@ -946,6 +1168,8 @@ def main():
         installer_tests(tmp / 'i')
         pmset_tests(tmp / 'p')
         keyboard_tests(tmp / 'k')
+        btm_tests(tmp / 'b')
+        link_tests(tmp / 'l')
         if quick:
             print('(--quick: parts 4-7 skipped)')
         elif k27_tree(required=False) is None:
@@ -954,6 +1178,7 @@ def main():
             trust_tests(tmp / 't')
             cdhash_tests(tmp / 'c')
             seed_tests(tmp / 's')
+            addon_tests(tmp / 'a')
             live_tests(tmp / 'v')
     print(f'\n{"PASS" if not failures else "FAIL"}: {len(failures)} failure(s)')
     return 1 if failures else 0

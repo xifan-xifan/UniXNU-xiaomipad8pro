@@ -8,6 +8,7 @@
 #include "Buttons.h"
 #include "HidReports.h"
 #include "PowerKey.h"
+#include "KeySim.h"
 #include <cstdio>
 #include <map>
 #include <vector>
@@ -423,6 +424,70 @@ static void testDescriptor()
   CHECK(deviceInfo(Kind::buttons).descriptor == kButtonsDescriptor && deviceInfo(Kind::buttons).descriptorBytes == sizeof kButtonsDescriptor);
 }
 
+// KeySim.h (machdep.piano_input_sim): the value's decoding, the refusals, and a simulated press through the same debounce and
+// PowerKey.h path as a PMIC sample (KeyRun), short, long and a volume key; a system sleep ends it.
+static void testKeySim()
+{
+  uint8_t keys = 0;
+  uint32_t ms = 0;
+  CHECK(decodeSim(300, &keys, &ms) && keys == kKeyPower && ms == 300);
+  CHECK(decodeSim((int64_t(kKeyVolumeUp) << 16) | 200, &keys, &ms) && keys == kKeyVolumeUp && ms == 200);
+  CHECK(decodeSim((int64_t(kKeyVolumeDown) << 16) | 10000, &keys, &ms) && keys == kKeyVolumeDown && ms == 10000);
+  CHECK(!decodeSim(0, &keys, &ms) && !decodeSim(-300, &keys, &ms) && !decodeSim(49, &keys, &ms) && !decodeSim(10001, &keys, &ms));
+  CHECK(!decodeSim(int64_t(8) << 16 | 300, &keys, &ms));   // a bit above the three keys
+  {
+    KeySim k;
+    CHECK(k.arm(false, 300, 0) == SimResult::off && k.refused == 1 && !k.active(0));
+    CHECK(k.arm(true, 20, 0) == SimResult::invalid && k.refused == 2);
+    CHECK(k.arm(true, 300, 1000) == SimResult::ok && k.presses == 1 && k.active(1000));
+    CHECK(k.arm(true, 300, 1100) == SimResult::busy && k.refused == 3);
+    CHECK(k.held(1299) == kKeyPower && k.held(1300) == 0 && !k.active(1300));
+    CHECK(k.arm(true, 300, 1400) == SimResult::ok && k.presses == 2);
+    k.reset();
+    CHECK(k.held(1500) == 0 && !k.active(1500));
+  }
+  // the keys settled up first (as after start), the press armed at 1000 ms by "the sysctl", sampled every 10 ms from there
+  auto run = [](KeyRun &r, KeySim &k, int64_t value, uint64_t until) {
+    for (uint64_t t = 0; t < until; t += kPollMs) {
+      if (t == 1000) CHECK(k.arm(true, value, t) == SimResult::ok);
+      r.sample(k.held(t), t);
+    }
+  };
+  {   // a short simulated press: PianoPolicy is asked once, on the release, nothing reaches macOS
+    KeyRun r;
+    KeySim k;
+    run(r, k, 300, 3000);
+    CHECK(r.reports.empty());
+    CHECK(r.asks.size() == 1 && r.asks[0].heldMs >= 290 && r.asks[0].heldMs <= 310);
+  }
+  {   // a long simulated press (2000 ms): the HID Power usage down at 1.5 s, up at the release; PianoPolicy not asked
+    KeyRun r;
+    KeySim k;
+    run(r, k, 2000, 5000);
+    CHECK(r.asks.empty() && r.k.longPresses() == 1);
+    CHECK(r.reports.size() == 2 && r.reports[0].second == kKeyPower && r.reports[1].second == 0);
+  }
+  {   // without PianoPolicy the simulated power key is reported as it happens, like a real one
+    KeyRun r;
+    r.policyThere = false;
+    KeySim k;
+    run(r, k, 300, 3000);
+    CHECK(r.asks.empty() && r.reports.size() == 2 && r.reports[0].second == kKeyPower);
+  }
+  {   // vol- (the volume path the physical key would take): the consumer bit down and up
+    KeyRun r;
+    KeySim k;
+    run(r, k, (int64_t(kKeyVolumeDown) << 16) | 150, 3000);
+    CHECK(r.asks.empty() && r.reports.size() == 2 && r.reports[0].second == kKeyVolumeDown && r.reports[1].second == 0);
+  }
+  {   // under the debounce: a 50 ms press still passes the 32 ms debounce at the 10 ms rate
+    KeyRun r;
+    KeySim k;
+    run(r, k, (int64_t(kKeyVolumeUp) << 16) | 50, 2000);
+    CHECK(r.reports.size() == 2 && r.reports[0].second == kKeyVolumeUp);
+  }
+}
+
 int main()
 {
   testDarkPolling();
@@ -431,6 +496,7 @@ int main()
   testDebounce();
   testAdaptivePolling();
   testPowerKey();
+  testKeySim();
   testDescriptor();
   if (failures) {
     std::printf("buttons_host: %d failure(s)\n", failures);

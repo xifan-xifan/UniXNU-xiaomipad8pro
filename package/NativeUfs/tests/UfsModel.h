@@ -32,6 +32,12 @@ struct Model {
   std::vector<uint8_t> written;
   std::vector<std::string> events;             // "get", "uic17", "uic18", "ahit=<hex>", "nop", "sync", "read", "write"
   std::function<void (uintptr_t)> onSleep;     // a thread would sleep on this event: the test plays the other thread
+  // UniXNU-piano 2026-11-25 (RootDevice.h): the device's query state. Flags and attributes by IDN (index 0); a set bit of
+  // queryRefused answers that IDN with response code 0xF5 (invalid IDN); flagSticky: SET FLAG answers success but the flag stays 0.
+  std::array<uint32_t, 64> flags {}, attrs {};
+  uint64_t queryRefused = 0;
+  bool flagSticky = false;
+  std::vector<std::string> queries;            // "r3:02", "r5:0e", "s6:0e" ... in order
 };
 static Model m;
 
@@ -142,7 +148,16 @@ static void doorbell (uint32_t value)
   rsp[1] = 0;
   if (m.fault == Fault::StuckWithReply) reg (0x58) = value;
   if (scsi) putBe32 (rsp + 12, 0);
-  if (cmd[0] == 0x16) putBe32 (rsp + 20, 0x11);
+  if (cmd[0] == 0x16) {
+    const uint8_t op = cmd[12], idn = cmd[13] & 63;
+    m.queries.push_back ((cmd[5] == 0x81 ? "s" : "r") + std::to_string (op) + ":" + hex (cmd[13]));
+    assert ((op == 6 || op == 7) ? cmd[5] == 0x81 : cmd[5] == 0x01);   // write opcodes only as a standard write request
+    if (m.queryRefused >> idn & 1) rsp[6] = 0xf5;
+    else if (op == 3) putBe32 (rsp + 20, m.attrs[idn]);
+    else if (op == 5) putBe32 (rsp + 20, m.flags[idn]);
+    else if (op == 6) { if (!m.flagSticky) m.flags[idn] = 1; putBe32 (rsp + 20, m.flags[idn]); }
+    else if (op == 7) { m.flags[idn] = 0; putBe32 (rsp + 20, 0); }
+  }
   if (m.fault == Fault::Type) rsp[0] = 0x3f;
   if (m.fault == Fault::Tag) ++rsp[3];
   if (m.fault == Fault::Lun) ++rsp[2];
@@ -201,6 +216,7 @@ static void reset (Fault f = Fault::None)
 {
   m = Model {};
   m.fault = f;
+  m.attrs[2] = 0x11;                 // bCurrentPowerMode: active
   reg (0x00) = (1U << 23) | 0x1f;   // CAP: auto-hibernate, 32 request slots
   reg (0x34) = 1;                    // HCE
   reg (0x30) = 15;                   // HCS: device present, both lists ready, UIC ready

@@ -357,6 +357,7 @@ struct FakeSurface {
   uint64_t length = 0;
   int refs = 0;
   bool cleanable = true, mapFails = false;
+  uint32_t cacheMode = 0;
   unsigned cleans = 0;
   PrepareModel md;   // its memory descriptor's prepares (XNU's read-only rule)
   // 16 KiB pages from base, every fourth 16 KiB page skipped (not contiguous)
@@ -390,11 +391,18 @@ struct HostHw {
   FakeSurface testBuf{0x900000000ull, 2136ull * 12800};
   int liveCookies = 0;
   unsigned readOnlyPrepares = 0;
+  uint64_t nonWcPage = 0, failCleanBytes = 0;
+  std::vector<std::string> cleanEvents;
+  bool traceClean = false;
   HostHw(DpuModel &d, SmmuModel &s, Ram &r) : dpu(d), smmu(s), ram(r) {}
 
   uint32_t rd(uint64_t pa) { return dpu.rd(pa); }
-  void wr(uint64_t pa, uint32_t v) { dpu.wr(pa, v); }
-  void barrier() {}
+  void wr(uint64_t pa, uint32_t v)
+  {
+    if (traceClean && v && pa == DpuModel::kFlush) cleanEvents.emplace_back("flush");
+    dpu.wr(pa, v);
+  }
+  void barrier() { if (traceClean) cleanEvents.emplace_back("barrier"); }
   uint32_t smmuRd(uint32_t off) { return smmu.rd(off); }
   void smmuWr(uint32_t off, uint32_t v) { smmu.wr(off, v); }
   uint64_t nowUs() { return now; }
@@ -495,6 +503,21 @@ struct HostHw {
     FakeSurface *f = static_cast<Cookie *>(cookie)->s;
     ++f->cleans;
     return f->cleanable;
+  }
+  uint32_t surfaceCacheMode(void *cookie) { return static_cast<Cookie *>(cookie)->s->cacheMode; }
+  CleanPages surfaceAttributes(const uint64_t *pages, unsigned count)
+  {
+    if (traceClean) cleanEvents.emplace_back("check");
+    advance(10);
+    return cachePages(count, [&](unsigned i) { return pages[i] & sm::kOutMask; },
+                      [&](uint64_t pa, unsigned &attr) { attr = pa == nonWcPage ? 0 : 1; return true; }, 1, 1);
+  }
+  bool surfaceCleanPhysical(const uint64_t *, uint64_t, uint64_t bytes)
+  {
+    if (traceClean) cleanEvents.emplace_back("clean");
+    advance(100);
+    barrier();
+    return failCleanBytes != bytes && failCleanBytes != UINT64_MAX;
   }
   void surfaceRelease(void *cookie)
   {
@@ -1057,6 +1080,91 @@ static void testClean()
   CHECK(r.f.request(q) == kPianoDpuFlipShown && c.cleans == 0);
 }
 
+static void testConditionalClean()
+{
+  constexpr uint64_t pixels = 2136ull * 12800;
+  constexpr uint64_t allocation = pixels + 8192;
+  FakeSurface a(0x8d0000000ull, allocation), b(0x8e0000000ull, allocation), c(0x8f0000000ull, allocation);
+  FakeSurface d(0x900000000ull, allocation), e(0x910000000ull, allocation);
+  for (auto *surface : {&a, &b, &c, &d, &e}) surface->cacheMode = kSurfaceWriteCombined;
+  Rig r;
+  r.f.cfg.cleanSkip = true;
+  CHECK(r.ready());
+  const auto show = [&](FakeSurface &surface, bool complete = true) {
+    auto q = req(&surface);
+    return r.f.request(q, complete);
+  };
+
+  r.hw.traceClean = true;
+  for (int i = 0; i < 5; ++i) {
+    for (auto *surface : {&a, &b, &c}) {
+      r.hw.cleanEvents.clear();
+      r.hw.cleanEvents.emplace_back(i % 2 ? "CPU published" : "GPU retired");
+      CHECK(show(*surface) == kPianoDpuFlipShown);
+      const auto &events = r.hw.cleanEvents;
+      const auto check = std::find(events.begin(), events.end(), "check");
+      const auto clean = std::find(events.begin(), events.end(), "clean");
+      const auto flush = std::find(events.begin(), events.end(), "flush");
+      CHECK(check < flush && flush != events.end());
+      CHECK(std::find(check, flush, "barrier") != flush);
+      if (i == 0) CHECK(check < clean && clean < flush);
+      else CHECK(clean == events.end());
+    }
+  }
+  CHECK(r.f.st.maps == 3 && r.f.st.cleanInits == 3 && r.f.st.cleans == 3 && r.f.st.cleanSkips == 12);
+  CHECK(r.f.st.cleanUs == 300 && r.f.st.cleanCheckUs >= 150);
+  CHECK(r.ram.cleans >= 3 && r.smmu.onlyBankWrites());
+
+  r.hw.cleanEvents.clear();
+  CHECK(show(c) == kPianoDpuFlipShown && r.f.st.cleanSkips == 13);
+  CHECK((r.hw.cleanEvents == std::vector<std::string>{"check", "barrier"}));
+  auto q = req(&c);
+  q.offset = 4096;
+  CHECK(r.f.request(q, true) == kPianoDpuFlipShown && r.f.current.base % sm::kSlotBytes == 4096);
+  CHECK(r.f.st.cleanInits == 3 && r.f.st.cleanSkips == 14);
+  q.offset = UINT64_MAX - 63;
+  CHECK(r.f.request(q, true) == kPianoDpuFlipSize && r.f.st.cleanSkips == 14);
+
+  // The last backing page is outside the pixel span. It still invalidates the epoch.
+  r.hw.nonWcPage = c.pages.back();
+  CHECK(show(c) == kPianoDpuFlipShown && r.f.st.cleanReasons[unsigned(CleanReason::attributes)] == 1);
+  r.hw.nonWcPage = 0;
+  CHECK(show(c) == kPianoDpuFlipShown && r.f.st.cleanInits == 4);
+  c.cacheMode = 0x700;
+  CHECK(show(c) == kPianoDpuFlipShown && r.f.st.cleanReasons[unsigned(CleanReason::mode)] == 1);
+  c.cacheMode = kSurfaceWriteCombined;
+  CHECK(show(c, false) == kPianoDpuFlipShown && r.f.st.cleanReasons[unsigned(CleanReason::handoff)] == 1);
+  CHECK(show(c) == kPianoDpuFlipShown && r.f.st.cleanInits == 5);
+
+  r.f.cfg.forceFullClean = true;
+  CHECK(show(c) == kPianoDpuFlipShown && r.f.st.cleanReasons[unsigned(CleanReason::forced)] == 1);
+  r.f.cfg.forceFullClean = false;
+  CHECK(show(c) == kPianoDpuFlipShown && r.f.st.cleanInits == 6);
+  r.hw.failCleanBytes = allocation;   // the required initial clean fails; the scanout-only fallback works
+  CHECK(show(d) == kPianoDpuFlipShown && r.f.st.cleanReasons[unsigned(CleanReason::initialClean)] == 1);
+  CHECK(r.f.st.cleanFailures == 1 && r.f.st.cleanInits == 6);
+  r.hw.failCleanBytes = UINT64_MAX;
+  CHECK(show(e) == kPianoDpuFlipClean && r.f.st.cleanFailures == 3 && !r.f.st.uncleaned);
+  CHECK(r.f.slots.slot[r.f.slots.shown].key == &d && r.f.st.cleanSkips == 14);
+  CHECK(a.refs == 0 && r.f.st.evictions == 1);
+  r.hw.failCleanBytes = 0;
+  CHECK(show(e) == kPianoDpuFlipShown && r.f.st.cleanInits == 7);
+  CHECK(show(a) == kPianoDpuFlipShown && r.f.st.cleanInits == 8 && a.refs == 1);
+  q = req(&a);
+  q.memory = &q;   // new descriptor for the same surface identity
+  CHECK(r.f.request(q, true) == kPianoDpuFlipShown && r.f.st.cleanInits == 9 && a.refs == 2);
+  CHECK(show(a) == kPianoDpuFlipShown && r.f.st.cleanInits == 10);
+
+  e.mapFails = true;
+  q = req(&e);
+  q.memory = &q;
+  CHECK(r.f.request(q, true) == kPianoDpuFlipMemory && r.f.st.cleanInits == 10);
+  // The failed replacement invalidated e's old epoch. Initialize it again before testing a failed skip.
+  CHECK(show(e) == kPianoDpuFlipShown && r.f.st.cleanInits == 11);
+  r.dpu.latchNever = true;
+  CHECK(show(a) == kPianoDpuFlipLatch && r.f.st.cleanSkips == 14);
+}
+
 static void testVariants()
 {
   {   // VIG1 by its address (+6400), SRC_XY 0
@@ -1394,6 +1502,7 @@ int main(int argc, char **argv)
   testLadder();
   testService();
   testClean();
+  testConditionalClean();
   testVariants();
   testSafety();
   testIrq();

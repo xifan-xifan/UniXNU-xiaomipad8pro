@@ -84,6 +84,9 @@
 #include <PianoPerfInput.h>   // the input boost's event to PianoThermal (2026-11-22)
 namespace { pianoperf::InputNotifier gPerfInput; }   // PianoThermal's input boost (PianoPerfInput.h)
 #include <PianoSpmi.h>   // the SPMI lock and the transactions every kext shares
+#include <sys/sysctl.h>
+#include <sys/kauth.h>
+#include <PianoBootFlagSdam.h>   // the Android/macOS boot flag and the SDAM survey (T-16)
 
 using namespace pianousb;
 
@@ -105,6 +108,8 @@ int kernel_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *new
 }
 
 class PianoUsbHID;   // the HID input devices (piano-usb-hid=1), below
+
+SYSCTL_DECL(_machdep);
 
 namespace {
 
@@ -642,6 +647,143 @@ int setRestartReason(uint8_t reason)
   for (Region *r : all)
     if (r->map) r->map->release();
   return err;
+}
+
+// -------------------------------------------------------------------------------- the Android/macOS boot flag (T-16, switch/sel1)
+// machdep.piano_sdam_survey (root, read only): SDAM 0x7100 bytes 0x40..0xbf through EE 0's observer channel, never a write; the survey
+// before the flag byte 0x49 may be used (private/host-checks/20261123-switcher/UEFI-SWITCH-DESIGN.md section 2).
+// machdep.piano_bootflag (root): reads the flag byte (-1 when unreadable); a write is a request of firmware/selector/bootflag.h (1 once
+// Android, 2 once macOS, 3 clear the one-shot, 4 default Android, 5 default macOS, 6 reset), refused with EPERM unless the boot argument
+// piano-bootflag-write=1 (default 0), and refused when the byte is not ours. Package/include/PianoBootFlagSdam.h does the work.
+uint32_t gBootflagWrite;
+IOLock *gBootflagLock;
+struct SdamChannels {
+  Region core{}, cnfg{}, obsv{}, chnl{};
+  int apid = -1;
+  bool ee0 = false;
+};
+
+bool sdamOpen(SdamChannels &s, bool needOwner)
+{
+  constexpr uint64_t kCore = 0x0C400000, kCnfg = 0x0C42D000, kObsv = 0x0C440000, kChnl = 0x0C500000;
+  if (!mapRegion(s.core, kCore, 0x3000) || !mapRegion(s.cnfg, kCnfg, 0x1000)) return false;
+  const uint32_t count = rd32(s.core.va + 4) & 0x7ff;
+  if ((rd32(s.core.va) >> 28) != 7 || !count || count > 1024) return false;
+  for (uint32_t i = 0; i < count; i++) {
+    const uint32_t map = rd32(s.core.va + 0x2000 + 4 * i);
+    if (!map || ((map >> 8) & 0xfff) != pianobootflag::kSdamPpid) continue;
+    const bool ee0 = (rd32(s.cnfg.va + 4 * i) & 7) == 0;
+    if (s.apid < 0 || (ee0 && !s.ee0)) { s.apid = int(i); s.ee0 = ee0; }
+  }
+  if (s.apid < 0 || !mapRegion(s.obsv, kObsv + 0x20ull * uint32_t(s.apid), 0x20)) return false;
+  return !needOwner || !s.ee0 || mapRegion(s.chnl, kChnl + 0x1000ull * uint32_t(s.apid), 0x20);
+}
+
+void sdamClose(SdamChannels &s)
+{
+  Region *all[] = {&s.core, &s.cnfg, &s.obsv, &s.chnl};
+  for (Region *r : all)
+    if (r->map) { r->map->release(); r->map = nullptr; r->va = 0; }
+}
+
+int sysctlSdamSurvey(struct sysctl_oid *, void *, int, struct sysctl_req *req)
+{
+  if (!kauth_cred_issuser(kauth_cred_get())) return EPERM;
+  if (req->newptr) return EPERM;
+  char text[640];
+  if (!req->oldptr) return SYSCTL_OUT(req, nullptr, sizeof text);
+  uint8_t bytes[pianobootflag::kSurveyBytes] = {};
+  unsigned got = 0;
+  SdamChannels s;
+  IOLockLock(gBootflagLock);
+  if (sdamOpen(s, false)) {
+    const uintptr_t o = s.obsv.va;
+    got = pianobootflag::survey([o](uint32_t off) { return rd32(o + off); }, [o](uint32_t off, uint32_t v) { wr32(o + off, v); },
+                                [](unsigned us) { IODelay(us); }, bytes);
+  }
+  sdamClose(s);
+  IOLockUnlock(gBootflagLock);
+  pianobootflag::formatSurvey(text, sizeof text, bytes, got);
+  return SYSCTL_OUT(req, text, strlen(text) + 1);
+}
+
+int sysctlBootflag(struct sysctl_oid *oidp, void *, int, struct sysctl_req *req)
+{
+  if (!kauth_cred_issuser(kauth_cred_get())) return EPERM;
+  int v = -1;
+  SdamChannels s;
+  IOLockLock(gBootflagLock);
+  if (sdamOpen(s, false)) {
+    const uintptr_t o = s.obsv.va;
+    uint8_t b = 0;
+    if (pianospmi::read([o](uint32_t off) { return rd32(o + off); }, [o](uint32_t off, uint32_t x) { wr32(o + off, x); },
+                        [](unsigned us) { IODelay(us); }, pianobootflag::kFlagOffset, &b, 1) == pianospmi::Result::ok)
+      v = b;
+  }
+  sdamClose(s);
+  IOLockUnlock(gBootflagLock);
+  int r = v;
+  int err = sysctl_handle_int(oidp, &r, 0, req);
+  if (err || !req->newptr) return err;
+  if (gBootflagWrite != 1) { note("bootflag: request %d refused: piano-bootflag-write=0", r); return EPERM; }
+  pianobootflag::Outcome out;
+  IOLockLock(gBootflagLock);
+  if (!sdamOpen(s, true)) {
+    out.status = pianobootflag::Status::readFailed;
+  } else {
+    const uintptr_t o = s.obsv.va, c = s.chnl.va;
+    out = pianobootflag::request([o](uint32_t off) { return rd32(o + off); }, [o](uint32_t off, uint32_t x) { wr32(o + off, x); },
+                                 [c](uint32_t off) { return rd32(c + off); },
+                                 [c](uint32_t off, uint32_t x) { wr32(c + off, x); if (off == pianospmi::kCmd) dsb(); },
+                                 [](unsigned us) { IODelay(us); }, r, s.ee0 && c, true);
+  }
+  sdamClose(s);
+  IOLockUnlock(gBootflagLock);
+  note("bootflag: request %d: %s, 0x49 %#04x -> %#04x (APID %d%s)", r, pianobootflag::statusName(out.status), out.before, out.after,
+       s.apid, s.ee0 ? "" : ", not EE 0's");
+  switch (out.status) {
+    case pianobootflag::Status::ok:
+    case pianobootflag::Status::unchanged: return 0;
+    case pianobootflag::Status::badRequest: return EINVAL;
+    case pianobootflag::Status::notOurs:
+    case pianobootflag::Status::notOwner:
+    case pianobootflag::Status::writeDisabled: return EPERM;
+    default: return EIO;
+  }
+}
+
+// Filled at run time (arm64e signs the parent and handler pointers), as PianoPolicy's.
+struct sysctl_oid gOidSdamSurvey, gOidBootflag;
+
+void fillBootflagOid(struct sysctl_oid &o, const char *name, int kind, int (*handler)(struct sysctl_oid *, void *, int, struct sysctl_req *),
+                     const char *fmt, const char *descr)
+{
+  o.oid_parent = &sysctl__machdep_children;
+  o.oid_number = OID_AUTO;
+  o.oid_kind = kind | CTLFLAG_OID2;
+  o.oid_arg1 = nullptr;
+  o.oid_arg2 = 0;
+  o.oid_name = name;
+  o.oid_handler = handler;
+  o.oid_fmt = fmt;
+  o.oid_descr = descr;
+  o.oid_version = SYSCTL_OID_VERSION;
+  o.oid_refcnt = 0;
+}
+
+void bootflagStart()
+{
+  gBootflagWrite = bootArg("piano-bootflag-write", 0);
+  gBootflagLock = IOLockAlloc();
+  if (!gBootflagLock) return;
+  fillBootflagOid(gOidSdamSurvey, "piano_sdam_survey", CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED, sysctlSdamSurvey, "A",
+                  "SDAM 0x7100 0x40..0xbf, observer reads only (root)");
+  fillBootflagOid(gOidBootflag, "piano_bootflag", CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, sysctlBootflag, "I",
+                  "boot flag byte (read); a request 1..6 (write, piano-bootflag-write=1, root)");
+  sysctl_register_oid(&gOidSdamSurvey);
+  sysctl_register_oid(&gOidBootflag);
+  note("bootflag: machdep.piano_sdam_survey (read only) and machdep.piano_bootflag (writes %s) registered",
+       gBootflagWrite == 1 ? "on: piano-bootflag-write=1" : "off");
 }
 
 void usbStatus();
@@ -2647,6 +2789,7 @@ bool PianoDwc3::start(IOService *provider)
   if (gArgs.hid && gArgs.level < 2) note("piano-usb-hid needs piano-usb=2: no HID input");
   if (gArgs.net && gArgs.level < 2) note("piano-usb-net needs piano-usb=2: no network function");
   setProperty("piano-usb", gArgs.level, 32);
+  bootflagStart();   // machdep.piano_sdam_survey / machdep.piano_bootflag, at every piano-usb level (T-16)
   gLock = IOLockAlloc();
   gSleepLock = IOLockAlloc();   // the sleep guard: QSCRATCH writes (the takeover, a monitor poke) and setPowerState
   gSleep = UsbSleep(gArgs.sleepUsb != 0);

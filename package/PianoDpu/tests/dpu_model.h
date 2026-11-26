@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // A timed register model of piano's panel path for the B1c/B1d/B1e host tests (dpu_refresh_host.cpp, dpu_pcc_host.cpp,
 // dpu_panel_host.cpp): the Io of DpuSlices.h over simulated time. What it models, from the facts in DpuHw.h / DpuSlices.h:
-//   - INTF1/INTF2 timing engines: frames of vtotal lines at the 120 Hz family's line time, frame and line counters, INTF_STATUS;
+//   - INTF1/INTF2 timing engines: frame length and line time at a fixed pixel clock, frame and line counters, INTF_STATUS;
 //     EN = 0 stops an engine at its frame end, EN = 1 starts it at once; VSYNC_PERIOD_F0 is a shadow taken at a CTL INTF flush;
 //   - the CTL: FLUSH bits set by writing ones, latched (and cleared) at INTF1's frame start, or at the engines' start when stopped;
 //   - the DSPPs' PCC words: shadows taken at a CTL DSPP flush (CTL_DSPP_n_FLUSH bit 4);
@@ -36,6 +36,7 @@ struct Dcs {
   unsigned link;
   uint8_t command;
   bool lowPower;
+  uint8_t parameter;
 };
 
 struct Dpu {
@@ -47,6 +48,16 @@ struct Dpu {
   bool engineStuck[2] = {false, false}; // EN = 0 does not stop INTF1 / INTF2
   bool engineDead[2] = {false, false};  // EN = 1 does not start it
   bool flushStuck = false;              // CTL_FLUSH never latches
+  bool modeWrites = false;              // M3's extra INTF timing registers are writable
+  uint64_t dropStore = 0;               // an accepted store whose hardware read-back does not change
+  uint32_t dropValue = 0;
+  unsigned dropCount = 0;
+  unsigned underrunAfterDma = 0;       // inject one underrun after this many bonded commands
+  bool handleUnderrunIrq = false;
+  uint32_t irqUnderruns = 0;
+  bool resetPccOnTimingChange = false;
+  unsigned lateDmas = 0;               // delay this many DMA completions past a short front porch
+  bool countEnableIgnored[2] = {false, false};   // COUNT_EN writes do not change the readback or live counters
   // ---- state
   uint64_t ns = 0;
   std::map<uint64_t, uint32_t> regs;
@@ -58,6 +69,8 @@ struct Dpu {
     bool on = true, stopPending = false, counting = true;
     uint64_t start = 0;
     uint32_t frames = 1000, period = 2310 * kHtotal, shadow = 2310 * kHtotal, cur = 2310 * kHtotal;
+    uint32_t htotal = kHtotal;
+    uint32_t fetch = 0;
   } intf[3];
   struct Dsi {
     uint32_t total = 2309u << 16 | 575, shadow = 2309u << 16 | 575;
@@ -72,6 +85,8 @@ struct Dpu {
   uint32_t topStatus = 0;
   struct Half {
     bool displayOn = true, sleeping = false;
+    uint8_t page = 0x10, b2 = 0x91, b3 = 0x40;
+    bool unlocked = true;
   } half[2];
   uint64_t startNs[3] = {0, 0, 0};
 
@@ -101,15 +116,28 @@ struct Dpu {
   static constexpr uint32_t kDmaLowPowerFact = 1u << 26;
 
   // ---- time
-  uint64_t frameNs(unsigned i) const { return uint64_t(intf[i].cur / kHtotal) * kLineNs; }
-  uint32_t vtotal(unsigned i) const { return intf[i].cur / kHtotal; }
-  uint32_t line(unsigned i) const { return intf[i].on ? uint32_t((ns - intf[i].start) / kLineNs) : 0; }
+  uint64_t frameNs(unsigned i) const { return uint64_t(intf[i].cur) * kLineNs / kHtotal; }
+  uint32_t vtotal(unsigned i) const { return intf[i].cur / intf[i].htotal; }
+  uint32_t line(unsigned i) const
+  {
+    return intf[i].on ? uint32_t((ns - intf[i].start) * kHtotal / (intf[i].htotal * kLineNs)) : 0;
+  }
   void latchCtl()
   {
     if (!ctlFlush || flushStuck) return;
+    bool timingChanged = false;
     if (ctlFlush & kFlushIntf)
       for (unsigned i = 1; i <= 2; ++i)
-        if ((ctlIntfFlush >> i) & 1u) intf[i].period = intf[i].shadow;
+        if ((ctlIntfFlush >> i) & 1u) {
+          timingChanged |= intf[i].period != intf[i].shadow || intf[i].htotal != (regs[intfReg(i, kIntfHsyncCtl)] >> 16);
+          intf[i].period = intf[i].shadow;
+          intf[i].htotal = regs[intfReg(i, kIntfHsyncCtl)] >> 16;
+          intf[i].fetch = regs[intfReg(i, kIntfProgFetch)];
+        }
+    if (timingChanged && resetPccOnTimingChange) {
+      for (unsigned d = 0; d < 2; ++d)
+        for (unsigned k = 0; k < 13; ++k) pccActive[d][k] = pccShadow[d][k] = 0;
+    }
     if (ctlFlush & kFlushDspp)
       for (unsigned d = 0; d < 4; ++d)
         if (dsppFlush[d] & kDsppFlushPcc)
@@ -120,7 +148,10 @@ struct Dpu {
   void checkFrame(unsigned i)
   {
     const Dsi &d = dsi[i - 1];
-    if ((d.total >> 16) + 1 != vtotal(i)) {
+    const auto &f = intf[i];
+    const bool fetchOn = (regs[intfReg(i, kIntfConfig)] & kIntfConfigProgFetch) != 0;
+    const bool fetchInBlank = f.fetch > kVActiveEnd * f.htotal && f.fetch <= f.cur;
+    if ((d.total >> 16) + 1 != vtotal(i) || (d.total & 0xffffu) + 1 != f.htotal || (fetchOn && !fetchInBlank)) {
       ++glitches;
       topStatus |= 1u << kIntrIntfUnderrun[i];
     }
@@ -170,17 +201,32 @@ struct Dpu {
   {
     Dsi &d = dsi[l];
     d.dmaPending = false;
-    if (!d.fifo.empty()) {
-      const uint32_t w = d.fifo[0];
+    const unsigned words = regs[dsiReg(l, kDsiDmaLength)] / 4;
+    for (unsigned index = 0; index < words && index < d.fifo.size(); ++index) {
+      const uint32_t w = d.fifo[index];
       const uint8_t type = uint8_t((w >> 16) & 0x3fu), command = uint8_t(w & 0xffu);
+      const uint8_t parameter = uint8_t(w >> 8);
+      Half &h = half[l];
+      const bool lp = (regs[dsiReg(l, kDsiCmdDmaCtrl)] & kDmaLowPowerFact) != 0;
       if (type == 0x05) {
-        dcs.push_back({ns, l, command, (regs[dsiReg(l, kDsiCmdDmaCtrl)] & (1u << 26)) != 0});
-        Half &h = half[l];
+        dcs.push_back({ns, l, command, lp, 0});
         if (command == 0x28) h.displayOn = false;
         if (command == 0x29) h.displayOn = true;
         if (command == 0x10) h.sleeping = true;
         if (command == 0x11) h.sleeping = false;
       }
+      if (type == 0x15) {
+        dcs.push_back({ns, l, command, lp, parameter});
+        if (command == 0xff) { h.page = parameter; h.unlocked = false; }
+        if (command == 0xfb && parameter == 1) h.unlocked = true;
+        if (h.page == 0x10 && h.unlocked && command == 0xb2) h.b2 = parameter;
+        if (h.page == 0x10 && h.unlocked && command == 0xb3) h.b3 = parameter;
+      }
+      if (w & (1u << 31)) break;
+    }
+    if (l == 1 && underrunAfterDma && --underrunAfterDma == 0) {
+      if (handleUnderrunIrq) irqUnderruns |= kUnderrunBits;
+      else topStatus |= kUnderrunBits;
     }
     d.fifo.clear();
     d.intr |= 1u;
@@ -199,17 +245,20 @@ struct Dpu {
       return;
     }
     const unsigned i = l + 1;
+    const uint64_t duration = lateDmas ? 300000 : 20000;
+    if (lateDmas) --lateDmas;
     d.dmaPending = true;
     if (!intf[i].on) {
-      d.dmaAt = ns + 20000;
+      d.dmaAt = ns + duration;
       return;
     }
     const uint32_t ln = line(i);
     if (blockDma) {
-      d.dmaAt = ln >= kVActiveEnd ? ns + 20000 : intf[i].start + uint64_t(kVActiveEnd + 1) * kLineNs;
+      d.dmaAt = ln >= kVActiveEnd ? ns + duration
+                                 : intf[i].start + uint64_t(kVActiveEnd + 1) * intf[i].htotal * kLineNs / kHtotal;
     } else {
       if (ln < kVActiveEnd) ++commandsInFrame;   // a command inside the active frame: the picture tears
-      d.dmaAt = ns + 20000;
+      d.dmaAt = ns + duration;
     }
   }
 
@@ -246,19 +295,25 @@ struct Dpu {
   bool wr(uint64_t pa, uint32_t v)
   {
     tick(150);
-    if (!storeAllowed(pa, v)) {
+    if (!storeAllowed(pa, v, modeWrites)) {
       refused.push_back(pa);
       return false;
     }
     stores.push_back({ns, pa, v, intf[1].frames, line(1)});
+    if (dropCount && pa == dropStore && v == dropValue) {
+      --dropCount;
+      return true;
+    }
     for (unsigned i = 1; i <= 2; ++i) {
       if (pa == intfReg(i, kIntfVsyncPeriod)) {
         intf[i].shadow = v;
         return true;
       }
       if (pa == intfReg(i, kIntfCountEn)) {
-        regs[pa] = v;
-        intf[i].counting = (v & 3u) == 3u;
+        if (!countEnableIgnored[i - 1]) {
+          regs[pa] = v;
+          intf[i].counting = (v & 3u) == 3u;
+        }
         return true;
       }
       if (pa == intfReg(i, kIntfEn)) {
@@ -313,7 +368,7 @@ struct Dpu {
         if (d.db) {
           d.shadow = v;
         } else {
-          if ((v >> 16) != (d.total >> 16) && intf[i].on) {   // the video engine's frame changes length mid-frame
+          if (v != d.total && intf[i].on) {   // the video timing changes inside a frame
             ++midFrameTotal;
             topStatus |= 1u << kIntrIntfUnderrun[i];
           }
@@ -352,6 +407,12 @@ struct Dpu {
   }
   void delayUs(uint32_t us) { tick(uint64_t(us) * 1000); }
   void sleepMs(uint32_t ms) { tick(uint64_t(ms) * 1000000); }
+  uint32_t modeUnderruns() { return (rd(kMdp + kTopIntrStatus) & kUnderrunBits) | irqUnderruns; }
+  bool clearModeUnderruns()
+  {
+    irqUnderruns = 0;
+    return wr(kMdp + kTopIntrClear, kUnderrunBits);
+  }
   uint64_t nowUs() { return ns / 1000; }
   uintptr_t irqOff() { return irqDepth++; }
   void irqRestore(uintptr_t) { --irqDepth; }

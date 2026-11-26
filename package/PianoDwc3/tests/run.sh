@@ -9,7 +9,7 @@
 set -euo pipefail
 P=$(cd "$(dirname "$0")/.." && pwd)
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-for t in usb_gadget_host ncm_host smmu_stream_host hid_input_host usb_idle_host usb_sleep_host usb_handoff_host usb_cold_host log_cursor_host; do
+for t in usb_gadget_host ncm_host smmu_stream_host hid_input_host usb_idle_host usb_sleep_host usb_handoff_host usb_cold_host log_cursor_host bootflag_sdam_host; do
   c++ -std=c++20 -Wall -Wextra -Werror -Wno-unused-parameter -I "$P" -I "$P/../PianoKeyboard" "$P/tests/$t.cpp" -o "$T/$t"
   "$T/$t" "$@"
 done

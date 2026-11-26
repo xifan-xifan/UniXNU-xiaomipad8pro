@@ -33,7 +33,16 @@ struct A830R3bThermal {
     static constexpr uint8_t Skin25Level=13,Skin45Level=9;
     static constexpr int32_t Skin25On=25000,Skin25Off=23000,Skin45On=45000,Skin45Off=42000,XoOn=78000,XoOff=70000;
     static constexpr int32_t XoHard=90000;
-    enum Cause : uint8_t {CauseNone,CauseLadder,CauseSkin25,CauseSkin45,CauseXo,CauseSkinUnknown,CauseHard};
+    enum Cause : uint8_t {CauseNone,CauseLadder,CauseSkin25,CauseSkin45,CauseXo,CauseSkinUnknown,CauseHard,CauseSkinBand};
+    /* gpu/throttle1 (private/host-checks/20261124-gpu-throttle/TABLE.md): the docked skin table (skinTable 1) replaces the normal
+     * scene's two rows (25 C -> 1050, 45 C -> 734 in one jump) by one GMU level per 2 C band; each band leaves only under its own
+     * clear point. XO (78 C -> 734, 90 C exit), no reading (734), the silicon ladder (95/90 C), the guard exit (raw 100 C) and the
+     * unsafe exit (105 C) are the same in both tables. */
+    struct SkinBand {int32_t on,off;uint8_t level;};
+    static constexpr unsigned DockedBands=7;
+    static constexpr SkinBand Docked[DockedBands]={{35000,33000,13},{45000,43000,12},{47000,45000,11},{49000,47000,10},
+                                                  {51000,49000,9},{53000,51000,7},{55000,53000,6}};
+    uint8_t skinTable=0,band=0;   /* band: 0 none, n = Docked[n-1] holds */
     bool skinValid=false,skin25=false,skin45=false,xoHot=false,xoHard=false;
     int32_t skinMilli=0,xoMilli=0;
     uint8_t skinCap=14,cause=CauseNone;
@@ -54,6 +63,8 @@ struct A830R3bThermal {
             skinMilli=skin->virtual_milli_c;
             if(skinMilli>=Skin25On)skin25=true;else if(skinMilli<Skin25Off)skin25=false;
             if(skinMilli>=Skin45On)skin45=true;else if(skinMilli<Skin45Off)skin45=false;
+            while(band<DockedBands && skinMilli>=Docked[band].on)++band;
+            while(band && skinMilli<Docked[band-1].off)--band;
         }
         const bool xoValid=skin && skin->version==PIANO_SKIN_TEMPS_VERSION && (skin->valid&(1u<<PIANO_SKIN_XO));
         xoHard=false;
@@ -63,7 +74,10 @@ struct A830R3bThermal {
             xoHard=xoMilli>=XoHard;
         }
         const uint8_t before=skinCap;
-        skinCap=!usable || skin45 || xoHot?Skin45Level:skin25?Skin25Level:14;
+        if(skinTable==1) {
+            skinCap=band?Docked[band-1].level:14;
+            if((!usable || xoHot) && skinCap>Skin45Level)skinCap=Skin45Level;
+        } else skinCap=!usable || skin45 || xoHot?Skin45Level:skin25?Skin25Level:14;
         if(skinCap!=before) {++skinChanges;events|=16;}
     }
     void tick(uint64_t now,const Sm8750TsensSample &g,const piano_gpu_temps &b,bool ok,bool running,
@@ -122,7 +136,9 @@ struct A830R3bThermal {
         uint8_t cap=hard?1:boardCap?3:step;
         if(android && !hard && skinCap<cap)cap=skinCap;
         cause=hard?CauseHard:!android?(boardCap?CauseLadder:step<top?CauseLadder:CauseNone):
-              skinCap<step && skinCap<top?(!skinValid?CauseSkinUnknown:skin45?CauseSkin45:xoHot?CauseXo:CauseSkin25):
+              skinCap<step && skinCap<top?(!skinValid?CauseSkinUnknown:skinTable==1?(xoHot && skinCap==Skin45Level &&
+                  (!band || Docked[band-1].level>=Skin45Level)?CauseXo:CauseSkinBand):
+                  skin45?CauseSkin45:xoHot?CauseXo:CauseSkin25):
               step<top?CauseLadder:CauseNone;
         __atomic_store_n(&snapshot,uint64_t(cap)|uint64_t(uint16_t(raw))<<8|
             uint64_t(uint16_t(filter16/16))<<24|uint64_t(healthy)<<40|uint64_t(boardCap)<<41,__ATOMIC_RELEASE);

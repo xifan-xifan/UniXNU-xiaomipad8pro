@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /* host-test: A830Dcvs.cpp A830PowerState.cpp A830Recovery.cpp platform/sm8750/Sm8750Tsens.c */
+#include "../A830Bind.h"
+#include <cstring>
 #define main r3aRegressionMain
 #include "test_a830qualification.cpp"
 #undef main
@@ -151,6 +153,80 @@ static void androidProfile() {
     /* without fullopp the same readings keep the R3b-607 rules (the board hold and exit) */
     bootB();openB();auto b=board(100);b.milli_c[0]=65000;tickB(740,100000000,b);CHECK(qual.reason()==A830QualBoardHot);
 }
+/* gpu/throttle1 (private/host-checks/20261124-gpu-throttle/TABLE.md): the docked skin table, one GMU level per 2 C band; XO, no reading,
+ * the die ladder and the exits as in Android's table. */
+static void dockedProfile() {
+    const piano_skin_temps cool=skinOf(20000);
+    bootFull();qual.thermal().skinTable=1;openB();
+    driveF(240,740,&cool);CHECK(qual.thermal().step==14 && dcvs.level()==14 && qual.thermal().band==0);
+    /* 25..34.9 C: no cap (Android's normal scene caps 1050 from 25 C) */
+    piano_skin_temps k=skinOf(34999);driveF(3,740,&k);CHECK(qual.thermal().skinCap==14 && dcvs.level()==14);
+    struct Row {int32_t milli;uint8_t cap;};
+    static const Row up[]={{35000,13},{44999,13},{45000,12},{46999,12},{47000,11},{49000,10},{51000,9},{53000,7},{55000,6},{70000,6}};
+    for(const Row &r:up) {
+        k=skinOf(r.milli);driveF(3,740,&k);
+        CHECK(qual.thermal().skinCap==r.cap && power.qualificationCap()==r.cap && dcvs.level()==r.cap && !qual.reason());
+        if(r.cap<14)CHECK(qual.thermal().cause==A830R3bThermal::CauseSkinBand);
+    }
+    /* down: each band leaves only under its own clear point (2 C below its trigger) */
+    static const Row down[]={{53000,6},{52999,7},{51000,7},{50999,9},{49000,9},{48999,10},{45000,11},{44999,12},{43000,12},
+                             {42999,13},{33000,13},{32999,14}};
+    for(const Row &r:down) {k=skinOf(r.milli);driveF(3,740,&k);CHECK(qual.thermal().skinCap==r.cap && dcvs.level()==r.cap);}
+    /* a jump: 20 -> 50 C goes straight to its band (832), never through the floor */
+    k=skinOf(50000);driveF(1,740,&k);CHECK(qual.thermal().skinCap==10 && qual.thermal().band==4);
+    k=skinOf(20000);driveF(1,740,&k);CHECK(qual.thermal().skinCap==14 && qual.thermal().band==0);
+    /* no usable reading: 734 at most; XO 78 C: 734 at most, cause xo */
+    driveF(3,740,nullptr);CHECK(qual.thermal().skinCap==9 && qual.thermal().cause==A830R3bThermal::CauseSkinUnknown);
+    k=skinOf(36000,78000);driveF(3,740,&k);CHECK(qual.thermal().skinCap==9 && qual.thermal().cause==A830R3bThermal::CauseXo);
+    k=skinOf(54000,78000);driveF(3,740,&k);CHECK(qual.thermal().skinCap==7 && qual.thermal().cause==A830R3bThermal::CauseSkinBand);
+    k=skinOf(20000,69999);driveF(3,740,&k);CHECK(qual.thermal().skinCap==14);
+    driveF(30,740,&k);CHECK(dcvs.level()==14);
+    /* the die ladder stays on top of a band: 95 C steps down below 1050 */
+    k=skinOf(40000);driveF(3,740,&k);CHECK(dcvs.level()==13);
+    driveF(11,950,&k);CHECK(qual.thermal().step<13 && dcvs.level()==qual.thermal().step && qual.thermal().cause==A830R3bThermal::CauseLadder);
+    driveF(80,850,&k);CHECK(dcvs.level()==13);
+    /* the exits are unchanged: GPU raw 100 C, XO 90 C */
+    tickF(1000,&k);CHECK(qual.reason()==A830QualGpuHot && power.qualificationCap()==1);
+    bootFull();qual.thermal().skinTable=1;openB();driveF(240,740,&cool);
+    k=skinOf(20000,90000);tickF(740,&k);CHECK(qual.reason()==A830QualBoardHot && power.qualificationCap()==1);
+    /* switching back at run time: Android's normal scene again (25 C -> 1050, 45 C -> 734) */
+    bootFull();qual.thermal().skinTable=1;openB();driveF(240,740,&cool);
+    k=skinOf(46000);driveF(3,740,&k);CHECK(dcvs.level()==12);
+    qual.thermal().skinTable=0;driveF(3,740,&k);CHECK(qual.thermal().skinCap==9 && dcvs.level()==9 && qual.thermal().cause==A830R3bThermal::CauseSkin45);
+    /* the effective-cap probe from the top shows 14 (it started at 7 and never showed more) */
+    qual.thermal().skinTable=1;k=skinOf(20000);driveF(60,740,&k);
+    CHECK(power.qualificationEffectiveCap(A830ExitContext::Guard,14)==14 && power.qualificationEffectiveCap(A830ExitContext::Guard)==7);
+}
+/* gpu/throttle1: which limit holds the cap (the y12c consoles' "cause=skin25" under Low Power Mode's 342 MHz) */
+static void bindNames() {
+    auto eq=[](const char *a,const char *b) {return std::strcmp(a,b)==0;};
+    A830BindIn in;in.top=14;in.opened=true;in.high=true;
+    /* y12c: LPM's slot at 342 (level 3), the guard at 1050 (skin25), the governor at 222 */
+    in.voted=2;in.cap=3;in.guardCap=13;in.guardStep=13;in.guardCause=A830R3bThermal::CauseSkin25;in.external=3;in.externalName="lpm";
+    CHECK(eq(a830BindName(in),"lpm") && eq(a830BindWhy(in),"demand"));
+    in.voted=3;CHECK(eq(a830BindWhy(in),"lpm"));
+    /* LPM off: the guard's skin rule binds */
+    in.external=0;in.cap=13;in.voted=13;CHECK(eq(a830BindName(in),"skin25") && eq(a830BindWhy(in),"skin25"));
+    in.guardCause=A830R3bThermal::CauseSkinBand;in.cap=in.guardCap=in.guardStep=11;in.voted=11;CHECK(eq(a830BindWhy(in),"skinband"));
+    in.guardCause=A830R3bThermal::CauseLadder;CHECK(eq(a830BindWhy(in),"ladder"));
+    /* nothing binds: the top */
+    in.guardCause=0;in.cap=in.guardCap=in.guardStep=14;in.voted=14;CHECK(eq(a830BindWhy(in),"top"));
+    in.voted=5;CHECK(eq(a830BindWhy(in),"demand"));
+    /* the first LV line of a boot: unhealthy before the first board round -> 160 MHz, "startup" (the gate read it as "hard") */
+    A830BindIn st;st.voted=1;st.cap=1;st.guardCap=1;st.guardStep=1;st.guardCause=A830R3bThermal::CauseHard;
+    CHECK(eq(a830BindWhy(st),"startup"));
+    st.opened=true;CHECK(eq(a830BindWhy(st),"hard"));
+    /* before the permit: the guard holds 342 while its own table would allow more */
+    A830BindIn pm;pm.voted=3;pm.cap=3;pm.guardCap=3;pm.guardStep=14;CHECK(eq(a830BindWhy(pm),"permit"));
+    /* the boot latch */
+    pm.opened=true;pm.latched=true;CHECK(eq(a830BindWhy(pm),"hard"));
+    /* PianoThermal's passive slot, the ACD-off knob, a boost's cap */
+    A830BindIn o;o.opened=o.high=true;o.guardCap=o.guardStep=14;o.cap=1;o.voted=1;o.external=1;o.externalName="thermal";
+    CHECK(eq(a830BindWhy(o),"thermal"));
+    o.external=0;o.cap=9;o.voted=9;o.knob=9;CHECK(eq(a830BindWhy(o),"knob"));
+    o.knob=14;o.boost=12;o.cap=12;o.voted=12;CHECK(eq(a830BindWhy(o),"boostcap"));
+    A830BindIn z;CHECK(eq(a830BindName(z),"none"));
+}
 static void residencyBudget() {
     bootB(true);
     openB();
@@ -295,7 +371,7 @@ static void failuresB() {
 #define A830_R3B_ENTRY main
 #endif
 int A830_R3B_ENTRY() {
-    pureBoundaries();topLevels();androidProfile();stepsAndBoard();failuresB();residencyBudget();
+    pureBoundaries();topLevels();androidProfile();dockedProfile();bindNames();stepsAndBoard();failuresB();residencyBudget();
     std::printf("PASS: R3b real policy/DCVS/power/recovery boundaries, thermal/board dwell, stale250/251, strict off/low M9/late ACK, independent105 halt, external/boost/wake/park (%u checks)\n",gChecks);
     return 0;
 }

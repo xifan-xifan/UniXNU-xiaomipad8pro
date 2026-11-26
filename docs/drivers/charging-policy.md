@@ -1156,3 +1156,66 @@ contract), at most 3 A; never above the advertisement; the USB default keeps the
   thermal derating, the board holds, sleep (the row), detach (100 mA back, the steps from the row), the ADSP lifecycle. There is no
   new boot argument.
 - **Tests:** `tests/policy_host.cpp` testT14FiveVoltMax. Analysis: the private note T14-ICL.md (charging lane).
+
+## 23. The buck path at 9 V, by default (charge/pd2, 2026-11-24; host-tested, not run)
+
+The daily profile has carried the buck fast-charge set since v13.1y10 (`piano-power-hv=1 -pdo-mca=1 -hv-order=1 -hv-caps=1 -qc=1
+-fv-hot=1`, §21): a PD charger with a fixed 9 V object is asked for 9 V, and its input limit is min(RDO operating current, object,
+2500 mA) with a connector reading below 50 °C, else the in_pd row 1600 (§22, T-14 9 V). The sink's fixed RDO current is formed by the
+charger firmware, not by this driver (we write only the voltage, 0x21018 = 9000); on chargers where the firmware asks 1600 mA, fixed
+9 V stays at 9 V / 1.6 A, as on stock Android (in_pd 1600). A PPS request carries its current (0x21017), so PPS 9 V (mode 2) is the
+buck's only path to in_pps 2500.
+
+- **Changed:** a PPS 9 V contract above 1600 mA now takes the same connector rule as the fixed one (a connector that reads below
+  50 °C, no hot hold), else 1600. Before, PPS got 2500 with no connector reading. `ChargePolicy.c` (the 9 V input limit).
+- **Unchanged:** the charge pump (off: `piano-power-cp=1` and the per-boot root arm), MiPPS (off), every ceiling and allowlist, the
+  80/75 policy, the barrier, the 8.0-9.6 V window, 15-45 °C for 9 V, the board holds. No new boot argument.
+- **Tests:** `tests/policy_host.cpp` testT14NineVolt (PPS cases: 2500 with a cool connector; 1600 without a reading or at 51 °C;
+  100 mA at 60 °C; a 2 A APDO; 80/75 from PPS).
+
+## 24. The charging ladder, in the Ubuntu port's order (charge/mipps2, 2026-11-24; host-tested, not run)
+
+A line-by-line comparison with the Ubuntu port (yzddmr6/linux-sm8750-piano, `xiaomi_mca.c` at v1.4.0 and at v1.6.3; read for behaviour
+only) covers PD, MiPPS, the pump session, the 9 V buck, AICL, the input caps, the thermal and stop limits and the replug, retry and
+fallback paths: 64 rows, 40 the same, 21 different (each safer or equal: stepped 5 V raises, one 9 V request per attach, the contract's
+object confirmed, liquid and gauge alerts stop charging, an earlier connector limit), 3 not done (MiPPS revocation while pumping above
+5 A, the adapter SVID diagnostic, writing the firmware's AICL enable). v1.6.3 changes nothing on these paths except the liquid and
+gauge-alert holds, which ours already treat more strictly.
+
+The ladder (logged as `ladder: <stage>`, published as `Ladder`, `LadderObject`, `LadderRefused`, `LadderRefusal`):
+1. 5 V: the class row, the Type-C current through the steps.
+2. 5 V on a validated contract whose object the latest 0x21011 list holds (a fixed vSafe5V contract, or a PPS contract at 5 V on a listed
+   APDO: the firmware's own move to a verified MiPPS adapter's object).
+3. MiPPS at 5 V (`piano-power-mipps=1`): while it is pending or running no voltage is asked (Ubuntu authenticates only with the bus at
+   5 V and nothing asked yet).
+4. 5 V ready: the pump (`piano-power-cp=1`, armed) starts from here when its gates hold, and the buck then asks nothing; otherwise the buck
+   asks 9 V: the fixed 9 V object first, the APDO in mode 2, each only when the latest list advertises it, after the reduced-current barrier.
+5. 9 V asked, then 9 V confirmed: the contract on the object asked for and the bus 8.0-9.6 V. Another object, or no confirmation within
+   15 s: vSafe5V again, and no 9 V until the next attach. The pump may also start from a confirmed 9 V.
+6. The pump's PPS steps: from 2 x VBAT + 300 mV, +40 mV while opening, 20 mV in regulation, each step up only after the previous word is
+   taken with the bus following it (within -1.2/+0.3 V) and no pump fault; a PPS word no listed APDO covers is refused and logged.
+Not Ubuntu's order, and not used: 9 V fixed before MiPPS (Ubuntu never authenticates once 9 V is asked).
+
+At 5 V a PD source gets its class row at once (at most 1.5 A) and, once it is settled at 5 V, min(RDO, the vSafe5V object, 3 A) through
+the 10 s steps under the connector rule. The firmware's own AICL (0x2029) still holds the input where a weak source's bus sags: on the
+Mac mini's Rp 3 A port the request is 3 A and the firmware holds 1.8 A at 4.72 V; no host setting raises that safely.
+
+### 24.1 A PD RDO that does not decode, at 5 V (cp-first2, 2026-11-24; host-tested, not run)
+
+On the RAM boot cp-first2 the firmware, after MiPPS, formed RDO 0x7301f441 (object 7, PPS layout 5000 mV / 3250 mA) while its own
+0x21011 list held 4 entries and the first of them was no 5000/5000 object (the only conjunct of the old test that could fail: the
+console line read `error=6 fresh PD status/invalid RDO ... obj=7 unmapped=0 mca_pdos=4`). The input stayed at 100 mA, FCC 500, at a
+5.0 V bus. 0x21011 is the firmware's list, not the source's Source_Capabilities by position (cp-first1: object 7 with 2 entries).
+
+| Ubuntu v1.4.0 (`xiaomi_mca.c`, clone `linux-sm8750-piano` b5100d5f) | ours (charge/mipps2) | mark |
+|---|---|---|
+| L1828-1841 `xiaomi_mca_pd_5v_ma`: the first 5000/5000 entry of 0x21011 at any slot, else 500 (L277) | `pd_unmapped_row`: the same rule, within the class row (<= 1500) and the ceiling | same |
+| L2050-2081 `xiaomi_mca_5v_input`: PD at 5 V = min(that, the UCSI contract or min(that, 3000)), at most 3000; never the RDO | an undecodable RDO of a fresh PD sink status at a 4.0-6.0 V bus, list read: the row above, not 100 mA | same (lower cap: 1500) |
+| L2462-2485 `xiaomi_mca_apply_policy`: 5 V row whenever the bus is below the 5 V window and hv is off | the same; no list read at all: the firmware's 100 mA (nothing known of the source) | different (safer) |
+| L4104-4125 `xiaomi_mca_cp_apdo`: the pump's APDO from 0x21011 at any slot, no RDO position | the pump needs a validated PPS contract (section 24 step 2) | different (safer; open) |
+
+Registry keys that survive the dmesg ring and the swap back: `McaPDO1-7` / `McaPDOCount` / `McaPDOUnusable` (the last non-empty list),
+`McaPDOPrev1-7`, `McaPDONow`, `McaPDOSeenMs`, `McaPDOAttach`, `McaPDOLists`; `PDUnmappedRDO`, `PDUnmappedClass` (bit 0 beyond the count,
+1 empty slot, 2 another object there, 4 no vSafe5V at slot 1, 5 no vSafe5V at all), `PDUnmappedMs`, `PDUnmappedChanges`; `MiPPSRuns`,
+`MiPPSResults`, `MiPPSResultError`, `MiPPSResultVerified`, `MiPPSResultAdapter`, `MiPPSResultMs`, `MiPPSVersion`, `MiPPSCleared`.
+Test: `tests/pdo_firmware_host.cpp` cpFirst2Replay (fails on a8ff8e74 with ICL 100 / FCC 500, as on the tablet).

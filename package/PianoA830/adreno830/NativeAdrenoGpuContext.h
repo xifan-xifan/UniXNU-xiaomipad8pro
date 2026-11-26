@@ -24,7 +24,8 @@ enum : uint64_t {
     GpuSqeIova=0x100000, GpuAqeIova=0x180000, GpuRingIova=0x200000, GpuMemptrsIova=0x300000, GpuPwrupIova=0x301000,
     GpuScratchIova=0x302000, GpuNullGuardBytes=0x100000, GpuGmemIova=0x4000000, GpuGmemBytes=0xC00000,
     GpuApertureBytes=0x100000000, GpuApertureBytes2G=0x80000000, GpuApertureBytes16G=0x400000000, GpuClientBase=0x20000000,
-    GpuApertureBytes64G=0x1000000000   /* UniXNU-piano (2026-11-22, GPU-SLOTS): pagani-gpu-va=64, a 36-bit input */
+    GpuApertureBytes64G=0x1000000000,  /* UniXNU-piano (2026-11-22, GPU-SLOTS): pagani-gpu-va=64, a 36-bit input */
+    GpuApertureBytes256G=0x4000000000  /* UniXNU-piano (2026-11-25, gpu/slots2): pagani-gpu-va=256, a 38-bit input, paged mode only */
 };
 enum : size_t {GpuSqeBytes=0x1C000, GpuAqeBytes=0x7000, GpuRingBytes=0x8000, GpuPageBytes=0x1000};
 enum NativeAdrenoGpuBufferIndex : unsigned {
@@ -38,7 +39,9 @@ struct NativeAdrenoGpuContextConfig {
     uint16_t sid,lpac_sid;          /* 0, 1 */
     unsigned output_bits;           /* 0: from the programmer's IDR2 (capped at 40) */
     uint32_t aperture_gib;          /* pagani-gpu-va: 16 (8209 table pages, a 34-bit input; else 4), 4 (2053) or 2 (1027); UniXNU-piano:
-                                     * 64 (32833 table pages, 128 MiB, a 36-bit input; else 16, else 4) */
+                                     * 64 (32833 table pages, 128 MiB, a 36-bit input; else 16, else 4); gpu/slots2: 256 (the macOS
+                                     * default: a 38-bit input in paged mode, tables on demand; else 64, 16, 4. Without paged mode 256
+                                     * asks for 64: the preallocated 256 GiB table would be 512 MiB) */
     uint32_t pool_mib;              /* pagani-gpu-pool (512); 0: no pool, every BO scattered */
     bool write_combined_pool;       /* the pool's pages write-combined once (user BOs are write-combined) */
     /* UniXNU-piano (2026-11-23, GPU-PAGED P1, private P1-GATE.md): piano-gpu-mem=paged: no BO pool, no table pool, the VM's paged
@@ -77,8 +80,9 @@ public:
     NativeAdrenoSmmuContext &smmu() {return smmu_;}
     uint64_t apertureBytes() const {return aperture_;}
     /* The input size the context was prepared with: 34 bits for the 16 GiB aperture, else 32 (the publish shell's input_bits).
-     * UniXNU-piano: 36 for the 64 GiB one. */
-    unsigned inputBits() const {return aperture_>GpuApertureBytes16G?36u:aperture_>GpuApertureBytes?34u:32u;}
+     * UniXNU-piano: 36 for the 64 GiB one, 38 for the 256 GiB one (gpu/slots2). */
+    unsigned inputBits() const
+    {return aperture_>GpuApertureBytes64G?38u:aperture_>GpuApertureBytes16G?36u:aperture_>GpuApertureBytes?34u:32u;}
     uint64_t guardTable() const {return guard_.spanCount()?guard_.spans()[0].physical:0;}
     unsigned outputBits() const {return output_bits_;}
     uint32_t poolMib() const {return pool_mib_;}   /* the pool reserved (0: none) */

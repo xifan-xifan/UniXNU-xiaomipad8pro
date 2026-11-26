@@ -16,6 +16,7 @@
 #include "CmdDb.h"
 #include "HidDescriptors.h"
 #include "CoverPower.h"
+#include "HallSim.h"
 #include "../PianoBacklight/PianoBacklightClient.h"
 #include <cstdio>
 #include <cstring>
@@ -1343,6 +1344,87 @@ static void testCoverPower()
   }
 }
 
+// HallSim.h (machdep.piano_keyboard_hall_sim) with a model of pollHall: the accepted level, what PianoPolicy would be told (the
+// published changes), the real samples ignored while simulated, the sensor read again when it ends, and the wake's clear.
+// Also the polarity helper the wake's re-read now uses.
+static void testHallSim()
+{
+  CHECK(hallOpenFromRaw(1, true) && !hallOpenFromRaw(0, true) && !hallOpenFromRaw(1, false) && hallOpenFromRaw(0, false));
+  {
+    HallSim h;
+    CHECK(h.set(false, true, 0) == HallSimSet::off && h.refused == 1 && h.requested == -1);
+    CHECK(h.set(true, false, 0) == HallSimSet::noSensor && h.refused == 2);
+    CHECK(h.set(true, true, 2) == HallSimSet::invalid && h.set(true, true, -2) == HallSimSet::invalid && h.refused == 4);
+    CHECK(h.set(true, true, 0) == HallSimSet::ok && h.requested == 0 && h.sets == 1);
+  }
+  struct Model {
+    HallSim sim;
+    int hall = 1, real = 1;            // accepted level, gpio80 through the polarity
+    std::vector<int> published;        // acceptHall calls (each a property change PianoPolicy reads)
+    void pass()
+    {
+      const HallSimStep st = sim.step(hall);
+      if (st.accept >= 0) accept(st.accept);
+      else if (st.readReal && real != hall) accept(real);
+      if (st.skipReal) return;
+      if (real != hall) accept(real);    // (the debounced sensor path, collapsed: two agreeing samples)
+    }
+    void accept(int level) { hall = level; published.push_back(level); }
+    void wake()
+    {
+      sim.clearAtWake();
+      if (real != hall) accept(real);
+    }
+  };
+  {   // close, then open, by simulation with the cover physically open: two changes, as a real close/open
+    Model m;
+    m.pass();
+    CHECK(m.published.empty());
+    CHECK(m.sim.set(true, true, 0) == HallSimSet::ok);
+    m.pass();
+    CHECK(m.hall == 0 && m.published.size() == 1 && m.published[0] == 0);
+    m.pass();   // the real sample (open) is ignored while simulated
+    CHECK(m.hall == 0 && m.published.size() == 1);
+    CHECK(m.sim.set(true, true, 1) == HallSimSet::ok);
+    m.pass();
+    CHECK(m.hall == 1 && m.published.size() == 2 && m.published[1] == 1);
+    CHECK(m.sim.set(true, true, -1) == HallSimSet::ok);
+    m.pass();   // the sensor again: open = the accepted level, nothing published
+    CHECK(m.hall == 1 && m.published.size() == 2 && m.sim.applied == -1);
+  }
+  {   // a simulated close ended by -1: the real (open) level is accepted at once
+    Model m;
+    m.sim.set(true, true, 0);
+    m.pass();
+    m.sim.set(true, true, -1);
+    m.pass();
+    CHECK(m.hall == 1 && m.published.size() == 2 && m.published[1] == 1);
+  }
+  {   // a simulated close left set across a system sleep: the wake gives the cover back to the sensor (open), once
+    Model m;
+    m.sim.set(true, true, 0);
+    m.pass();
+    m.wake();
+    CHECK(m.hall == 1 && m.published.size() == 2 && m.sim.requested == -1 && m.sim.applied == -1 && m.sim.wakeClears == 1);
+    m.pass();
+    CHECK(m.published.size() == 2);
+    m.wake();   // nothing simulated: no clear counted
+    CHECK(m.sim.wakeClears == 1);
+  }
+  {   // a simulated open while the accepted level is already open: nothing sent, the real samples held off until -1
+    Model m;
+    m.sim.set(true, true, 1);
+    m.pass();
+    CHECK(m.published.empty());
+    m.real = 0;   // a physical close while simulated open: ignored
+    m.pass();
+    CHECK(m.published.empty() && m.hall == 1);
+    m.sim.set(true, true, -1);
+    m.pass();
+    CHECK(m.hall == 0 && m.published.size() == 1 && m.published[0] == 0);
+  }
+}
+
 int main(int argc, char **argv)
 {
   bool noFirmware = false;
@@ -1373,6 +1455,7 @@ int main(int argc, char **argv)
   testIrqWait();
   testBrightnessKeys();
   testCoverPower();
+  testHallSim();
   if (failures) {
     std::printf("keyboard_host: %d failure(s)\n", failures);
     return 1;

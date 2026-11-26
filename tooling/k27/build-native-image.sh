@@ -45,6 +45,8 @@ for k in $LIST; do   # the kexts' objects: tooling/k27/build-native-<name>.sh
   [ -n "$b" ] || { echo "no build script for $k" >&2; exit 1; }
   tooling/k27/build-native-$b.sh > out/k27/build-native-$b.log 2>&1 || { grep -E "error:|Error" out/k27/build-native-$b.log | head; exit 1; }
 done
+# PIANO_STOP_AFTER=kexts: the kexts' objects only (out/native-kexts; CI's tooling/ci/build-kexts.sh), no collection, ADT or image.
+if [ "${PIANO_STOP_AFTER:-}" = kexts ]; then echo "kexts built (out/native-kexts), PIANO_STOP_AFTER=kexts"; exit 0; fi
 # A descriptor of a kext the list already links (e.g. PIANO_EXTRA_KEXTS=.../PianoA830.json from before PianoA830 was listed) is not
 # linked twice.
 EXTRA=
@@ -179,5 +181,7 @@ COMMON=(--fd out/fd/piano-uefi-A-bundled.fd --fd-name A-bundled --kc out/k27/kc-
 # The dump image only lets our UEFI read the previous run's log; its XNU never touches the Data store (data-persist=0), so a dump
 # image with another seed cannot reset the store of the installed system (docs/persistent-boot.md).
 PIANO_RESET_AFTER=1 PIANO_DATA_PERSIST=0 python3 tooling/bootimg/build-ram-images.py "${COMMON[@]}" --out out/ram-dump > out/k27/build-ram-dump.log 2>&1 &
+# RAM16G R1 uses an opt-in placeholder in the primary RAM payload.
+if [ "${PIANO_EXTRA_RAM:-0}" = 1 ]; then COMMON+=(--extra-ram); fi
 python3 tooling/bootimg/build-ram-images.py "${COMMON[@]}" --out out/ram | tail -1
 wait $! || { tail -3 out/k27/build-ram-dump.log; exit 1; }

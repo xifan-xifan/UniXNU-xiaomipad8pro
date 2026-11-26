@@ -3,6 +3,7 @@
 //   - the DCS short packet and its FIFO words; one command on both links: the stores in order, low power, sent in the vertical
 //     blanking (by the hardware's block or, without it, triggered in the front porch), every word restored as found; the
 //     refusals (not video mode, the FIFO in use, no software trigger, a command that is not a sleep command, a busy DMA);
+//   - counter setup from disabled, ten cycles with advancing counters despite zero COUNT_EN, and the logged refusal when stuck;
 //   - display sleep: 0x28, >= 20 ms, 0x10, >= 100 ms, INTF2 stopped before INTF1, both stopped, the panel halves asleep; wake:
 //     the INTF flush, INTF1 and INTF2 started together and in phase, counting in lockstep, 0x11, >= 120 ms, 0x29; 50 cycles;
 //   - the failures: a DMA that never finishes (the link left alone, nothing after it), an engine that does not stop (the panel
@@ -11,6 +12,8 @@
 //   c++ -std=c++20 -Wall -Wextra -Werror -I.. dpu_panel_host.cpp -o /tmp/dpu_panel_host && /tmp/dpu_panel_host
 #include "DpuPanel.h"
 #include "dpu_model.h"
+#include "../../NativeGopDisplay/GopCompose.h"
+#include "../../NativeGopDisplay/GopPanelPower.h"
 #include <cstdio>
 #include <cstring>
 
@@ -103,32 +106,62 @@ static void testRefusals()
     const Sent s = sendDcs(m, kDcsDisplayOff, Options());
     CHECK(!s.ok && std::strstr(s.why, "busy") && m.stores.empty());
   }
+  {
+    model::Dpu m;
+    m.blockDma = false;
+    m.regs[intfReg(1, kIntfHsyncCtl)] = 0;  // no usable porch geometry
+    const Result r = panelOff(m, readPath(m), Options());
+    CHECK(!r.ok && r.safeAwake && m.dcs.empty() && m.storesTo(dsiReg(0, kDsiTrigDma)) == 0 &&
+          m.rd(dsiReg(0, kDsiTpgCtrl)) == 0);
+  }
 }
 
 static void testSleepWake()
 {
   model::Dpu m;
+  m.blockDma = false;
+  constexpr uint32_t config = 0x80800000u;
+  for (unsigned i = 1; i <= 2; ++i) {
+    m.regs[intfReg(i, kIntfCountEn)] = 0;
+    m.intf[i].counting = false;
+    m.regs[intfReg(i, kIntfConfig)] = config;
+    m.intf[i].fetch = m.regs[intfReg(i, kIntfProgFetch)] = (2290 + i) * model::kHtotal;
+  }
   m.sleepMs(3);
-  const LivePath p = readPath(m);
-  CHECK(p.ok);
+  LivePath p = readPath(m);
+  CHECK(p.ok && p.link[0].countEn == 0 && p.link[1].countEn == 0);
+  const CounterInit init = initCounters(m, p);
+  CHECK(init.enabled && init.moving && m.stores.size() == 2);
+  CHECK(m.firstStore(intfReg(1, kIntfCountEn), 3) == 0 && m.firstStore(intfReg(2, kIntfCountEn), 3) == 1);
   Result off = panelOff(m, p, Options());
-  CHECK(off.ok && off.enginesStopped && off.step == 4);
+  CHECK(off.ok && off.enginesStopped && off.step == 5 && off.dcs[0].waitedBlanking);
   const model::Dcs *d28 = m.firstDcs(0x28, 0), *d10 = m.firstDcs(0x10, 0), *e28 = m.firstDcs(0x28, 1), *e10 = m.firstDcs(0x10, 1);
   CHECK(d28 && d10 && e28 && e10);
   if (d28 && d10) CHECK(d10->ns - d28->ns >= 20000000ull);
   const int stop2 = m.firstStore(intfReg(2, kIntfEn), 0), stop1 = m.firstStore(intfReg(1, kIntfEn), 0);
   CHECK(stop2 >= 0 && stop1 > stop2);                                  // the slave first
+  for (unsigned i = 1; i <= 2; ++i) {
+    const int disable = m.firstStore(intfReg(i, kIntfConfig), config & ~kIntfConfigProgFetch);
+    CHECK(disable > stop1);
+    CHECK(m.rd(intfReg(i, kIntfConfig)) == (config & ~kIntfConfigProgFetch));
+    m.regs[intfReg(i, kIntfProgFetch)] = 0;   // prove the wake uses the saved registers
+  }
   if (d10 && stop2 >= 0) CHECK(m.stores[size_t(stop2)].ns - d10->ns >= 100000000ull);   // 100 ms after sleep-in
   CHECK(!m.intf[1].on && !m.intf[2].on && m.half[0].sleeping && m.half[1].sleeping && !m.half[0].displayOn);
   const uint32_t f1 = m.intf[1].frames, f2 = m.intf[2].frames;
   m.sleepMs(1000);   // asleep: no frames, no fetch
   CHECK(m.intf[1].frames == f1 && m.intf[2].frames == f2 && m.rd(intfReg(1, kIntfStatus)) == 0);
   const size_t before = m.stores.size();
-  Result on = panelOn(m, p, Options(), true);
+  Result on = panelOn(m, p, Options(), off.enginesStopped, off.fetch);
   CHECK(on.ok && on.engines.ok && on.engines.rate.lockstep && on.engines.latchUs >= 0);
-  CHECK(m.stores[before].pa == ctlReg(0, kCtlIntfFlush) && m.stores[before + 1].pa == ctlReg(0, kCtlFlush));
-  CHECK(m.stores[before + 2].pa == intfReg(1, kIntfEn) && m.stores[before + 3].pa == intfReg(2, kIntfEn));
-  CHECK(m.stores[before + 3].ns - m.stores[before + 2].ns < 1000 && m.desync == 0);
+  for (unsigned i = 1; i <= 2; ++i) {
+    CHECK(m.stores[before + 2 * (i - 1)].pa == intfReg(i, kIntfProgFetch));
+    CHECK(m.stores[before + 2 * (i - 1) + 1].pa == intfReg(i, kIntfConfig));
+    CHECK(m.rd(intfReg(i, kIntfConfig)) == config && m.rd(intfReg(i, kIntfProgFetch)) == (2290 + i) * model::kHtotal);
+  }
+  CHECK(m.stores[before + 4].pa == ctlReg(0, kCtlIntfFlush) && m.stores[before + 5].pa == ctlReg(0, kCtlFlush));
+  CHECK(m.stores[before + 6].pa == intfReg(1, kIntfEn) && m.stores[before + 7].pa == intfReg(2, kIntfEn));
+  CHECK(m.stores[before + 7].ns - m.stores[before + 6].ns < 1000 && m.desync == 0);
   CHECK(m.intf[1].on && m.intf[2].on && m.intf[1].frames > f1 && m.intf[1].frames - f1 == m.intf[2].frames - f2);
   const model::Dcs *d11 = m.firstDcs(0x11, 0), *d29 = nullptr;
   for (const model::Dcs &x : m.dcs)
@@ -138,14 +171,99 @@ static void testSleepWake()
   CHECK(!m.half[0].sleeping && !m.half[1].sleeping && m.half[0].displayOn && m.half[1].displayOn);
   CHECK(m.glitches == 0 && clean(m));
   // 50 cycles
+  using namespace gopcompose;
+  PanelPower power;
+  Slot slot;
+  Busy busy;
+  Job shown;
   unsigned ok = 0;
   for (unsigned k = 0; k < 50; ++k) {
     m.sleepMs(3 * k % 17);
-    ok += panelOff(m, p, Options()).ok;
+    Job flip;
+    flip.serial = 2 * k + 1;
+    flip.flip = true;
+    flip.kind = Job::kFull;
+    CHECK(offer(slot, flip, nullptr) == Offer::Taken && takeJob(slot, busy, &shown));
+    CHECK(power.request(false) && !power.canPresent());
+    uint64_t done = 0;
+    CHECK(finishJob(busy, &done, flip.serial) && done == flip.serial);  // drain the serving flip before DCS
+    bool want;
+    CHECK(power.begin(want) && !want);
+    const Result sleep = panelOff(m, p, Options());
+    ok += sleep.ok;
+    power.finish(false, sleep.ok);
+    flip.serial++;
+    const Admission held = admitSwap(slot, busy, flip, LayerChange(), kDeferAlways);
+    CHECK(held.hadJob && held.offer == Offer::Taken && held.waitSerial == flip.serial);
+    const uint32_t asleepFrame = m.intf[1].frames;
     m.sleepMs(500);
-    ok += panelOn(m, p, Options(), true).ok;
+    CHECK(!power.canPresent() && slot.busy && m.intf[1].frames == asleepFrame);
+    CHECK(power.request(true) && power.begin(want) && want && !power.canPresent());
+    const Result wake = panelOn(m, p, Options(), sleep.enginesStopped, sleep.fetch);
+    ok += wake.ok;
+    power.finish(true, wake.ok);
+    CHECK(power.wakeComplete && power.canPresent() && takeJob(slot, busy, &shown) && shown.serial == flip.serial && shown.flip);
+    CHECK(finishJob(busy, &done, flip.serial) && done == flip.serial);
   }
-  CHECK(ok == 100 && m.desync == 0 && m.glitches == 0 && m.half[0].displayOn && clean(m));
+  CHECK(ok == 100 && m.desync == 0 && m.glitches == 0 && m.commandsInFrame == 0 && m.half[0].displayOn && clean(m));
+}
+
+static void testZeroCounterReadback()
+{
+  model::Dpu m;
+  m.blockDma = false;
+  for (unsigned i = 1; i <= 2; ++i) {
+    m.regs[intfReg(i, kIntfCountEn)] = 0;
+    m.countEnableIgnored[i - 1] = true;
+    m.regs[intfReg(i, kIntfConfig)] = kIntfConfigProgFetch;
+    m.regs[intfReg(i, kIntfProgFetch)] = 2290 * model::kHtotal;
+  }
+  LivePath p = readPath(m);
+  const CounterInit init = initCounters(m, p);
+  CHECK(p.ok && !init.enabled && init.moving && m.stores.size() == 2);
+  CHECK(p.link[0].countEn == 0 && p.link[1].countEn == 0);
+  for (unsigned k = 0; k < 10; ++k) {
+    const Result off = panelOff(m, p, Options());
+    CHECK(off.ok && off.enginesStopped && off.dcs[0].waitedBlanking);
+    const Frames asleep = readFrames(m);
+    m.sleepMs(100);
+    const Frames after = readFrames(m);
+    for (unsigned i = 1; i <= 2; ++i) {
+      CHECK(m.rd(intfReg(i, kIntfEn)) == 0 && m.rd(intfReg(i, kIntfStatus)) == 0 &&
+            !(m.rd(intfReg(i, kIntfConfig)) & kIntfConfigProgFetch));
+      CHECK(after.f[i - 1] == asleep.f[i - 1]);
+    }
+    const Result on = panelOn(m, p, Options(), off.enginesStopped, off.fetch);
+    CHECK(on.ok && on.engines.rate.lockstep);
+    for (unsigned i = 1; i <= 2; ++i) {
+      CHECK(m.rd(intfReg(i, kIntfEn)) == 1 && m.rd(intfReg(i, kIntfStatus)) == 1 &&
+            (m.rd(intfReg(i, kIntfConfig)) & kIntfConfigProgFetch));
+      CHECK(m.rd(intfReg(i, kIntfFrameCount)) > asleep.f[i - 1] && m.rd(intfReg(i, kIntfCountEn)) == 0);
+    }
+  }
+  CHECK(m.dcs.size() == 80 && m.desync == 0 && m.glitches == 0 && m.commandsInFrame == 0 && clean(m));
+}
+
+static void testUnavailablePanel()
+{
+  model::Dpu m;
+  // The second timing engine runs, but its counters do not advance even with the enable bits set.
+  m.intf[2].counting = false;
+  LivePath p = readPath(m);
+  const CounterInit init = initCounters(m, p);
+  CHECK(p.ok && init.enabled && !init.moving && m.stores.empty());
+  RequestGate gate;
+  gate.ready = init.moving;
+  unsigned logs = 0;
+  const char *message = nullptr;
+  auto log = [&](const char *line) { ++logs; message = line; };
+  if (gate.admit(false, log)) panelOff(m, p, Options());
+  CHECK(logs == 1 && message && std::strstr(message, "sleep refused"));
+  CHECK(m.dcs.empty() && m.stores.empty() && m.intf[1].on && m.intf[2].on);
+  CHECK(!gate.admit(true, log) && logs == 2 && std::strstr(message, "wake refused"));
+  gate.wakePending = true;   // a dispatched transition may still need a recovery wake after sleep was disabled
+  CHECK(gate.admit(true, log) && logs == 2);
+  CHECK(!gate.admit(false, log) && logs == 3);
 }
 
 static void testFailures()
@@ -156,7 +274,7 @@ static void testFailures()
     m.sleepMs(3);
     const LivePath p = readPath(m);
     const Result r = panelOff(m, p, Options());
-    CHECK(!r.ok && r.step == 1 && std::strstr(r.why, "DSI1"));
+    CHECK(!r.ok && !r.safeAwake && r.step == 1 && std::strstr(r.why, "DSI1"));
     CHECK(m.rd(dsiReg(1, kDsiTpgCtrl)) == 0x30006u && m.rd(dsiReg(0, kDsiTpgCtrl)) == 0);
     CHECK(m.storesTo(intfReg(1, kIntfEn)) == 0 && m.storesTo(intfReg(2, kIntfEn)) == 0 && m.intf[1].on);
   }
@@ -187,11 +305,22 @@ static void testFailures()
     model::Dpu m;
     m.sleepMs(3);
     const LivePath p = readPath(m);
-    CHECK(panelOff(m, p, Options()).ok);
+    const Result off = panelOff(m, p, Options());
+    CHECK(off.ok);
     m.engineDead[0] = m.engineDead[1] = true;
     const size_t dcs = m.dcs.size();
-    const Result r = panelOn(m, p, Options(), true);
+    const Result r = panelOn(m, p, Options(), off.enginesStopped, off.fetch);
     CHECK(!r.ok && r.step == 1 && std::strstr(r.why, "running") && m.dcs.size() == dcs);
+  }
+  {   // both engines count but the INTF flush never latched
+    model::Dpu m;
+    const LivePath p = readPath(m);
+    const Result off = panelOff(m, p, Options());
+    CHECK(off.ok);
+    m.flushStuck = true;
+    const size_t dcs = m.dcs.size();
+    const Result wake = panelOn(m, p, Options(), off.enginesStopped, off.fetch);
+    CHECK(!wake.ok && std::strstr(wake.why, "flush") && m.dcs.size() == dcs);
   }
   {   // DCS only: the engines keep running
     model::Dpu m;
@@ -201,9 +330,38 @@ static void testFailures()
     o.engines = false;
     const Result off = panelOff(m, p, o);
     CHECK(off.ok && !off.enginesStopped && m.intf[1].on && m.half[0].sleeping && m.storesTo(intfReg(1, kIntfEn)) == 0);
-    const Result on = panelOn(m, p, o, false);
+    const Result on = panelOn(m, p, o, off.enginesStopped, off.fetch);
     CHECK(on.ok && m.half[0].displayOn && !m.half[1].sleeping && m.storesTo(intfReg(2, kIntfEn)) == 0);
   }
+}
+
+static void testHeldOnFailedOrSupersededWake()
+{
+  using namespace gopcompose;
+  PanelPower power;
+  Slot slot;
+  Job frame;
+  frame.kind = Job::kFull;
+  frame.flip = true;
+  frame.serial = 42;
+  CHECK(offer(slot, frame, nullptr) == Offer::Taken);
+  bool on;
+  CHECK(power.request(false) && power.begin(on) && !on);
+  power.finish(false, true);
+  CHECK(power.request(true) && power.begin(on) && on);
+  power.finish(true, false);
+  CHECK(!power.canPresent() && !power.wakeComplete && slot.job.serial == 42);
+  CHECK(power.request(false) && power.request(true) && power.begin(on) && on);
+  CHECK(power.request(false));   // a new sleep arrived while the wake was in progress
+  power.finish(true, true);
+  CHECK(!power.canPresent() && !power.wakeComplete && slot.job.serial == 42);
+  CHECK(power.begin(on) && !on);
+  power.finish(false, false);    // a clean refusal of the hardware sleep
+  CHECK(power.request(true) && power.begin(on) && on);
+  power.finish(true, true);
+  Busy busy;
+  Job resumed;
+  CHECK(power.canPresent() && power.wakeComplete && takeJob(slot, busy, &resumed) && resumed.serial == 42 && resumed.flip);
 }
 
 int main()
@@ -212,7 +370,10 @@ int main()
   testSend();
   testRefusals();
   testSleepWake();
+  testZeroCounterReadback();
+  testUnavailablePanel();
   testFailures();
+  testHeldOnFailedOrSupersededWake();
   if (failures) {
     std::printf("%d failures\n", failures);
     return 1;

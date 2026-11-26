@@ -539,6 +539,7 @@ PianoBacklight told to leave automatic mode: 0x0`, `light: QRTR port 24 closed`.
 | `piano-sensors-condition-trace=1` | 0 | log each change seen from NativeGopDisplay/PianoKeyboard and the resulting accelerometer gate (`wanted` or its reason) |
 | `piano-sensors-accel-hz=N` (level 4) | 10 | the rate asked (1..100 Hz); the driver runs its nearest at or above (logged) |
 | `piano-sensors-accel-batch=MS` (level 4) | 0 | the hub may hold accelerometer samples this long (`batch_period`; 0: none, as libssc; at most 1000) |
+| `piano-sensors-accel-sample-time=1` (level 4) | 0 | use SSC sample timestamps for orientation dwell, with a limit of two requested sample periods between measurements. See [auto-rotate.md](auto-rotate.md). |
 | `piano-sensors-axes=a..` (level 4) | `a+y+x+z` | the accelerometer map (SensorsFixed text), for the four-edge test; a text that is not a map: the default, logged |
 
 The consumers' own arguments: `piano-rotate*` (the agent, §5a.2) and `piano-backlight-auto=1` (PianoBacklight, §5a.4).

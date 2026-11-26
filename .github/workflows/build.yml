@@ -1,0 +1,127 @@
+# Our binaries on a GitHub-hosted macos-26 runner (no self-hosted runner): the FD (UEFI), the k27 native kernel and our kexts.
+# Run by hand (workflow_dispatch) or by release.yml (workflow_call); never on every push. docs/ci.md.
+#
+# Apple content on the runner, and what happens to it:
+#   - Xcode (the runner's): used, never copied out;
+#   - the IPSW's kernelcache member ONLY (31 MiB): fetched by tooling/ci/with-kernelcache.sh into $RUNNER_TEMP, used to relink the
+#     kernel and build the kexts, deleted when that command ends; never in a cache or an artifact;
+#   - the Kernel Debug Kit's headers: from vars.PIANO_KDK_URL (owner decision pending, docs/ci.md), into $RUNNER_TEMP, deleted at
+#     the end of the job; never in a cache or an artifact.
+# The artifacts hold our binaries and SHA-256 manifests only; the FD job uploads only the FD's hash (it bundles third-party DXEs).
+name: build
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: the commit or tag to build (default the caller's)
+        type: string
+        default: ''
+    outputs:
+      commit:
+        description: the commit built
+        value: ${{ jobs.kernel-kexts.outputs.commit }}
+
+permissions:
+  contents: read
+
+env:
+  JOBS: '6'
+
+jobs:
+  fd:
+    name: FD (UEFI)
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Host tools
+        run: brew install nasm mtoc acpica 2>&1 | tail -3 || true
+      - name: UEFI checkouts of unixnu.lock
+        env:
+          UNIXNU_RESEARCH: ${{ runner.temp }}/unixnu-research
+        run: python3 scripts/fetch-pins.py --only UniXNU,UniXNU-sm8750-common,Mu-Silicium,Device-Binaries,piano-uefi,uefi-sheng,DarwinBoot,ArmCpu,ArmDTPlatform,GopFramebuffer,RamBlock,XnuPrelink,AppleKeyStoreState
+      - name: FD A (tooling/firmware/build-fd.sh)
+        env:
+          UNIXNU_RESEARCH: ${{ runner.temp }}/unixnu-research
+        run: bash tooling/firmware/build-fd.sh
+      - name: Hash
+        run: |
+          mkdir -p "$RUNNER_TEMP/fd"
+          shasum -a 256 out/fd/piano-uefi-A-bundled.fd | tee "$RUNNER_TEMP/fd/fd.sha256"
+          cp out/fd/build-A-bundled.log "$RUNNER_TEMP/fd/" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fd-hash
+          path: ${{ runner.temp }}/fd
+          retention-days: 14
+
+  kernel-kexts:
+    name: k27 kernel and kexts
+    runs-on: macos-26
+    timeout-minutes: 300
+    outputs:
+      commit: ${{ steps.commit.outputs.commit }}
+    env:
+      KDK_URL: ${{ vars.PIANO_KDK_URL }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - id: commit
+        run: |
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          # work and outputs outside the workspace (and outside every cache and artifact path but the explicit uploads below)
+          { echo "WORK=$RUNNER_TEMP/ci"; echo "OUT=$RUNNER_TEMP/ci/out"; } >> "$GITHUB_ENV"
+      - name: Host tools
+        run: brew install gnu-sed 2>&1 | tail -1
+      - name: k27 tree, xnu source, ld-classic
+        run: bash tooling/ci/k27-kernel.sh tree xnu ld
+      - name: KDK headers
+        env:
+          KDK_AUTH: ${{ secrets.PIANO_KDK_AUTH }}
+        run: |
+          [ -n "$KDK_URL" ] || { echo "::error::vars.PIANO_KDK_URL is not set: the kernel needs a Kernel Debug Kit's headers (docs/ci.md, owner decision)"; exit 1; }
+          curl -fL --retry 3 ${KDK_AUTH:+-H "$KDK_AUTH"} -o "$RUNNER_TEMP/kdk.dmg" "$KDK_URL"
+          KDK_DMG="$RUNNER_TEMP/kdk.dmg" bash tooling/ci/k27-kernel.sh kdk
+          rm -f "$RUNNER_TEMP/kdk.dmg"
+      - name: Fakeroot (Apple OSS, libfirehose_kernel from source)
+        run: bash tooling/ci/k27-kernel.sh fakeroot
+      - name: Platform libraries and the kernel
+        run: bash tooling/ci/k27-kernel.sh platform kernel
+      - name: Kexts (the kernelcache member only, deleted afterwards)
+        run: bash tooling/ci/build-kexts.sh
+      - name: Nothing of Apple's in the outputs
+        run: |
+          cd "$OUT"
+          for f in *; do
+            case $f in kernel-k27-native.macho|kernel-k273-native.macho|piano-kexts.tar.gz|*.sha256) ;; *) echo "::error::unexpected output $f"; exit 1 ;; esac
+          done
+          if tar -tzf piano-kexts.tar.gz | grep -viE '^(native-kexts/.*\.o|tooling/k27/kext(/.*\.json)?/?)$'; then
+            echo "::error::piano-kexts.tar.gz holds more than our kext objects and descriptors"; exit 1
+          fi
+          ls -la
+      - name: Manifest
+        run: |
+          cd "$OUT"
+          shasum -a 256 kernel-k27-native.macho kernel-k273-native.macho piano-kexts.tar.gz > SHA256SUMS
+          { echo "commit $(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"; echo "k27 tree $(git -C "$WORK/k27-tree" rev-parse 'HEAD^{tree}')"
+            echo "xnu source $(git -C "$WORK/k27-tree/out/k27/xnu" rev-parse 'HEAD^{tree}')"; xcodebuild -version | tr '\n' ' '; echo; } > BUILD-INFO.txt
+          cat SHA256SUMS BUILD-INFO.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kernel-kexts
+          path: |
+            ${{ runner.temp }}/ci/out/kernel-k27-native.macho
+            ${{ runner.temp }}/ci/out/kernel-k273-native.macho
+            ${{ runner.temp }}/ci/out/piano-kexts.tar.gz
+            ${{ runner.temp }}/ci/out/SHA256SUMS
+            ${{ runner.temp }}/ci/out/BUILD-INFO.txt
+          retention-days: 14
+      - name: Remove the KDK copy and every leftover input
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/kdk.dmg" "$WORK/k27-tree/out/k27/kdk-notb" "$RUNNER_TEMP"/piano-kc.* "$WORK/kdk-mnt" "$WORK/kdk-pkg"

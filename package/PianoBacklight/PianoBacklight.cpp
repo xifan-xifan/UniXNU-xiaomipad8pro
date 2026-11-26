@@ -314,6 +314,8 @@ Pending gPending = {false, false, false, 0, 0, 0, -1, "?", 0, 0, false, -1, 0, "
 // The thread's answer to a sleep request: the requests taken, and whether the ICs were dark after the last one.
 uint32_t gSleepAsked, gSleepTaken;
 bool gServing, gDarkForSleep;
+uint32_t gBlankAsked, gBlankTaken;
+bool gDarkForPanel;
 bool gNativeReady;
 uint32_t gNativeMin, gNativeMax;  // fixed schema, initialized by the worker under gLock
 uint64_t gControlOrder;
@@ -675,6 +677,7 @@ void PianoBacklight::serve()
     gPending.sync = gPending.managed = gPending.moved = -1;
     gPending.ambientFault = false;
     const uint32_t asked = gSleepAsked;
+    const uint32_t blank = gBlankAsked;
     IOLockUnlock(gLock);
 
     if (p.sleep == 0 && fCtl.asleep()) nativeSettle("a wake");
@@ -702,6 +705,17 @@ void PianoBacklight::serve()
       const bool wasLit = fCtl.wantLit();
       fCtl.display(p.on, p.system, p.api);
       if (wasLit != fCtl.wantLit()) restartAmbient();
+    }
+    if (p.display && blank != gBlankTaken) {
+      for (unsigned retry = 0; !p.on && fCtl.pending() && retry < 2; ++retry) {
+        IOSleep(20);
+        fCtl.retry();
+      }
+      IOLockLock(gLock);
+      gDarkForPanel = !p.on && fCtl.controlling() && !fCtl.lit(0) && !fCtl.lit(1);
+      gBlankTaken = blank;
+      IOLockWakeup(gLock, &gBlankTaken, false);
+      IOLockUnlock(gLock);
     }
     if (p.reference >= 0 && fReference != bool(p.reference)) {
       fReference = bool(p.reference);
@@ -1046,6 +1060,11 @@ IOReturn PianoBacklight::callPlatformFunction(const OSSymbol *name, bool wait, v
   if (ambient && (gArgs.level < 2 || !gArgs.autoAllowed)) return kIOReturnUnsupported;
   if (!gLock) return kIOReturnNotReady;
   IOLockLock(gLock);
+  const bool waitBlank = display && !p1 && p4;
+  if (waitBlank && !gServing) {
+    IOLockUnlock(gLock);
+    return kIOReturnNotReady;
+  }
   if (ambient) {
     const intptr_t t = intptr_t(p1);
     const bool versioned = gNativeMax == PA_SDR_MAX_FIXED;
@@ -1076,9 +1095,17 @@ IOReturn PianoBacklight::callPlatformFunction(const OSSymbol *name, bool wait, v
     ++gPending.stepCalls;
   }
   gPending.any = true;
+  const uint32_t blank = waitBlank ? ++gBlankAsked : 0;
   IOLockWakeup(gLock, &gPending, false);
+  IOReturn result = kIOReturnSuccess;
+  if (waitBlank) {
+    uint64_t deadline = 0;
+    clock_interval_to_deadline(800, kMillisecondScale, &deadline);
+    while (gBlankTaken != blank && IOLockSleepDeadline(gLock, &gBlankTaken, deadline, THREAD_UNINT) != THREAD_TIMED_OUT) {}
+    result = gBlankTaken != blank ? kIOReturnTimeout : gDarkForPanel ? kIOReturnSuccess : kIOReturnIOError;
+  }
   IOLockUnlock(gLock);
-  return kIOReturnSuccess;
+  return result;
 }
 
 // docs/power.md 4: off = the backlight dark before the system freezes (the thread clears BL_EN; this waits for it, at most 800 ms, so

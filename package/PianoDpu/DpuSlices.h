@@ -12,8 +12,8 @@
 //   uintptr_t irqOff(); void irqRestore(uintptr_t)   a few back-to-back stores with nothing in between
 //
 // The store guard (storeAllowed) is the whole list of registers the three slices write: CTL flush words, INTF1/INTF2's timing
-// engine enable, frame period and counter enable, the DSPPs' PCC, the DSI controllers' command-DMA words and their video TOTAL and
-// timing shadow words, and the DPU's INTF underrun status (write-one-to-clear, those two bits only). Nothing else: never TLMM (so
+// engine enable, fetch configuration, porch timing and counter enable, the DSPPs' PCC, the DSI controllers' command-DMA words,
+// video TOTAL and timing shadow words, and the DPU's INTF underrun status (write-one-to-clear, those two bits only). Never TLMM (so
 // never the panel's reset gpio98 or the supply enables gpio117/118 that switch the KTZ8866's AVDD/AVEE), never the backlight's I2C,
 // the display clocks, the DSI PHYs, VBIF, REGDMA, the SSPPs, the LMs, the DSC or the SMMU.
 #pragma once
@@ -54,7 +54,7 @@ constexpr uint32_t kDsiCmdDmaCtrl = 0x03c, kDsiDmaLength = 0x04c, kDsiAckErr = 0
                    kDsiTpgCtrl = 0x15c, kDsiTpgFifo = 0x17c, kDsiDmaCtrl1 = 0x390, kDsiShadow[3] = {0x1e4, 0x1e8, 0x1ec};
 
 // ------------------------------------------------------------------------------------------------------------ the guard
-inline bool storeAllowed(uint64_t pa, uint32_t v)
+inline bool storeAllowed(uint64_t pa, uint32_t v, bool modeTiming = false)
 {
   if (pa & 3u) return false;
   if (pa == kMdp + kTopIntrClear) return v && !(v & ~kUnderrunBits);
@@ -64,6 +64,12 @@ inline bool storeAllowed(uint64_t pa, uint32_t v)
   for (unsigned i = 1; i <= 2; ++i) {
     if (pa == intfReg(i, kIntfEn)) return v <= 1;
     if (pa == intfReg(i, kIntfVsyncPeriod)) return true;
+    if (pa == intfReg(i, kIntfConfig) || pa == intfReg(i, kIntfProgFetch)) return true;
+    if (modeTiming) {
+      const uint32_t timing[] = {kIntfHsyncCtl, kIntfVsyncWidth, kIntfDispVStart, kIntfDispVEnd};
+      for (uint32_t off : timing)
+        if (pa == intfReg(i, off)) return v != 0;
+    }
     if (pa == intfReg(i, kIntfCountEn)) return v == kCountersOn;
   }
   for (unsigned d = 0; d < kDsppCount; ++d)
@@ -221,7 +227,7 @@ Rate measureRate(Io &io, uint32_t ms)
 // INTF1's line counter inside [lo, hi] (a frame start is then at least vtotal - hi lines away and lo lines behind). Sleeps while
 // far, spins when near. False when the window did not come within timeoutUs (a counter that does not move).
 template <class Io>
-bool waitLines(Io &io, unsigned lo, unsigned hi, unsigned vtotal, uint32_t timeoutUs)
+bool waitLines(Io &io, unsigned lo, unsigned hi, unsigned vtotal, uint32_t timeoutUs, uint32_t lineNs = kLineNs)
 {
   const uint64_t end = io.nowUs() + timeoutUs;
   for (;;) {
@@ -229,7 +235,7 @@ bool waitLines(Io &io, unsigned lo, unsigned hi, unsigned vtotal, uint32_t timeo
     if (line >= lo && line <= hi) return true;
     if (io.nowUs() >= end) return false;
     const uint64_t lines = line < lo ? lo - line : (line < vtotal ? vtotal - line : 0) + lo;
-    const uint64_t us = lines * kLineNs / 1000;
+    const uint64_t us = lines * lineNs / 1000;
     if (us > 2500) io.sleepMs(uint32_t((us - 1500) / 1000));
     else io.delayUs(us > 100 ? 100 : uint32_t(us) + 1);
   }

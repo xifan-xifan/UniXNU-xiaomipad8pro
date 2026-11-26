@@ -18,6 +18,8 @@
 //   piano-input-dark=MS  the idle period while the display is off (NativeGopDisplay's piano-display-power, followed through its
 //                        messages; default 0: as lit; at most 200): opt-in until short presses in the dark are tested (Buttons.h)
 //   piano-wake-log=S     the "idle: N wakeups" line every S seconds (default 60, 0 none; shared with the other converted drivers)
+//   piano-input-sim=1    machdep.piano_input_sim (root writes): a simulated press for unattended tests (KeySim.h; default 0: the
+//                        sysctl does not exist). It enters the same debounce, power key and HID path as a PMIC sample.
 // The power key with PianoPolicy (docs/policy.md 5.1, PowerKey.h): while a PianoPolicy service is there (piano-policy=N), a press is
 // not reported at once: still down after 1.5 s it is a long press (the HID Power usage down then, up at the release); released
 // before, PianoPolicy is asked on the release (callPlatformFunction "piano-policy-power-key", the press in ms): taken, macOS gets
@@ -42,16 +44,21 @@
 #include <kern/thread.h>
 #include <pexpert/pexpert.h>
 #include <stdarg.h>
+#include <sys/sysctl.h>
+#include <sys/errno.h>
 #include "SpmiObserver.h"
 #include "Buttons.h"
 #include "HidReports.h"
 #include "PowerKey.h"
+#include "KeySim.h"
 #include <PianoPowerContract.h>
 #include <PianoPerfInput.h>   // the input boost's event to PianoThermal (2026-11-22)
 namespace { pianoperf::InputNotifier gPerfInput; }   // PianoThermal's input boost (PianoPerfInput.h)
 #include <PianoDisplayFollow.h>
 
 using namespace pianoinput;
+
+SYSCTL_DECL(_machdep);
 
 extern "C" {
 // Post-mortem breadcrumb (also in the console log): the last start stage reached, negative when it failed there.
@@ -65,6 +72,7 @@ struct Args {
   uint32_t mask;    // piano-input-mask
   uint32_t idle;    // piano-input-idle
   uint32_t dark;    // piano-input-dark
+  uint32_t sim;     // piano-input-sim
 };
 Args gArgs;
 pianodisplay::Follow gDisplay;   // with piano-input-dark only
@@ -82,7 +90,14 @@ void readArgs()
   gArgs.mask = bootArg("piano-input-mask", kKeysAll) & kKeysAll;
   gArgs.idle = PollPlan::clampIdle(bootArg("piano-input-idle", kIdlePollMs));
   gArgs.dark = clampDark(bootArg("piano-input-dark", 0));
+  gArgs.sim = bootArg("piano-input-sim", 0) == 1 ? 1 : 0;
 }
+
+// machdep.piano_input_sim (piano-input-sim=1 only): KeySim.h under a lock (the sysctl writer and the poll thread).
+KeySim gSim;
+IOLock *gSimLock = nullptr;
+volatile uint32_t gSimPending = 0;   // a press armed since the poll thread last looked (it polls fast from the next sample)
+struct sysctl_oid gOidSim;
 
 // Explicit ldr/str, as PianoDwc3 does: every store from a general register.
 inline uint32_t rd32(uintptr_t a)
@@ -131,6 +146,84 @@ uint64_t nowMs()
   uint64_t ns = 0;
   absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
   return ns / 1000000;
+}
+
+void keyNames(uint8_t keys, char *out, size_t bytes)
+{
+  size_t used = 0;
+  out[0] = 0;
+  for (uint8_t bit = 1; bit & kKeysAll; bit = uint8_t(bit << 1))
+    if ((keys & bit) && used < bytes) used += size_t(snprintf(out + used, bytes - used, "%s%s", used ? "+" : "", keyName(bit)));
+}
+
+// machdep.piano_input_sim: reads the number of simulated presses accepted; a root write arms one (KeySim.h's value).
+int sysctlSim(struct sysctl_oid *oidp, void *, int, struct sysctl_req *req)
+{
+  IOLockLock(gSimLock);
+  int v = int(gSim.presses);
+  IOLockUnlock(gSimLock);
+  const int err = sysctl_handle_int(oidp, &v, 0, req);
+  if (err || !req->newptr) return err;
+  IOLockLock(gSimLock);
+  const SimResult r = gSim.arm(gArgs.sim != 0, v, nowMs());
+  const uint32_t presses = gSim.presses, refused = gSim.refused;
+  IOLockUnlock(gSimLock);
+  uint8_t keys = 0;
+  uint32_t ms = 0;
+  char names[32];
+  if (r == SimResult::ok && decodeSim(v, &keys, &ms)) {
+    __atomic_store_n(&gSimPending, 1u, __ATOMIC_RELEASE);
+    keyNames(keys, names, sizeof names);
+    note("sim %u: %s down for %u ms (machdep.piano_input_sim): from the next sample the same path as a PMIC press (debounce, power "
+         "key, HID); the PMIC itself is not read for it", presses, names, ms);
+    return 0;
+  }
+  note("sim: value %#x %s (%u refused)", unsigned(v), simResultName(r), refused);
+  return r == SimResult::off ? EPERM : r == SimResult::busy ? EBUSY : EINVAL;
+}
+
+void registerSim()
+{
+  gSimLock = IOLockAlloc();
+  if (!gSimLock) {
+    note("piano-input-sim=1: no lock: machdep.piano_input_sim not registered");
+    return;
+  }
+  // Filled in at run time rather than by SYSCTL_OID's static initializer: its parent and handler are signed pointers on arm64e.
+  gOidSim.oid_parent = &sysctl__machdep_children;
+  gOidSim.oid_number = OID_AUTO;
+  gOidSim.oid_kind = CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_OID2;
+  gOidSim.oid_arg1 = nullptr;
+  gOidSim.oid_arg2 = 0;
+  gOidSim.oid_name = "piano_input_sim";
+  gOidSim.oid_handler = sysctlSim;
+  gOidSim.oid_fmt = "I";
+  gOidSim.oid_descr = "PianoInput: a simulated key press (ms | keys << 16; root, piano-input-sim=1)";
+  gOidSim.oid_version = SYSCTL_OID_VERSION;
+  gOidSim.oid_refcnt = 0;
+  sysctl_register_oid(&gOidSim);
+  note("piano-input-sim=1: machdep.piano_input_sim registered (root writes ms | keys << 16, %u..%u ms; 0 keys = the power key): a "
+       "test's press, the same path as a PMIC sample after the register read", kSimMinMs, kSimMaxMs);
+}
+
+// The simulated keys for the sample taken now (0 without piano-input-sim).
+uint8_t simHeld(uint64_t ms)
+{
+  if (!gSimLock) return 0;
+  IOLockLock(gSimLock);
+  const uint8_t keys = gSim.held(ms);
+  IOLockUnlock(gSimLock);
+  return keys;
+}
+
+void simReset()
+{
+  if (!gSimLock) return;
+  IOLockLock(gSimLock);
+  const bool was = gSim.active(nowMs());
+  gSim.reset();
+  IOLockUnlock(gSimLock);
+  if (was) note("sim: the simulated press ended by the system sleep");
 }
 
 // The SPMI arbiter's three windows, and SpmiObserver.h's Io over them.
@@ -242,6 +335,7 @@ bool PianoInput::start(IOService *provider)
   }
   thread_deallocate(thread);
   fRunning = true;
+  if (gArgs.sim) registerSim();
   registerService();
   stage(6, "running: the keys go to macOS as consumer usages Power 0x30, Volume Increment 0xE9, Volume Decrement 0xEA");
   setProperty("piano-input-stage", uint64_t(uint32_t(piano_input_stage)), 32);
@@ -406,6 +500,7 @@ void PianoInput::pollThread(void *self, wait_result_t)
     if (input->park()) {   // woken from a system sleep: the keys read afresh, as at start
       input->fFilter = Debounce();
       input->fPower.reset();
+      simReset();
       plan = PollPlan(gArgs.idle);
       note("wake %u: polling again; the keys are read afresh (a key down now is reported only after it has been up once)",
            input->fSleeps);
@@ -416,7 +511,8 @@ void PianoInput::pollThread(void *self, wait_result_t)
       input->describe(elapsed / 1000);
       nextDescribe = nextDescribe < 60000 ? 60000 : nextDescribe + 300000;
     }
-    const uint32_t period = darkPeriod(plan.next(input->fFilter, now), gArgs.dark > gArgs.idle && gDisplay.dark(), gArgs.dark);
+    uint32_t period = darkPeriod(plan.next(input->fFilter, now), gArgs.dark > gArgs.idle && gDisplay.dark(), gArgs.dark);
+    if (__atomic_exchange_n(&gSimPending, 0u, __ATOMIC_ACQ_REL)) period = kPollMs;   // a simulated press armed: sample it soon
     pianoirq::WakeStats::Window w;
     if (wakes.due(now, &w)) {
       note("idle: %u wakeups in %u s, irq 0 (polled: %u at %u ms while a key was busy, %u at %u ms idle)", w.wakeups, w.seconds, fastWakes,
@@ -440,6 +536,7 @@ void PianoInput::poll()
     which = "GPIO6 0x8d10";
   }
   const bool valid = result == ReadResult::ok;
+  const uint8_t sim = simHeld(nowMs());   // piano-input-sim's press (KeySim.h): added to a good sample only
   ++fSamples;
   if (valid) {
     fPon = pon;
@@ -447,15 +544,15 @@ void PianoInput::poll()
   } else if (++fReadErrors <= 5 || fReadErrors % 1000 == 0) {
     note("read error %u: %s %s (status %08x); counted as all keys up", fReadErrors, which, resultName(result), status);
   }
-  const uint8_t down = fFilter.update(valid, valid ? decodeKeys(pon, gpio) : 0, nowMs());
+  const uint8_t down = fFilter.update(valid, valid ? uint8_t(decodeKeys(pon, gpio) | sim) : 0, nowMs());
   if (const uint8_t changed = down ^ fDown) {
     fDown = down;
     for (uint8_t bit = 1; bit & kKeysAll; bit = uint8_t(bit << 1)) {
       if (!(changed & bit)) continue;
       ++fEdges;
       if (gArgs.level >= 2)
-        note("key %s %s (PON [10] %02x, GPIO6 [10] %02x)%s", keyName(bit), down & bit ? "down" : "up", fPon, fGpio,
-             gArgs.mask & bit ? "" : ", masked: not reported");
+        note("key %s %s (PON [10] %02x, GPIO6 [10] %02x)%s%s", keyName(bit), down & bit ? "down" : "up", fPon, fGpio,
+             gArgs.mask & bit ? "" : ", masked: not reported", (down & bit) && (sim & bit) ? ", simulated (machdep.piano_input_sim)" : "");
     }
   }
   // The power key (PowerKey.h): with PianoPolicy there at the press it is held back; a short press is PianoPolicy's to take.

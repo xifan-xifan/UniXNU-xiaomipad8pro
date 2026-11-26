@@ -15,6 +15,8 @@
 #   K273_ROOT    k273 (default): the 27.3 root image on linux_data (native-ufs-root-part=linux_data), its seed and trust cache from
 #                $K273_INPUTS/root; k27: the installed 27.0.1 root on linux_rootfs with its seed and trust cache (out/inputs), to
 #                test the 27.3 collection and identity without the 27.3 root
+#   K273_ROOT_PART  with K273_ROOT=k273: the partition NativeUfs takes that root from, linux_data (default, the first 27.3 line's
+#                and a second unit's first write: Ubuntu's root stays) or linux_rootfs (the whole-disk layout, persistent-boot.md §13.8)
 # The rest is build-native-image.sh's (PIANO_GPU, PIANO_EXTRA_ARGS, PIANO_RESET_AFTER, ...). The Data disk is volatile
 # (PIANO_DATA_PERSIST=0) unless set: no 27.3 image opens the owner's store.
 # This writes the same out/ paths as the 27.0.1 line's builds: run it in its own checkout (worktree), or copy the results away
@@ -45,7 +47,8 @@ case ${K273_ROOT:-k273} in
     export PIANO_ROOT_VOLUME_UUID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["os_volume_uuid"])' "$R/root.json")
     export PIANO_SYSTEMOS_UUID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["systemos_volume_uuid"])' "$R/root.json")
     export PIANO_BASE_SEED=$R/scratch-data.img PIANO_BASE_TRUST=$R/kernel.macho.trustcache
-    export PIANO_EXTRA_ARGS="native-ufs-root-part=linux_data ${PIANO_EXTRA_ARGS:-}"
+    case ${K273_ROOT_PART:=linux_data} in linux_data|linux_rootfs) ;; *) echo "K273_ROOT_PART must be linux_data or linux_rootfs" >&2; exit 2 ;; esac
+    export PIANO_EXTRA_ARGS="native-ufs-root-part=$K273_ROOT_PART ${PIANO_EXTRA_ARGS:-}"
     ;;
   k27)
     # The installed 27.0.1 root's volumes (configs/k27-adt.toml).

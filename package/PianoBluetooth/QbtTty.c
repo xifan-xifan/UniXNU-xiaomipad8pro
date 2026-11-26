@@ -432,10 +432,46 @@ static int bt_baseline_sysctl SYSCTL_HANDLER_ARGS
     return 0;
 }
 
+/* piano-bt-lemask at run time: reads the current value; root writes 0 or 1. bluetoothd sends its LE event mask at HCI start, so a
+ * change takes effect at the daemon's next start (or a radio off/on). */
+static int bt_lemask_sysctl SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp,arg1,arg2)
+    int value = (int)qbt_bt_lemask;
+    int error = SYSCTL_OUT(req, &value, sizeof value);
+    if (error || !req->newptr) return error;
+    if (!kauth_cred_issuser(kauth_cred_get())) return EPERM;
+    int requested = 0;
+    error = SYSCTL_IN(req, &requested, sizeof requested);
+    if (error) return error;
+    if (requested != 0 && requested != 1) return EINVAL;
+    qbt_bt_lemask = (uint32_t)requested;
+    BT_LOG("PianoBluetooth: bt-lemask1: machdep.piano_bt_lemask=%d", requested);
+    return 0;
+}
+
+/* piano-bt-lerdy at run time (HciH4.h LeReadyAssist): reads the current value; root writes 0 or 1. Applies to the assist's next
+ * step for every LE link it tracks. */
+static int bt_lerdy_sysctl SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp,arg1,arg2)
+    int value = (int)qbt_bt_lerdy;
+    int error = SYSCTL_OUT(req, &value, sizeof value);
+    if (error || !req->newptr) return error;
+    if (!kauth_cred_issuser(kauth_cred_get())) return EPERM;
+    int requested = 0;
+    error = SYSCTL_IN(req, &requested, sizeof requested);
+    if (error) return error;
+    if (requested != 0 && requested != 1) return EINVAL;
+    qbt_bt_lerdy = (uint32_t)requested;
+    BT_LOG("PianoBluetooth: bt-lerdy1: machdep.piano_bt_lerdy=%d", requested);
+    return 0;
+}
+
 /* XNU's node macros make permanent OIDs for kernel startup. Kexts register
  * non-permanent, versioned OIDs at run time and unregister them on stop. */
 SYSCTL_DECL(_machdep);
-static struct sysctl_oid bt_boot_oid,bt_firmware_oid,bt_power_on_oid,bt_uptime_oid,bt_baseline_oid;
+static struct sysctl_oid bt_boot_oid,bt_firmware_oid,bt_power_on_oid,bt_uptime_oid,bt_baseline_oid,bt_lemask_oid,bt_lerdy_oid;
 static bool bt_sysctls_registered;
 static void bt_tty_register_oid(struct sysctl_oid *oid,const char *name,int type,
                                sysctl_handler_t handler,const char *format,const char *description)
@@ -459,6 +495,8 @@ void qbt_transport_unregister_sysctls(void)
 {
     if(!bt_sysctls_registered)return;
     /* Unregistration waits for active handlers; do not hold bt_tty_lock. */
+    sysctl_unregister_oid(&bt_lerdy_oid);
+    sysctl_unregister_oid(&bt_lemask_oid);
     sysctl_unregister_oid(&bt_power_on_oid);
     sysctl_unregister_oid(&bt_firmware_oid);
     sysctl_unregister_oid(&bt_boot_oid);
@@ -487,6 +525,10 @@ int qbt_transport_init(const struct qbt_transport_ops *ops)
     bt_tty_register_oid(&bt_boot_oid,"piano_bt_boot",CTLTYPE_INT,bt_tty_boot_sysctl,"I","WCN7860 kernel bring-up result");
     bt_tty_register_oid(&bt_firmware_oid,"piano_bt_firmware",CTLTYPE_STRING,sysctl_handle_string,"A","WCN7860 firmware build label");
     bt_tty_register_oid(&bt_power_on_oid,"piano_bt_power_on",CTLTYPE_INT,bt_tty_power_on_sysctl,"I","WCN7860 startup request");
+    bt_tty_register_oid(&bt_lemask_oid, "piano_bt_lemask", CTLTYPE_INT|CTLFLAG_WR, bt_lemask_sysctl, "I",
+                        "OR LE Data Length Change and PHY Update Complete into the host LE event mask (0 off, 1 on)");
+    bt_tty_register_oid(&bt_lerdy_oid, "piano_bt_lerdy", CTLTYPE_INT|CTLFLAG_WR, bt_lerdy_sysctl, "I",
+                        "Hand the host a no-change LE length/PHY event for a stalled LE link (0 off, 1 on)");
     if(qbt_bt_trace_enabled)
         bt_tty_register_oid(&bt_uptime_oid,"piano_bt_uptime_ms",CTLTYPE_QUAD,bt_uptime_sysctl,"Q","BT observation monotonic milliseconds");
     if(qbt_bt_wait_baseline)

@@ -7,6 +7,12 @@
 class IOBufferMemoryDescriptor;
 class IOMemoryDescriptor;
 class IOMultiMemoryDescriptor;
+namespace a830tier { enum class Parse; }
+struct NativeAdrenoTierStats {
+    const char *state;
+    unsigned mode, runs, tested, passed, pass_mask;
+    uint64_t free_bytes, used_bytes, refusals, allocations;
+};
 /* UniXNU-piano (2026-11-23, GPU-PAGED P1b, private P1-GATE.md section 7): a user BO (the pageable named entry) of at least
  * NativeAdrenoWireSplitBytes is made of up to NativeAdrenoWireMaxParts named entries wired at the same time by
  * native_adreno_wire_workers kernel threads and the calling thread (XNU wires each fresh page in the BoAlloc thread: 0.5-3 us per 4 KiB
@@ -126,8 +132,8 @@ class NativeAdrenoMemory final {
     NativeAdrenoPhysicalSpan *spans_=nullptr;
     size_t bytes_=0,span_count_=0,span_capacity_=0;
     uint32_t device_references_=0;
-    bool prepared_=false,quarantined_=false,write_combined_=false,pooled_=false;
-    bool unzeroed_=false;   /* from the pool, still holding what its last owner left: no device reference until finishPooled succeeded */
+    bool prepared_=false,quarantined_=false,write_combined_=false,pooled_=false,tier_=false;
+    bool unzeroed_=false;   /* pool or tier pages must be zeroed before publication */
     size_t pool_offset_=0;
     IOReturn maintainImported(size_t offset,size_t bytes,NativeAdrenoCacheOperation);
     IOReturn takePooled(size_t bytes,uint64_t limit,bool contiguous);
@@ -177,6 +183,16 @@ public:
      * by the user client publishing the BO only after this succeeded. On a failure the caller releases the object (under the Memory
      * lock, as ever for a pooled BO). Nothing to do for any other object, or twice. */
     IOReturn finishPooled();
+    /* Configured once at board start, tested before publishing the accelerator. */
+    static a830tier::Parse configureTier(unsigned mode,const uint8_t *property,size_t length,
+                                       uint64_t xnuBase,uint64_t xnuSize);
+    static void qualifyTier(unsigned bits,bool write_combined,bool cached_coherent,
+        bool (*probe)(uint64_t,unsigned,void *),void *ctx,void (*line)(const char *,void *));
+    static NativeAdrenoTierStats tierStats();
+    static bool tierEligible(size_t bytes);
+    IOReturn allocateTier(size_t bytes,unsigned bits);
+    bool tier() const {return tier_;}
+    bool sharedBacking() const {return pooled_ || tier_;}
     /* One physically contiguous block taken from the VM early (while memory is not yet fragmented) and cut into BOs afterwards: a BO from it is
      * one span of the GPU's table instead of one per scattered page (int-137: 59474 spans for 332 MiB, the 65536 span capacity ran out,
      * BoMap failed, the translator answered out of device memory and the compositor fell back to the CPU; each map also walked every span, 167 ms).
@@ -230,8 +246,8 @@ public:
      * BO pool: XNU set scattered BOs' pages back to the default attribute (int-160: 123847 pages), never a pool page (int-161: none in
      * 1280 submissions, while walking the pool's pages took 0.65 ms of each). The submissions' line audit still covers every object. */
     IOReturn reassertWriteCombined(uint32_t *reset) const
-    {return write_combined_ && span_count_ && !pooled_?NativeAdrenoReassertWriteCombined(spans_,span_count_,reset):kIOReturnSuccess;}
-    bool backed() const {return descriptor_ || parts_ || imported_ || pooled_ || device_;}
+    {return write_combined_ && span_count_ && !sharedBacking()?NativeAdrenoReassertWriteCombined(spans_,span_count_,reset):kIOReturnSuccess;}
+    bool backed() const {return descriptor_ || parts_ || imported_ || sharedBacking() || device_;}
     /* UniXNU-piano (GPU-PAGED P1b): named entries the BO is made of (1 for one descriptor, 0 for other backings). */
     size_t partCount() const {return parts_?part_count_:descriptor_?1:0;}
     const IOMultiMemoryDescriptor *partsView() const {return multi_;}

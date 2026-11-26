@@ -200,6 +200,32 @@ int main()
             CHECK(past.allocate(4096,36,false,size_t(NativeAdrenoMemoryMaxBytes)+4096)==kIOReturnBadArgument);
         }
         macosChecks+=4;
+        {
+            /* gpu/slots2: a 4 GiB window of the 256 GiB table (slot 62, 0x3C00000000, a 38-bit input): the window alone would make the
+             * limit NativeAdrenoMemoryMaxBytes; the table's per-object limit keeps Query's max_bo_bytes at 1 GiB, a larger BO is refused
+             * with that limit and the window in the reason; close() drops the limit. */
+            NativeAdrenoUserClient wide;
+            CHECK(wide.open(NativeAdrenoAbiVersion,&p.vm,&p.execbuf,&p.ring,38,36)==kIOReturnSuccess);
+            CHECK(wide.setScope(62*NativeAdrenoAbiMaxQueues,NativeAdrenoClientWindows256G[62].start,NativeAdrenoClientWindows256G[62].bytes)==
+                  kIOReturnSuccess && wide.windowBytes()==UINT64_C(4)<<30);
+            NativeAdrenoAbiParams wp{};
+            CHECK(wide.query(&wp)==kIOReturnSuccess && wp.input_bits==38 && wp.max_bo_bytes==NativeAdrenoMemoryMaxBytes);
+            CHECK(wide.setObjectLimit(4097)==kIOReturnBadArgument);
+            CHECK(wide.setObjectLimit(NativeAdrenoClientObjectLimit(NativeAdrenoClientWindows256G,62))==kIOReturnSuccess);
+            CHECK(wide.query(&wp)==kIOReturnSuccess && wp.max_bo_bytes==UINT64_C(1)<<30 && wide.maxObjectBytes()==UINT64_C(1)<<30);
+            const unsigned created=fixture.created;
+            NativeAdrenoAbiBoAlloc past{(UINT64_C(1)<<30)+4096,12,0};NativeAdrenoAbiBoAllocReply none{};
+            CHECK(wide.allocBo(&past,&none)==kIOReturnBadArgument && !none.handle && fixture.created==created);
+            const NativeAdrenoAllocRefusal why=wide.lastAllocRefusal();
+            CHECK(why.why==NativeAdrenoAllocWhyLimit && why.a==(UINT64_C(1)<<30)+4096 && why.b==UINT64_C(1)<<30 && why.c==UINT64_C(4)<<30);
+            CHECK(wide.close()==kIOReturnSuccess && wide.setObjectLimit(0)==kIOReturnNotReady);
+            CHECK(wide.open(NativeAdrenoAbiVersion,&p.vm,&p.execbuf,&p.ring,38,36)==kIOReturnSuccess &&
+                  wide.setScope(62*NativeAdrenoAbiMaxQueues,NativeAdrenoClientWindows256G[62].start,NativeAdrenoClientWindows256G[62].bytes)==
+                  kIOReturnSuccess && wide.maxObjectBytes()==NativeAdrenoMemoryMaxBytes && wide.close()==kIOReturnSuccess);
+            /* slot 0 keeps its window's 3.5 GiB; on the 64 GiB table nothing changes */
+            CHECK(!NativeAdrenoClientObjectLimit(NativeAdrenoClientWindows256G,0) && !NativeAdrenoClientObjectLimit(NativeAdrenoClientWindows64G,4));
+            macosChecks+=10;
+        }
 #else
         CHECK(params.max_bo_bytes==(UINT64_C(1)<<NativeAdrenoAbiMaxBoBytesShift));
 #endif

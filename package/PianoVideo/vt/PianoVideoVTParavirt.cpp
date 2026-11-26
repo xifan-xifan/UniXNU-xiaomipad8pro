@@ -87,6 +87,21 @@ static void captureMessage(const uint8_t *bytes, uint32_t length, uint32_t direc
     IOLockUnlock(captureLock);
 }
 
+// LT-B5 B1 (private/host-checks/20261124-browser-gpu ANALYSIS section 12): Safari's GPU process may open this service only on a virtual
+// device (GPUProcess.sb (system-attribute virtual-device)), which piano is not. With boot-arg piano-video-vt-grant=1 the service names
+// "com.apple.WebKit" in NativeSandboxGrantProcess (the k27 kernel's per-service grant: is_io_service_open_extended skips the MACF open
+// checks for a process whose first 16 name characters match). The kernel compares only 16 characters, which also covers WebContent and
+// Networking, so the user client then admits a com.apple.WebKit* process only if it holds the GPU process's own entitlement
+// (com.apple.rootless.storage.WebKitGPUSandbox: on WebKit.GPU.xpc, not on WebContent / Networking, checked on 27.2).
+static bool pianoVtGrant() {
+    static int grant = -1;
+    // default ON since y12i (Safari hardware decode qualified: v131y12i-qual1/qual3); piano-video-vt-grant=0 turns it off
+    if (grant < 0) { uint32_t v = 1; PE_parse_boot_argn("piano-video-vt-grant", &v, sizeof v); grant = v == 1; }
+    return grant == 1;
+}
+static constexpr const char PianoVtGrantPrefix[] = "com.apple.WebKit";            // 16 characters: the kernel's compare length
+static constexpr const char PianoVtGrantEntitlement[] = "com.apple.rootless.storage.WebKitGPUSandbox";
+
 class AppleVideoToolboxParavirtualizationDriver : public IOService {
     OSDeclareDefaultStructors(AppleVideoToolboxParavirtualizationDriver)
 public:
@@ -97,6 +112,11 @@ public:
         // It does not read kern.hv_vmm_present or a guest boolean property.  Keep a diagnostic property so the
         // registry records exactly what this service implements; IOUserClientClass is consumed by IOServiceOpen.
         setProperty("piano-video-vt-guest-gate", "IOServiceMatching(AppleVideoToolboxParavirtualizationDriver)+IOServiceOpen(type=0)");
+        if (pianoVtGrant()) {
+            setProperty("NativeSandboxGrantProcess", PianoVtGrantPrefix);
+            IOLog("PianoVideoVT G1: sandbox grant %s (16-char kernel match), admitted only with %s\n", PianoVtGrantPrefix,
+                  PianoVtGrantEntitlement);
+        }
         IOLog("PianoVideo: vt guest property published: gate=IOServiceMatching(AppleVideoToolboxParavirtualizationDriver)+IOServiceOpen(type=0), kern.hv_vmm_present untouched\n");
         // Synchronously: a process that writes kern.piano_video_vt finds the service as soon as the write returns.
         registerService(kIOServiceSynchronous);
@@ -147,6 +167,14 @@ bool AppleVideoToolboxParavirtualizationUserClient::initWithTask(task_t task, vo
     if (process) {
         ownerPid = proc_pid(process);
         proc_name(ownerPid,ownerName,sizeof ownerName);
+    }
+    if (pianoVtGrant() && !strncmp(ownerName, PianoVtGrantPrefix, sizeof PianoVtGrantPrefix - 1)) {
+        OSObject *entitled = task ? IOUserClient::copyClientEntitlement(task, PianoVtGrantEntitlement) : nullptr;
+        const bool gpu = entitled == kOSBooleanTrue;
+        if (entitled) entitled->release();
+        IOLog("PianoVideoVT G1: %s pid %d name %s (WebKit GPU entitlement %d)\n", gpu ? "admitted" : "refused", ownerPid, ownerName,
+              gpu);
+        if (!gpu) return false;
     }
     setProperty("piano-video-owner-pid",uint64_t(ownerPid),32);
     setProperty("piano-video-owner-name",ownerName);

@@ -32,6 +32,7 @@
 #include "NativeAdrenoMapLines.h"   /* UniXNU-piano */
 #include "NativeAdrenoPagedLine.h"   /* UniXNU-piano: GPU-PAGED P1 */
 #include "NativeAdrenoPoolBypass.h"   /* UniXNU-piano: GPU-PAGED P0b */
+#include "NativeAdrenoPciIdentity.h"   /* UniXNU-piano: BR1 */
 #include <sys/codesign.h>
 #include <sys/proc.h>
 #include <sys/ubc.h>
@@ -607,7 +608,9 @@ IOReturn AGXDeviceUserClient::mount(bool kernel)
     const bool listed=!kernel && NativeAdrenoListNamesProcess(NativeAdrenoSandboxGrantList,name_,sizeof name_);
     bool decoder=false;
 #ifdef ADRENO830_MACOS
-    if(!kernel && g.windows==NativeAdrenoClientWindows16G) {
+    /* UniXNU-piano (gpu/slots2): also on the 256 GiB table, whose decoder slot 63 nobody else takes (the 64 GiB table's slot 58 stays as
+     * it was: never handed out, the decoder takes an ordinary slot there). */
+    if(!kernel && (g.windows==NativeAdrenoClientWindows16G || g.windows==NativeAdrenoClientWindows256G)) {
         proc_t process=current_proc();
         if(process && csproc_get_platform_binary(process))
             decoder=NativeAdrenoDecoderClient(true,cs_identity_get(process));
@@ -651,6 +654,10 @@ IOReturn AGXDeviceUserClient::mount(bool kernel)
                 NativeAdrenoMemory::poolBytes()/NativeAdrenoPoolRenderShare);
         status=kernel?box->core.setScope(0,0,0):
             box->core.setScope(slot*NativeAdrenoAbiMaxQueues,g.windows[slot].start,g.windows[slot].bytes);
+#ifdef ADRENO830_MACOS
+        /* UniXNU-piano (gpu/slots2): the slot's per-object limit (1 GiB but in slot 0 on the 256 GiB table; 0 elsewhere: the window's) */
+        if(!status && !kernel)status=box->core.setObjectLimit(NativeAdrenoClientObjectLimit(g.windows,slot));
+#endif
         if(status) {
             noteMountFailure(3,status,slot);
             box->core.releaseAll(&g.clock,0);
@@ -794,6 +801,21 @@ void AGXDeviceUserClient::free()
     if(lock_) {IOLockFree(lock_);lock_=nullptr;}
     IOUserClient::free();
 }
+/* The normal Physical64 factory cannot constrain the cache bits that IOKit accepts from
+ * IOConnectMapMemory64. Use the same designated initializer for tier views and force WC
+ * when a mapping reaches the pager. Keep default-cache lookup usable for IOConnectUnmapMemory64. */
+class NativeAdrenoTierView final : public IOGeneralMemoryDescriptor {
+    OSDeclareDefaultStructors(NativeAdrenoTierView)
+protected:
+    IOReturn doMap(vm_map_t map,IOVirtualAddress *address,IOOptionBits options,IOByteCount offset,IOByteCount length) override
+    {
+        const auto cache=options&kIOMapCacheMask;
+        if(cache!=kIOMapDefaultCache && cache!=kIOMapWriteCombineCache)return kIOReturnUnsupported;
+        return IOGeneralMemoryDescriptor::doMap(map,address,(options&~kIOMapCacheMask)|kIOMapWriteCombineCache,offset,length);
+    }
+};
+OSDefineMetaClassAndStructors(NativeAdrenoTierView,IOGeneralMemoryDescriptor)
+
 IOReturn AGXDeviceUserClient::clientMemoryForType(UInt32 type,IOOptionBits *options,IOMemoryDescriptor **memory)
 {
     if(memory)*memory=nullptr;
@@ -835,7 +857,7 @@ IOReturn AGXDeviceUserClient::clientMemoryForType(UInt32 type,IOOptionBits *opti
     if(v && v->descriptor && v->token==type) {
         v->descriptor->retain();*memory=v->descriptor;*options=kIOMapAnywhere|cache;
         if(NativeAdrenoMemory *b=live_?box_->core.memoryForToken(type):nullptr)
-            if(b->unmapped())*options=kIOMapAnywhere|(b->writeCombined()?kIOMapWriteCombineCache:kIOMapDefaultCache);
+            if(b->unmapped() || b->tier())*options=kIOMapAnywhere|(b->writeCombined()?kIOMapWriteCombineCache:kIOMapDefaultCache);
         native_adreno_view_diag[2]=native_adreno_view_diag[2]+1;
         IOLockUnlock(lock_);
         return kIOReturnSuccess;
@@ -867,8 +889,14 @@ IOReturn AGXDeviceUserClient::clientMemoryForType(UInt32 type,IOOptionBits *opti
             if(!ranges)status=kIOReturnNoMemory;
             else {
                 for(size_t i=0;i<count;++i)ranges[i]={backing->spans()[i].physical,backing->spans()[i].bytes};
-                IOMemoryDescriptor *descriptor=IOMemoryDescriptor::withAddressRanges(ranges,(UInt32)count,
-                    static_cast<IOOptionBits>(kIODirectionInOut)|static_cast<IOOptionBits>(kIOMemoryTypePhysical64),nullptr);
+                const IOOptionBits physical=static_cast<IOOptionBits>(kIODirectionInOut)|static_cast<IOOptionBits>(kIOMemoryTypePhysical64);
+                IOMemoryDescriptor *descriptor=nullptr;
+                if(backing->tier()) {
+                    auto *view=new NativeAdrenoTierView;
+                    if(view && view->initWithOptions(ranges,(UInt32)count,0,nullptr,physical|kIOMemoryMapperNone,nullptr))
+                        descriptor=view;
+                    else if(view)view->release();
+                } else descriptor=IOMemoryDescriptor::withAddressRanges(ranges,(UInt32)count,physical,nullptr);
                 IODeleteData(ranges,IOAddressRange,count);
                 if(!descriptor)status=kIOReturnNoMemory;
                 else if(!v || v->descriptor) {
@@ -878,7 +906,7 @@ IOReturn AGXDeviceUserClient::clientMemoryForType(UInt32 type,IOOptionBits *opti
                 } else {
                     v->token=type;v->descriptor=descriptor;descriptor->retain();
                     *memory=descriptor;
-                    *options=kIOMapAnywhere|cache;
+                    *options=kIOMapAnywhere|(backing->tier()?kIOMapWriteCombineCache:cache);
                     native_adreno_view_diag[1]=native_adreno_view_diag[1]+1;
                     status=kIOReturnSuccess;
                 }
@@ -2054,6 +2082,35 @@ extern "C" IOReturn native_adreno_publish(NativeAdrenoVm *vm,NativeAdrenoSubmit 
     service->setProperty("NativeAdrenoClientSlots",(unsigned long long)NativeAdrenoClientWindowCount(windows),32);
     service->setProperty("NativeAdrenoClientVaEndMiB",(unsigned long long)(NativeAdrenoClientWindowsEnd(windows)>>20),32);
     service->setProperty("NativeAdrenoClientWindowMiB",(unsigned long long)(windows[NativeAdrenoLargeSlots+1].bytes>>20),32);
+    /* gpu/slots2: an ordinary slot's per-object limit in MiB (Query's max_bo_bytes: its window's unless the table caps it) and the GPU
+     * input size the clients get (Query's input_bits). */
+    {
+        const uint64_t cap=NativeAdrenoClientObjectLimit(windows,NativeAdrenoLargeSlots+1),window=windows[NativeAdrenoLargeSlots+1].bytes;
+        const uint64_t object=cap && cap<window?cap:window<NativeAdrenoMemoryMaxBytes?window:uint64_t(NativeAdrenoMemoryMaxBytes);
+        service->setProperty("NativeAdrenoClientObjectMiB",(unsigned long long)(object>>20),32);
+        service->setProperty("NativeAdrenoClientInputBits",(unsigned long long)input_bits,32);
+        /* one console line ("PianoA830: gpu windows: ...") whatever the trace: the table the boot runs with */
+        char line[200];
+        snprintf(line,sizeof line,"windows: %u slots up to %llu MiB (input %u bits), ordinary window %llu MiB, per-object limit %llu MiB, "
+            "WindowServer %llu MiB",NativeAdrenoClientWindowCount(windows),(unsigned long long)(NativeAdrenoClientWindowsEnd(windows)>>20),
+            unsigned(input_bits),(unsigned long long)(window>>20),(unsigned long long)(object>>20),(unsigned long long)(windows[0].bytes>>20));
+        boot_progress_gpu_event(line);
+    }
+    /* UniXNU-piano (2026-11-24, BR1): the PCI-style identity Chrome's ANGLE and Dawn read from the accelerator's provider
+     * (NativeAdrenoPciIdentity.h); before registerService, so the AGXAccelerator never exists without it. */
+    {
+        const NativeAdrenoPciBytes vendor=NativeAdrenoPciLe32(NativeAdrenoPciVendorQualcomm);
+        if(OSData *data=OSData::withBytes(vendor.b,sizeof vendor.b)) {
+            service->setProperty(NativeAdrenoPciVendorKey,data);
+            data->release();
+        }
+        const uint32_t device_id=info?NativeAdrenoPciDeviceId(info->chip_id):0;
+        const NativeAdrenoPciBytes device=NativeAdrenoPciLe32(device_id);
+        if(OSData *data=device_id?OSData::withBytes(device.b,sizeof device.b):nullptr) {
+            service->setProperty(NativeAdrenoPciDeviceKey,data);
+            data->release();
+        }
+    }
 #endif
     service->registerService();
     return kIOReturnSuccess;

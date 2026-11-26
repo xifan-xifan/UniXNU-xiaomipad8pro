@@ -619,16 +619,60 @@ static int hv_settled_5v(const PianoChargeConfig *c, const PianoChargeState *s, 
     return s->hv == PIANO_CHG_HV_OFF && (fallback == PIANO_CHG_FALLBACK_SOURCE || fallback == PIANO_CHG_FALLBACK_HEALTH);
 }
 
+/* charge/mipps2: the fixed vSafe5V object's current of the latest 0x21011 list (the Ubuntu port's xiaomi_mca_pd_5v_ma, v1.4.0
+ * L1776-1787: a fixed 5 V PDO only, never an APDO), 0 when none is listed */
+static uint32_t vsafe5v_ma(const PianoChargeInput *in)
+{
+    if (!(in->valid & PIANO_CHG_IN_PDOS)) return 0;
+    for (unsigned i = 0; i < in->pdos && i < 7; ++i)
+        if (in->pdo[i][0] == 5000 && in->pdo[i][1] == 5000 && in->pdo[i][2]) return in->pdo[i][2];
+    return 0;
+}
+
+unsigned piano_charge_listed_object(const PianoChargeInput *in, int pps, uint32_t mv, uint32_t ma)
+{
+    unsigned best = 0;
+    uint32_t best_ma = 0;
+    if (!(in->valid & PIANO_CHG_IN_PDOS)) return 0;
+    for (unsigned i = 0; i < in->pdos && i < 7; ++i) {
+        const uint32_t lo = in->pdo[i][0], hi = in->pdo[i][1], cap = in->pdo[i][2];
+        if (!lo || !hi || !cap || cap < ma) continue;
+        if (!pps && lo == mv && hi == mv) return i + 1;
+        if (pps && lo < hi && lo <= mv && hi >= mv && cap > best_ma) {best = i + 1; best_ma = cap;}
+    }
+    return best;
+}
+
+const char *piano_charge_ladder_name(int stage)
+{
+    switch (stage) {
+    case PIANO_CHG_LAD_NONE: return "no source";
+    case PIANO_CHG_LAD_5V: return "5 V";
+    case PIANO_CHG_LAD_5V_CONTRACT: return "5 V contract";
+    case PIANO_CHG_LAD_MIPPS: return "MiPPS at 5 V";
+    case PIANO_CHG_LAD_5V_READY: return "5 V ready";
+    case PIANO_CHG_LAD_9V_ASKED: return "9 V asked";
+    case PIANO_CHG_LAD_9V: return "9 V";
+    default: return "?";
+    }
+}
+
 /* At fixed 5 V the selected RDO, rather than an MCA offer or Rp, authorizes PD current. Keep the same opt-in ceiling,
  * connector check and measured steps as the non-PD path. Voltage withdrawal must finish before this budget is used. */
 static uint32_t contract_5v_budget(const PianoChargeConfig *c, const PianoChargeInput *in, const PianoChargeState *s,
                                    uint8_t fallback)
 {
     if (!c->strict_contract || !hv_settled_5v(c, s, fallback) || !ramped(c) || !strict_contract(in) ||
-        !(in->valid & PIANO_CHG_IN_SOURCE) || in->contract_protocol != 1 || in->contract_mv != 5000 ||
+        !(in->valid & PIANO_CHG_IN_SOURCE) || !(in->contract_protocol == 1 || in->contract_protocol == 2) ||
+        in->contract_mv < 4500 || in->contract_mv >= HV_5V_MAX_MV ||
         !(in->valid & PIANO_CHG_IN_BUS) || in->bus_mv < ONLINE_MV || in->bus_mv >= HV_5V_MAX_MV ||
         s->contract_transition || s->contract_mode_change || volt_raised(s)) return 0;
-    return umin(in->contract_ma, rp_cap(c));
+    /* charge/mipps2: a fixed contract at vSafe5V, or a PPS contract at 5 V on a listed APDO (a verified MiPPS adapter's vendor
+     * object); within the RDO, the listed vSafe5V object's current (Ubuntu: min(vSafe5V, 3000)) and the stepped ceiling */
+    if (in->contract_protocol == 1 && in->contract_mv != 5000) return 0;
+    if (in->contract_protocol == 2 && !piano_charge_listed_object(in, 1, in->contract_mv, in->contract_ma)) return 0;
+    const uint32_t v5 = vsafe5v_ma(in);
+    return umin(umin(in->contract_ma, v5 ? v5 : in->contract_ma), rp_cap(c));
 }
 
 /* The 5 V input limit of a class: its row (a PD source's 5 V offer), or with cfg.rp (and with_rp) the Type-C current. */
@@ -820,6 +864,28 @@ static int strict_contract(const PianoChargeInput *in)
            in->contract_ma >= PIANO_CHG_ICL_DEFAULT && in->contract_ma <= 5000;
 }
 
+/* charge/mipps2 (MIPPS-RDO.md): a fresh PD sink status whose RDO does not decode against the firmware's 0x21011 list (ChargeLink:
+ * PIANO_CHG_IN_PD_UNMAPPED; a verified MiPPS adapter's vendor object), and the bus reads 5 V. The Ubuntu port's PD rule at 5 V applies
+ * there (xiaomi_mca_5v_input: xiaomi_mca_pd_5v_ma, a 5000/5000 entry at any slot, else 500; min 3000): the class row from that, never
+ * the 100 mA of an unknown contract. It is no contract: no 9 V, no PPS, no pump, and above the 5 V window nothing changes. */
+static int pd_unmapped_5v(const PianoChargeInput *in)
+{
+    return (in->valid & PIANO_CHG_IN_PD_UNMAPPED) && !strict_contract(in) && (in->valid & PIANO_CHG_IN_BUS) &&
+           in->bus_mv >= ONLINE_MV && in->bus_mv < HV_5V_MAX_MV;
+}
+
+/* Its input: the class's 5 V row from the list's fixed 5000/5000 object at any position (Ubuntu: the buck's 5 V path uses a fixed
+ * PDO, never a PPS APDO), else the row's 500 mA; within the configured ceiling. */
+static uint32_t pd_unmapped_row(const PianoChargeConfig *c, const PianoChargeInput *in, PianoChargePlan *p, int cls)
+{
+    uint32_t ma = 0;
+    for (unsigned i = 0; (in->valid & PIANO_CHG_IN_PDOS) && i < in->pdos && i < 7; ++i)
+        if (in->pdo[i][0] == 5000 && in->pdo[i][1] == 5000 && in->pdo[i][2] >= PIANO_CHG_ICL_DEFAULT) {ma = in->pdo[i][2]; break;}
+    p->icl_why = PIANO_CHG_ICL_ROW;
+    p->rp_ma = 0;
+    return umin(piano_charge_icl_5v(cls, ma), icl_cap(c));
+}
+
 static int strict_barrier(const PianoChargeInput *in, const PianoChargeState *s)
 {
     const uint32_t ma = s->transition_ma ? s->transition_ma : 500;
@@ -867,8 +933,11 @@ static uint32_t strict_hv(const PianoChargeConfig *c, const PianoChargeInput *in
         s->contract_notify_since = in->contract_notify_ms;
     } else if (in->contract_notify_ms < s->contract_notify_since) s->contract_notify_since = in->contract_notify_ms;
     const int contract = strict_contract(in);
-    const int at5 = contract && in->contract_protocol == 1 && in->contract_mv < HV_5V_MAX_MV &&
-                    (in->valid & PIANO_CHG_IN_BUS) && in->bus_mv < HV_5V_MAX_MV;
+    /* charge/mipps2: 5 V confirmed on a fixed contract, or on a PPS contract at 5 V whose APDO the latest list holds (the firmware
+     * moved to a verified MiPPS adapter's vendor object by itself): the next stage may then be asked */
+    const int at5 = contract && in->contract_mv < HV_5V_MAX_MV && (in->valid & PIANO_CHG_IN_BUS) && in->bus_mv < HV_5V_MAX_MV &&
+                    (in->contract_protocol == 1 ||
+                     (in->contract_protocol == 2 && piano_charge_listed_object(in, 1, in->contract_mv, in->contract_ma)));
     /* With no PD contract, a fresh measured5V plus our explicit5V ACK can finish withdrawal; it never authorizes a new HV. */
     const int returned5 = (in->valid & PIANO_CHG_IN_BUS) && in->bus_mv >= ONLINE_MV && in->bus_mv < HV_5V_MAX_MV &&
                           (!contract || (in->contract_protocol == 1 && in->contract_mv < HV_5V_MAX_MV));
@@ -977,6 +1046,15 @@ static uint32_t strict_hv(const PianoChargeConfig *c, const PianoChargeInput *in
     if (budget < (pps ? HV_PPS_MIN_MA : HV_FIXED_MIN_MA)) {
         strict_fallback(in, s, p, PIANO_CHG_FALLBACK_SOURCE); return 0;
     }
+    if (at9 && in->contract_protocol == (pps ? 2 : 1) && s->ladder_obj && s->ladder_obj != 0xffu && in->contract_object &&
+        in->contract_object != s->ladder_obj && (s->hv == PIANO_CHG_HV_ASKED || s->hv == PIANO_CHG_HV_ON)) {
+        /* charge/mipps2: the contract confirms another object than the one asked for: back to 5 V, no 9 V until a detach */
+        p->ladder_refusal = PIANO_CHG_LREF_OBJECT;
+        if (s->ladder_refused < 255) s->ladder_refused++;
+        s->hv = PIANO_CHG_HV_BLOCKED;
+        strict_fallback(in, s, p, PIANO_CHG_FALLBACK_READBACK);
+        return 0;
+    }
     if (at9 && in->contract_protocol == (pps ? 2 : 1)) {
         if (s->contract_recheck) {
             s->contract_transition = 1;
@@ -1010,6 +1088,20 @@ static uint32_t strict_hv(const PianoChargeConfig *c, const PianoChargeInput *in
         return 0;
     }
     if (now < s->attach_ms + HV_WAIT_MS || now < s->hv_retry_ms) return 0;
+    /* charge/mipps2 ladder: MiPPS first, at 5 V (the Ubuntu port: xiaomi_mca_mipps_authenticate before cp_try_start and
+     * apply_policy, v1.4.0 L5276-5282; hv_step waits while VERIFY_PROCESS reads non-zero, L2242), and only an object the latest
+     * 0x21011 list advertises */
+    if (in->mipps_pending || in->cp_first) {p->ladder_refusal = PIANO_CHG_LREF_ORDER; return 0;}
+    unsigned object = piano_charge_listed_object(in, pps, HV_MV, pps ? HV_PPS_MIN_MA : HV_FIXED_MIN_MA);
+    /* no 0x21011 list this cycle (a UCSI PPM with its own PDO list): the validated contract's own source list is the advertisement
+     * (budget > 0 above came from it); its position is then not checked (0xff) */
+    if (!object && !(in->valid & PIANO_CHG_IN_PDOS)) object = 0xffu;
+    if (!object) {
+        p->ladder_refusal = PIANO_CHG_LREF_UNLISTED;
+        if (s->ladder_refused < 255) s->ladder_refused++;
+        strict_fallback(in, s, p, PIANO_CHG_FALLBACK_SOURCE);
+        return 0;
+    }
     s->transition_ma = umin(500, umin(in->contract_ma, budget));
     s->contract_transition = 1;
     if (!strict_barrier(in, s)) {p->fallback = PIANO_CHG_FALLBACK_READBACK; return 0;}
@@ -1018,6 +1110,7 @@ static uint32_t strict_hv(const PianoChargeConfig *c, const PianoChargeInput *in
     s->hv_qc = 0;
     s->hv_ma = budget;
     s->hv_asked_ms = now;
+    s->ladder_obj = (uint8_t)object;
     want_volt(s, pps ? PIANO_CHG_PPS : PIANO_CHG_PD_FIXED,
               pps ? piano_charge_pps_word(HV_MV, budget) : HV_MV);
     p->events |= PIANO_CHG_EV_HV_ASKED;
@@ -1531,7 +1624,7 @@ out:
     p->kick_count = s->kick_count;
 }
 
-void piano_charge_decide(const PianoChargeConfig *c, const PianoChargeInput *in, PianoChargeState *s, PianoChargePlan *p)
+static void decide_inner(const PianoChargeConfig *c, const PianoChargeInput *in, PianoChargeState *s, PianoChargePlan *p)
 {
     zero(p, sizeof *p);
     const uint64_t now = in->now_ms;
@@ -1607,6 +1700,7 @@ void piano_charge_decide(const PianoChargeConfig *c, const PianoChargeInput *in,
         s->hv = PIANO_CHG_HV_OFF;
         s->hv_qc = 0;
         s->hv_renegs = s->hv_checks = 0;
+        s->ladder_obj = 0;
         s->fcc_full = 0;
         s->stop_noted = s->fw_noted = 0;
         s->rp_noted = 0;
@@ -1686,6 +1780,10 @@ void piano_charge_decide(const PianoChargeConfig *c, const PianoChargeInput *in,
             icl = umin(hv_ma, PIANO_CHG_ICL_ABS_MAX);
             if (icl > HV_PD_ROW_MA && !conn_allows_rp(in, s)) icl = HV_PD_ROW_MA;
         }
+        /* charge/pd2: a PPS 9 V contract (in_pps 2500) above the in_pd row takes the same connector rule as the fixed one: every
+         * 9 V input above 1600 mA needs a connector that reads below 50 degC and no hot hold */
+        if (hv_caps(c) && !s->hv_qc && cls == PIANO_CHG_C_PD_PPS && icl > HV_PD_ROW_MA && !conn_allows_rp(in, s))
+            icl = HV_PD_ROW_MA;
         p->icl_why = PIANO_CHG_ICL_9V;
         p->rp_ma = 0;
     } else {
@@ -1709,13 +1807,15 @@ void piano_charge_decide(const PianoChargeConfig *c, const PianoChargeInput *in,
             const int contract = strict_contract(in);
             const uint32_t cap = p->icl_why == PIANO_CHG_ICL_CONTRACT_5V ? piano_charge_icl_max(c) :
                                  hv_on && hv_caps(c) ? PIANO_CHG_ICL_ABS_MAX : PIANO_CHG_ICL_CAP;
-            icl = contract ? umin(icl, umin(in->contract_ma, cap)) : PIANO_CHG_ICL_DEFAULT;
+            const int unmapped = !contract && !hv_on && pd_unmapped_5v(in);
+            icl = contract ? umin(icl, umin(in->contract_ma, cap)) :
+                  unmapped ? umin(icl, pd_unmapped_row(c, in, p, cls)) : PIANO_CHG_ICL_DEFAULT;
         }
         if (s->contract_transition) icl = umin(icl, s->transition_ma);
         if (!gauge_fresh(in, now) || !t.valid) icl = umin(icl, PIANO_CHG_ICL_DEFAULT);
         const uint32_t live_safety = PIANO_CHG_SAFE_LPD_DRY | PIANO_CHG_SAFE_DTPT;
         if ((in->safety & live_safety) != live_safety ||
-            (is_pd(cls) && (!(in->valid & PIANO_CHG_IN_SOURCE) || !strict_contract(in))))
+            (is_pd(cls) && (!(in->valid & PIANO_CHG_IN_SOURCE) || !strict_contract(in)) && !(!hv_on && pd_unmapped_5v(in))))
             icl = umin(icl, s->icl_set ? s->icl_set : PIANO_CHG_ICL_DEFAULT);
         p->transition = s->contract_transition;
     }
@@ -1756,7 +1856,7 @@ void piano_charge_decide(const PianoChargeConfig *c, const PianoChargeInput *in,
         const uint32_t live_safety = PIANO_CHG_SAFE_LPD_DRY | PIANO_CHG_SAFE_DTPT;
         if (s->contract_transition || !gauge_fresh(in, now) || !t.valid ||
             (in->safety & live_safety) != live_safety ||
-            (is_pd(cls) && (!(in->valid & PIANO_CHG_IN_SOURCE) || !strict_contract(in))))
+            (is_pd(cls) && (!(in->valid & PIANO_CHG_IN_SOURCE) || !strict_contract(in)) && !(!hv_on && pd_unmapped_5v(in))))
             full = umin(full, s->fcc_set ? umin(s->fcc_set, PIANO_CHG_FCC_DEFAULT) : PIANO_CHG_FCC_DEFAULT);
     }
     const uint32_t fcc = fcc_target(s, full, &t, now);
@@ -1803,6 +1903,31 @@ void piano_charge_decide(const PianoChargeConfig *c, const PianoChargeInput *in,
 
 /* The charge indicator's path (the Ubuntu port's top-bar protocol, here for the registry and the log): from the plan's class and
  * the 9 V state, never from a request alone. */
+/* charge/mipps2: the ladder stage of this decision (ChargePolicy.h PIANO_CHG_LAD_*), from what is confirmed now: each stage only from
+ * the one below it (the voltage requests themselves are gated in strict_hv: MiPPS first, a listed object, the contract's object). */
+static uint8_t ladder_stage(const PianoChargeInput *in, const PianoChargeState *s)
+{
+    if (!s->attached || !(in->valid & PIANO_CHG_IN_BUS) || in->bus_mv < ONLINE_MV) return PIANO_CHG_LAD_NONE;
+    if (s->hv == PIANO_CHG_HV_ON) return PIANO_CHG_LAD_9V;
+    if (s->hv == PIANO_CHG_HV_ASKED) return PIANO_CHG_LAD_9V_ASKED;
+    if (in->bus_mv >= HV_5V_MAX_MV) return PIANO_CHG_LAD_5V;   /* a raised bus without a confirmed session: nothing builds on it */
+    const int contract5 = strict_contract(in) && in->contract_mv < HV_5V_MAX_MV &&
+                          (in->contract_protocol == 1 ||
+                           piano_charge_listed_object(in, 1, in->contract_mv, in->contract_ma));
+    if (!contract5) return PIANO_CHG_LAD_5V;
+    if (in->mipps_pending || ((in->valid & PIANO_CHG_IN_VERIFY) && in->verify)) return PIANO_CHG_LAD_MIPPS;
+    if (in->now_ms < s->attach_ms + HV_WAIT_MS) return PIANO_CHG_LAD_5V_CONTRACT;
+    return PIANO_CHG_LAD_5V_READY;
+}
+
+void piano_charge_decide(const PianoChargeConfig *c, const PianoChargeInput *in, PianoChargeState *s, PianoChargePlan *p)
+{
+    decide_inner(c, in, s, p);
+    if (!s->attached) s->ladder_obj = 0;
+    s->ladder = ladder_stage(in, s);
+    p->ladder = s->ladder;
+}
+
 int piano_charge_path(const PianoChargeState *s, const PianoChargePlan *p, const PianoChargeInput *in)
 {
     if (!(in->valid & PIANO_CHG_IN_BUS) || in->bus_mv < ONLINE_MV || !s->attached) return PIANO_CHG_PATH_NONE;
@@ -1925,6 +2050,9 @@ void piano_charge_cp_sys(const PianoChargeConfig *c, const PianoChargeInput *in,
     if (limit_on(c) && !y->soc_entry_max) y->health_hold = 1;
     /* the source: a validated contract, and the APDO (min != max) reaching furthest above 9 V with 2 A or more */
     const int contract = c->strict_contract && strict_contract(in);
+    /* charge/mipps2 ladder: the pump starts only from a confirmed 5 V after MiPPS (the Ubuntu port's cp_after_auth, v1.4.0 L3959-3972)
+     * or from a confirmed 9 V session (its cp_try_start, L4035-4037); never on an unmapped object or mid-request */
+    y->ladder_hold = (uint8_t)!(s->ladder == PIANO_CHG_LAD_5V_READY || s->ladder == PIANO_CHG_LAD_9V);
     y->contract_valid = (uint8_t)contract;
     y->contract_pps = (uint8_t)(contract && in->contract_protocol == 2);
     y->contract_mv = contract ? in->contract_mv : 0;

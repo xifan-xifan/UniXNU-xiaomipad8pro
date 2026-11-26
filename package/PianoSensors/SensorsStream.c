@@ -29,6 +29,7 @@ void ss_defaults(SsConfig *c)
     SfxAxes gyro, mag;
     c->accel_hz = SS_ACCEL_HZ;
     c->accel_batch_ms = 0;
+    c->accel_sample_time = 0;
     sfx_axes_identity(&c->axes);
     sfx_axes_identity(&gyro);
     sfx_axes_identity(&mag);
@@ -165,6 +166,7 @@ static void restart(SsEngine *e, int i, uint64_t at)
     ch->sample_session = 0;
     if (i == SS_ACCEL) {
         sno_init(&e->orient);
+        e->last_accel_ticks = 0;
         set_edge(e, PS_EDGE_NONE, at);
     }
     apply(e, at);
@@ -461,7 +463,7 @@ static void response(SsEngine *e, int i, const SscQmi *m, uint64_t at)
     result(e, ok);
 }
 
-static void sample(SsEngine *e, int i, const SscSensorEvent *se, uint64_t at)
+static void sample(SsEngine *e, int i, const SscSensorEvent *se, uint64_t at, uint64_t ticks)
 {
     SsChannel *ch = &e->ch[i];
     PasStream *s = stream_of(e, i);
@@ -487,7 +489,10 @@ static void sample(SsEngine *e, int i, const SscSensorEvent *se, uint64_t at)
     if (se->count < 3) {ch->malformed++; return;}
     const int use = pas_event(s, at);
     if (use == PAS_EV_DROP) {ch->dropped++; return;}
-    if (use == PAS_EV_FIRST) sno_init(&e->orient);
+    if (use == PAS_EV_FIRST) {
+        sno_init(&e->orient);
+        e->last_accel_ticks = 0;
+    }
     ch->samples++;
     if (se->status == 0) ch->unreliable++;
     if (ch->sample_session != s->sessions) {
@@ -501,7 +506,18 @@ static void sample(SsEngine *e, int i, const SscSensorEvent *se, uint64_t at)
         snt_kd(&t, "session", s->sessions);
         emit(e, i, &t, at, 0);
     }
-    const int state = ps_accel_sample(&e->orient, &e->cfg.axes, se->data, at);
+    uint64_t sample_ms = at;
+    if (e->cfg.accel_sample_time) {
+        const uint64_t ticks_per_ms = 19200;   /* SSC's 19.2 MHz QTimer */
+        const uint64_t max_gap = 2 * 1000 * ticks_per_ms / e->cfg.accel_hz;
+        const uint64_t last = e->last_accel_ticks;
+        if (!ticks || ticks < last || (last && ticks - last > max_gap))
+            e->orient.candidate = e->orient.state;
+        e->last_accel_ticks = ticks;
+        if (!ticks || ticks == last) return;
+        sample_ms = ticks / ticks_per_ms;
+    }
+    const int state = ps_accel_sample(&e->orient, &e->cfg.axes, se->data, sample_ms);
     if (state >= 0) set_edge(e, ps_edge_of(state), at);
 }
 
@@ -513,7 +529,7 @@ static void event(SsEngine *e, int i, const SscEvent *ev, uint64_t at)
     if (ev->msg_id == SSC_MSG_SENSOR_EVENT) {
         SscSensorEvent se;
         if (ssc_parse_sensor_event(ev->payload, ev->length, &se)) {ch->malformed++; return;}
-        sample(e, i, &se, at);
+        sample(e, i, &se, at, ev->timestamp);
     } else if (ev->msg_id == SSC_MSG_PHYSICAL_CONFIG_EVENT) {
         SscPhysicalConfig pc;
         if (ssc_parse_physical_config(ev->payload, ev->length, &pc)) {ch->malformed++; return;}

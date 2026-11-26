@@ -211,9 +211,22 @@ static int ask_pulse(Ctx *x, int up)
 }
 
 /* a step of the regulation: +1 up, -n down (n steps of 20 mV for PPS; one pulse for QC) */
+/* charge/mipps2 ladder: a PPS step up only once the previous one is confirmed: the word acknowledged by the firmware, nothing in
+ * flight, the bus read and within -1200 / +300 mV of the request (the cable drop allowance, Ubuntu MCA_CP_VBUS_MAX_DELTA_MV), and no
+ * pump fault. Steps down are never held back. */
+static int up_confirmed(const Ctx *x)
+{
+    const PianoCpSys *y = x->sys;
+    if (qc_kind(y->src_kind)) return !y->volt_pending;
+    if (y->volt_pending || y->pps_taken_word != x->s->req_word || !y->bus_valid || hard_faults(x->drv)) return 0;
+    const int32_t req = (int32_t)x->s->req_mv;
+    return y->vbus_mv >= req - 1200 && y->vbus_mv <= req + 300;
+}
+
 static void step(Ctx *x, int dir, unsigned n)
 {
     if (!dir) return;
+    if (dir > 0 && !up_confirmed(x)) {x->p->events |= PIANO_CPS_EV_UNCONFIRMED; return;}
     if (qc_kind(x->sys->src_kind)) {(void)ask_pulse(x, dir > 0); return;}
     const uint32_t d = REG_STEP_MV * (n ? n : 1u);
     const uint32_t mv = dir > 0 ? x->s->req_mv + REG_STEP_MV : (x->s->req_mv > d + PIANO_CPS_REQ_MIN_MV ? x->s->req_mv - d
@@ -332,6 +345,7 @@ static int may_start(Ctx *x)
     if (!y->attached || !y->awake || y->sleep_pending || x->now < s->awake_since_ms + WAKE_SETTLE_MS) return 0;
     if (y->health_hold) return 0;
     if (c->mipps && !d->mipps_done) return 0;      /* MiPPS runs before any pump step */
+    if (y->ladder_hold) return 0;                  /* charge/mipps2: only from a confirmed 5 V after MiPPS or a confirmed 9 V */
     if (y->mipps_cleanup_pending || y->volt_pending) return 0;
     if (!y->gauges_valid || !y->cells_valid) return 0;
     const unsigned entry = umin(y->soc_entry_max ? y->soc_entry_max : (c->soc_entry_max ? c->soc_entry_max : PIANO_CPS_SOC_ENTRY),
@@ -435,6 +449,19 @@ static int regulate(Ctx *x, int cv)
     } else if (ibus > t + REG_ABOVE_MA || ibat > (int32_t)target + REG_WELL_ABOVE_MA) step(x, -1, 1);
     else if (ibus < t - REG_BAND_BELOW_MA && vbus < window - 100 && !(cv && y->vbat_max_mv >= cv_mv(x->c) - CV_HOLD_MV)) step(x, +1, 1);
     return 1;
+}
+
+/* charge/mipps2 ladder: whether an idle session would start now (the start gates on a copy of the state, nothing planned): the
+ * buck then holds its 9 V request, so the pump goes first from a confirmed 5 V, as the Ubuntu port's policy pass tries cp_try_start
+ * before apply_policy (xiaomi_mca.c v1.4.0 L5280-5282) */
+int piano_cp_may_start(const PianoCpConfig *c, const PianoCpSys *sys, const struct piano_cp_in *drv, const PianoCpState *st)
+{
+    if (!c || !sys || !drv || !st || st->state != PIANO_CPS_IDLE) return 0;
+    PianoCpState copy = *st;
+    PianoCpPlan plan;
+    zero(&plan, sizeof plan);
+    Ctx x = {c, sys, drv, &copy, &plan, sys->now_ms};
+    return may_start(&x);
 }
 
 void piano_cp_decide(const PianoCpConfig *c, const PianoCpSys *sys, const struct piano_cp_in *drv, PianoCpState *s,
@@ -559,6 +586,13 @@ void piano_cp_decide(const PianoCpConfig *c, const PianoCpSys *sys, const struct
         if (s->tries >= OPEN_TRIES) {begin_exit(&x, PIANO_CPS_EXIT_OPEN_FAIL, 0); break;}
         if (sys->volt_pending) {
             if (now >= s->request_ms + VOLT_PENDING_MS) {s->errors++; s->request_ms = now;}
+            break;
+        }
+        if (!up_confirmed(&x)) {
+            /* the previous step is not confirmed: no further one; a step that stays unconfirmed counts as an error */
+            p->events |= PIANO_CPS_EV_UNCONFIRMED;
+            if (now >= s->request_ms + VOLT_PENDING_MS) {s->errors++; p->events |= PIANO_CPS_EV_ERROR; s->request_ms = now;}
+            s->next_ms = now + OPEN_STEP_MS;
             break;
         }
         if (qc_kind(sys->src_kind)) {

@@ -93,6 +93,7 @@ struct Inputs {
   bool hpm = false;              // machdep.piano_policy_hpm (macOS High Power Mode; Energy Mode step E2)
   uint32_t thermalProfiles = kThermalBalanced;   // PianoThermal's piano-thermal-profiles: the highest profile mode it takes
   bool lidSleepArmed = true;    // explicit runtime safety gate while physical polarity awaits observation
+  int lidSleepAC = -1;           // machdep.piano_policy_lid_sleep_ac (root writes 0/1): the AC opt-in now; -1: Config's (boot arg)
   bool sleepOn = false;          // machdep.piano_sleep begins with "on" (k27 0062 and piano-sleep=1)
   uint32_t wakeMask = 0;         // its "wake mask"
   Thermal thermal = Thermal::unknown;   // PianoThermal's piano_thermal_state (with thermalOwnsGpu, only while the slot is shared)
@@ -110,6 +111,9 @@ struct View {
   bool keyboardLatch = false;    // PianoKeyboard may arm the gpio95 latch for a system sleep (0062 bit 16)
 };
 
+// The AC lid demand-sleep opt-in in force: the runtime switch when it was read, else the boot argument's.
+inline bool lidSleepAC(const Config &c, const Inputs &in) { return in.lidSleepAC < 0 ? c.lidSleepAC : in.lidSleepAC != 0; }
+
 inline View view(const Config &c, const Inputs &in, bool seenOpen)
 {
   View v;
@@ -121,7 +125,7 @@ inline View view(const Config &c, const Inputs &in, bool seenOpen)
     v.closeWhy = "no hall reading (PianoKeyboard absent or piano-keyboard-hall=0)";
   } else {
     v.close = Close::lock;
-    if (in.power == Power::external && !c.lidSleepAC) v.closeWhy = "on external power: lock only";
+    if (in.power == Power::external && !lidSleepAC(c, in)) v.closeWhy = "on external power: lock only";
     else if (in.power == Power::unknown) v.closeWhy = "power source unknown (piano-power-ps=1 publishes it): lock only";
     else if (!in.lidSleepArmed) v.closeWhy = "lid sleep not armed: physical observation pending";
     else if (!in.sleepOn) v.closeWhy = "no system sleep (k27 0062 with piano-sleep=1): lock only";
@@ -230,7 +234,7 @@ class Engine {
     }
     // AC desktop/clamshell masks are owned by powerd. Use the explicit demand
     // request once per eligible closed epoch, after mirroring the real lid/AC.
-    const bool demand = c_.lidSleepAC && v.close == Close::sleep && in.power == Power::external && in.lid == Lid::closed;
+    const bool demand = lidSleepAC(c_, in) && v.close == Close::sleep && in.power == Power::external && in.lid == Lid::closed;
     if (demand && !acDemand_) out.add(Kind::root, kSleepNow, "AC lid demand-sleep opted in");
     acDemand_ = demand;
     if (c_.profile) {

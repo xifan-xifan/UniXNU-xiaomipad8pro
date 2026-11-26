@@ -52,6 +52,10 @@ int native_ufs_store_sync(void);
 int native_ufs_store_read_tracked(uint64_t, uint32_t, void *, bool *);
 int native_ufs_store_write_tracked(uint64_t, uint32_t, const void *, bool *);
 unsigned native_ufs_store_gpt_check(void);
+// NativeUfs's store window commands (count, mach ticks, the longest single call), reported in machdep.piano_data_io
+// (UniXNU-piano 2026-11-25, disk-speed lane: the device side of a Data request, without the gate/stage wait above it).
+extern volatile uint64_t native_ufs_store_rd_ops, native_ufs_store_rd_ticks, native_ufs_store_wr_ops, native_ufs_store_wr_ticks,
+                         native_ufs_store_sync_ops, native_ufs_store_sync_ticks, native_ufs_store_max_ticks;
 // UniXNU-piano (NativeUfs, native-ufs-suspend=1): the Data disk's power parent (nullptr: no part in a system sleep), and the veto a
 // failed store sync sends it (its suspend then leaves the link up).
 IOService *native_ufs_power_parent(void);
@@ -494,7 +498,8 @@ public:
     configureDirect();
     registerDirectSysctls();
     IOLog("NativeRamBlock: Data I/O mode %s depth %u\n",
-          commitGate ? "concurrent" : direct ? "single-gate" : "volatile", commitGate ? admission.depth : 1);
+          admission.parallel ? "concurrent" : direct ? "single-gate" : "volatile",
+          admission.parallel ? admission.depth : 1);
     storeTrace("set-up done");
     IOLockUnlock(gate);
   }
@@ -650,7 +655,8 @@ bool NativeRamBlock::start(IOService *provider)
 void NativeRamBlock::configureDirect()
 {
   uint32_t requested = 0;
-  if (!direct || !PE_parse_boot_argn("data-store-concurrent", &requested, sizeof requested) || requested != 1)
+  if (!direct || !PE_parse_boot_argn("data-store-concurrent", &requested, sizeof requested) ||
+      (requested != 1 && requested != 2))
     return;
   auto *lock = IOLockAlloc();
   if (!lock) return;
@@ -660,9 +666,12 @@ void NativeRamBlock::configureDirect()
     stages[count] = static_cast<uint8_t *>(IOMallocZero(kStagePages * persist::kBlock));
     if (!stages[count]) break;
   }
-  admission.configure(count);
+  // Arm the live switch without parallel I/O during the initial mount and serial control.
+  const bool startParallel = requested == 1;
+  admission.configure(count, startParallel);
   if (directFailed) writeState.fail();  // a prepublication flatten may have failed
   __atomic_store_n(&commitGate, lock, __ATOMIC_RELEASE);
+  if (!startParallel) IOLog("NativeRamBlock: Data concurrency armed at depth %u; starting in single-gate mode\n", count);
 }
 
 int NativeRamBlock::directModeSysctl(struct sysctl_oid *oid, void *arg, int, struct sysctl_req *req)
@@ -704,9 +713,15 @@ int NativeRamBlock::directStatsSysctl(struct sysctl_oid *, void *arg, int, struc
   const uint64_t waits = disk.admission.waits;
   const uint64_t pubs = __atomic_load_n(&disk.bitmapPublications, __ATOMIC_RELAXED);
   env.unlock();
-  char line[128];
-  snprintf(line, sizeof(line), "mode=%s depth=%u inflight_max=%u waits=%llu bitmap_publications=%llu",
-           parallel ? "concurrent" : direct ? "single-gate" : "volatile", depth, peak, waits, pubs);
+  // The store commands since boot (both modes; not reset with the mode): ops and microseconds per kind, the longest call.
+  auto us = [](uint64_t ticks) { uint64_t ns = 0; absolutetime_to_nanoseconds(ticks, &ns); return (unsigned long long)(ns / 1000); };
+  char line[320];
+  snprintf(line, sizeof(line), "mode=%s depth=%u inflight_max=%u waits=%llu bitmap_publications=%llu "
+           "store_rd=%llu/%lluus store_wr=%llu/%lluus store_sync=%llu/%lluus store_max=%lluus",
+           parallel ? "concurrent" : direct ? "single-gate" : "volatile", depth, peak, waits, pubs,
+           (unsigned long long)native_ufs_store_rd_ops, us(native_ufs_store_rd_ticks), (unsigned long long)native_ufs_store_wr_ops,
+           us(native_ufs_store_wr_ticks), (unsigned long long)native_ufs_store_sync_ops, us(native_ufs_store_sync_ticks),
+           us(native_ufs_store_max_ticks));
   return SYSCTL_OUT(req, line, strlen(line) + 1);
 }
 

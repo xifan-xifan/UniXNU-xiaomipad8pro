@@ -1,0 +1,66 @@
+Plugin 0012 (gpu/plugin0012, LT-B3; private analysis 20261124-browser-gpu section 14.7): a Metal client that may write in none of the
+plugin's m2v cache-directory candidates still gets its device, without the translated-shader cache on disk.
+
+Chrome's GPU helper (gpu.sb allow-metal-shader-cache) may create only Apple's Metal cache names under the user cache directory, so all
+five `.probe-<pid>` creates were denied, native_bridge_metal_open was never called and the helper logged `no device: ` with an empty
+reason; ANGLE then had no Metal device. The prebuilt bridge (libnative_metal_bridge.a 81d46fae) refuses a NULL cache path
+(nmb_device_open: "loader and cache are required") but carries the runtime's METAL2VULKAN_SHADER_CACHE_OPTIONAL (UniXNU-turnip
+AdrenoMetal bridge patch 0007, shader_cache/store.rs Directory::open): with it set, a directory that cannot be made or written opens
+anyway and every disk read/write is a miss; the in-memory pipeline memo stays. UniXNU-turnip's own plugin (clientDevice) does the same
+for WebKit's GPU process.
+
+Only when no candidate took the probe: a process with a writable directory (WindowServer, Safari's GPU process, apps) keeps its disk
+cache exactly as before, and one whose open was refused in a writable directory is not opened again. The variable is cleared after the
+open (it is read only at device creation).
+
+Applied by tooling/metal/build-turnip-a830.sh to $PIANO_K27_TREE/overlay/metal/NativeAdrenoMetalPlugin.mm (sha256 6d59c5f2).
+--- a/NativeAdrenoMetalPlugin.mm
++++ b/NativeAdrenoMetalPlugin.mm
+@@ -369,6 +369,7 @@
+         if (!confstr(_CS_DARWIN_USER_TEMP_DIR, candidates[3], sizeof candidates[3] - 16))
+             candidates[3][0] = 0;
+         strlcpy(candidates[4], "/private/var/tmp/", sizeof candidates[4]);
++        unsigned writable = 0;
+         for (unsigned i = 0; i < 5 && !device; i++) {
+             if (!candidates[i][0])
+                 continue;
+@@ -381,6 +382,7 @@
+                 continue;
+             close(fd);
+             unlink(probe);
++            writable++;
+             @try {
+                 device = native_bridge_metal_open(turnip, candidates[i], registryID, missingSelector);
+             } @catch (NSException *exception) {
+@@ -390,7 +392,31 @@
+             if (!device) {   // the reason past the path, which the kernel's log line would cut off
+                 const char *error = nmb_last_error(), *kind = error ? strstr(error, "kind") : nullptr;
+                 fprintf(stderr, "NativeAdrenoMetal: %s: %s refused: %.160s\n", getprogname(), candidates[i], kind ? kind : error ? error : "");
++            }
++        }
++        // A process that may write in none of them (Chrome's GPU process: its gpu.sb lets it create only Apple's Metal cache names under
++        // the cache directory) still gets its device, with no translated shaders on disk: the runtime's METAL2VULKAN_SHADER_CACHE_OPTIONAL
++        // (the bridge's patch 0007, as upstream's plugin does for WebKit's GPU process) opens a directory that takes no write anyway, every
++        // read and write of it then a miss; the device's in-memory memo of pipelines stays. Only when no candidate took the probe: a
++        // process with a writable directory keeps its disk cache, and one whose open was refused there is not opened again.
++        if (!device && !writable) {
++            const char *path = nullptr;
++            for (unsigned i = 0; i < 5 && !path; i++)
++                if (candidates[i][0])
++                    path = candidates[i];
++            fprintf(stderr, "NativeAdrenoMetal: %s: no writable cache directory: opening without the m2v disk cache\n", getprogname());
++            setenv("METAL2VULKAN_SHADER_CACHE_OPTIONAL", "1", 1);
++            @try {
++                device = native_bridge_metal_open(turnip, path ? path : "/private/var/tmp/m2v", registryID, missingSelector);
++            } @catch (NSException *exception) {
++                fprintf(stderr, "NativeAdrenoMetal: %s: %s\n", getprogname(), exception.reason.UTF8String);
++                device = nil;
+             }
++            unsetenv("METAL2VULKAN_SHADER_CACHE_OPTIONAL");
++            if (!device) {
++                const char *error = nmb_last_error(), *kind = error ? strstr(error, "kind") : nullptr;
++                fprintf(stderr, "NativeAdrenoMetal: %s: without a disk cache refused: %.160s\n", getprogname(), kind ? kind : error ? error : "");
++            }
+         }
+         if (device) {
+             IOObjectRetain(port);

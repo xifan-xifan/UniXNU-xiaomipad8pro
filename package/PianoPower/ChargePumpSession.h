@@ -58,6 +58,7 @@ enum {
     PIANO_CPS_EV_START = 1u << 0, PIANO_CPS_EV_ENABLED = 1u << 1, PIANO_CPS_EV_OPENED = 1u << 2, PIANO_CPS_EV_CV = 1u << 3,
     PIANO_CPS_EV_EXIT = 1u << 4, PIANO_CPS_EV_HANDBACK = 1u << 5, PIANO_CPS_EV_LATCHED = 1u << 6, PIANO_CPS_EV_DERATE = 1u << 7,
     PIANO_CPS_EV_ERROR = 1u << 8, PIANO_CPS_EV_STUCK = 1u << 9, PIANO_CPS_EV_UNLATCHED = 1u << 10,
+    PIANO_CPS_EV_UNCONFIRMED = 1u << 11,   /* charge/mipps2: a step up held: the previous one is not confirmed */
 };
 
 /* a QC pulse request rides in out.req_valid next to ChargePump.h's PPS/BUCK bits */
@@ -86,6 +87,7 @@ typedef struct {
     uint8_t contract_pps;    /* and it is a PPS one */
     uint32_t contract_mv, contract_ma;
     uint8_t mipps_cleanup_pending;   /* ChargeMipps.h: no voltage request while set */
+    uint8_t ladder_hold;     /* charge/mipps2: the buck's ladder is not at a stage the pump may start from (piano_charge_cp_sys) */
     /* the firmware's bus reading */
     uint8_t bus_valid;
     int32_t vbus_mv, ibus_ma;
@@ -173,6 +175,8 @@ void piano_cp_init(PianoCpState *s);
 /* One call (see above). Repeat while plan.sleep_ready is 0 during a sleep. */
 void piano_cp_decide(const PianoCpConfig *c, const PianoCpSys *sys, const struct piano_cp_in *drv, PianoCpState *s,
                      PianoCpPlan *p);
+/* charge/mipps2: 1 when an idle session's start gates all hold now (no state change) */
+int piano_cp_may_start(const PianoCpConfig *c, const PianoCpSys *sys, const struct piano_cp_in *drv, const PianoCpState *st);
 /* The firmware writes the session may ever make: a PPS word 5000-11000 mV (20 mV steps) at 1000-6000 mA (50 mA steps), one QC
  * pulse up or down (only with cfg.qc3). Anything else: 0. */
 int piano_cp_write_allowed(const PianoCpConfig *c, uint32_t property, uint32_t value, uint8_t bytes);

@@ -392,6 +392,13 @@ The first unattended sleep test uses `piano-policy-lid-arm=0`
 kernel maximum-duration wake timer. Real cover acceptance is attended; it first observes a valid physical close/open,
 then arms the same image while open. Lid reporting keeps a single owner throughout.
 
+`machdep.piano_policy_lid_sleep_ac` (root writes 0/1, starts at `piano-policy-lid-sleep-ac`) switches the AC opt-in at run
+time, so one boot can check both AC behaviours and the owner can choose without a new profile; `piano-policy-lid-arm=0` still
+wins over it. The daily choice (2026-11-26) follows Ubuntu v1.4.0: on a charger closing the cover locks and turns the display
+off while charging goes on (a demand sleep would stop charging below the limit, PianoPower's handover); on battery it sleeps.
+The physical closed level was seen on a 27.3 boot (2026-11-16: `hall: cover closed (gpio80 0, ...)`, then `cover open
+(gpio80 1, ...)` 30 s later, same pull as the installed profile), so the daily profile arms the gate (`piano-policy-lid-arm=1`).
+
 ## 12. Energy Mode: the AppleSMC stand-in (step E1, 2026-11-22)
 
 Status 2026-11-22: **built, host-tested (`smc_host: 127 checks, 0 failures`); not run on the tablet.** The first of the Energy Mode

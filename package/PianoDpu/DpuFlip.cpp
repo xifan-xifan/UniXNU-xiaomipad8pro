@@ -10,6 +10,7 @@
 //   piano-dpu-irq=0       CTL_FLUSH polled every ~1 ms instead of the vsync interrupt (default 1)
 //   piano-dpu-clean=N     0 never clean a surface's rows from the CPU caches, 1 (default) through a cacheable alias when one can be
 //                         made, 2 refuse a surface without one
+//   piano-dpu-clean-skip=1  use the strict WC-only policy. A verified backing gets one whole-backing clean through the DRAM aperture.
 //   piano-dpu-flush=MASK  the CTL_FLUSH bits of a flip (default 0: the pipes' own bits)
 //   piano-dpu-underrun=0  an underrun does not revert (default 1)
 //   piano-dpu-latch=MS    the latch timeout (default 50, 10..500)
@@ -28,16 +29,30 @@
 #include <libkern/c++/OSSymbol.h>
 #include <libkern/c++/OSString.h>
 #include <kern/clock.h>
+#include <kern/cpu_data.h>
 #include <kern/thread.h>
+#include <mach/vm_param.h>
 #include <pexpert/pexpert.h>
 #include <stdarg.h>
+#include <sys/errno.h>
+#include <sys/kauth.h>
 #include <sys/sysctl.h>
+#include <vm/memory_types.h>
 #include "DpuFlip.h"
 #include "DpuFlipKernel.h"
 #include "../common/PianoIrq.h"
 
 extern "C" task_t kernel_task;
 extern "C" volatile int32_t piano_dpu_stage;
+extern "C" uint64_t gPhysBase, gPhysSize;
+extern "C" vm_offset_t phystokv_range(uint64_t pa, vm_size_t *length);
+extern "C" boolean_t pmap_valid_page(ppnum_t pn);
+extern "C" unsigned pmap_cache_attributes(ppnum_t pn);
+
+#if PIANO_DPU_IOSURFACE_CACHE_MODE
+class IOSurface;
+uint32_t ioSurfaceCacheMode(const IOSurface *) __asm("__ZNK9IOSurface12getCacheModeEv");
+#endif
 
 namespace pianodpu {
 namespace {
@@ -188,13 +203,21 @@ uint64_t nowUs()
   return ns / 1000;
 }
 
-// A window's owner: the surface and its memory retained, the memory prepared (wired), the read-only cacheable alias for the clean.
+// A window owns the surface and wired backing. Only the legacy policy makes a copyback alias.
 struct Cookie {
   OSObject *surface;
   IOMemoryDescriptor *memory;
   IOMemoryMap *alias;
   bool prepared;
+  unsigned references = 1;   // window, plus any in-flight readouts
 };
+
+bool aperturePage(uint64_t pa)
+{
+  return page_size == 4096 && !(pa & 4095) && pa >= gPhysBase &&
+         gPhysSize >= 4096 && pa - gPhysBase <= gPhysSize - 4096 &&
+         pmap_valid_page(ppnum_t(pa >> 12));
+}
 
 // The 4 KiB pages of md (at most max); false with why when a segment is not 4 KiB aligned or there are too many.
 bool listPages(IOMemoryDescriptor *md, uint64_t *pages, unsigned max, unsigned *count, const char **why)
@@ -236,6 +259,7 @@ class KernelHw {
   uint32_t bankOff = 0;
   uint64_t stores = 0, smmuStores = 0, refusedStores = 0;
   uint32_t cleanPolicy = 1;   // piano-dpu-clean
+  bool cleanSkip = false;
   uint32_t cleanThreads = 1;  // piano-dpu-clean-threads
   uint64_t readOnlyPrepares = 0;   // surfaces prepared kIODirectionOut because their own direction was refused
   // The vsync interrupt.
@@ -395,7 +419,8 @@ class KernelHw {
     c->surface = surface;
     c->memory = md;
     c->prepared = true;
-    if (cleanPolicy) {
+    c->references = 1;
+    if (cleanPolicy && !cleanSkip) {
       c->alias = md->createMappingInTask(kernel_task, 0, kIOMapAnywhere | kIOMapReadOnly | kIOMapCopybackCache);
       if (!c->alias) {
         static bool told;
@@ -417,10 +442,53 @@ class KernelHw {
                __atomic_load_n(&cleanThreads, __ATOMIC_ACQUIRE));
     return true;
   }
+  uint32_t surfaceCacheMode(void *cookie)
+  {
+#if PIANO_DPU_IOSURFACE_CACHE_MODE
+    const Cookie *c = static_cast<Cookie *>(cookie);
+    const auto *surface = c->surface->metaCast("IOSurface");
+    return surface ? ioSurfaceCacheMode(reinterpret_cast<const IOSurface *>(surface)) : 0;
+#else
+    return 0;
+#endif
+  }
+  flip::CleanPages surfaceAttributes(const uint64_t *pages, unsigned count)
+  {
+    return flip::cachePages(count, [&](unsigned i) { return pages[i] & smmu::kOutMask; },
+                            [](uint64_t pa, unsigned &attr) {
+                              if (!aperturePage(pa)) return false;
+                              attr = pmap_cache_attributes(ppnum_t(pa >> 12));
+                              return true;
+                            }, VM_WIMG_MASK, VM_WIMG_WCOMB);
+  }
+  bool surfaceCleanPhysical(const uint64_t *ptes, uint64_t offset, uint64_t bytes)
+  {
+    // Use the same wired pages the DPU sees. The DRAM aperture is used solely for maintenance.
+    // Bound each contiguous run and finish its DSB on the issuing CPU.
+    while (bytes) {
+      const uint64_t index = offset >> 12, inPage = offset & 4095;
+      const uint64_t page = ptes[index] & smmu::kOutMask;
+      if (!aperturePage(page)) return false;
+      vm_size_t run = bytes < 4096 - inPage ? bytes : 4096 - inPage;
+      for (unsigned i = 1; i < 64 && run < bytes; ++i) {
+        const uint64_t next = ptes[index + i] & smmu::kOutMask;
+        if (next != page + uint64_t(i) * 4096 || !aperturePage(next)) break;
+        run += bytes - run < 4096 ? bytes - run : 4096;
+      }
+      const vm_offset_t va = phystokv_range(page + inPage, &run);
+      if (!va || !run || run > UINTPTR_MAX - va) return false;
+      disable_preemption();
+      cleanRange(reinterpret_cast<const void *>(va), run);
+      enable_preemption();
+      offset += run;
+      bytes -= run;
+    }
+    return true;
+  }
   void surfaceRelease(void *cookie)
   {
     Cookie *c = static_cast<Cookie *>(cookie);
-    if (!c) return;
+    if (!c || __atomic_sub_fetch(&c->references, 1, __ATOMIC_ACQ_REL)) return;
     if (c->alias) c->alias->release();
     if (c->prepared) c->memory->complete();   // a complete's direction only carries its error/valid flags: none here
     c->memory->release();
@@ -480,6 +548,7 @@ constinit flip::Flipper<KernelHw> gFlipper(gHw);
 IOLock *volatile gLock;
 const OSSymbol *volatile gSymbol;
 volatile bool gServing;            // step 4 ready: requests go to the engine (else refused without the lock)
+bool gPanelPaused;                 // under gLock: no flips or watch while timing is stopped
 pianoirq::Waiter gWatch;           // the watch thread's wake-up: a surface came on the panel
 IOService *gOwner;
 
@@ -519,7 +588,86 @@ void publish(const char *what)
 
 }  // namespace
 
-bool flipFunction(const OSSymbol *name, void *request, IOReturn *result)
+IOReturn scanoutRead(PianoDpuScanoutRequest *request)
+{
+  if (!request || !request->read) return kIOReturnBadArgument;
+  IOLock *lock = __atomic_load_n(&gLock, __ATOMIC_ACQUIRE);
+  if (!lock) return kIOReturnNotFound;   // no flip engine
+  if (!IOLockTryLock(lock)) return kIOReturnBusy;
+
+  const auto target = gFlipper.current;
+  const auto state = gFlipper.state;
+  const auto generation = [] { return gFlipper.st.flips + gFlipper.st.reshows + gFlipper.st.toBoot; };
+  const uint64_t before = generation();
+  const int shown = gFlipper.slots.shown;
+  Cookie *cookie = nullptr;
+  uint64_t offset = 0;
+  if (target.surface && state == flip::State::ready && shown >= 0)
+    cookie = static_cast<Cookie *>(gFlipper.slots.slot[shown].cookie);
+  if (cookie) {
+    offset = target.base - smmu::slotIova(unsigned(shown));
+    __atomic_add_fetch(&cookie->references, 1, __ATOMIC_RELAXED);
+  }
+  const bool boot = flip::sameTarget(target, flip::Target{}) && gFlipper.slots.pending < 0;
+  IOLockUnlock(lock);
+  if (!cookie && !boot) return kIOReturnNotReadable;
+
+  IOMemoryMap *map = cookie ? cookie->alias : nullptr;
+  IOMemoryMap *temporary = nullptr;
+  if (cookie && !map) {
+    temporary = cookie->memory->createMappingInTask(kernel_task, 0, kIOMapAnywhere | kIOMapReadOnly);
+    map = temporary;
+  }
+  request->error = request->read(request->context, cookie ? cookie->surface : nullptr, map, offset, target.stride);
+  if (temporary) temporary->release();
+  gHw.surfaceRelease(cookie);
+  if (request->error) return kIOReturnSuccess;
+
+  if (!IOLockTryLock(lock)) return kIOReturnBusy;
+  const bool stable = state == gFlipper.state && before == generation() && flip::sameTarget(target, gFlipper.current);
+  IOLockUnlock(lock);
+  return stable ? kIOReturnSuccess : kIOReturnBusy;
+}
+
+// The flip and slice workers share CTL_FLUSH. Hold this lock from staging through the latch.
+IOLock *flipTransactionLock()
+{
+  IOLock *lock = __atomic_load_n(&gLock, __ATOMIC_ACQUIRE);
+  if (lock) return lock;
+  IOLock *fresh = IOLockAlloc();
+  if (!fresh) return nullptr;
+  if (__atomic_compare_exchange_n(&gLock, &lock, fresh, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return fresh;
+  IOLockFree(fresh);
+  return lock;
+}
+
+void flipInvalidateCleanEpochs()
+{
+  gFlipper.invalidateCleanEpochs();
+}
+
+uint32_t flipPendingUnderruns(bool clear)
+{
+  const uint32_t bits = clear ? __atomic_fetch_and(&gHw.sticky, ~flip::kUnderrunBits, __ATOMIC_ACQ_REL)
+                              : __atomic_load_n(&gHw.sticky, __ATOMIC_ACQUIRE);
+  return bits & flip::kUnderrunBits;
+}
+
+void flipPanelBegin()
+{
+  if (IOLock *lock = __atomic_load_n(&gLock, __ATOMIC_ACQUIRE)) IOLockLock(lock);
+}
+
+void flipPanelEnd(bool paused)
+{
+  gPanelPaused = paused;
+  if (IOLock *lock = __atomic_load_n(&gLock, __ATOMIC_ACQUIRE)) {
+    IOLockUnlock(lock);
+    gWatch.kick();
+  }
+}
+
+bool flipFunction(const OSSymbol *name, void *request, void *handoff, IOReturn *result)
 {
   const OSSymbol *ours = __atomic_load_n(&gSymbol, __ATOMIC_ACQUIRE);
   if (!name || !ours || !name->isEqualTo(ours)) return false;
@@ -537,14 +685,66 @@ bool flipFunction(const OSSymbol *name, void *request, IOReturn *result)
   }
   IOLock *lock = __atomic_load_n(&gLock, __ATOMIC_ACQUIRE);
   IOLockLock(lock);
+  if (gPanelPaused) {
+    r->result = kPianoDpuFlipPaused;
+    r->latchUs = r->workUs = 0;
+    IOLockUnlock(lock);
+    return true;
+  }
   const bool before = gFlipper.watching();
-  gFlipper.request(*r);
+  gFlipper.request(*r, reinterpret_cast<uintptr_t>(handoff) == kPianoDpuFlipProducerComplete);
   const bool after = gFlipper.watching();
   if (gFlipper.state != flip::State::ready) __atomic_store_n(&gServing, false, __ATOMIC_RELEASE);
   IOLockUnlock(lock);
   if (after && !before) gWatch.kick();
   return true;
 }
+
+bool flipStatsSnapshot(flip::Stats &stats)
+{
+  IOLock *lock = __atomic_load_n(&gLock, __ATOMIC_ACQUIRE);
+  if (!lock) return false;
+  IOLockLock(lock);
+  stats = gFlipper.st;
+  IOLockUnlock(lock);
+  return true;
+}
+
+namespace {
+
+int cleanSkipSysctl(struct sysctl_oid *oid, void *, int, struct sysctl_req *req)
+{
+  if (!kauth_cred_issuser(kauth_cred_get())) return EPERM;
+  IOLock *lock = __atomic_load_n(&gLock, __ATOMIC_ACQUIRE);
+  IOLockLock(lock);
+  int value = !gFlipper.cfg.forceFullClean;
+  IOLockUnlock(lock);
+  const int err = sysctl_handle_int(oid, &value, 0, req);
+  if (err || !req->newptr) return err;
+  if (value != 0 && value != 1) return EINVAL;
+  IOLockLock(lock);
+  gFlipper.cfg.forceFullClean = !value;
+  // Restart epoch qualification even for a slot that is idle during the control.
+  flipInvalidateCleanEpochs();
+  IOLockUnlock(lock);
+  return 0;
+}
+
+void registerCleanSkipSysctl()
+{
+  static struct sysctl_oid oid;
+  oid.oid_parent = &sysctl__machdep_children;
+  oid.oid_number = OID_AUTO;
+  oid.oid_kind = int(CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_OID2);
+  oid.oid_name = "piano_dpu_clean_skip";
+  oid.oid_handler = cleanSkipSysctl;
+  oid.oid_fmt = "I";
+  oid.oid_descr = "PianoDpu WC-clean policy (0 full clean, 1 conditional)";
+  oid.oid_version = SYSCTL_OID_VERSION;
+  sysctl_register_oid(&oid);
+}
+
+}  // namespace
 
 void flipRun(IOService *owner, const Survey &s, const SmmuSurvey &m, uint32_t smmuLevel)
 {
@@ -557,6 +757,7 @@ void flipRun(IOService *owner, const Survey &s, const SmmuSurvey &m, uint32_t sm
   cfg.irq = bootArg("piano-dpu-irq", 1) != 0;
   cfg.clean = bootArg("piano-dpu-clean", 1);
   if (cfg.clean > 2) cfg.clean = 2;
+  cfg.cleanSkip = cfg.level == 4 && bootArg("piano-dpu-clean-skip", 0) == 1;
   cfg.flush = bootArg("piano-dpu-flush", 0);
   cfg.underrun = bootArg("piano-dpu-underrun", 1) != 0;
   cfg.latchMs = bootArg("piano-dpu-latch", 50);
@@ -572,6 +773,7 @@ void flipRun(IOService *owner, const Survey &s, const SmmuSurvey &m, uint32_t sm
   cfg.cadenceS = bootArg("piano-dpu-cadence", 0);
   if (cfg.cadenceS > 3600) cfg.cadenceS = 3600;
   gHw.cleanPolicy = cfg.clean;
+  gHw.cleanSkip = cfg.cleanSkip;
   gHw.cleanThreads = cfg.cleanThreads;
   if (cfg.level == 4) registerCleanThreadsSysctl(&gHw.cleanThreads, &cfg.cleanThreads);
   stage(6, "B1b: zero-copy flips (docs/drivers/dpu.md section 8)");
@@ -612,15 +814,18 @@ void flipRun(IOService *owner, const Survey &s, const SmmuSurvey &m, uint32_t sm
       }
     }
   }
-  IOLock *lock = IOLockAlloc();
+  IOLock *lock = flipTransactionLock();
   const OSSymbol *symbol = OSSymbol::withCStringNoCopy(kPianoDpuFlipFunction);
   if (!lock || !symbol) {
     stage(-6, "B1b: no lock");
     publish("failed: no lock");
     return;
   }
-  __atomic_store_n(&gLock, lock, __ATOMIC_RELEASE);
   __atomic_store_n(&gSymbol, symbol, __ATOMIC_RELEASE);
+  if (cfg.cleanSkip) {
+    registerCleanSkipSysctl();
+    note("piano-dpu-clean-skip=1: strict WC policy; machdep.piano_dpu_clean_skip selects the full-clean control");
+  }
   gFlipper.pages = static_cast<uint64_t *>(IOMalloc(smmu::kSlotPages * sizeof(uint64_t)));   // kept for the boot
   stage(7, cfg.level == 1 ? "B1b step 1: the boot framebuffer's addresses flushed again"
            : cfg.level == 2 ? "B1b step 2: the boot framebuffer shifted by 64 rows and back"
@@ -648,8 +853,8 @@ void flipRun(IOService *owner, const Survey &s, const SmmuSurvey &m, uint32_t sm
   for (;;) {
     const uint32_t seen = gWatch.now();   // before the look: a surface shown after it wakes the wait below
     IOLockLock(lock);
-    gFlipper.watch();
-    const bool watching = gFlipper.watching();
+    if (!gPanelPaused) gFlipper.watch();
+    const bool watching = !gPanelPaused && gFlipper.watching();
     const bool failed = gFlipper.state == flip::State::failed;
     if (failed) __atomic_store_n(&gServing, false, __ATOMIC_RELEASE);
     IOLockUnlock(lock);

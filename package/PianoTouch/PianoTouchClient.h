@@ -16,6 +16,8 @@ namespace pianotouch {
 
 constexpr const char *kServiceClass = "PianoTouch";
 constexpr const char *kFunctionContact = "PianoTouchContact";
+// Null p1 parks SPI and waits for the frame thread. Non-null p1 releases it after panel wake.
+constexpr const char *kFunctionPanel = "PianoTouchPanel";
 // A cover tap is dropped when the screen had a finger on it during the tap or this much before it.
 constexpr uint32_t kContactMarginMs = 60;
 

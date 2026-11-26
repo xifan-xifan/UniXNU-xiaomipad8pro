@@ -901,7 +901,8 @@
 #define A830_GPU_VA_CLIENT_END_4G       0x0000000100000000ull  /* pagani-gpu-va=4 与默认的退路：4 GiB 光圈（不含） */
 #define A830_GPU_VA_CLIENT_END_2G       0x0000000080000000ull  /* pagani-gpu-va=2 回退 */
 #define A830_GPU_VA_CLIENT_END_16G      0x0000000400000000ull  /* 默认（pagani-gpu-va=16）：34 位输入（须 IDR2.UBS ≥ 34 位，SM8750 为 48），32 个客户端窗口 */
-#define A830_GPU_VA_CLIENT_END_64G      0x0000001000000000ull  /* UniXNU-piano（pagani-gpu-va=64，macOS 默认）：36 位输入，64 个客户端窗口 */
+#define A830_GPU_VA_CLIENT_END_64G      0x0000001000000000ull  /* UniXNU-piano（pagani-gpu-va=64）：36 位输入，64 个客户端窗口 */
+#define A830_GPU_VA_CLIENT_END_256G     0x0000004000000000ull  /* UniXNU-piano（gpu/slots2，pagani-gpu-va=256，macOS 默认，仅 paged）：38 位输入，普通窗口 4 GiB */
 #define A830_GPU_VA_UCHE_TRAP           A830_UCHE_TRAP_ADDR
 /* PTE（4K 页描述符；ARCH 4.6.3） */
 #define A830_PTE_PAGE                   0x3ull                 /* bits[1:0] = 0b11 */
@@ -1568,6 +1569,8 @@ A830_STATIC_ASSERT(A830_GPU_VA_UCHE_TRAP >= A830_GPU_VA_CLIENT_END_16G && A830_G
                    "trap beyond the 34-bit input of pagani-gpu-va=16");
 A830_STATIC_ASSERT(A830_GPU_VA_UCHE_TRAP >= A830_GPU_VA_CLIENT_END_64G && A830_GPU_VA_CLIENT_END_64G == 0x1000000000ull,
                    "trap beyond the 36-bit input of pagani-gpu-va=64");
+A830_STATIC_ASSERT(A830_GPU_VA_UCHE_TRAP >= A830_GPU_VA_CLIENT_END_256G && A830_GPU_VA_CLIENT_END_256G == 0x4000000000ull,
+                   "trap beyond the 38-bit input of pagani-gpu-va=256");
 A830_STATIC_ASSERT(A830_ZAP_FW_FILE_BYTES == 0x2F38u && A830_ZAP_METADATA_BYTES == 0x94u + (0x2F38u - 0x2000u) &&
                    A830_ZAP_METADATA_BYTES <= 0x1000u && A830_ZAP_MEM_SETUP_BYTES <= A830_ZAP_BYTES, "ZAP image (ARCH 4.11)");
 A830_STATIC_ASSERT(A830_MEMPTRS_BV_RPTR == 8u && A830_MEMPTRS_BV_FENCE == 12u, "memptrs layout (ARCH 4.13.1)");

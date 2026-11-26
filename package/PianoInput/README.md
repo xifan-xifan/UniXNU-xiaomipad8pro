@@ -25,3 +25,11 @@ between two samples, so no SPMI read is in flight while the kernel (k27 0062) po
 (the release goes to macOS if it had the press). Host tests: `tests/buttons_host.cpp` `testPowerKey` (no PianoPolicy, taken, not
 taken, long press, the 1.5 s threshold, other keys meanwhile, masked, PianoPolicy appearing mid-press, a sleep during a long press
 and a key held through the wake).
+
+Simulated presses (2026-11-24, host-tested, not run; private analysis 20261124-keys-lid): `piano-input-sim=1` registers
+`machdep.piano_input_sim` (root writes `ms | keys << 16`, 50..10000 ms; keys 0 = the power key, 2 vol+, 4 vol-; reads the number of
+presses accepted). The simulated keys are OR'ed into the decoded PMIC sample, so the press takes the debounce, `PowerKey.h`
+(PianoPolicy's short press, the HID Power usage for a long one) and the HID report like a real one (`KeySim.h`, `buttons_host`
+`testKeySim`). A real press adds only the PON / GPIO6 read and, while suspended, the kernel's power key wake. Lines: `sim N: power
+down for M ms (machdep.piano_input_sim) ...`, the key edges with `, simulated (machdep.piano_input_sim)`; refusals `sim: value ...
+refused: ...` (EPERM without the argument, EBUSY while one runs, EINVAL otherwise). Without the argument the sysctl does not exist.

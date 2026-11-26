@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // The PianoDpu service's flip interface (B1b, docs/drivers/dpu.md section 4.1), header only: no link dependency. The caller finds the
-// service by its class name (IOService::serviceMatching("PianoDpu"), registered only with piano-dpu=2) and calls
-//   service->callPlatformFunction("PianoDpuFlip", false, request, nullptr, nullptr, nullptr)
+// service by its class name (IOService::serviceMatching("PianoDpu"), registered only with piano-dpu=2; flips served with piano-dpu=2) and calls
+//   service->callPlatformFunction("PianoDpuFlip", false, request, handoff, nullptr, nullptr)
 // with a PianoDpuFlipRequest. It returns kIOReturnSuccess when the request was understood; the outcome is request->result:
 //   surface != nullptr   scan that IOSurface out directly: its pages are mapped into an IOVA window of the DPU's SMMU bank (once per
 //                        surface), the CPU caches over the rows the DPU fetches are cleaned, the pipes that scan the boot framebuffer
 //                        are pointed at it with one CTL flush, and the call returns once the hardware latched it (at the next frame,
 //                        < 8.4 ms at 120 Hz; at most piano-dpu-latch ms). kPianoDpuFlipShown: on the panel now, the previous surface
-//                        free. Anything else: nothing changed on the panel (the caller copies the frame into the boot framebuffer and
-//                        then asks for it back with surface = nullptr).
+//                        free. kPianoDpuFlipPaused asks the caller to keep the frame queued for wake. Other refusals use the boot
+//                        framebuffer fallback (the caller copies the frame there and asks for it back with surface = nullptr).
 //   surface == nullptr   back to the boot framebuffer (the caller has just copied a frame there): returns once latched, at once when it
 //                        is on the panel already. kPianoDpuFlipShown.
 // A failure on the hardware side (an SMMU fault, a missed latch, an underrun) puts the boot framebuffer back on the panel and the
@@ -23,6 +23,20 @@
 #define kPianoDpuFlipFunction "PianoDpuFlip"
 #define kPianoDpuFlipVersion 1u
 
+// Kernel-only readout for NativeGopDisplay. The callback runs outside the flip lock while the window's
+// surface, wiring and CPU map are held. A null surface selects the boot framebuffer. kIOReturnBusy
+// means the read must be discarded (changing or indeterminate scanout).
+#define kPianoDpuScanoutFunction "PianoDpuScanout"
+class OSObject;
+class IOMemoryMap;
+struct PianoDpuScanoutRequest {
+  int (*read)(void *context, const OSObject *surface, IOMemoryMap *map, uint64_t offset, uint32_t stride);
+  void *context;
+  int error;                  // callback result
+};
+// Optional pointer-sized value in handoff. Legacy callers pass nullptr. Only pass this at a producer handoff with known completion.
+constexpr uintptr_t kPianoDpuFlipProducerComplete = 1;
+
 enum PianoDpuFlipResult : uint32_t {
   kPianoDpuFlipShown = 0,     // latched: on the panel
   kPianoDpuFlipOff,           // not serving: piano-dpu-flip below 4, not ready yet, or off for the boot after a failure
@@ -33,11 +47,12 @@ enum PianoDpuFlipResult : uint32_t {
   kPianoDpuFlipAlign,         // the pixels' offset in the memory is not a multiple of 64
   kPianoDpuFlipMemory,        // the memory could not be prepared, listed (4 KiB pages inside XNU's RAM) or mapped
   kPianoDpuFlipSlots,         // no window free (all are on screen or pending)
-  kPianoDpuFlipClean,         // piano-dpu-clean=2 and no cacheable alias to clean the caches with
+  kPianoDpuFlipClean,         // required pixel clean failed
   kPianoDpuFlipLatch,         // the hardware did not latch: reverted, off for the boot
   kPianoDpuFlipFault,         // an SMMU fault: reverted, off for the boot
   kPianoDpuFlipUnderrun,      // an underrun: reverted, off for the boot
   kPianoDpuFlipVersionMismatch,
+  kPianoDpuFlipPaused,        // panel asleep or unsafe: keep the request and retry after wake
   kPianoDpuFlipResults
 };
 
@@ -61,7 +76,7 @@ struct PianoDpuFlipRequest {
 inline const char *pianoDpuFlipResultName(uint32_t r)
 {
   static const char *const names[kPianoDpuFlipResults] = {"shown", "off", "format", "planes", "size", "stride", "align", "memory",
-                                                           "slots", "clean", "latch", "fault", "underrun", "version"};
+                                                           "slots", "clean", "latch", "fault", "underrun", "version", "paused"};
   return r < kPianoDpuFlipResults ? names[r] : "?";
 }
 

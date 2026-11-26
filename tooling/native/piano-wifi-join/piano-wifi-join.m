@@ -415,6 +415,7 @@ struct apple_join {
   CWNetwork *network;
   unsigned readiness_attempt;
 };
+// Raw SET20 acceptance, also used before and after the CoreWLAN call.
 static uint32_t receipt(void *unused)
 {
   (void)unused;
@@ -433,9 +434,24 @@ static uint32_t receipt(void *unused)
   return generation;
 }
 
-static int native_join_seen(struct apple_join *a)
+static int native_join_seen(CWInterface *interface)
 {
-  if (!receipt(NULL) && !a->interface.ssidData.length) return 0;
+  uint64_t generation = 0;
+  size_t size = sizeof generation;
+  if (sysctlbyname(PIANO_WIFI_CURRENT_JOIN_SYSCTL, &generation, &size, NULL, 0) == 0) {
+    if (size != sizeof generation || generation > UINT32_MAX) {
+      timeline("fallback skipped=invalid-current-join");
+      return 1;
+    }
+    timeline("SET20 current generation=%u", (unsigned)generation);
+    if (!generation) return 0;
+  } else if (errno == ENOENT) {
+    // The opt-in OID is absent on the default path and on older kernels.
+    if (!receipt(NULL) && !interface.ssidData.length) return 0;
+  } else {
+    timeline("fallback skipped=current-join-read-error errno=%d", errno);
+    return 1;
+  }
   timeline("fallback skipped=association-present-or-requested");
   return 1;
 }
@@ -448,10 +464,7 @@ static int ready(void *context)
   if (since_kick < NativeJoinGraceSeconds) return 0;
   // airportd's own auto-join (DRIVER_AVAILABLE, scan TIMESTAMP, ASSOCIATE outcome) usually joins first: the kernel receipt needs no
   // CoreWLAN or CoreLocation call, so it is read before the CoreLocation gate, whose query can stay unanswered for minutes.
-  if (receipt(NULL)) {
-    timeline("fallback skipped=association-present-or-requested");
-    return -1;
-  }
+  if (native_join_seen(nil)) return -1;
   if (!a->location_passed) {
     if (!location_ready(&a->location, a->executable, attempt)) return 0;
     a->location_passed = 1;
@@ -467,7 +480,7 @@ static int ready(void *context)
     timeline("fallback skipped=powered-off");
     return -1;
   }
-  if (native_join_seen(a)) return -1;
+  if (native_join_seen(a->interface)) return -1;
   NSData *name = [NSData dataWithBytes:a->profile->ssid length:a->profile->ssid_len];
   NSError *error = nil;
   timeline("scan attempt=%u begin", attempt);
@@ -493,7 +506,7 @@ static int ready(void *context)
 static int associate(void *context)
 {
   struct apple_join *a = context;
-  if (!a->interface.powerOn || native_join_seen(a)) return -1;
+  if (!a->interface.powerOn || native_join_seen(a->interface)) return -1;
   const struct piano_wifi_profile *p = a->profile;
   NSString *password = p->psk_len ? [[NSString alloc] initWithBytes:p->psk length:p->psk_len encoding:NSUTF8StringEncoding] : nil;
   NSError *error = nil;

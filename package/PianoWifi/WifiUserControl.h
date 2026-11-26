@@ -13,13 +13,15 @@ struct WifiJoinRequest {
   static constexpr uint64_t kTimeoutMs = 9500; // before IO80211's ~10 s poll ends
   bool nativeOwner = false;
   uint32_t generation = 0;
+  uint32_t radioRestart = 0;
   uint64_t deadline = 0;
   bool consumed = false;
   uint32_t terminal = 2;
 
-  void accept(uint32_t gen, uint64_t now) {
+  void accept(uint32_t gen, uint64_t now, uint32_t restart) {
     nativeOwner = true;
     generation = gen;
+    radioRestart = restart;
     deadline = now + kTimeoutMs;
     consumed = false;
     terminal = 0;
@@ -28,10 +30,21 @@ struct WifiJoinRequest {
   uint32_t result(uint64_t now) const { return !terminal && now >= deadline ? 9u : terminal; }
   bool canStart(uint64_t now) const { return !nativeOwner || (!consumed && !result(now)); }
   void consume() { if (nativeOwner) consumed = true; }
-  bool finish(uint32_t gen, uint32_t status, uint64_t now) {
+  bool finish(uint32_t gen, uint32_t status, uint64_t now, uint32_t restart) {
     if (!gen || gen != generation || terminal) return false;
     terminal = now >= deadline ? 9u : status;
+    // A request queued during a restart belongs to the new pass once it authorizes there.
+    if (terminal == 1) radioRestart = restart;
     return terminal != 0;
+  }
+  uint32_t currentReceipt(uint64_t now, uint32_t restart, uint32_t stationGeneration,
+                          bool stationActive, bool stationAuthorized) const {
+    if (!nativeOwner || radioRestart != restart) return 0;
+    const uint32_t status = result(now);
+    const bool sameStation = consumed && stationGeneration == generation;
+    if (status == 0 && (!consumed || (sameStation && stationActive))) return generation;
+    if (status == 1 && sameStation && stationAuthorized) return generation;
+    return 0;
   }
 };
 

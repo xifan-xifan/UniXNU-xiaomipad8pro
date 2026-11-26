@@ -5,7 +5,9 @@
 # host test compares both over every value and request).
 #   bootflag.sh show | once-android | once-macos | once-clear | default-android | default-macos | reset
 # Backends: PIANO_BOOTFLAG_NVMEM=FILE (Android; default: the nvmem device whose of_node is sdam@7100), or
-# PIANO_BOOTFLAG_BACKEND=sysctl (macOS). Offset 0x49 (73). A byte that is not ours is never written (exit 3).
+# PIANO_BOOTFLAG_BACKEND=sysctl (macOS, root): `sysctl machdep.piano_bootflag` reads the byte, writing a request number (1..6, the
+# kext applies and checks it: package/include/PianoBootFlagSdam.h) needs the boot argument piano-bootflag-write=1.
+# Offset 0x49 (73). A byte that is not ours is never written (exit 3).
 OFF=73
 
 ours() {  # $1 decimal byte
@@ -47,15 +49,19 @@ nvmem() {
 }
 
 rd() {
-  if [ "$PIANO_BOOTFLAG_BACKEND" = sysctl ]; then sysctl -n machdep.piano_bootflag; return; fi
+  if [ "$PIANO_BOOTFLAG_BACKEND" = sysctl ]; then x=$(sysctl -n machdep.piano_bootflag) || return 1; [ "$x" -ge 0 ] 2>/dev/null || return 1; echo "$x"; return; fi
   f=$(nvmem) || { echo "no sdam@7100 nvmem device" >&2; return 1; }
   x=$(dd if="$f" bs=1 skip=$OFF count=1 2>/dev/null | od -An -tu1 | tr -d ' \n')
   [ -n "$x" ] || return 1
   echo "$x"
 }
 
-wrt() {  # $1 decimal
-  if [ "$PIANO_BOOTFLAG_BACKEND" = sysctl ]; then sysctl -q machdep.piano_bootflag="$1" >/dev/null; return; fi
+reqnum() {
+  case "$1" in once-android) echo 1;; once-macos) echo 2;; once-clear) echo 3;; default-android) echo 4;; default-macos) echo 5;;
+    reset) echo 6;; *) return 1;; esac
+}
+
+wrt() {  # $1 decimal (nvmem backend)
   f=$(nvmem) || return 1
   printf "\\$(printf '%03o' "$1")" | dd of="$f" bs=1 seek=$OFF count=1 conv=notrunc 2>/dev/null
 }
@@ -67,6 +73,12 @@ main() {
   old=$(rd) || { echo "bootflag: cannot read the flag" >&2; return 2; }
   if [ "$req" = show ]; then describe "$old"; return 0; fi
   new=$(apply "$old" "$req") || { ours "$old" && echo "bootflag: unknown request $req" >&2 || echo "bootflag: $(describe "$old"); refused" >&2; return 3; }
+  if [ "$PIANO_BOOTFLAG_BACKEND" = sysctl ]; then   # the kext applies the request under its lock and reads it back
+    sysctl -w machdep.piano_bootflag="$(reqnum "$req")" >/dev/null 2>&1 || { echo "bootflag: the kext refused (piano-bootflag-write=1? root?)" >&2; return 4; }
+    now=$(rd)
+    [ "$now" = "$new" ] || { echo "bootflag: read back $now, want $new" >&2; return 5; }
+    describe "$now"; return 0
+  fi
   if [ "$new" -ne "$old" ]; then
     wrt "$new" || { echo "bootflag: write failed" >&2; return 4; }
     now=$(rd)

@@ -67,7 +67,7 @@ VIDEO_HOST_FW=$([ -f "$FW" ] && echo "$FW" || true) "$O/host-tests/bringup_host"
 python3 "$D/tooling/persist/firmware.py" stage --kext PianoVideo --header "$O/gen/PianoVideoFirmwarePins.h" \
   --source "$O/gen/PianoVideoFirmware.c" "$FW=2409160:95c5882f9b66b93ad2635604b7db563cc310481e017fa6b82e0ce6cbb9eae01b"
 python3 "$D/tooling/k27/build-native-kext.py" PianoVideo "$P/PianoVideo.cpp" "$D/tooling/k27/NativeKextGlue.cpp" \
-  "$P/FatVolume.c" "$P/QcomMdt.c" "$P/Sm8750Scm.c" "$P/vt/PianoVideoVTParavirt.cpp" "$P/vt/PianoVideoVTHost.cpp" "$D/package/common/PianoFirmware.cpp" "$D/package/common/PianoFirmwareCore.c" \
+  "$P/PianoVideoExtraRam.cpp" "$P/FatVolume.c" "$P/QcomMdt.c" "$P/Sm8750Scm.c" "$P/vt/PianoVideoVTParavirt.cpp" "$P/vt/PianoVideoVTHost.cpp" "$D/package/common/PianoFirmware.cpp" "$D/package/common/PianoFirmwareCore.c" \
   "$D/package/common/PianoFirmwareZlib.c" "$O/gen/PianoVideoFirmware.c" -I "$P" -I "$D/package/common" -I "$O/gen" \
   --obj "${K27_OBJ:-k27-native-obj}"
 # PianoVideoVTParavirt owns two Apple-named IOService classes.  As with the audited accelerator, move its

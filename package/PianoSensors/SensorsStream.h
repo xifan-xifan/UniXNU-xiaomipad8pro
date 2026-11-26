@@ -76,6 +76,7 @@ typedef struct {
 typedef struct {
     uint32_t accel_hz;                   /* SS_ACCEL_HZ (piano-sensors-accel-hz) */
     uint32_t accel_batch_ms;             /* 0: no batching (as libssc); else the hub may hold samples this long */
+    int accel_sample_time;               /* 1: use SSC sample time for orientation dwell, 0: use receive time */
     SfxAxes axes;                        /* PS_ACCEL_AXES (piano-sensors-axes) */
     PasConfig stream;                    /* AutoStream's defaults */
 } SsConfig;
@@ -127,6 +128,7 @@ typedef struct {
     PalLight light;                      /* the light's stream, policy and smoothing (AutoLight.h) */
     PasStream accel;                     /* the accelerometer's stream (AutoStream.h) */
     SnoState orient;
+    uint64_t last_accel_ticks;           /* SSC timestamp of the last orientation input, or 0 before the first */
     SsChannel ch[SS_STREAMS];
     SsConditions cond;
     int asleep;                          /* ss_sleep: a system sleep is under way */

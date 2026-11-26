@@ -1,0 +1,1074 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: leozhang <zwj8727@gmail.com>
+Date: Tue, 10 Nov 2026 18:31:05 +0800
+Subject: [PATCH 1/2] k27 tree, piano: build entry points, KC builder,
+ overlays, kernel patches 0050-0052
+
+The piano additions to the k27 tree (Droid-VM/macOS-DroidVM abcbc18): build-k27-piano.sh (the
+kernel), build-metal-plugin-piano.sh and scripts/piano-frontend-patch.py (the Metal plugin),
+k27/kc-build27-piano.py and k27/build-native-display-piano.sh, the KC keep list, overlay edits
+(DroidVMDisplay, NativeAdrenoMetalPlugin), overlay-piano/, droidvm-audio 0004, droidvm-video
+0013-0017 and patches/xnu-12377 0050-0052 (VM-guest TLB, power-off, zone VA).
+
+From the maintainer's local k27 checkout, commit a1e3f4e, without its four VM-host orchestration
+scripts (boot-disk-piano.sh, iterate-k27-piano.sh, restart-vm-piano.sh and a .bak copy): they
+drove the retired Gunyah VM over the local network and nothing in the native build reads them.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ build-k27-piano.sh                            |  56 ++++++++
+ build-metal-plugin-piano.sh                   |  31 ++++
+ configs/kc-keep.txt                           |   1 +
+ k27/build-native-display-piano.sh             |  24 ++++
+ k27/kc-build27-piano.py                       |  48 +++++++
+ k27/segaddrs.json                             |   2 +-
+ k27/segaddrs.sh                               |   6 +-
+ overlay-piano/DroidVMEthernetReserved.cpp     |   9 ++
+ overlay-piano/display-wc.py                   |  23 +++
+ overlay-piano/gpu-check.mm                    | 135 ++++++++++++++++++
+ .../kext/DroidVMDisplay/DroidVMDisplay.cpp    |  24 +++-
+ .../DroidVMDisplay/IOMobileFramebufferABI.h   |   4 +-
+ overlay/metal/NativeAdrenoMetalPlugin.mm      |  44 ++++--
+ .../0004-ring-whole-periods.patch             |  19 +++
+ .../0013-card-role-any-case.patch             |  37 +++++
+ .../0014-decoder-rating-1000.patch            |  13 ++
+ .../0015-dsts-accept-format.patch             |  13 ++
+ .../droidvm-video/0016-hvcc-skip-sei.patch    |  20 +++
+ .../0017-dsts-decline-image-tiles.patch       |  22 +++
+ patches/xnu-12377/0050-vm-guest-tlb.patch     |  79 ++++++++++
+ ...st-poweroff-unmount-bootstrap-tables.patch |  99 +++++++++++++
+ .../xnu-12377/0052-vm-guest-zone-va-12g.patch |  39 +++++
+ scripts/piano-frontend-patch.py               |  81 +++++++++++
+ 23 files changed, 806 insertions(+), 23 deletions(-)
+ create mode 100755 build-k27-piano.sh
+ create mode 100755 build-metal-plugin-piano.sh
+ create mode 100644 k27/build-native-display-piano.sh
+ create mode 100644 k27/kc-build27-piano.py
+ create mode 100644 overlay-piano/DroidVMEthernetReserved.cpp
+ create mode 100644 overlay-piano/display-wc.py
+ create mode 100644 overlay-piano/gpu-check.mm
+ create mode 100644 patches/droidvm-audio/0004-ring-whole-periods.patch
+ create mode 100644 patches/droidvm-video/0013-card-role-any-case.patch
+ create mode 100644 patches/droidvm-video/0014-decoder-rating-1000.patch
+ create mode 100644 patches/droidvm-video/0015-dsts-accept-format.patch
+ create mode 100644 patches/droidvm-video/0016-hvcc-skip-sei.patch
+ create mode 100644 patches/droidvm-video/0017-dsts-decline-image-tiles.patch
+ create mode 100644 patches/xnu-12377/0050-vm-guest-tlb.patch
+ create mode 100644 patches/xnu-12377/0051-vm-guest-poweroff-unmount-bootstrap-tables.patch
+ create mode 100644 patches/xnu-12377/0052-vm-guest-zone-va-12g.patch
+ create mode 100644 scripts/piano-frontend-patch.py
+
+diff --git a/build-k27-piano.sh b/build-k27-piano.sh
+new file mode 100755
+index 0000000..a623f39
+--- /dev/null
++++ b/build-k27-piano.sh
+@@ -0,0 +1,56 @@
++#!/bin/bash
++# k27 macOS 内核（xnu-12377 + patches/xnu-12377 0001-0049）的本机重建构建脚本。
++# 作者的 out/x12377/build-kernel.sh 未公开；这里按 k27/build-kernel27.sh 传给它的参数、UniXNU 的 XNU make 调用重写。
++# 底座：Droid-VM/UniXNU wip/droidvm 的 ipados27 板 bootstrap 出来的 xnu-12377 arm64e 环境（fakeroot、firehose、ArmDTPlatform/ArmCpu）。
++#   build-k27-piano.sh [make target...]      环境：JOBS（默认 10）SEGADDRS=0（不用 KC 段地址，先链一个普通内核量尺寸）
++set -euo pipefail
++export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
++# k27 的 iokit/DriverKit/Makefile 用了 GNU 风格的 sed -i（作者在 Linux 上构建）
++export PATH=/opt/homebrew/opt/gnu-sed/libexec/gnubin:/opt/homebrew/opt/llvm/bin:/opt/homebrew/bin:$PATH
++M=$(cd "$(dirname "$0")" && pwd)
++B=$(dirname "$M")
++UP=$B/UniXNU-up/out/droidvm/ipados-27.0.1-24A446/droidvm_ipados27/tree
++T=$M/out/k27/xnu
++X=$M/out/x12377
++O=$X/build/xnu
++FR=$X/fakeroot
++# KDK 去掉 Tightbeam：它的 libTightbeam.a 是 macOS 平台的，iOS 平台链接（ld-classic）拒收；exclaves 在这台 VM 上不存在
++KDKROOT=$M/out/k27/kdk-notb
++mkdir -p $O $X
++# fakeroot：沿用 12377 底座（libplatform/libdispatch 头、availability.pl、arm64e firehose），再用 k27 源码重装内核头
++if [ ! -d $FR ]; then cp -R $UP/.cache/fakeroot $FR; fi
++export KERNEL_SDKROOT=$FR
++export XNU_AVAILABILITY_PL=$FR/usr/local/libexec/availability.pl
++if [ ! -f $FR/.k27-headers ]; then
++  make -C $T installhdrs SDKROOT=macosx ARCH_CONFIGS=ARM64 MACHINE_CONFIGS=BCM2837 KERNEL_CONFIGS=DEVELOPMENT \
++    RC_DARWIN_KERNEL_VERSION=27.0.0 RC_ProjectSourceVersion=12377.121.6 MAKEJOBS=-j${JOBS:-10} \
++    OBJROOT=$O/k27-hdr-obj SYMROOT=$O/k27-hdr-sym DSTROOT=$FR KDKROOT=$KDKROOT > $X/installhdrs.log 2>&1
++  touch $FR/.k27-headers
++fi
++# ArmDTPlatform/ArmCpu 必须按 k27（macOS 目标：kext vtable 布局带 padding）的编译记录重编，否则 PAC 校验失败（见 2026-11-09 第一次启动的 panic）
++DT=$X/un/build/platform-12377-arm64e/ArmDTPlatform/libArmDTPlatform.a
++CPU=$X/un/build/platform-12377-arm64e/ArmCpu/libArmCpu.a
++FH=$FR/usr/local/lib/kernel
++# Xcode 27 的 ld（ld-prime）不再支持 -threaded_starts_section：内核用 CLT 的 ld-classic（ld64-957）链接
++LDX="-B$X/ldc -Wl,-no_fixup_chains -Wl,-threaded_starts_section"
++LD_ARCHIVES="$LDX -L$FH -lfirehose_kernel -Wl,-force_load,$DT -Wl,-force_load,$CPU ${K27_EXTRA_LD:-}"
++OWNER="-DXNU_NATIVE_RAM_BLOCK=1 -DXNU_OWNER_DATA_MOUNT=1 -DXNU_OWNER_CACHE_MOUNT=1 -DXNU_OWNER_UNION_SYSTEMOS=1 -DXNU_OWNER_BOOT_MANIFEST=1 -DXNU_OWNER_CACHE_STARTUP=1"
++WNO="-Wno-reserved-identifier -Wno-pre-c11-compat -Wno-missing-designated-field-initializers -Wno-suggest-override -Wno-unnecessary-virtual-specifier -Wno-suggest-destructor-override -Wno-ms-bitfield-padding"
++EXTRA_CFLAGS="$WNO -DXNU_VM_GUEST=1 -DXNU_NATIVE_CS_HASH_CACHE=1 $OWNER -DXNU_ARM_DT_PLATFORM=1 -DXNU_ARMCPU=1 -DXNU_NATIVE_PAN=1 -DXNU_SOURCE_CORECRYPTO14=0 -DXNU_NATIVE_TRUST_CACHE=1 ${XNU_EXTRA_CFLAGS:-}"
++export CCC_OVERRIDE_OPTIONS='+-Wno-error=missing-designated-field-initializers'
++SEG=()
++if [ "${SEGADDRS:-1}" = 1 ]; then SEG=("XNU_KC_SEGADDRS=$(bash $M/k27/segaddrs.sh)"); fi
++make -C $T "${@:-build}" SDKROOT=iphoneos ARCH_CONFIGS=ARM64 MACHINE_CONFIGS=BCM2837 KERNEL_CONFIGS=DEVELOPMENT \
++  ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG=arm64e LARGE_MEMORY_DEFINE=-UARM_LARGE_MEMORY \
++  ARM64_LINK_ADDR=0xfffffff007004000 ARM64_PLKSEG_ADDR=0xfffffff004004000 \
++  DEPLOYMENT_TARGET_FLAGS="-miphoneos-version-min=26.0 -DXNU_TARGET_OS_OSX" \
++  DEPLOYMENT_LINKER_FLAGS="-Wl,-ios_version_min,26.0" \
++  RC_DARWIN_KERNEL_VERSION=27.0.0 RC_ProjectSourceVersion=12377.121.6 \
++  BUILD_LTO=0 BOUND_CHECKS=0 BUILD_WERROR=0 MAKEJOBS=-j${JOBS:-10} \
++  KDKROOT=$KDKROOT CFLAGS_EXTRA="$EXTRA_CFLAGS" \
++  LD_KERNEL_ARCHIVES="$LD_ARCHIVES" XNU_EXTERNAL_KERNEL_ARCHIVES="$DT $CPU" \
++  "pe_init.o_CFLAGS_ADD=-DXNU_DT_PANIC_REGION=1" "start.o_SFLAGS_ADD=-DXNU_NATIVE_ARCH_TIMER=1" \
++  "copyio.o_CFLAGS_ADD=-march=armv8.1-a" "pcb.o_CFLAGS_ADD=-march=armv8.1-a" "platform_tests.o_CFLAGS_ADD=-march=armv8.1-a" \
++  ${SEG[@]+"${SEG[@]}"} \
++  OBJROOT=$O/k27-obj SYMROOT=$O/k27-sym DSTROOT=$O/k27-dst
++ls -la $O/k27-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped* 2>/dev/null
+diff --git a/build-metal-plugin-piano.sh b/build-metal-plugin-piano.sh
+new file mode 100755
+index 0000000..6b76701
+--- /dev/null
++++ b/build-metal-plugin-piano.sh
+@@ -0,0 +1,31 @@
++#!/bin/bash
++# macOS 版 Metal 插件 NativeAdrenoMetal.bundle（Mac 原生 Xcode 构建）：overlay/metal/NativeAdrenoMetalPlugin.mm + NativeMetal fb063de 的前端
++# （build-metal-plugin.sh 的改动）+ Linux 构建机交叉编好的 bridge（libnative_metal_bridge.a）+ 本机编的 Turnip。
++set -euo pipefail
++export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
++M=$(cd "$(dirname "$0")" && pwd); T=$(dirname "$M")/UniXNU-turnip
++U=$T/drivers/AdrenoMetal; O=$M/out/metal/plugin; B=$O/NativeAdrenoMetal.bundle/Contents
++SDK=$(xcrun --sdk macosx --show-sdk-path)
++rm -rf $O/NativeAdrenoMetal.bundle; mkdir -p "$B/MacOS"
++CXX=(xcrun clang++ -target arm64e-apple-macos14.0 -isysroot $SDK -fobjc-arc -O2 -std=c++17 -Wno-deprecated-declarations -c -x objective-c++ -I $U)
++"${CXX[@]}" $M/overlay/metal/NativeAdrenoMetalPlugin.mm -o $O/plugin.o
++python3 $M/scripts/piano-frontend-patch.py $U/NativeBridgeMetalFrontend.mm $O/frontend.mm
++"${CXX[@]}" $O/frontend.mm -o $O/frontend.o
++xcrun ld -arch arm64e -platform_version macos 14.0 27.2 -syslibroot $SDK -F $M/overlay/metal/frameworks \
++  -bundle -dead_strip -o $B/MacOS/NativeAdrenoMetal $O/plugin.o $O/frontend.o $M/out/metal/bridge/libnative_metal_bridge.a \
++  -framework Foundation -framework Metal -framework IOSurface -framework IOKit -framework CoreFoundation -framework IOGPU \
++  -lobjc -lc++ -lSystem -liconv 2>&1 | { grep -v "was built for newer" || true; }
++cp $T/build/mesa-tu-macos/src/freedreno/vulkan/libvulkan_freedreno.dylib $B/MacOS/
++# macho-weak-self-binds.py (chained fixups) rewrites binds after the linker signed the image and leaves its page hashes stale:
++# XNU rejected the changed page in WindowServer ("rejecting invalid page ... offset 0xf2c000"). Sign it again (ad hoc).
++codesign -f -s - $B/MacOS/libvulkan_freedreno.dylib
++codesign -v $B/MacOS/libvulkan_freedreno.dylib
++python3 - "$B/Info.plist" <<'EOF'
++import plistlib, sys
++open(sys.argv[1], 'wb').write(plistlib.dumps(dict(
++    CFBundleIdentifier='org.droidvm.NativeAdrenoMetal', CFBundleExecutable='NativeAdrenoMetal', CFBundlePackageType='BNDL',
++    CFBundleVersion='1', CFBundleShortVersionString='1', NSPrincipalClass='NativeAdrenoMetalDevice',
++    CFBundleSupportedPlatforms=['MacOSX'], LSMinimumSystemVersion='14.0'), fmt=plistlib.FMT_XML))
++EOF
++codesign -dv $B/MacOS/NativeAdrenoMetal 2>&1 | grep -E "Signature|flags" | head -2
++ls -la $B/MacOS
+diff --git a/configs/kc-keep.txt b/configs/kc-keep.txt
+index ca9d022..625aaa3 100644
+--- a/configs/kc-keep.txt
++++ b/configs/kc-keep.txt
+@@ -13,3 +13,4 @@ com.apple.plugin.IOgPTPPlugin
+ com.apple.driver.AppleDiskImages2
+ com.apple.filesystems.hfs.kext
+ com.apple.driver.AppleMultitouchDriver
++ com.apple.driver.driverkit.serial
+diff --git a/k27/build-native-display-piano.sh b/k27/build-native-display-piano.sh
+new file mode 100644
+index 0000000..64794c4
+--- /dev/null
++++ b/k27/build-native-display-piano.sh
+@@ -0,0 +1,24 @@
++#!/usr/bin/env bash
++# DroidVMDisplay (overlay/kext/DroidVMDisplay, described by overlay/kext/DroidVMDisplay.json; objects in
++# out/x12377/native-kexts/DroidVMDisplay) against macOS 27's IOMobileFramebuffer/IOMobileFramebufferLegacy: its
++# IOMobileFramebufferABI.h is regenerated from the 27 collection (scripts/gen-iomfb-abi.py out/kc/kc27.bin) and must come out unchanged.
++# The kext also carries the DroidVM board's virtio-gpu transport and 3D contexts (UniXNU-droidvm package/DroidVMVirtioGpu.{h,cpp} and
++# DroidVMVirtioGpu3D.cpp at VGPU_REF, exported to out/k27/src/DroidVMVirtioGpu), whose buffers come from one contiguous allocation
++# (DROIDVM_VIRTIO_GPU_DYNAMIC: a native kext's __DATA has no room for 8 MiB), with patches/droidvm-display. Their user ABI, DroidVMVirtgpuABI.h, is NativeAdreno's:
++# run scripts/build-droidvm-gpu.py first (it exports NativeAdreno to out/x12377/src-gpu).
++set -eu
++K27=$(cd "$(dirname "$0")" && pwd); M=$(dirname "$K27"); D=$M/overlay/kext/DroidVMDisplay
++VGPU_REF=59ec0a814ea407f0f635af0ceb30d5147414ee15   # Droid-VM/UniXNU-droidvm wip/hackintosh, 2026-11-02
++ABI=$M/out/x12377/src-gpu/drivers/NativeAdreno
++[ -f $ABI/DroidVMVirtgpuABI.h ] || { echo "no $ABI/DroidVMVirtgpuABI.h: run scripts/build-droidvm-gpu.py first"; exit 1; }
++python3 $M/scripts/gen-iomfb-abi.py $M/out/kc/kc27.bin $D/IOMobileFramebufferABI.h
++git -C $M diff --stat -- $D/IOMobileFramebufferABI.h   # piano: 27.0.1 的 KC，ABI 头允许与仓库（27.2）不同
++V=$M/out/k27/src/DroidVMVirtioGpu; mkdir -p $V
++for name in DroidVMVirtioGpu.h DroidVMVirtioGpu.cpp DroidVMVirtioGpu3D.cpp; do
++  git -C $M/sources/UniXNU-droidvm show $VGPU_REF:package/$name > $V/$name
++done
++for patch in $M/patches/droidvm-display/*.patch; do patch -p1 -s --batch -d $V -i $patch || { echo "$patch does not apply"; exit 1; }; done
++python3 $M/overlay-piano/display-wc.py $V/DroidVMVirtioGpu3D.cpp
++cd $M
++python3 scripts/build-native-kext.py DroidVMDisplay $D/DroidVMDisplay.cpp $V/DroidVMVirtioGpu.cpp $V/DroidVMVirtioGpu3D.cpp overlay/kext/NativeKextGlue.cpp \
++  -I $D -I $V -I $ABI -D DROIDVM_VIRTIO_GPU_DYNAMIC=1 --obj k27-obj
+diff --git a/k27/kc-build27-piano.py b/k27/kc-build27-piano.py
+new file mode 100644
+index 0000000..e469c46
+--- /dev/null
++++ b/k27/kc-build27-piano.py
+@@ -0,0 +1,48 @@
++#!/usr/bin/env python3
++# piano: KEPT_POINTER_REBINDS 用 27.0.1 (26A434) kernelcache 里 AMFI __DATA_CONST,__got 的第二格 0xfffffe0007b439c8（原文件是 27.2 的地址）
++"""scripts/kc-build.py for the macOS 27 kernelcache: same arguments (KC KERNEL OUTPUT --keep ... --native ...), with kc27's layout.
++
++The top-level segment starts come from k27/segaddrs.json (k27/kc27-layout.py, the layout the kernel was linked with).
++"""
++import importlib.util
++import json
++import os
++import sys
++from pathlib import Path
++
++HERE = Path(__file__).resolve().parent
++spec = importlib.util.spec_from_file_location('kc_build', HERE.parent / 'scripts/kc-build.py')
++source = spec.loader.get_data(spec.origin).decode()
++source = source[:source.rindex('\nmain()')]          # the module without its trailing main() call
++module = importlib.util.module_from_spec(spec)
++sys.modules['kc_build'] = module
++sys.path.insert(0, str(HERE.parent / 'scripts'))
++exec(compile(source, spec.origin, 'exec'), module.__dict__)
++
++layout = json.loads((HERE / 'segaddrs.json').read_text())
++module.DATA_CONST_START = layout['DATA_CONST_START']
++module.DATA_START = layout['DATA_START']
++# No kept kext's bytes are patched: Sandbox's Data volume prefix (/System/Volumes/Data) was rewritten to /private/var/.data until
++# the root's writable entries became real firmlinks (kern_exec.c native_owner_firmlinks_prepare).
++# AMFI's only reference to PAGE_SHIFT_CONST (its GOT slot, used by CoreEntitlements' CEElementIterate alone) goes to the kernel's
++# k27_amfi_page_shift (31): that check fails when sp is within 0x80 of a page start, a fixed outcome on a fixed call chain over page
++# aligned kernel stacks, and with our kernel's frames every spawn's entitlement dictionary copy failed ("failed to create OSDictionary
++# copy: 14" panic). The kext's bytes stay as shipped.
++# The slot is the second of AMFI's __DATA_CONST,__got in the 27.2 vma2 kernelcache (0xfffffe0007b439c8 in 27.0.1's).
++module.KEPT_POINTER_REBINDS = [(0xfffffe0007b439c8, '_k27_amfi_page_shift')]
++
++# Symbols of the native kexts as linked (for k27/sym.py), next to the output: OUTPUT.natives.json {symbol: address}.
++natives = {}
++link = module.kc_native.link
++
++
++def recording_link(*args, **kwargs):
++    linked = link(*args, **kwargs)
++    natives.update(linked['symbols'])
++    return linked
++
++
++module.kc_native.link = recording_link
++module.main()
++output = Path([a for a in sys.argv[1:] if not a.startswith('-')][2])
++output.with_suffix('.natives.json').write_text(json.dumps(natives))
+diff --git a/k27/segaddrs.json b/k27/segaddrs.json
+index c7a4698..7840265 100644
+--- a/k27/segaddrs.json
++++ b/k27/segaddrs.json
+@@ -1 +1 @@
+-{"DATA_CONST_START": 8486912, "DATA_START": 61292544}
++{"DATA_CONST_START": 8454144, "DATA_START": 61161472}
+diff --git a/k27/segaddrs.sh b/k27/segaddrs.sh
+index 61a87b6..d70abe2 100755
+--- a/k27/segaddrs.sh
++++ b/k27/segaddrs.sh
+@@ -3,7 +3,7 @@ KB=0xfffffff007004000
+ echo -n "-Wl,-rename_section,__TEXT,__cstring,__TEXT_EXEC,__cstring "
+ a() { printf -- "-Wl,-segaddr,%s,0x%x " "$1" $((KB + $2)); }
+ {
+-a __TEXT 0x4000; a __DATA_CONST 0x818000; a __LASTDATA_CONST 0x9f8000; a __TEXT_EXEC 0x2df0000; a __KLD 0x3854000; a __LAST 0x3860000; a __KLDDATA 0x3a74000; a __DATA 0x3a7c000; a __BOOTDATA 0x3be0000; a __PRELINK_TEXT 0x3864000;
+-o=0x3cc4000; for n in __PRELINK_DATA __PRELINK_INFO __PLK_TEXT_EXEC __PLK_DATA_CONST __PLK_LLVM_COV __PLK_LINKEDIT; do a $n $o; o=$((o+0x4000)); done
+-a __LINKINFO 0x3e20000
++a __TEXT 0x4000; a __DATA_CONST 0x810000; a __LASTDATA_CONST 0x9f0000; a __TEXT_EXEC 0x2d6c000; a __KLD 0x3834000; a __LAST 0x3840000; a __KLDDATA 0x3a54000; a __DATA 0x3a5c000; a __BOOTDATA 0x3bc0000; a __PRELINK_TEXT 0x3844000;
++o=0x3ca4000; for n in __PRELINK_DATA __PRELINK_INFO __PLK_TEXT_EXEC __PLK_DATA_CONST __PLK_LLVM_COV __PLK_LINKEDIT; do a $n $o; o=$((o+0x4000)); done
++a __LINKINFO 0x3e00000
+ } | sed 's/ $//'
+diff --git a/overlay-piano/DroidVMEthernetReserved.cpp b/overlay-piano/DroidVMEthernetReserved.cpp
+new file mode 100644
+index 0000000..d569fdf
+--- /dev/null
++++ b/overlay-piano/DroidVMEthernetReserved.cpp
+@@ -0,0 +1,9 @@
++// piano: macOS 27.0.1's IONetworkingFamily (26A434 vma2 kernelcache) exports no symbols for IONetworkController's unused
++// reserved slots 2-5 (identical bodies folded into the later ones); the 27.2 SDK header still declares them, so DroidVMEthernet's
++// vtable names them. They are never called: like Apple's, these just panic.
++#include <IOKit/network/IONetworkController.h>
++#include <kern/debug.h>
++void IONetworkController::_RESERVEDIONetworkController2() { panic("IONetworkController reserved slot 2"); }
++void IONetworkController::_RESERVEDIONetworkController3() { panic("IONetworkController reserved slot 3"); }
++void IONetworkController::_RESERVEDIONetworkController4() { panic("IONetworkController reserved slot 4"); }
++void IONetworkController::_RESERVEDIONetworkController5() { panic("IONetworkController reserved slot 5"); }
+diff --git a/overlay-piano/display-wc.py b/overlay-piano/display-wc.py
+new file mode 100644
+index 0000000..9e2ef2f
+--- /dev/null
++++ b/overlay-piano/display-wc.py
+@@ -0,0 +1,23 @@
++#!/usr/bin/env python3
++"""piano: vgpu-wc=1 maps a guest blob's own pages write-combined in its client (DroidVMVirtioGpu3D.cpp mapResource).
++
++DroidVM's drm2kgsl host imports guest pages IO-coherent (KGSL), so the guest maps them write-back. The piano's host is msm DRM,
++whose dma-buf imports are always MSM_BO_WC (msm_gem_import): the GPU's pagetables map them without IOMMU_CACHE and the GPU does
++not snoop the CPU's caches. The guest's mapping must not cache them either. The pool (the context's shmem, CPU only on both sides)
++and a caller's own pages (CREATE_BLOB_USER) stay write-back."""
++import sys
++from pathlib import Path
++
++p = Path(sys.argv[1])
++s = p.read_text()
++old = '''        r->map = memory->createMappingInTask(task, 0, IOOptionBits(kIOMapAnywhere) | IOOptionBits(kIOMapCopybackCache));'''
++new = '''        // piano: vgpu-wc=1, write-combined guest pages for a host whose GPU imports them non-coherent (msm DRM)
++        static int wc = -1;
++        if (wc < 0) { unsigned on = 0; PE_parse_boot_argn("vgpu-wc", &on, sizeof on); wc = on != 0; }
++        const IOOptionBits cache = (wc && !r->hostVisible && !r->wired) ? IOOptionBits(kIOMapWriteCombineCache)
++                                                                         : IOOptionBits(kIOMapCopybackCache);
++        r->map = memory->createMappingInTask(task, 0, IOOptionBits(kIOMapAnywhere) | cache);'''
++if s.count(old) != 1:
++    raise SystemExit('mapResource mapping line not found once')
++p.write_text(s.replace(old, new))
++print('vgpu-wc patched', p)
+diff --git a/overlay-piano/gpu-check.mm b/overlay-piano/gpu-check.mm
+new file mode 100644
+index 0000000..370c4d6
+--- /dev/null
++++ b/overlay-piano/gpu-check.mm
+@@ -0,0 +1,135 @@
++// piano: gpu-check, a launchd job of the Data seed (stage-gpu-plugin.py --probe) that checks the Metal plugin's results, not only
++// that it loads: a clear, a CPU upload copied by the GPU, a sampled draw, and a clear of an IOSurface-backed texture (what Core
++// Animation renders into), each read back and printed on stderr (stderr-log=1), one short line per write.
++#import <Foundation/Foundation.h>
++#import <IOSurface/IOSurface.h>
++#import <Metal/Metal.h>
++#include <stdio.h>
++#include <unistd.h>
++
++static void report(const char *what, const uint8_t *p)
++{
++    fprintf(stderr, "gpu-check: %s: %02x %02x %02x %02x | %02x %02x %02x %02x\n", what, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
++}
++
++static NSString *const kSource = @R"(
++#include <metal_stdlib>
++using namespace metal;
++struct V {float4 position [[position]]; float2 uv;};
++vertex V fullscreen(uint id [[vertex_id]]) {
++    float2 uv = float2((id << 1) & 2, id & 2);
++    return {float4(uv * float2(2, -2) + float2(-1, 1), 0, 1), uv};
++}
++fragment half4 copy(V in [[stage_in]], texture2d<half> source [[texture(0)]]) {
++    constexpr sampler nearest(filter::nearest);
++    return source.sample(nearest, in.uv);
++}
++)";
++
++int main(void)
++{
++    sleep(30);
++    @autoreleasepool {
++        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
++        fprintf(stderr, "gpu-check: device %s\n", device ? device.name.UTF8String : "(none)");
++        if (!device)
++            return 1;
++        id<MTLCommandQueue> queue = [device newCommandQueue];
++        const NSUInteger n = 64;
++        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:n height:n
++                                                                                mipmapped:NO];
++        d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
++        d.storageMode = MTLStorageModeShared;
++        uint8_t pixels[64 * 64 * 4];
++
++        // 1: a clear
++        id<MTLTexture> cleared = [device newTextureWithDescriptor:d];
++        MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
++        pass.colorAttachments[0].texture = cleared;
++        pass.colorAttachments[0].loadAction = MTLLoadActionClear;
++        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
++        pass.colorAttachments[0].clearColor = MTLClearColorMake(0.25, 0.5, 0.75, 1.0);
++        id<MTLCommandBuffer> cb = [queue commandBuffer];
++        [[cb renderCommandEncoderWithDescriptor:pass] endEncoding];
++        [cb commit];
++        [cb waitUntilCompleted];
++        fprintf(stderr, "gpu-check: clear status %ld %s\n", (long)cb.status, cb.error ? cb.error.description.UTF8String : "");
++        memset(pixels, 0xee, sizeof pixels);
++        [cleared getBytes:pixels bytesPerRow:n * 4 fromRegion:MTLRegionMake2D(0, 0, n, n) mipmapLevel:0];
++        report("clear 0.25/0.5/0.75 (want bf 80 40 ff)", pixels);
++        report("clear, last pixels", pixels + sizeof pixels - 8);
++
++        // 2: a CPU upload, copied by the GPU
++        id<MTLTexture> uploaded = [device newTextureWithDescriptor:d];
++        for (NSUInteger i = 0; i < n * n; i++) {
++            pixels[4 * i] = 0x11; pixels[4 * i + 1] = 0x22; pixels[4 * i + 2] = 0x33; pixels[4 * i + 3] = 0xff;
++        }
++        [uploaded replaceRegion:MTLRegionMake2D(0, 0, n, n) mipmapLevel:0 withBytes:pixels bytesPerRow:n * 4];
++        id<MTLTexture> copied = [device newTextureWithDescriptor:d];
++        cb = [queue commandBuffer];
++        id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
++        [blit copyFromTexture:uploaded toTexture:copied];
++        [blit endEncoding];
++        [cb commit];
++        [cb waitUntilCompleted];
++        memset(pixels, 0xee, sizeof pixels);
++        [copied getBytes:pixels bytesPerRow:n * 4 fromRegion:MTLRegionMake2D(0, 0, n, n) mipmapLevel:0];
++        report("upload+blit (want 11 22 33 ff)", pixels);
++
++        // 3: a draw sampling the upload
++        NSError *error = nil;
++        id<MTLLibrary> library = [device newLibraryWithSource:kSource options:nil error:&error];
++        fprintf(stderr, "gpu-check: library %p %s\n", library, error ? error.description.UTF8String : "");
++        if (library) {
++            MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
++            pd.vertexFunction = [library newFunctionWithName:@"fullscreen"];
++            pd.fragmentFunction = [library newFunctionWithName:@"copy"];
++            pd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
++            id<MTLRenderPipelineState> pipeline = [device newRenderPipelineStateWithDescriptor:pd error:&error];
++            fprintf(stderr, "gpu-check: pipeline %p %s\n", pipeline, error ? error.description.UTF8String : "");
++            if (pipeline) {
++                id<MTLTexture> drawn = [device newTextureWithDescriptor:d];
++                pass.colorAttachments[0].texture = drawn;
++                pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
++                cb = [queue commandBuffer];
++                id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:pass];
++                [enc setRenderPipelineState:pipeline];
++                [enc setFragmentTexture:uploaded atIndex:0];
++                [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
++                [enc endEncoding];
++                [cb commit];
++                [cb waitUntilCompleted];
++                memset(pixels, 0xee, sizeof pixels);
++                [drawn getBytes:pixels bytesPerRow:n * 4 fromRegion:MTLRegionMake2D(0, 0, n, n) mipmapLevel:0];
++                report("sampled draw (want 11 22 33 ff)", pixels);
++                report("sampled draw, centre", pixels + (32 * n + 32) * 4);
++            }
++        }
++
++        // 4: a clear of an IOSurface-backed texture, read through the surface's CPU mapping
++        NSDictionary *props = @{(id)kIOSurfaceWidth: @(n), (id)kIOSurfaceHeight: @(n), (id)kIOSurfaceBytesPerElement: @4,
++                                (id)kIOSurfacePixelFormat: @((uint32_t)'BGRA')};
++        IOSurfaceRef surface = IOSurfaceCreate((__bridge CFDictionaryRef)props);
++        if (surface) {
++            MTLTextureDescriptor *sd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:n height:n
++                                                                                     mipmapped:NO];
++            sd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
++            id<MTLTexture> st = [device newTextureWithDescriptor:sd iosurface:surface plane:0];
++            fprintf(stderr, "gpu-check: surface texture %p\n", st);
++            if (st) {
++                pass.colorAttachments[0].texture = st;
++                pass.colorAttachments[0].clearColor = MTLClearColorMake(0.75, 0.5, 0.25, 1.0);
++                cb = [queue commandBuffer];
++                [[cb renderCommandEncoderWithDescriptor:pass] endEncoding];
++                [cb commit];
++                [cb waitUntilCompleted];
++                IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL);
++                report("iosurface clear 0.75/0.5/0.25 (want 40 80 bf ff)", (const uint8_t *)IOSurfaceGetBaseAddress(surface));
++                IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
++            }
++            CFRelease(surface);
++        }
++    }
++    fprintf(stderr, "gpu-check: done\n");
++    return 0;
++}
+diff --git a/overlay/kext/DroidVMDisplay/DroidVMDisplay.cpp b/overlay/kext/DroidVMDisplay/DroidVMDisplay.cpp
+index 0cf57ca..5e9eb39 100644
+--- a/overlay/kext/DroidVMDisplay/DroidVMDisplay.cpp
++++ b/overlay/kext/DroidVMDisplay/DroidVMDisplay.cpp
+@@ -116,8 +116,10 @@ extern "C" bool droidvm_virtgpu_finished(uint64_t);
+ 
+ class VirtioGpu {
+ public:
+-    static constexpr uint32_t kRequestBytes = DroidVMVirtioGpu::MaxCommand;   // a blob's page list: 8 K entries
+-    static constexpr uint32_t kMaxEntries = (kRequestBytes - 64) / sizeof(VirtioGpuEntry);
++    // A blob's page list: the transport's MaxEntries (64 MiB of scattered 4 KiB pages; past MaxCommand it goes through its huge
++    // request buffer). It was MaxCommand's 8 K entries: a 3200x2136 half-float surface (54.7 MB, ~13.4 K pages) never got a
++    // scanout resource, eight failures switched the display to copying, and the screen stayed black.
++    static constexpr uint32_t kMaxEntries = DroidVMVirtioGpu::MaxEntries;
+     const char *start() {return DroidVMVirtioGpu::start() ? nullptr : "the transport did not start (see virtio-gpu: lines)";}
+     bool ready() const {return DroidVMVirtioGpu::ready();}
+     uint64_t features() const {return DroidVMVirtioGpu::features();}
+@@ -201,7 +203,9 @@ private:
+     // The refresh rate of the timing published (boot-arg droidvm-display-hz, 30 to 240): the app's window shows 120 Hz (its gpu-0
+     // screen's refresh rate).
+     uint32_t fRefreshHz;
+-    static constexpr uint32_t kWidthMM = 286, kHeightMM = 179;   // a 13.3-inch 16:10 panel: about 114 dpi at 1280x800
++    // The panel's physical size (boot-arg droidvm-display-mm=WIDTHxHEIGHT in mm; default a 13.3-inch 16:10 panel, about 114 dpi
++    // at 1280x800). macOS offers HiDPI ("looks like" half the pixels) modes by the pixel density these give.
++    uint32_t kWidthMM = 286, kHeightMM = 179;
+     static constexpr uint32_t kColorID = 100, kTimingID = 1000;  // AppleParavirtDisplay's IDs of its first color and timing element
+ 
+     bool clean_queue_gated();
+@@ -320,6 +324,16 @@ bool DroidVMDisplay::start(IOService *provider)
+ {
+     fRefreshHz = 120;
+     PE_parse_boot_argn("droidvm-display-hz", &fRefreshHz, sizeof(fRefreshHz));
++    {
++        char mm[32] = {};
++        if (PE_parse_boot_arg_str("droidvm-display-mm", mm, sizeof(mm))) {
++            uint32_t w = 0, h = 0;
++            const char *c = mm;
++            while (*c >= '0' && *c <= '9') w = w * 10 + uint32_t(*c++ - '0');
++            if (*c == 'x') for (++c; *c >= '0' && *c <= '9';) h = h * 10 + uint32_t(*c++ - '0');
++            if (w >= 50 && w <= 2000 && h >= 50 && h <= 2000) { kWidthMM = w; kHeightMM = h; }
++        }
++    }
+     if (fRefreshHz < 30 || fRefreshHz > 240)
+         fRefreshHz = 120;
+     if (getPlatform()->getConsoleInfo(&fVideo) != kIOReturnSuccess || !fVideo.v_baseAddr || fVideo.v_depth != 32) {
+@@ -1135,8 +1149,10 @@ bool DroidVMDisplay::createDisplayAttributes()
+         if (!colors->setObject(color) || !timingColors->setObject(color) || !timings->setObject(timing))
+             break;
+         ioavTimingSetColorElements(timing, timingColors);
++        // The serial number is the size: WindowServer keeps the chosen mode per display identity, so each boot disk screen size
++        // (1600x1068 at 1x, the panel's 3200x2136 at 2x) gets its own saved choice instead of inheriting the other's.
+         if (!(appendString(product, "ManufacturerID", "APP") && appendNumber(product, "ProductID", 0) &&
+-              appendNumber(product, "SerialNumber", 0) && appendString(product, "ProductName", "DroidVM Display") &&
++              appendNumber(product, "SerialNumber", width << 16 | height) &&appendString(product, "ProductName", "DroidVM Display") &&
+               appendNumber(product, "WeekOfManufacture", 24) && appendNumber(product, "YearOfManufacture", 2021)))
+             break;
+         if (!(appendDictionary(chromaticity, "Red", point(41943, 21627)) && appendDictionary(chromaticity, "Green", point(19661, 39322)) &&
+diff --git a/overlay/kext/DroidVMDisplay/IOMobileFramebufferABI.h b/overlay/kext/DroidVMDisplay/IOMobileFramebufferABI.h
+index 435da35..30b2af8 100644
+--- a/overlay/kext/DroidVMDisplay/IOMobileFramebufferABI.h
++++ b/overlay/kext/DroidVMDisplay/IOMobileFramebufferABI.h
+@@ -361,8 +361,8 @@ public:
+     virtual IOReturn trigger_pswap_dependent_thread();                                                                             // 480 0x106a
+     virtual IOReturn send_clamshell_state();                                                                                       // 481 0xf761
+     virtual IOReturn get_shared_disp_property();                                                                                   // 482 0xc09c
+-    uint8_t iomfbLegacyState[0x1de0 - sizeof(IOService)];   // the instance size of its MetaClass
++    uint8_t iomfbLegacyState[0x1dd8 - sizeof(IOService)];   // the instance size of its MetaClass
+ };
+ 
+-static_assert(sizeof(IOMobileFramebufferLegacy) == 0x1de0, "IOMobileFramebufferLegacy instance size");
++static_assert(sizeof(IOMobileFramebufferLegacy) == 0x1dd8, "IOMobileFramebufferLegacy instance size");
+ enum : unsigned {IOMobileFramebufferLegacySlots = 483};
+diff --git a/overlay/metal/NativeAdrenoMetalPlugin.mm b/overlay/metal/NativeAdrenoMetalPlugin.mm
+index 17b0344..88f09f0 100644
+--- a/overlay/metal/NativeAdrenoMetalPlugin.mm
++++ b/overlay/metal/NativeAdrenoMetalPlugin.mm
+@@ -344,25 +344,43 @@ static id deviceForPort(io_service_t port)
+         setenv("CA_DISABLE_FRAMEBUFFER_COMPRESSION", "1", 1);
+         CFPreferencesSetAppValue(CFSTR("CAEnableFramebufferCompression"), kCFBooleanFalse, kCFPreferencesCurrentApplication);
+         CFPreferencesSetAppValue(CFSTR("CAEnableIOSurfaceCompression"), kCFBooleanFalse, kCFPreferencesCurrentApplication);
+-        // The runtime needs a writable shader-cache directory: the user cache directory, the process's own folder in it (a platform
+-        // sandbox lets a service write only there), the temp directory, else /private/var/tmp.
+-        char candidates[4][512] = {};
+-        if (!confstr(_CS_DARWIN_USER_CACHE_DIR, candidates[0], sizeof candidates[0] - 16))
+-            candidates[0][0] = 0;
+-        if (NSString *bundle = NSBundle.mainBundle.bundleIdentifier; candidates[0][0] && bundle.length) {
+-            snprintf(candidates[1], sizeof candidates[1] - 16, "%s%s/", candidates[0], bundle.UTF8String);
+-            mkdir(candidates[1], 0700);
++        // The runtime needs a writable shader-cache directory. First where Metal itself keeps one, the user cache directory's
++        // com.apple.metal/<bundle or program> -- every system sandbox profile allows METAL_CACHE_PATH (iconservicesagent's allows
++        // neither the cache directory itself nor the process's folder in it: every write there was denied, icons came out empty) --
++        // then the user cache directory, the process's own folder in it, the temp directory, else /private/var/tmp. A directory
++        // counts as writable when a file can be made in it: access() does not ask the sandbox.
++        char candidates[5][512] = {};
++        char cache[480] = {};
++        if (!confstr(_CS_DARWIN_USER_CACHE_DIR, cache, sizeof cache))
++            cache[0] = 0;
++        NSString *bundle = NSBundle.mainBundle.bundleIdentifier;
++        const char *owner = bundle.length ? bundle.UTF8String : getprogname();
++        if (cache[0]) {
++            snprintf(candidates[0], sizeof candidates[0] - 16, "%scom.apple.metal/", cache);
++            mkdir(candidates[0], 0700);
++            snprintf(candidates[0], sizeof candidates[0] - 16, "%scom.apple.metal/%s/", cache, owner);
++            mkdir(candidates[0], 0700);
++            strlcpy(candidates[1], cache, sizeof candidates[1] - 16);
++            if (bundle.length) {
++                snprintf(candidates[2], sizeof candidates[2] - 16, "%s%s/", cache, bundle.UTF8String);
++                mkdir(candidates[2], 0700);
++            }
+         }
+-        if (!confstr(_CS_DARWIN_USER_TEMP_DIR, candidates[2], sizeof candidates[2] - 16))
+-            candidates[2][0] = 0;
+-        strlcpy(candidates[3], "/private/var/tmp/", sizeof candidates[3]);
+-        for (unsigned i = 0; i < 4 && !device; i++) {
++        if (!confstr(_CS_DARWIN_USER_TEMP_DIR, candidates[3], sizeof candidates[3] - 16))
++            candidates[3][0] = 0;
++        strlcpy(candidates[4], "/private/var/tmp/", sizeof candidates[4]);
++        for (unsigned i = 0; i < 5 && !device; i++) {
+             if (!candidates[i][0])
+                 continue;
+             strlcat(candidates[i], "m2v", sizeof candidates[i]);
+             mkdir(candidates[i], 0700);
+-            if (access(candidates[i], W_OK) != 0)
++            char probe[600];
++            snprintf(probe, sizeof probe, "%s/.probe-%d", candidates[i], getpid());
++            int fd = open(probe, O_CREAT | O_EXCL | O_WRONLY, 0600);
++            if (fd < 0)
+                 continue;
++            close(fd);
++            unlink(probe);
+             @try {
+                 device = native_bridge_metal_open(turnip, candidates[i], registryID, missingSelector);
+             } @catch (NSException *exception) {
+diff --git a/patches/droidvm-audio/0004-ring-whole-periods.patch b/patches/droidvm-audio/0004-ring-whole-periods.patch
+new file mode 100644
+index 0000000..2620922
+--- /dev/null
++++ b/patches/droidvm-audio/0004-ring-whole-periods.patch
+@@ -0,0 +1,19 @@
++The engine ring is a whole number of periods. Upstream sized it 8192 frames, which 240-frame periods do not divide: the
++period at frames 7952..8191 ran 832 bytes past the end of the ring, read by droidvm_snd_play and then zeroed by the engine.
++On the piano (Linux host, PipeWire) the page after the speaker ring was unmapped: a kernel data abort in memmove the first
++time Safari played a sound (2026-11-09).
++
++--- a/DroidVMAudio.cpp
+++++ b/DroidVMAudio.cpp
++@@ -64,7 +64,10 @@
++ 
++ namespace {
++ enum : uint32_t {
++-    Rate = 48000, RingFrames = 8192, PeriodFrames = 240,   // 5 ms
+++    // The ring a whole number of periods (32, 160 ms): the engine moves a period at a time and never splits one at the wrap, so
+++    // with 8192 frames (not a multiple of 240) the period at 7952..8191 ran 832 bytes past the ring's end -- read by
+++    // droidvm_snd_play's memcpy and then cleared by the bzero after it (a kernel data abort where the next page is unmapped).
+++    Rate = 48000, RingFrames = 32 * 240, PeriodFrames = 240,   // 5 ms
++     OutputChannels = 2, InputChannels = 1, StreamID = 1,
++     SafetyOffset = 2 * PeriodFrames, Latency = PeriodFrames,
++     OutputLead = 8 * PeriodFrames,   // the silence the transport queues ahead as the output starts (DroidVMVirtioSnd.c's SND_PREFILL)
+diff --git a/patches/droidvm-video/0013-card-role-any-case.patch b/patches/droidvm-video/0013-card-role-any-case.patch
+new file mode 100644
+index 0000000..a916a15
+--- /dev/null
++++ b/patches/droidvm-video/0013-card-role-any-case.patch
+@@ -0,0 +1,37 @@
++--- a/DroidVMVTHost.cpp	2026-11-10 02:22:11
+++++ b/DroidVMVTHost.cpp	2026-11-10 02:22:11
++@@ -518,11 +518,24 @@
++     IOLockUnlock(gTableLock);
++ }
++ 
+++// Whether device `d`'s card names `role` ("decoder", "encoder"), in any case: MediaCodec's cards say "c2.qti.avc.decoder", a
+++// Linux host's V4L2 driver its own name ("Iris Decoder" on the SM8750's Iris).
+++static bool cardIs(unsigned d, const char *role) {
+++    const char *card = droidvm_media_card(d);
+++    const size_t n = strlen(role);
+++    for (size_t i = 0; card[i] && i < 33; ++i) {
+++        size_t j = 0;
+++        while (j < n && card[i + j] && (card[i + j] | 0x20) == role[j]) ++j;
+++        if (j == n) return true;
+++    }
+++    return false;
+++}
+++
++ unsigned decoderDevice() {
++     static unsigned device = ~0u;
++     if (device != ~0u) return device;
++     for (unsigned d = 0; d < droidvm_media_devices(); ++d) {
++-        if (!droidvm_media_is_up(d) || !strnstr(droidvm_media_card(d), "decoder", 33)) continue;
+++        if (!droidvm_media_is_up(d) || !cardIs(d, "decoder")) continue;
++         droidvm_media_set_sink(d, mediaSink, reinterpret_cast<void *>(uintptr_t(d)));
++         device = d;
++         break;
++@@ -534,7 +547,7 @@
++     static unsigned device = ~0u;
++     if (device != ~0u) return device;
++     for (unsigned d = 0; d < droidvm_media_devices(); ++d) {
++-        if (!droidvm_media_is_up(d) || !strnstr(droidvm_media_card(d), "encoder", 33)) continue;
+++        if (!droidvm_media_is_up(d) || !cardIs(d, "encoder")) continue;
++         droidvm_media_set_sink(d, mediaSink, reinterpret_cast<void *>(uintptr_t(d)));
++         device = d;
++         break;
+diff --git a/patches/droidvm-video/0014-decoder-rating-1000.patch b/patches/droidvm-video/0014-decoder-rating-1000.patch
+new file mode 100644
+index 0000000..8dceada
+--- /dev/null
++++ b/patches/droidvm-video/0014-decoder-rating-1000.patch
+@@ -0,0 +1,13 @@
++--- a/DroidVMVTHost.cpp	2026-11-10 03:19:57
+++++ b/DroidVMVTHost.cpp	2026-11-10 03:19:57
++@@ -2263,7 +2263,9 @@
++             const int type = p->string(codecs[i][0]);
++             const int keys[5] = {p->string("VTCodecType"), p->string("CMClassImplementationName"), p->string("IsPreferredInternalPlugin"),
++                                  p->string("VTRating"), p->string("CMClassImplementationID")};
++-            const int values[5] = {p->array(&type, 1), p->string(codecs[i][2]), p->boolean(false), p->integer(400), p->string(codecs[i][1])};
+++            // Rated above every decoder of Apple's for the codec (avd 400, gva, vcp 200): with 400 VideoToolbox kept HEVC on its own GPU/software
+++            // decoders (no session ever reached the device; H.264 came here as avd's hardware is absent).
+++            const int values[5] = {p->array(&type, 1), p->string(codecs[i][2]), p->boolean(false), p->integer(1000), p->string(codecs[i][1])};
++             entries[i] = p->dict(keys, values, 5);
++         }
++         const int list = p->array(entries, decoderDevice() == ~0u ? 0 : 2);
+diff --git a/patches/droidvm-video/0015-dsts-accept-format.patch b/patches/droidvm-video/0015-dsts-accept-format.patch
+new file mode 100644
+index 0000000..dbb7915
+--- /dev/null
++++ b/patches/droidvm-video/0015-dsts-accept-format.patch
+@@ -0,0 +1,13 @@
++--- a/DroidVMVTHost.cpp	2026-11-10 04:58:16
+++++ b/DroidVMVTHost.cpp	2026-11-10 04:58:16
++@@ -2923,6 +2923,10 @@
++         break;
++     case cc("+dec"): createDecoder(c, h, m, n); break;
++     case cc("dset"): replyStatus(c, h, 0); break;
+++    // dsts: whether the session takes a (new) format description (,fds; VTDecompressionSessionCanAcceptFormatDescription).
+++    // Answered -12900 by default, VideoToolbox dropped every HEVC session before its first frame (its sample descriptions
+++    // carry colr/chrm/clli extensions and are checked) and decoded in software. The device takes what the stream says.
+++    case cc("dsts"): replyStatus(c, h, 0); break;
++     case cc("dmul"): replyStatus(c, h, 0); break;
++     case cc("dsta"): {
++         const int error = s ? startSession(s, m, n) : -12903;
+diff --git a/patches/droidvm-video/0016-hvcc-skip-sei.patch b/patches/droidvm-video/0016-hvcc-skip-sei.patch
+new file mode 100644
+index 0000000..9f4f035
+--- /dev/null
++++ b/patches/droidvm-video/0016-hvcc-skip-sei.patch
+@@ -0,0 +1,20 @@
++--- a/DroidVMVTHost.cpp	2026-11-10 05:10:08
+++++ b/DroidVMVTHost.cpp	2026-11-10 05:10:08
++@@ -710,12 +710,16 @@
++         p += 23;
++         for (unsigned a = 0; a < arrays; ++a) {
++             if (end - p < 3) return false;
+++            // SEI arrays (prefix 39, suffix 40) are no parameter sets: x265 (every ffmpeg-made HEVC file) keeps a ~2 KB SEI
+++            // with its settings in hvcC, which overflowed parameterSets and failed the session (-12909) before any frame.
+++            const unsigned type = p[0] & 0x3f;
+++            const bool sei = type == 39 || type == 40;
++             const unsigned count = be16(p + 1);
++             p += 3;
++             for (unsigned i = 0; i < count; ++i) {
++                 if (end - p < 2) return false;
++                 const uint32_t n = be16(p);
++-                if (uint32_t(end - p) < 2 + n || !add(p + 2, n)) return false;
+++                if (uint32_t(end - p) < 2 + n || (!sei && !add(p + 2, n))) return false;
++                 p += 2 + n;
++             }
++         }
+diff --git a/patches/droidvm-video/0017-dsts-decline-image-tiles.patch b/patches/droidvm-video/0017-dsts-decline-image-tiles.patch
+new file mode 100644
+index 0000000..58b4b4b
+--- /dev/null
++++ b/patches/droidvm-video/0017-dsts-decline-image-tiles.patch
+@@ -0,0 +1,22 @@
++--- a/DroidVMVTHost.cpp	2026-11-10 05:51:43
+++++ b/DroidVMVTHost.cpp	2026-11-10 05:51:43
++@@ -2929,8 +2929,17 @@
++     case cc("dset"): replyStatus(c, h, 0); break;
++     // dsts: whether the session takes a (new) format description (,fds; VTDecompressionSessionCanAcceptFormatDescription).
++     // Answered -12900 by default, VideoToolbox dropped every HEVC session before its first frame (its sample descriptions
++-    // carry colr/chrm/clli extensions and are checked) and decoded in software. The device takes what the stream says.
++-    case cc("dsts"): replyStatus(c, h, 0); break;
+++    // carry colr/chrm/clli extensions and are checked) and decoded in software. The device takes a video's format; a
+++    // still image's HEVC tiles (HEIC: 512x512 grids, decoded with dtil, which this host does not do) stay with Apple's
+++    // decoders -- accepted, ImageIO waited forever on its tile decodes and the login window and wallpapers stayed black.
+++    case cc("dsts"): {
+++        Param fds;
+++        ImageDescription d;
+++        const bool video = param(m, n, cc(",fds"), fds) && imageDescription(fds.value, fds.size, d) &&
+++                           (d.width > 512 || d.height > 512);
+++        replyStatus(c, h, video ? 0 : -12900);
+++        break;
+++    }
++     case cc("dmul"): replyStatus(c, h, 0); break;
++     case cc("dsta"): {
++         const int error = s ? startSession(s, m, n) : -12903;
+diff --git a/patches/xnu-12377/0050-vm-guest-tlb.patch b/patches/xnu-12377/0050-vm-guest-tlb.patch
+new file mode 100644
+index 0000000..31278b6
+--- /dev/null
++++ b/patches/xnu-12377/0050-vm-guest-tlb.patch
+@@ -0,0 +1,79 @@
++From 7354e15d5c8f027fee43a69031c0e7dbb8e63ca5 Mon Sep 17 00:00:00 2001
++From: leozhang <zwj8727@gmail.com>
++Date: Mon, 9 Nov 2026 21:06:04 +0800
++Subject: [PATCH] k27: VM-guest TLB safety: 16-bit ASIDs and non-global
++ shared-region mappings (XNU_VM_GUEST_TLB)
++
++Gunyah does not flush a CPU's TLB when another vCPU of the VM runs there. With 8-bit ASIDs
++XNU multiplexes address spaces onto one ASID and keeps them apart with per-CPU bookkeeping
++and core-local flushes; after a vCPU migration processes read each other's pages (launchd
++exited reading sort's _pthread_count). Shared-region mappings were global and also only
++flushed core-locally. BCM2837.h now defines XNU_VM_GUEST_TLB (default 1): HAS_16BIT_ASID
++(unique ASID per address space, broadcast-flushed before reuse) and nG shared-region PTEs.
++asidtest with forced migrations: 0 cross-address-space reads (8-bit kernel: several in 45 s).
++
++Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
++---
++ osfmk/arm/pmap/pmap.c           |  6 ++++++
++ osfmk/arm64/cpu.c               |  2 ++
++ pexpert/pexpert/arm64/BCM2837.h | 12 ++++++++++++
++ 3 files changed, 20 insertions(+)
++
++diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
++index 79d0bc1..609b521 100644
++--- a/osfmk/arm/pmap/pmap.c
+++++ b/osfmk/arm/pmap/pmap.c
++@@ -6162,6 +6162,12 @@ pmap_construct_pte(
++ 	} else {
++ 		if (pmap->type != PMAP_TYPE_NESTED) {
++ 			pte |= ARM_PTE_NG;
+++#if XNU_VM_GUEST_TLB
+++		} else if (true) {
+++			/* Shared-region entries tagged with the ASID of the address space that walked them (BCM2837.h): a global one
+++			 * outlives the core-local flush pmap_switch() gives it on a vCPU that has moved to another physical CPU. */
+++			pte |= ARM_PTE_NG;
+++#endif
++ 		} else if ((pmap->nested_region_unnested_table_bitmap)
++ 		    && (va >= pmap->nested_region_addr)
++ 		    && (va < (pmap->nested_region_addr + pmap->nested_region_size))) {
++diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
++index d10d7a1..04ecbbc 100644
++--- a/osfmk/arm64/cpu.c
+++++ b/osfmk/arm64/cpu.c
++@@ -882,8 +882,10 @@ cpu_data_init(cpu_data_t *cpu_data_ptr)
++ 	pmap_cpu_data_ptr->pv_free_spill_marker = NULL;
++ #if !CONFIG_SPTM
++ 	pmap_cpu_data_ptr->cpu_nested_pmap = (struct pmap *) NULL;
+++#if !HAS_16BIT_ASID   /* XNU_VM_GUEST_TLB (BCM2837.h): no per-CPU alias bookkeeping with 16-bit ASIDs */
++ 	bzero(&(pmap_cpu_data_ptr->cpu_sw_asids[0]), sizeof(pmap_cpu_data_ptr->cpu_sw_asids));
++ #endif
+++#endif
++ #endif /* !XNU_MONITOR */
++ 	cpu_data_ptr->halt_status = CPU_NOT_HALTED;
++ #if __ARM_KERNEL_PROTECT__
++diff --git a/pexpert/pexpert/arm64/BCM2837.h b/pexpert/pexpert/arm64/BCM2837.h
++index 0d7e976..e6e180a 100644
++--- a/pexpert/pexpert/arm64/BCM2837.h
+++++ b/pexpert/pexpert/arm64/BCM2837.h
++@@ -15,6 +15,18 @@
++ #define HAS_APPLE_PAC 1
++ #endif
++ #define BCM2837_BRINGUP
+++
+++/* XNU_VM_GUEST_TLB (k27/build-kernel27.sh): a guest of a hypervisor that does not flush a CPU's TLB when another vCPU of the VM
+++ * comes to run there (Gunyah on the piano: the vCPUs are host threads the host migrates). No correctness may rest on core-local
+++ * TLB invalidation then: 16-bit ASIDs, one per address space and broadcast-flushed before reuse (with 8-bit ones address spaces
+++ * share an ASID, told apart by per-CPU bookkeeping and core-local flushes: processes read each other's pages after a migration),
+++ * and non-global shared-region mappings (pmap.c), whose global entries were also only flushed core-locally. */
+++#ifndef XNU_VM_GUEST_TLB
+++#define XNU_VM_GUEST_TLB 1   /* the piano's k27 is only ever such a guest; here, so assembly (TCR_EL1.AS) agrees with C */
+++#endif
+++#if XNU_VM_GUEST_TLB
+++#define HAS_16BIT_ASID 1
+++#endif
++ #define ARM_ARCH_TIMER
++ 
++ #define __ARM_ARCH__              8
++-- 
++2.55.0
++
+diff --git a/patches/xnu-12377/0051-vm-guest-poweroff-unmount-bootstrap-tables.patch b/patches/xnu-12377/0051-vm-guest-poweroff-unmount-bootstrap-tables.patch
+new file mode 100644
+index 0000000..a8d0f48
+--- /dev/null
++++ b/patches/xnu-12377/0051-vm-guest-poweroff-unmount-bootstrap-tables.patch
+@@ -0,0 +1,99 @@
++From f0d10c6165be3ded1acf3945c38506414065f139 Mon Sep 17 00:00:00 2001
++From: leozhang <zwj8727@gmail.com>
++Date: Tue, 10 Nov 2026 00:53:22 +0800
++Subject: [PATCH] k27: VM guest: PSCI power-off at halt, dead union parents at
++ the final unmount, bootstrap tables for >6 GiB
++
++- halt_all_cpus ends with PSCI SYSTEM_OFF/SYSTEM_RESET over HVC (crosvm's /psci method): Gunyah ends the VM and crosvm exits
++  (XNU_VM_GUEST, set by build-k27-piano.sh).
++- vnode_rele_internal: a VBAD vnode released past zero is a union parent across mounts (SystemOS over /) reclaimed by the halt's
++  forced unmount; restore the count instead of panicking (counted in vnode_rele_dead_past_zero).
++- BOOTSTRAP_TABLE_SIZE for native 4 KiB: 48 pages (2 + 2*(GiB+1), up to 22 GiB); 16 overran start.s's area above 6 GiB.
++
++Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
++---
++ bsd/vfs/vfs_subr.c             | 18 ++++++++++++++++++
++ osfmk/arm/pmap/pmap.h          |  7 ++++---
++ osfmk/arm64/machine_routines.c | 11 +++++++++++
++ 3 files changed, 33 insertions(+), 3 deletions(-)
++
++diff --git a/bsd/vfs/vfs_subr.c b/bsd/vfs/vfs_subr.c
++index 456b500..282c705 100644
++--- a/bsd/vfs/vfs_subr.c
+++++ b/bsd/vfs/vfs_subr.c
++@@ -2661,6 +2661,10 @@ vnode_rele_ext(vnode_t vp, int fmode, int dont_reenter)
++ }
++ 
++ 
+++#if XNU_VM_GUEST
+++uint32_t vnode_rele_dead_past_zero;
+++#endif
+++
++ void
++ vnode_rele_internal(vnode_t vp, int fmode, int dont_reenter, int locked)
++ {
++@@ -2677,6 +2681,20 @@ vnode_rele_internal(vnode_t vp, int fmode, int dont_reenter, int locked)
++ #endif
++ 	/* Enable atomic ops on v_usecount without the vnode lock */
++ 	old_usecount = os_atomic_dec_orig(&vp->v_usecount, relaxed);
+++#if XNU_VM_GUEST
+++	if (old_usecount < 1 && vp->v_type == VBAD) {
+++		/*
+++		 * A reclaimed vnode a child still names as its parent across mounts: the union of the SystemOS
+++		 * volume over / (patches 0015/0023/0024) gives vnodes of / parents on the SystemOS mount, which
+++		 * the halt's forced unmount reclaims first, dropping its references; reclaiming the child then
+++		 * releases the parent once more (vnode_update_identity). Nothing holds the dead vnode: put the
+++		 * count back and carry on rather than panic in the middle of the shutdown.
+++		 */
+++		os_atomic_inc(&vp->v_usecount, relaxed);
+++		os_atomic_inc(&vnode_rele_dead_past_zero, relaxed);   /* for the host rig (gpeek) */
+++		goto done;
+++	}
+++#endif
++ 	if (old_usecount < 1) {
++ 		/*
++ 		 * Because we allow atomic ops on usecount (in lookup only, under
++diff --git a/osfmk/arm/pmap/pmap.h b/osfmk/arm/pmap/pmap.h
++index b236ca6..ab1de89 100644
++--- a/osfmk/arm/pmap/pmap.h
+++++ b/osfmk/arm/pmap/pmap.h
++@@ -116,10 +116,11 @@
++  */
++ #define BOOTSTRAP_TABLE_SIZE (ARM_PGBYTES * 34)
++ #elif !defined(APPLE_ARM64_ARCH_FAMILY) && !__ARM_16K_PG__
++-/* Native 4 KiB: two roots plus up to seven L2 pages per 6 GiB mapping.
++- * The physical and virtual bases may each straddle an extra 1 GiB region.
+++/* Native 4 KiB: two roots plus, for each of the two bootstrap mappings (V=P and KVA), one L2 page per GiB of DRAM
+++ * and one more where the base straddles a 1 GiB region: 2 + 2 * (GiB + 1). 16 pages covered 6 GiB: a 7 GiB guest
+++ * overran the area in start.s and died before its first message (the piano, 2026-11-10). 48 cover 22 GiB (192 KiB).
++  */
++-#define BOOTSTRAP_TABLE_SIZE (ARM_PGBYTES * 16)
+++#define BOOTSTRAP_TABLE_SIZE (ARM_PGBYTES * 48)
++ #else /* defined(ARM_LARGE_MEMORY) */
++ #define BOOTSTRAP_TABLE_SIZE (ARM_PGBYTES * 8)
++ #endif /* defined(ARM_LARGE_MEMORY) */
++diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
++index f456377..2b62e95 100644
++--- a/osfmk/arm64/machine_routines.c
+++++ b/osfmk/arm64/machine_routines.c
++@@ -934,6 +934,17 @@ halt_all_cpus(boolean_t reboot)
++ 		printf("CPU halted\n");
++ 		PEHaltRestart(kPEHaltCPU);
++ 	}
+++#if XNU_VM_GUEST
+++	/*
+++	 * A VM guest ends here: PSCI SYSTEM_RESET or SYSTEM_OFF through the conduit crosvm's FDT names (/psci method "hvc"),
+++	 * so the hypervisor ends the VM and crosvm exits (or restarts it), where the platform expert has no power-off of its
+++	 * own and its reset went through SMC, which Gunyah does not route to PSCI.
+++	 */
+++	{
+++		register uint64_t x0 __asm__("x0") = reboot ? 0x84000009ULL : 0x84000008ULL;
+++		__asm__ volatile ("hvc #0" : "+r"(x0) : : "x1", "x2", "x3", "memory");
+++	}
+++#endif
++ 	while (1) {
++ 		;
++ 	}
++-- 
++2.55.0
++
+diff --git a/patches/xnu-12377/0052-vm-guest-zone-va-12g.patch b/patches/xnu-12377/0052-vm-guest-zone-va-12g.patch
+new file mode 100644
+index 0000000..8e4145d
+--- /dev/null
++++ b/patches/xnu-12377/0052-vm-guest-zone-va-12g.patch
+@@ -0,0 +1,39 @@
++From a7e76ffcb80c34acc2c689e46fa8ff8946ffe5c4 Mon Sep 17 00:00:00 2001
++From: leozhang <zwj8727@gmail.com>
++Date: Tue, 10 Nov 2026 03:16:42 +0800
++Subject: [PATCH] k27: VM guest: 12 GiB of zone VA instead of 24 (guest RAM
++ past 8 GiB)
++
++The kernel map shares its VA window with the physical aperture, which grows with the guest's RAM.
++With 24 GiB reserved for zones the pointer ranges were ~640 MiB each at 8 GiB of RAM and negative at
++10 GiB (kmem_add_extra_claims: free_size - claims underflowed, the kernel stopped in startup). The zone
++map is at most 8 GiB (~3/8 of RAM below that). 10, 12 and 13 GiB guests boot and log in.
++
++Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
++---
++ osfmk/kern/zalloc.c | 9 +++++++++
++ 1 file changed, 9 insertions(+)
++
++diff --git a/osfmk/kern/zalloc.c b/osfmk/kern/zalloc.c
++index 9edf8c5..c831172 100644
++--- a/osfmk/kern/zalloc.c
+++++ b/osfmk/kern/zalloc.c
++@@ -170,6 +170,15 @@ ZONE_DEFINE_TYPE(percpu_u64_zone, "percpu.64", uint64_t,
++ #if   XNU_PLATFORM_MacOSX
++ #define ZONE_MAP_MAX            (32ULL << 30)
++ #define ZONE_MAP_VA_SIZE        (128ULL << 30)
+++#elif XNU_VM_GUEST
+++/*
+++ * VM guest (4 KiB pages, no ARM_LARGE_MEMORY): the kernel map shares its VA window with the physical
+++ * aperture, which grows with the guest's RAM. With 24 GiB reserved for zones the pointer ranges were
+++ * ~640 MiB each at 8 GiB of RAM and negative at 10 GiB (kmem_add_extra_claims). The zone map itself
+++ * is at most ZONE_MAP_MAX (and ~3/8 of RAM below that), so 12 GiB of VA is plenty.
+++ */
+++#define ZONE_MAP_MAX            (8ULL << 30)
+++#define ZONE_MAP_VA_SIZE        (12ULL << 30)
++ #else
++ #define ZONE_MAP_MAX            (8ULL << 30)
++ #define ZONE_MAP_VA_SIZE        (24ULL << 30)
++-- 
++2.55.0
++
+diff --git a/scripts/piano-frontend-patch.py b/scripts/piano-frontend-patch.py
+new file mode 100644
+index 0000000..cfe076c
+--- /dev/null
++++ b/scripts/piano-frontend-patch.py
+@@ -0,0 +1,81 @@
++#!/usr/bin/env python3
++# piano: the frontend edits of build-metal-plugin.sh, as a file; an edit whose anchor this NativeMetal (fb063de) lacks is skipped
++import sys
++s = open(sys.argv[1]).read()
++for old, new in [
++    (' NBHeap *heap=[NBHeap new];heap.handle=handle;',
++     ' NBLOG(@"native-metal: heap %lu bytes type %ld options %lx -> %llu",(unsigned long)d.size,(long)d.type,(unsigned long)d.resourceOptions,'
++     'nmb_heap_size(handle));\n NBHeap *heap=[NBHeap new];heap.handle=handle;'),
++    # The encoding thread (NativeMetal fd9fbe1: the runtime's half of each encoder call on a thread of its own, fed in batches) in
++    # WindowServer as in backboardd, the render server it was made for; /private/var/ngpu/debug/no-encode-thread turns it off.
++    ('                                (isRenderServer() || access("/private/var/ngpu/debug/encode-thread",F_OK)==0);',
++     '                                (isRenderServer() || !strcmp(getprogname(),"WindowServer") ||\n'
++     '                                 access("/private/var/ngpu/debug/encode-thread",F_OK)==0);'),
++    # The runtime converts a two-plane YCbCr texture on the CPU at every encoder that uses it (planes copied to staging, then a
++    # dispatch): WindowServer's 4096x2160 wallpaper frames (YCBCR8_444_2P) took the 4 GiB guest into jetsam. Above 1 Mpx it is
++    # refused here; the server has no other way to draw the wallpaper (refused, the desktop is never repainted where windows moved
++    # off it), so the 8-bit formats are converted once per surface contents before this (the frontend's convertedYCbCrTexture) and
++    # only the others still reach this refusal; the small backdrop samples (512x512) are made.
++    # Where the runtime reads 4:2:0 planes in place (METAL2VULKAN_YCBCR_PLANES_ONLY, set for WindowServer by the plugin; patches/
++    # metal2vulkan-macos/0001), YCBCR8_420_2P and YCBCR10_420_2P (500, 505) over plane 0 go to it: neither converted on the CPU nor refused.
++    (' if(id<MTLTexture> converted=convertedYCbCrTexture(self,d,surface,plane))return converted;\n',
++     ' static const bool planesInPlace=getenv("METAL2VULKAN_YCBCR_PLANES_ONLY")!=nullptr;\n'
++     ' const bool inPlace=planesInPlace && plane==0 && (d.pixelFormat==500 || d.pixelFormat==505);\n'
++     ' if(inPlace){static std::atomic<unsigned> made;if(made++<4)NBLOG(@"native-metal: surface texture %lux%lu YCbCr format %lu read in place",'
++     '(unsigned long)d.width,(unsigned long)d.height,(unsigned long)d.pixelFormat);}\n'
++     ' if(id<MTLTexture> converted=inPlace?nil:convertedYCbCrTexture(self,d,surface,plane))return converted;\n'),
++    # Such a texture reads the video frame's own pages when the GPU runs a pass that samples it (no copy), so its surface is counted in
++    # use from the commit of each command buffer that binds it until that command buffer completes: a decoder's pool reuses a surface no
++    # one uses, and wrote the next frame into one a lock-screen pass was still reading (black bands a CTU row high). Counted for the
++    # texture's life instead, every pool surface stayed in use (WindowServer keeps a texture of each), and the decoder, out of
++    # surfaces, showed grey frames but for what moved.
++    ('@property(nonatomic,strong) NSMutableSet *surfaces;',
++     '@property(nonatomic,strong) NSMutableSet *surfaces;\n@property(nonatomic,strong) NSMutableArray *surfacesInUse;'),
++    ('  flushSurfaces(_surfaces);\n  if(gLogTextures)dumpSurfacesOnce(_surfaces,_resourceOwners);\n',
++     '  flushSurfaces(_surfaces);\n'
++     '  if(getenv("METAL2VULKAN_YCBCR_PLANES_ONLY"))for(NBTexture *texture in _surfaces)\n'
++     '   if(texture.surface && (texture.descriptor.format==500 || texture.descriptor.format==505)) {\n'
++     '    if(!_surfacesInUse)_surfacesInUse=[NSMutableArray array];\n'
++     '    IOSurfaceIncrementUseCount(texture.surface);[_surfacesInUse addObject:texture];\n'
++     '   }\n'
++     '  if(gLogTextures)dumpSurfacesOnce(_surfaces,_resourceOwners);\n'),
++    (' [_surfaces removeAllObjects];[_writtenSurfaces removeAllObjects];[_resourceOwners removeAllObjects];\n',
++     ' for(NBTexture *texture in _surfacesInUse)IOSurfaceDecrementUseCount(texture.surface);\n _surfacesInUse=nil;\n'
++     ' [_surfaces removeAllObjects];[_writtenSurfaces removeAllObjects];[_resourceOwners removeAllObjects];\n'),
++    (' NmbTextureDescriptor descriptor;if(!buffer || !textureDescriptor(d,&descriptor))return nil;\n const uint64_t base=(uintptr_t)IOSurfaceGetBaseAddress(surface),',
++     ' NmbTextureDescriptor descriptor;if(!buffer || !textureDescriptor(d,&descriptor))return nil;\n'
++     ' if(d.pixelFormat>=500 && d.pixelFormat<600 && (uint64_t)d.width*d.height>1024*1024 &&\n'
++     '    !(getenv("METAL2VULKAN_YCBCR_PLANES_ONLY") && plane==0 && (d.pixelFormat==500 || d.pixelFormat==505))){\n'
++     '  static std::atomic<unsigned> refusals;   // the server asks again at every frame\n'
++     '  if(refusals++<4)NBLOG(@"native-metal: surface texture refused: %lux%lu YCbCr format %lu converts on the CPU",(unsigned long)d.width,'
++     '(unsigned long)d.height,(unsigned long)d.pixelFormat);\n'
++     '  return nil;}\n'
++     ' const uint64_t base=(uintptr_t)IOSurfaceGetBaseAddress(surface),'),
++]:
++    if s.count(old) != 1:
++        print('piano: frontend edit skipped (not in this NativeMetal):', old.strip().splitlines()[0][:90], file=sys.stderr)
++        continue
++    s = s.replace(old, new)
++# NMB_FRAME_ROWS=1 (diagnostics, research/debug-2026-10-27): WindowServer's telemetry table every 20 s without NATIVE_METAL_TIMING in
++# its launchd job, and each K row (a commit) with its GPU time (GPUEndTime - GPUStartTime) and its encoding (command buffer made to commit).
++import os
++if os.environ.get('NMB_FRAME_ROWS') == '1':
++    for old, new in [
++        (' if(!getenv("NATIVE_METAL_TIMING"))return;\n',
++         ' if(!getenv("NATIVE_METAL_TIMING") && strcmp(getprogname(),"WindowServer"))return;\n'),
++        ('struct CommitRecord {uint64_t committedUs=0,callbackUs=0,ageUs=0;',
++         'struct CommitRecord {uint64_t committedUs=0,callbackUs=0,ageUs=0,gpuUs=0;'),
++        (' {\n  const uint64_t took=nowUs()-commandBuffer.committedUs;\n',
++         ' {\n  const uint64_t took=nowUs()-commandBuffer.committedUs;\n'
++         '  const double gpuSeconds=[commandBuffer GPUEndTime]-[commandBuffer GPUStartTime];\n'),
++        ('  if(r.index==commandBuffer.commitIndex) {\n   r.callbackUs=took;\n',
++         '  if(r.index==commandBuffer.commitIndex) {\n   r.callbackUs=took;r.gpuUs=gpuSeconds>0?(uint64_t)(gpuSeconds*1e6):0;\n'),
++        ('   row("K%u t=%llu.%03llus rp%u dr%u kpx%llu cs%u bl%u ctc=%lluus",',
++         '   row("K%u t=%llu.%03llus rp%u dr%u kpx%llu cs%u bl%u ctc=%lluus gpu=%lluus enc=%lluus",'),
++        ('(unsigned long long)(r.work.pixels>>10),r.work.dispatches,r.work.blits,(unsigned long long)r.callbackUs);',
++         '(unsigned long long)(r.work.pixels>>10),r.work.dispatches,r.work.blits,(unsigned long long)r.callbackUs,(unsigned long long)r.gpuUs,'
++         '(unsigned long long)r.ageUs);'),
++    ]:
++        assert s.count(old) == 1, old
++        s = s.replace(old, new)
++open(sys.argv[2], 'w').write(s)

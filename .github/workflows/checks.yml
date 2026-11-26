@@ -1,0 +1,66 @@
+# Pull-request and main-branch checks on GitHub-hosted runners: nothing here needs Apple content, the k27 tree's build output or the
+# tablet, and nothing is uploaded but the test report. docs/ci.md.
+name: checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  privacy:
+    name: privacy scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scanner self-test
+        run: python3 scripts/ci/test-privacy-scan.py
+      - name: Lines added by this change, and its commit messages
+        env:
+          BASE_PR: ${{ github.event.pull_request.base.sha }}
+          BASE_PUSH: ${{ github.event.before }}
+        run: |
+          base=${BASE_PR:-$BASE_PUSH}
+          if [ -z "$base" ] || [ "$base" = 0000000000000000000000000000000000000000 ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            echo "no base commit: the whole-tree scan below covers it"; exit 0
+          fi
+          python3 scripts/ci/privacy-scan.py --diff "$base"
+      - name: Whole tree
+        run: python3 scripts/ci/privacy-scan.py
+
+  pins:
+    name: pinned sources exist
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every unixnu.lock pin (and submodule pin) fetches by its commit
+        run: python3 scripts/fetch-pins.py --verify
+      - name: The k27 tree from upstream plus patches/k27-tree has the pinned tree id
+        run: bash tooling/k27/fetch-k27-tree.sh "$RUNNER_TEMP/k27-tree"
+
+  self-tests:
+    name: self-tests
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host tests (no Apple content, no out/, no tablet)
+        run: python3 scripts/ci/self-tests.py --junit "$RUNNER_TEMP/self-tests.xml"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: self-tests-report
+          path: ${{ runner.temp }}/self-tests.xml
+          retention-days: 14

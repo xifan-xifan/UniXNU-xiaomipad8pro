@@ -1,0 +1,8 @@
+# Monthly update pull requests for the GitHub Actions the workflows use (the pinned sources are checked by
+# .github/workflows/dependencies.yml).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

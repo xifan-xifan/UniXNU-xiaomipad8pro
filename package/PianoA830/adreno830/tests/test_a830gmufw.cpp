@@ -114,8 +114,7 @@ int main()
     /* The design profile first: the loader writes and never reads back. */
     adreno830_profile_value=A830ProfileDesign;
     const char *path=std::getenv("A830_GMU_FW");
-    if(!path)path="/Users/xiaochoumao/unixnu-13t/\xe4\xb8\x80\xe5\x8a\xa0" "13T\xe5\x8e\x9f\xe5\x8e\x82\xe5\xa4\x87\xe4\xbb\xbd/GPU"
-                  "\xe5\x9b\xba\xe4\xbb\xb6/gen80000_gmu.bin";
+    if(!path)path="";   /* A830_GMU_FW names the GMU firmware (gen80000_gmu.bin); without it the synthetic image */
     std::vector<uint8_t> real;
     const bool have_real=readFile(path,&real);
     const std::vector<uint8_t> fake=synthetic();

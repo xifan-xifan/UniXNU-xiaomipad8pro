@@ -17,7 +17,10 @@
 //   uint64_t surfaceLength(const PianoDpuFlipRequest &)                         the memory's length
 //   bool surfaceMap(const PianoDpuFlipRequest &, uint64_t *pages, unsigned max, unsigned *count, void **cookie, const char **why)
 //                                                prepared (wired), listed as 4 KiB pages, the clean alias made
-//   bool surfaceClean(void *cookie, uint64_t offset, uint64_t bytes)             false: no cacheable alias to clean with
+//   bool surfaceClean(void *cookie, uint64_t offset, uint64_t bytes)             legacy clean through the alias
+//   uint32_t surfaceCacheMode(void *cookie)                                      IOSurface allocation mode (0 if unknown)
+//   CleanPages surfaceAttributes(const uint64_t *pages, unsigned count)           physical attributes of a page list or PTEs
+//   bool surfaceCleanPhysical(const uint64_t *ptes, uint64_t offset, uint64_t bytes)  PoC clean through the DRAM aperture
 //   void surfaceRelease(void *cookie)
 //   bool testBuffer(uint64_t *pages, unsigned max, unsigned *count, void **cookie)   level 3's 3200x2136 pattern, drawn and cleaned
 //   void note(const char *fmt, ...)                 one "PianoDpu: ..." line
@@ -36,6 +39,7 @@
 #else
 #include <stdio.h>
 #endif
+#include "DpuClean.h"
 #include "DpuSmmu.h"
 #include "DpuCadence.h"
 #include "PianoDpuFlipClient.h"
@@ -164,7 +168,8 @@ inline Need checkSurface(const PianoDpuFlipRequest &r)
   else if (r.offset % kRowAlign) n.result = kPianoDpuFlipAlign;
   if (n.result != kPianoDpuFlipShown) return n;
   n.bytes = (uint64_t(kPanelHeight) - 1) * r.rowBytes + uint64_t(kPanelWidth) * 4;
-  if (r.offset + n.bytes + 4096 > smmu::kSlotBytes - smmu::kGuardPages * 4096ull) n.result = kPianoDpuFlipSize;
+  if (r.offset > smmu::kSlotBytes || r.offset + n.bytes + 4096 > smmu::kSlotBytes - smmu::kGuardPages * 4096ull)
+    n.result = kPianoDpuFlipSize;
   return n;
 }
 
@@ -191,6 +196,8 @@ struct Config {
   uint32_t level = 1;         // piano-dpu-flip: 1 reflush, 2 + shifted flip, 3 + SMMU in place and a test pattern, 4 serve flips
   bool irq = true;            // piano-dpu-irq: the vsync interrupt (else CTL_FLUSH polled every ~1 ms)
   uint32_t clean = 1;         // piano-dpu-clean: 0 never, 1 through a cacheable alias when one can be made, 2 required
+  bool cleanSkip = false;     // piano-dpu-clean-skip=1: strict cleans, WC-preserving aperture
+  bool forceFullClean = false;  // same-boot control for the conditional policy
   uint32_t flush = 0;         // piano-dpu-flush: a CTL_FLUSH mask instead of the pipes' bits (0)
   bool underrun = true;       // piano-dpu-underrun: an underrun reverts
   uint32_t latchMs = 50;      // piano-dpu-latch: the latch timeout
@@ -234,6 +241,21 @@ struct Stats {
   uint64_t latchUs = 0, latchMaxUs = 0, mapUs = 0, cleanUs = 0, workUs = 0, copyUs = 0;
   uint64_t refused[kPianoDpuFlipResults] = {};
   uint64_t windowStartUs = 0, windowFlips = 0, windowRefused = 0;
+  uint64_t cleanSkips = 0, cleanInits = 0, cleanFailures = 0, aliasFailures = 0, cleanCheckUs = 0;
+  uint64_t cleanReasons[unsigned(CleanReason::count)] = {};
+
+  template<class Line>
+  void formatClean(Line line) const
+  {
+    const auto n = [](uint64_t value) { return static_cast<unsigned long long>(value); };
+    line("clean: shown %llu maps %llu evictions %llu passes %llu init %llu skip %llu failed %llu alias-failed %llu without %llu",
+         n(flips + reshows), n(maps), n(evictions), n(cleans), n(cleanInits), n(cleanSkips), n(cleanFailures), n(aliasFailures), n(uncleaned));
+    const auto reason = [&](CleanReason r) { return n(cleanReasons[unsigned(r)]); };
+    line("clean: fallback forced %llu handoff %llu unknown-mode %llu mode %llu attrs %llu backing %llu init-clean %llu",
+         reason(CleanReason::forced), reason(CleanReason::handoff), reason(CleanReason::unknownMode), reason(CleanReason::mode),
+         reason(CleanReason::attributes), reason(CleanReason::backing), reason(CleanReason::initialClean));
+    line("clean: pixel-us %llu check-us %llu", n(cleanUs), n(cleanCheckUs));
+  }
 };
 
 template <class Hw>
@@ -260,7 +282,14 @@ class Flipper {
   const char *failure = nullptr;
   Stats st;
   Cadence cad;
+  CleanEpoch cleanEpochs[smmu::kSlots];
+  uint64_t backingBytes[smmu::kSlots] = {};
   uint64_t *pages = nullptr;   // kSlotPages entries, the caller's (64 KiB: not in the kext's __DATA, which the KC has little room for)
+
+  void invalidateCleanEpochs()
+  {
+    for (auto &epoch : cleanEpochs) epoch = {};
+  }
 
   // --------------------------------------------------------------------------------------------- the interrupt enables
   void writeEn(uint32_t v)
@@ -608,6 +637,7 @@ class Flipper {
     unmap(s);
     hw.surfaceRelease(slots.slot[s].cookie);
     slots.clear(s);
+    cleanEpochs[s] = {};
     ++st.evictions;
   }
   uint32_t refuse(PianoDpuFlipRequest &r, uint32_t why)
@@ -618,16 +648,20 @@ class Flipper {
     summary(false);
     return why;
   }
-  uint32_t flipSurface(PianoDpuFlipRequest &r)
+  uint32_t flipSurface(PianoDpuFlipRequest &r, bool producerComplete = false)
   {
     const uint64_t t0 = hw.nowUs();
     r.latchUs = r.workUs = 0;
     if (state != State::ready) return refuse(r, kPianoDpuFlipOff);
     const Need need = checkSurface(r);
     if (need.result != kPianoDpuFlipShown) return refuse(r, need.result);
+    if (cfg.cleanSkip)
+      for (unsigned i = 0; i < smmu::kSlots; ++i)
+        if (slots.slot[i].key == r.surface && slots.slot[i].key2 != r.memory) cleanEpochs[i] = {};
     int s = slots.find(r.surface, r.memory);
     uint64_t mapUs = 0;
     bool mapped = false;
+    CleanPages before{};
     if (s < 0) {
       s = slots.victim();
       if (s < 0) return refuse(r, kPianoDpuFlipSlots);
@@ -646,40 +680,60 @@ class Flipper {
         hw.surfaceRelease(cookie);
         return refuse(r, kPianoDpuFlipSize);
       }
+      if (cfg.cleanSkip) {
+        const uint64_t start = hw.nowUs();
+        before = hw.surfaceAttributes(pages, count);
+        st.cleanCheckUs += hw.nowUs() - start;
+      }
       if (!mapPages(unsigned(s), count, &why)) {
         hw.note("flip: a %llux%llu surface not mapped into window %d: %s", (unsigned long long)r.width, (unsigned long long)r.height, s, why);
         hw.surfaceRelease(cookie);
         return refuse(r, kPianoDpuFlipMemory);
       }
       slots.take(unsigned(s), r.surface, r.memory, cookie, count);
+      backingBytes[s] = length;
+      cleanEpochs[s] = {};
       mapUs = hw.nowUs() - t0;
       mapped = true;
       ++st.maps;
       st.mapUs += mapUs;
     }
     const uint64_t c0 = hw.nowUs();
-    if (cfg.clean) {
-      if (hw.surfaceClean(slots.slot[s].cookie, r.offset, need.bytes)) {
-        ++st.cleans;
-      } else {
+    bool skipped = false;
+    if (cfg.cleanSkip) {
+      if (hw.surfaceLength(r) != backingBytes[s] || r.offset + need.bytes > backingBytes[s]) {
+        cleanEpochs[s] = {};
+        ++st.cleanReasons[unsigned(CleanReason::backing)];
+        return refuse(r, kPianoDpuFlipSize);
+      }
+      const auto clean = cleanForFlip(unsigned(s), r, need.bytes, producerComplete, mapped ? &before : nullptr);
+      if (clean == CleanEpoch::Action::refused) return refuse(r, kPianoDpuFlipClean);
+      skipped = clean == CleanEpoch::Action::skipped;
+    } else if (cfg.clean) {
+      const bool cleaned = hw.surfaceClean(slots.slot[s].cookie, r.offset, need.bytes);
+      st.cleanUs += hw.nowUs() - c0;
+      if (cleaned) ++st.cleans;
+      else {
+        ++st.aliasFailures;
         if (cfg.clean >= 2) return refuse(r, kPianoDpuFlipClean);
         if (!st.uncleaned++) hw.note("flip: no cacheable alias of a surface to clean the caches with: flipped without (piano-dpu-clean=2 copies instead)");
       }
     }
     const uint64_t cleanUs = hw.nowUs() - c0;
-    st.cleanUs += cleanUs;
-    if (s == slots.shown) {   // the surface on the panel again: the DPU fetches it every frame, the clean was all
+    const Target t{smmu::slotIova(unsigned(s)) + uint32_t(r.offset), uint32_t(r.rowBytes), true};
+    if (s == slots.shown && (!cfg.cleanSkip || sameTarget(current, t))) {
       ++st.reshows;
+      if (skipped) ++st.cleanSkips;
       if (cfg.cadenceS) ++cad.reshows;
       ++st.windowFlips;
       r.result = kPianoDpuFlipShown;
       r.workUs = uint32_t(hw.nowUs() - t0);
       st.workUs += r.workUs;
       st.copyUs += r.copyUs ? r.copyUs : 39000;
+      if (cfg.cleanSkip) summary(false);
       return r.result;
     }
     slots.pending = s;
-    const Target t{smmu::slotIova(unsigned(s)) + uint32_t(r.offset), uint32_t(r.rowBytes), true};
     const uint64_t p0 = hw.nowUs();
     const Latch l = flushTo(t);
     r.latchUs = l.us;
@@ -706,6 +760,7 @@ class Flipper {
     r.result = kPianoDpuFlipShown;
     r.workUs = uint32_t(work);
     ++st.flips;
+    if (skipped) ++st.cleanSkips;
     ++st.windowFlips;
     st.latchUs += l.us;
     if (l.us > st.latchMaxUs) st.latchMaxUs = l.us;
@@ -736,10 +791,10 @@ class Flipper {
     ++st.toBoot;
     return r.result;
   }
-  uint32_t request(PianoDpuFlipRequest &r)
+  uint32_t request(PianoDpuFlipRequest &r, bool producerComplete = false)
   {
     if (r.size < sizeof(PianoDpuFlipRequest) || r.version != kPianoDpuFlipVersion) return r.result = kPianoDpuFlipVersionMismatch;
-    return r.surface ? flipSurface(r) : toBoot(r);
+    return r.surface ? flipSurface(r, producerComplete) : toBoot(r);
   }
 
   // The watch while a surface is shown (the caller's thread, every cfg.watchS): a fault or an underrun reverts. Also the summary.
@@ -837,6 +892,7 @@ class Flipper {
             (unsigned long long)(st.flips + st.reshows ? st.copyUs / (st.flips + st.reshows) : 0), (unsigned long long)(st.workUs / 1000),
             (unsigned long long)hw.irqCount(), hw.irqLive() ? "live" : "polled",
             state == State::ready ? "serving" : state == State::failed ? "off for the boot (copies)" : "not serving");
+    st.formatClean([&](auto... args) { hw.note(args...); });
     st.windowStartUs = now;
     st.windowFlips = st.windowRefused = 0;
   }
@@ -866,6 +922,7 @@ class Flipper {
       if (!restored) unmap(i);
       hw.surfaceRelease(slots.slot[i].cookie);
       slots.clear(i);
+      cleanEpochs[i] = {};
     }
     writeEn(baseEn);
     hw.note("revert: done in %u us: the boot framebuffer on the panel, the translation %s, every window let go; copies from now on", l.us,
@@ -873,6 +930,46 @@ class Flipper {
   }
 
  private:
+  CleanEpoch::Action cleanForFlip(unsigned s, const PianoDpuFlipRequest &r, uint64_t bytes, bool producerComplete, const CleanPages *before)
+  {
+    const smmu::Slot &slot = slots.slot[s];
+    const uint64_t *ptes = tables.slotL3(s);
+    const bool reportMap = before && st.maps <= cfg.detailFlips;
+    uint32_t mode = 0;
+    CleanPages after{};
+    const auto verify = [&] {
+      const uint64_t start = hw.nowUs();
+      mode = hw.surfaceCacheMode(slot.cookie);
+      if (reportMap || mode == kSurfaceWriteCombined) after = hw.surfaceAttributes(ptes, slot.pages);
+      st.cleanCheckUs += hw.nowUs() - start;
+      return cleanEligibility(mode, after);
+    };
+    CleanReason reason = CleanReason::eligible;
+    if (cfg.forceFullClean) reason = CleanReason::forced;
+    else if (!producerComplete) reason = CleanReason::handoff;
+    if (reason == CleanReason::eligible) reason = verify();
+    else if (reportMap) verify();
+    if (reason == CleanReason::eligible && before && !before->allWriteCombined()) reason = CleanReason::attributes;
+    const CleanPages mappedAttributes = after;
+    const auto clean = [&](bool wholeBacking) {
+      const uint64_t start = hw.nowUs();
+      const bool ok = hw.surfaceCleanPhysical(ptes, wholeBacking ? 0 : r.offset, wholeBacking ? backingBytes[s] : bytes);
+      st.cleanUs += hw.nowUs() - start;
+      if (ok) ++st.cleans;
+      else ++st.cleanFailures;
+      return ok;
+    };
+    const auto result = cleanEpochs[s].prepare(reason, clean, verify, [&] { hw.barrier(); });
+    if (result.action == CleanEpoch::Action::initialized) ++st.cleanInits;
+    if (result.reason != CleanReason::eligible) ++st.cleanReasons[unsigned(result.reason)];
+    if (reportMap)
+      hw.note("clean map %llu: span %u off %u row %u mode %#x WC/other/unknown %u/%u/%u -> %u/%u/%u init %u reason %s",
+              static_cast<unsigned long long>(st.maps), unsigned(backingBytes[s]), unsigned(r.offset), unsigned(r.rowBytes), mode,
+              before->wc, before->other, before->unknown, mappedAttributes.wc, mappedAttributes.other, mappedAttributes.unknown,
+              result.action == CleanEpoch::Action::initialized, cleanReasonName(result.reason));
+    return result.action;
+  }
+
   struct SmmuIo {
     Hw &hw;
     uint32_t rd(uint32_t off) { return hw.smmuRd(off); }

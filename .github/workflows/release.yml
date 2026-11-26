@@ -1,0 +1,68 @@
+# A release, made only by hand: push a tag v* after the tablet qualification (or run this with the tag's name). It never runs on a
+# push to main. The release is a DRAFT for the maintainer to publish; it carries only our binaries, the recipes, SHA-256 manifests
+# and the install skill; the root image and the kernel collection are built on the user's side by the skill. docs/ci.md.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: an existing tag (v...) on main
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: tag
+        env:
+          TAG_IN: ${{ inputs.tag }}
+        run: |
+          tag=${TAG_IN:-$GITHUB_REF_NAME}
+          case $tag in v*) ;; *) echo "::error::$tag is not a v* tag"; exit 1 ;; esac
+          git rev-parse -q --verify "refs/tags/$tag" > /dev/null || { echo "::error::no tag $tag"; exit 1; }
+          git merge-base --is-ancestor "refs/tags/$tag^{commit}" origin/main || { echo "::error::$tag is not on main"; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: guard
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ needs.guard.outputs.tag }}
+    secrets: inherit
+
+  release:
+    needs: [guard, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.guard.outputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.guard.outputs.tag }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: kernel-kexts
+          path: assets
+      - uses: actions/download-artifact@v4
+        with:
+          name: fd-hash
+          path: fd-hash
+      - name: Recipes, skill and manifest
+        run: bash tooling/ci/release-assets.sh assets fd-hash
+      - name: Draft release
+        run: |
+          gh release create "$TAG" --draft --verify-tag --title "UniXNU-piano $TAG" --notes-file assets/RELEASE-NOTES.md assets/*

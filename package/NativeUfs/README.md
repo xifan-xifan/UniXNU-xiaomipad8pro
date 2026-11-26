@@ -79,6 +79,8 @@ ShengUfs b11de87 (`UPSTREAM`) with the piano/SM8750 deltas, built as a k27 nativ
 - Read path speed (opt-in, all off by default): `native-ufs-perf=1` (per-second timing with `native-ufs-iolog`),
   `native-ufs-async=N` (read workers), `native-ufs-bounce=KiB` (up to 1 MiB per command), `native-ufs-maxio=KiB`,
   `native-ufs-nap=US`, `native-ufs-direct=1` (DMA into the client's pages), `native-ufs-fast=1`.
+- Device state (every boot: `ufs-state:`, `ufs-clocks:`, `perf link:` lines) and `native-ufs-wb=1` (WriteBooster on as Linux
+  `ufshcd_configure_wb`): [docs/drivers/ufs.md](../../docs/drivers/ufs.md) §14.
   [docs/drivers/ufs.md](../../docs/drivers/ufs.md) §13.
 - Host tests: `tests/run-tests.sh` (the command, queue, link and power code against `tests/UfsModel.h`; the window reader's bounce
   sizes, `tests/RootWindowRead.cpp`; the direct reads' PRDT and command, `tests/RootDirect.cpp`).

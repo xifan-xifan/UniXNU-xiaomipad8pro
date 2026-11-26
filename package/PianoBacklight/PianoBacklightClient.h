@@ -2,13 +2,13 @@
 // The PianoBacklight service's interface for other drivers, header only (no link dependency: a caller finds the service by class
 // name and calls IOService::callPlatformFunction, which every IOService has):
 //   "PianoBacklightDisplay"  param1 = on (0/1), param2 = the system power state, param3 = WindowServer's (setAPIPowerState)
-//                            power state: NativeGopDisplay's display power, from its do_power_state_change_gated (piano-backlight>=2)
+//                            power state. With p1 null and p4 non-null, wait for both ICs to blank (copy thread only).
 //   "PianoBacklightStep"     param1 = steps (intptr_t, + brighter, - darker), param2 = the caller's name (a static C string)
 //   "PianoBacklightAmbient"  param1 = a target of the ambient light policy, permille of the code range (intptr_t; -1 leaves
 //                            automatic mode), param2 = the caller's name, param3 = the lux it came from (uintptr_t); only with
 //                            piano-backlight-auto=1 (else kIOReturnUnsupported). PianoSensors' piano-sensors-light-target property is
 //                            read as well (docs/drivers/sensors.md 5a.4)
-// Both only record the request and wake the service's thread: they never wait for I2C, so a gated or interrupt-free caller is fine.
+// With p4 null, the display request only wakes the service's thread and can be made under a command gate.
 // NativeGopDisplay also publishes "piano-display-power" (a boolean, on itself) with each change, which the service reads as well.
 //
 // KeyWatch turns a producer's keyboard and consumer reports into steps: consumer usage 0x6F (Display Brightness Increment) and 0x70

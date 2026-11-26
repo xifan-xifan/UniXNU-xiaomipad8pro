@@ -242,6 +242,8 @@ public:
     uint8_t floorLevel() const {return floor_;}
     uint8_t ceiling() const;            /* min(knob/ACD ceiling, thermal ceiling) */
     uint8_t thermalCeiling() const {return thermalCeiling_;}
+    uint8_t knobCeiling() const {return knobCeiling_;}   /* gpu/throttle1: the knob / ACD-off ceiling, for A830Bind */
+    uint8_t policyLevel() const {return policy_;}        /* gpu/throttle1: the governor's own level before boosts and ceilings */
     const A830DcvsStats &stats() const {return stats_;}
     const Sm8750Thermal &thermal() const {return thermal_;}
     /* adreno830_thermal_state(): lock-free, any thread. */

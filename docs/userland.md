@@ -162,6 +162,34 @@ mapping. The staged and final copies share APFS extents, and `userland.json` lis
 bundle preserves omitted backend files. Other userland files still use the boot installer; live layers keep the existing rollback
 behavior. The RAM image's final GPU path and trust cache must be verified together before submission.
 
+## 3a. Background Task Management: why jobs start through `/bin/sh` (2026-11-25)
+
+macOS 13 and later keep a record of every launchd job in Background Task Management (`backgroundtaskmanagementd`, listed by
+`sudo sfltool dumpbtm`). For a legacy job (a plist in `/Library/LaunchDaemons` or `/Library/LaunchAgents`) the record holds the
+plist's sha256 and modification date and the executable's path and modification date. The executable is `Program`, or
+`ProgramArguments[0]`. A new record, or a record whose plist or executable changed ("registerLaunchItem: plist or executable is
+modified" in the daemon's log), is stored as "not notified", and `BackgroundTaskManagementAgent` then shows "Background Items Added"
+for it. Our jobs have no Team ID and are grouped under "Unknown Developer".
+
+Every layer update replaces the programs it rebuilt. Before this change, each update therefore announced every job whose program
+changed again. `stage.py` now rewrites, in the staged copy only, each job whose program is a file of the manifest:
+
+    ProgramArguments = /bin/sh -c 'exec "$0" "$@"' PROGRAM ARG...
+
+The executable BTM records is `/bin/sh`, which lives on the sealed system volume and never changes with our layer. `exec` replaces
+the shell with the program, so the pid, argv (argv[0] is the program's path), exit status and KeepAlive behaviour stay the same.
+Jobs whose executable is already a system program (`/bin/sh SCRIPT`, `/usr/bin/notifyutil`) are left as they are. The pinned
+Bluetooth runtime's job file is also left alone: it is staged exactly as its build report records it.
+
+What still announces a job:
+- a job that is new to the Data store's BTM database;
+- a change to a job's plist, including this rewrite itself, once.
+
+So keep job files stable. RAM test boots start from a Data seed whose BTM database does not know our jobs, so they announce every
+job on every boot; that is a property of the seed, not of the layer. The managed alternative is the `com.apple.servicemanagement`
+payload (Managed Login Items, `LabelPrefix com.unixnu.`), but Apple's schema marks it `allowmanualinstall: false` and requires
+user-approved MDM, so it cannot be installed by hand.
+
 ## 4. The seed identity and the Data store (`data-store.md`)
 
 Every restage makes a new seed identity, because APFS writes times and transaction ids. `stage.py` prints what that means:

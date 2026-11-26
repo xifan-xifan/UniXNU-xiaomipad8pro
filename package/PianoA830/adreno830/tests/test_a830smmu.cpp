@@ -43,6 +43,7 @@ static uint32_t tcrOf0(uint32_t aperture_gib)
 {
     if(annibale())return tcrOf(0);
     if(aperture_gib==64)return (0xB5A03520u&~0x003F003Fu)|0x001C001Cu;   /* UniXNU-piano: T0SZ = T1SZ = 28, the 36-bit input */
+    if(aperture_gib==256)return (0xB5A03520u&~0x003F003Fu)|0x001A001Au;  /* gpu/slots2: T0SZ = T1SZ = 26, the 38-bit input */
     return aperture_gib!=16?tcrOf(0):(0xB5A03520u&~0x003F003Fu)|0x001E001Eu;
 }
 static uint32_t mair0() {return annibale()?0xF404FF44u:0xFF44u;}
@@ -826,6 +827,52 @@ static void wideFallbackCases()
         CHECK(report.table_pages==c.pages && gpu.apertureBytes()==c.aperture && gpu.inputBits()==c.input_bits);
         CHECK(model.at(A830SmmuModel::cb(0)+0x30)==(c.input_bits==36?tcrOf0(64):c.input_bits==34?tcrOf0(16):tcrOf(0)) &&
               model.aborts==0 && model.violations==0);
+        CHECK(smmu.releaseAll()==kIOReturnSuccess);
+    }
+    /* gpu/slots2: pagani-gpu-va=256 in paged mode builds the 256 GiB aperture with a 38-bit input on SM8750's UBS 48 (and on a 40-bit
+     * UBS), tables on demand (a few pages, not a pool); on a 36-bit UBS it is the 64 GiB one, on a 32-bit UBS 4 GiB; paged 64 stays 64
+     * GiB (the A/B switch); without paged mode 256 is the 64 GiB request with its preallocated 32833 pages. A BO maps at the top of
+     * the last ordinary 4 GiB window (slot 62, below 244 GiB) and in the decoder window under the 8 KiB guard, through the root's
+     * level-1 slots 243 and 255 (the annibale T0SZ 25 walks the same root: slots 256-511 stay invalid); 256 GiB itself is refused. */
+    struct CaseP {uint32_t idr2,gib;bool paged;uint64_t aperture;unsigned input_bits;};
+    const CaseP tableP[]={{0x5511,256,true,0x4000000000ull,38},{0x5211,256,true,0x4000000000ull,38},{0x5111,256,true,0x1000000000ull,36},
+                          {0x1011,256,true,0x100000000ull,32},{0x5511,64,true,0x1000000000ull,36},{0x5511,256,false,0x1000000000ull,36}};
+    for(const CaseP &c:tableP) {
+        Adreno830Status status{};
+        A830SmmuHostPlatform host;
+        model.boot(79,0x2,!annibale());
+        model.at(0x28)=c.idr2;
+        A830Smmu smmu;
+        CHECK(smmu.init(recordedConfig(host,&status))==kIOReturnSuccess);
+        CHECK(smmu.survey(nullptr)==kIOReturnSuccess && smmu.releaseCacheLock()==kIOReturnSuccess);
+        CHECK(smmu.clearGlobalFault()==kIOReturnSuccess && smmu.resetBank(0)==kIOReturnSuccess);
+        const NativeAdrenoSmmuProgrammer *programmer=smmu.programmer();
+        NativeAdrenoGpuContext gpu;
+        NativeAdrenoGmuContextReport report;
+        NativeAdrenoGpuContextConfig config{programmer,0,1,smmu.gpuStream().slot,smmu.lpacStream().slot,0,1,0,c.gib,0,true};
+        config.paged=c.paged;
+        CHECK(gpu.bringUp(config,nullptr,&report)==kIOReturnSuccess && gpu.ready() && gpu.paged()==c.paged);
+        CHECK(gpu.apertureBytes()==c.aperture && gpu.inputBits()==c.input_bits &&
+              (c.paged?report.table_pages>0 && report.table_pages<16:report.table_pages==32833u));
+        CHECK(model.at(A830SmmuModel::cb(0)+0x30)==(c.input_bits==38?tcrOf0(256):c.input_bits==36?tcrOf0(64):tcrOf(0)) &&
+              model.aborts==0 && model.violations==0);
+        if(c.paged && c.aperture==0x4000000000ull) {
+            NativeAdrenoVm *vm=gpu.vm();
+            CHECK(vm && vm->paged());
+            NativeAdrenoMemory high,dec,past;
+            CHECK(!high.allocate(0x4000,36,false,0x4000) && !high.makeWriteCombined());
+            CHECK(!dec.allocate(0x4000,36,false,0x4000) && !dec.makeWriteCombined() && !past.allocate(0x1000,36,false,0x1000));
+            uint64_t h1=0,h2=0,refused=0;
+            const uint64_t top62=0x3D00000000ull-0x4000,topDecoder=0x3FFFFFE000ull-0x4000;
+            CHECK(vm->mapClient(&high,top62,ArmSmmu4KRead|ArmSmmu4KWrite,1,3,&h1)==kIOReturnSuccess && h1);
+            CHECK(vm->mapClient(&dec,topDecoder,ArmSmmu4KRead|ArmSmmu4KWrite,1,3,&h2)==kIOReturnSuccess && h2);
+            CHECK((vm->pagedLeaf(top62)&~0x0000fffffffff000ull)==0x0060000000000E43ull &&
+                  (vm->pagedLeaf(top62)&0x0000fffffffff000ull)==high.spans()[0].physical);
+            CHECK((vm->pagedLeaf(topDecoder+0x3000)&0x0000fffffffff000ull)==dec.spans()[0].physical+0x3000);
+            CHECK(!vm->pagedLeaf(top62+0x4000) && !vm->pagedLeaf(0x3FFFFFE000ull));
+            CHECK(vm->map(&past,0,0x4000000000ull,3,0,2,&refused)!=kIOReturnSuccess && !refused);   /* past the aperture */
+            CHECK(vm->unmap(h1)==kIOReturnSuccess && vm->unmap(h2)==kIOReturnSuccess && !vm->pagedLeaf(top62));
+        }
         CHECK(smmu.releaseAll()==kIOReturnSuccess);
     }
 #endif

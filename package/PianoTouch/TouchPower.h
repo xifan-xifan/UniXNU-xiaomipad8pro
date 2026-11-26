@@ -33,9 +33,9 @@ struct TouchPower {
   bool reading() const { return mode != PowerMode::suspended; }
   bool muted() const { return mode == PowerMode::displayOff; }
   // display: 1 on, 0 off, -1 unknown (not published: counts as on). The step to act on now, at most one per call.
-  PowerStep step(bool systemOff, int display)
+  PowerStep step(bool systemOff, int display, bool panelOff = false)
   {
-    const bool dark = followDisplay && display == 0;
+    const bool dark = panelOff || (followDisplay && display == 0);
     switch (mode) {
     case PowerMode::on:
       if (systemOff) { mode = PowerMode::suspended; ++suspends; return PowerStep::suspend; }

@@ -20,6 +20,7 @@ struct Bench {
   PianoCpPlan p{};
   uint64_t now = 1000000;
   bool autoAck = true, autoBuck = true, pumpObeys = true, contractLive = true;
+  bool busLag = false;   // charge/mipps2: the firmware takes the word but the bus does not follow (the step stays unconfirmed)
   int32_t pumpOffsetMv = 280;
   std::vector<uint32_t> ppsWords;   // every PPS word asked
   std::vector<int> actions;         // every non-NONE action
@@ -75,7 +76,7 @@ struct Bench {
       if (autoAck) {
         y.pps_taken_word = p.pps_word; lastReqMv = p.out.pps_mv;
         if (contractLive) {y.contract_valid = 1; y.contract_pps = 1; y.contract_mv = p.out.pps_mv; y.contract_ma = p.out.pps_ma;}
-        y.vbus_mv = (int32_t)p.out.pps_mv - 60;
+        y.vbus_mv = (int32_t)p.out.pps_mv - (busLag ? 1500 : 60);
       } else {
         y.volt_pending = 1;
       }
@@ -533,7 +534,28 @@ static void glue() {
   CHECK(!y.contract_valid && y.src_kind == PIANO_CPS_SRC_NONE);
 }
 
+// charge/mipps2 ladder (UBUNTU-COMPARE.md): the pump never starts while the buck's ladder holds it (not at a confirmed 5 V after
+// MiPPS or a confirmed 9 V), and a PPS step up goes out only after the previous word is taken with the bus following it.
+static void ladder() {
+  {Bench b; b.y.ladder_hold = 1; b.ticks(300);
+   CHECK(b.s.state == PIANO_CPS_IDLE && b.ppsWords.empty());
+   CHECK(!piano_cp_may_start(&b.c, &b.y, &b.d, &b.s));
+   b.y.ladder_hold = 0; CHECK(piano_cp_may_start(&b.c, &b.y, &b.d, &b.s));
+   CHECK(b.until(PIANO_CPS_CC, 40000));}
+  {Bench b; CHECK(b.toCC());
+   uint32_t top = 0;
+   for (uint32_t w : b.ppsWords) top = std::max(top, (w >> 16) * 20);
+   b.busLag = true; b.y.vbus_mv = (int32_t)b.s.req_mv - 1500;   // the last step's bus never arrives
+   const size_t n = b.ppsWords.size();
+   bool held = false;
+   for (unsigned i = 0; i < 60; ++i) {b.tick(100); if (b.p.events & PIANO_CPS_EV_UNCONFIRMED) held = true;}
+   for (size_t i = n; i < b.ppsWords.size(); ++i) CHECK((b.ppsWords[i] >> 16) * 20 <= top);   // never higher than before
+   CHECK(held);
+   CHECK(!piano_cp_may_start(&b.c, &b.y, &b.d, &b.s));}   // not idle: no second start
+}
+
 int main() {
+  ladder();
   gates();
   happyPath();
   exits();

@@ -134,8 +134,8 @@ enum {McaHvOff = 0, McaHvAsked = 1, McaHvOn = 2, McaHvBlocked = 3};
 typedef struct {
     int32_t value[McaFields];
     uint32_t valid;                  /* bit per field */
-    uint32_t pdo[7][3];              /* min mV, max mV, max mA */
-    uint8_t pdos;
+    uint32_t pdo[7][3];              /* min mV, max mV, max mA; slot n - 1 is the source's object n (an empty slot is all zero) */
+    uint8_t pdos;                    /* the last object's position (value[McaPdos] bits 8-14: slots left empty as unusable) */
     /* the cycle */
     uint8_t cursor, in_flight, refresh_wanted;
     uint32_t seq, sent_property, sent_opcode;

@@ -1,0 +1,7 @@
+# Known, intended hits of scripts/ci/privacy-scan.py: FILE-GLOB REGEX, then two spaces, `#` and the reason.
+# Keep entries narrow (a file and the exact shape); a whole-class or whole-tree entry defeats the scan.
+* 02:50:49:41:4[eE]:0[0-9]  # the synthetic, locally administered USB-network MACs (02 + ASCII "PIANO" + index)
+* aa:bb:cc:dd:ee:ff  # documentation example
+* 02:11:22:33:44:55  # documentation example
+package/PianoWifi/tests/*_host.cpp 3[cC]:52:[aA]1:10:20:([fF][eE]|30)  # host-test fixture BSSIDs, not a real station
+docs/el1-native-plan.md /home/thin  # privacy-scan: ok. The VM era's squashfs roots folder name, not a person's home

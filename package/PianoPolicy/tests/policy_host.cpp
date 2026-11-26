@@ -791,10 +791,47 @@ static void acDemandSleep()
   CHECK(run(conflict, in).empty());
 }
 
+// machdep.piano_policy_lid_sleep_ac: the runtime switch overrides the boot argument either way, on one boot. The daily choice
+// (Ubuntu v1.4.0's: on a charger the cover locks only, charging goes on; on battery it sleeps) and the opt-in, back and forth.
+static void acRuntimeSwitch()
+{
+  Config c = actLid(); c.profile = false;   // piano-policy-lid-sleep-ac absent (0)
+  Engine e(c);
+  Inputs in = base(); in.power = Power::external;
+  CHECK(lidSleepAC(c, in) == false);
+  in.lidSleepAC = 0;
+  CHECK(run(e, in) == "root:kIOPMDisableClamshell root:kIOPMSetACAdaptorConnected (connected) root:kIOPMClamshellOpened");
+  in.lid = Lid::closed;
+  CHECK(run(e, in) == "root:kIOPMClamshellClosed");
+  CHECK(view(c, in, true).close == Close::lock && std::strcmp(view(c, in, true).closeWhy, "on external power: lock only") == 0);
+  in.lid = Lid::open;
+  CHECK(run(e, in) == "root:kIOPMClamshellOpened user");
+  // Opted in at run time with the cover open: clamshell sleep allowed, no demand yet; the close then demands one sleep.
+  in.lidSleepAC = 1;
+  CHECK(run(e, in) == "root:kIOPMEnableClamshell");
+  in.lid = Lid::closed;
+  CHECK(run(e, in) == "root:kIOPMClamshellClosed root:kIOPMSleepNow");
+  CHECK(run(e, in).empty());
+  // Back off while closed: clamshell sleep refused again, no further demand.
+  in.lidSleepAC = 0;
+  CHECK(run(e, in) == "root:kIOPMDisableClamshell");
+  // The disarm still wins over the opt-in; and on battery the switch changes nothing.
+  in.lidSleepAC = 1; in.lidSleepArmed = false;
+  CHECK(view(c, in, true).close == Close::lock);
+  in.lidSleepArmed = true; in.power = Power::battery;
+  for (int ac : {-1, 0, 1}) { in.lidSleepAC = ac; CHECK(view(c, in, true).close == Close::sleep); }
+  // -1 (not read): the boot argument's value.
+  Config on = c; on.lidSleepAC = true; Inputs x = base(); x.power = Power::external;
+  CHECK(lidSleepAC(on, x) && view(on, x, true).close == Close::sleep);
+  x.lidSleepAC = 0;
+  CHECK(!lidSleepAC(on, x) && view(on, x, true).close == Close::lock);
+}
+
 int main()
 {
   table();
   acDemandSleep();
+  acRuntimeSwitch();
   coverOnBattery();
   bootClosed();
   noSleep();

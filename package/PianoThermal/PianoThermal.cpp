@@ -229,14 +229,16 @@ void readArgs()
   gArgs.gateOpenC = clampU(bootArg("piano-cpufreq-gate-open", 0), 0, 110);
   gArgs.gateEndC = clampU(bootArg("piano-cpufreq-gate-end", 0), 0, 110);
   gArgs.gateQuietMs = clampU(bootArg("piano-cpufreq-gate-quiet-ms", 300), 0, 5000);
-  // the full table (Perf.h): Android's table and scenes behind machdep.piano_cpufreq_fullopp (boot default piano-cpufreq-fullopp, 0),
+  // the full table (Perf.h): Android's table and scenes behind machdep.piano_cpufreq_fullopp (boot default piano-cpufreq-fullopp, 1 since gpu/throttle1),
   // the WALT-like demand behind machdep.piano_cpufreq_walt (piano-cpufreq-walt, 0); with the full table the thermal limit releases
   // under piano-cpufreq-fullopp-release (87 C: the stock 95 C trip's 8 C hysteresis) one level per piano-cpufreq-fullopp-rise-ms
   // (100; the stock rule polls every 4 ms) and no temperature gate holds bursts or boosts (piano-cpufreq-fullopp-gate=1 keeps it);
   // piano-cpufreq-sweep=1 (test only) arms machdep.piano_cpufreq_sweep0/1 (a cluster pinned at one level) and
   // machdep.piano_cpufreq_measure (each core's clock at the next poll); piano-cpufreq-fw-check-ms: LEVEL_GET per cluster
   // (1000; with the full table or the sweep only), the firmware's level against ours
-  gArgs.fullopp = bootArg("piano-cpufreq-fullopp", 0) ? 1 : 0;
+  // gpu/throttle1 (owner 2026-11-24 05:45): the full table is the default (it acts only with piano-cpufreq=3 and perf policy >= 1);
+  // piano-cpufreq-fullopp=0 keeps the stock-level table of section 14
+  gArgs.fullopp = bootArg("piano-cpufreq-fullopp", 1) ? 1 : 0;
   gArgs.walt = bootArg("piano-cpufreq-walt", 0) ? 1 : 0;
   gArgs.riseMs = clampU(bootArg("piano-cpufreq-rise-ms", 1000), 10, 10000);
   gArgs.fullRiseMs = clampU(bootArg("piano-cpufreq-fullopp-rise-ms", 100), 10, 10000);

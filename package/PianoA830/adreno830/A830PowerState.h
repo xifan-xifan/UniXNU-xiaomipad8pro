@@ -260,8 +260,9 @@ public:
     bool qualificationBlocked() const {return __atomic_load_n(&qualificationBlocked_,__ATOMIC_SEQ_CST);}
     void parkQualification() {__atomic_store_n(&qualificationParked_,true,__ATOMIC_RELEASE);}
     uint8_t qualificationCap() const {return uint8_t(__atomic_load_n(&qualificationCap_,__ATOMIC_ACQUIRE));}
-    uint8_t qualificationEffectiveCap(A830ExitContext source=A830ExitContext::Power) {
-        uint8_t level=7,bus=6;
+    /* gpu/throttle1: the probe starts at `from` (the qualified top; 7 before, so the LV line never showed a cap above 607 MHz). */
+    uint8_t qualificationEffectiveCap(A830ExitContext source=A830ExitContext::Power,uint8_t from=7) {
+        uint8_t level=from,bus=6;
         limitQualification(level,bus,source);
         return level;
     }

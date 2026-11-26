@@ -42,7 +42,6 @@ chmod 444 "$T/sdam"; python3 -c "import sys,os;os.chmod(sys.argv[1],0o644);b=byt
 if [ "$(id -u)" = 0 ]; then n=$((n+1)); echo "SKIP read-only nvmem: root writes a 0444 file, run this test unprivileged"; else
 $SH "$S" once-android > /dev/null 2>&1; rc=$?; ok $([ $rc = 4 ] || [ $rc = 5 ]; echo $?) "read-only nvmem: write failure reported (rc $rc)"
 fi
-chmod 644 "$T/sdam"
 PIANO_BOOTFLAG_NVMEM=$T/missing $SH "$S" show > /dev/null 2>&1; ok $([ $? = 2 ]; echo $?) "missing nvmem: rc 2"
 unset PIANO_BOOTFLAG_NVMEM
 
@@ -50,10 +49,15 @@ unset PIANO_BOOTFLAG_NVMEM
 mkdir -p "$T/bin"; echo 0 > "$T/val"
 cat > "$T/bin/sysctl" <<F
 #!/bin/sh
-case "\$1" in -n) cat "$T/val" ;; -q) echo "\${2#*=}" > "$T/val" ;; esac
+case "\$1" in
+  -n) cat "$T/val" ;;
+  -w) r=\${2#*=}; echo "\$r" >> "$T/reqs"; [ -f "$T/deny" ] && exit 1
+      case \$r in 1) echo 161;; 3) echo 0;; esac > "$T/val" ;;
+esac
 F
 chmod +x "$T/bin/sysctl"
-PATH=$T/bin:$PATH PIANO_BOOTFLAG_BACKEND=sysctl $SH "$S" once-android > /dev/null; ok $([ "$(cat "$T/val")" = 161 ]; echo $?) "sysctl backend: once-android writes 161"
-PATH=$T/bin:$PATH PIANO_BOOTFLAG_BACKEND=sysctl $SH "$S" once-clear > /dev/null; ok $([ "$(cat "$T/val")" = 0 ]; echo $?) "sysctl backend: once-clear writes 0"
+PATH=$T/bin:$PATH PIANO_BOOTFLAG_BACKEND=sysctl $SH "$S" once-android > /dev/null; ok $([ "$(cat "$T/val")" = 161 ] && [ "$(tail -1 "$T/reqs")" = 1 ]; echo $?) "sysctl backend: once-android sends request 1, reads 0xa1"
+PATH=$T/bin:$PATH PIANO_BOOTFLAG_BACKEND=sysctl $SH "$S" once-clear > /dev/null; ok $([ "$(cat "$T/val")" = 0 ] && [ "$(tail -1 "$T/reqs")" = 3 ]; echo $?) "sysctl backend: once-clear sends request 3"
+touch "$T/deny"; PATH=$T/bin:$PATH PIANO_BOOTFLAG_BACKEND=sysctl $SH "$S" once-android > /dev/null 2>&1; ok $([ $? = 4 ]; echo $?) "sysctl backend: a kext refusal is rc 4"
 echo "$([ $fails = 0 ] && echo PASS || echo FAIL): bootflag.sh tests, $n checks, $fails failures"
 [ $fails = 0 ]

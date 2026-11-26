@@ -710,18 +710,29 @@ int piano_mca_receive(PianoMca *m, const uint8_t *data, uint32_t length)
         m->valid &= ~(1u << field);
     } else if (field == McaPdos) {
         m->pdos = 0;
+        zero(m->pdo, sizeof m->pdo);
         int good = have >= 7 * 12;
+        uint32_t odd = 0;
+        /* charge/mipps2 (MIPPS-RDO.md): every slot at its own position. The source's object n is slot n - 1, also after an empty
+         * slot (a verified MiPPS adapter's vendor objects; the firmware re-requested object 5 or 7 of a 2-object list on 11-24). An
+         * empty slot stays empty; a slot this codec cannot use (outside every PD field) is left empty and marked in bits 8-14 of
+         * value[McaPdos] (the count is bits 0-7); only an unusable first object (vSafe5V) discards the list. */
         for (unsigned i = 0; good && i < 7; ++i) {
             const uint32_t lo = le32(payload + 12 * i), hi = le32(payload + 12 * i + 4);
             uint32_t ma = le32(payload + 12 * i + 8);
-            if (!lo && !hi && !ma) break;
+            if (!lo && !hi && !ma) {if (!i) break; continue;}
             /* a 67 W PPS object (e.g. 3.3-11 V 6.1 A) is still the source's list: at most 5 A of it is ever used */
             if (m->pdo_clamp && ma > 5000 && ma <= (lo == hi ? 10230u : 6350u)) ma = 5000;
-            if (lo < 3300 || hi < lo || hi > 21000 || !ma || ma > 5000) {good = 0; break;}
-            m->pdo[m->pdos][0] = lo; m->pdo[m->pdos][1] = hi; m->pdo[m->pdos][2] = ma;
-            m->pdos++;
+            if (lo < 3300 || hi < lo || hi > 21000 || !ma || ma > 5000) {
+                if (!i) {good = 0; break;}
+                odd |= 1u << i;
+                continue;
+            }
+            m->pdo[i][0] = lo; m->pdo[i][1] = hi; m->pdo[i][2] = ma;
+            m->pdos = (uint8_t)(i + 1);
         }
-        m->value[field] = good ? m->pdos : 0;
+        if (odd) m->errors++;
+        m->value[field] = good ? (int32_t)(m->pdos | odd << 8) : 0;
         if (good) m->valid |= 1u << field;
         else {m->pdos = 0; m->valid &= ~(1u << field); m->errors++;}
     } else if (have >= (one_byte(field) ? 1u : 4u)) {

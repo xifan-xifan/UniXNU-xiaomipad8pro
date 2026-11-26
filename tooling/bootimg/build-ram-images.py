@@ -12,7 +12,9 @@ tags 0x100, dtb 0x1f00000, page 4096, the DTB also in the v2 dtb section, made b
 the FAT payload (UniXNU payload layout, written with UniXNU's payload.write_volume). Signing is a separate step
 (sign-on-remote.sh); verify-ram-images.py checks everything offline.
 
-  build-ram-images.py --fd FD --fd-name NAME --out DIR [--kc KC --trust T --seed S --adt ADT] [--utc SECONDS]
+  build-ram-images.py --fd FD --fd-name NAME --out DIR [--kc KC --trust T --seed S --adt ADT] [--utc SECONDS] [--extra-ram]
+
+--extra-ram adds the shared extra-RAM reservation placeholder to the payload ADT (docs/extra-ram.md).
 
 The Data store (docs/data-store.md): a macOS image opens the tablet's store (data-persist=2) only when its seed is the installed one
 (PIANO_INSTALLED_SEED in ~/.config/piano/env, or out/persistent/installed.json), else it runs Data volatile (data-persist=0), with a
@@ -87,7 +89,9 @@ K27_ARGS = ['-v', 'debug=0x14e', 'kt_fixed_zones=120', '-no_slto_panic', 'tlto_u
             # launch policy; k27 has none, and the listed jobs run: docs/boot-time.md). PIANO_FAST_BOOT drops it. The clock
             # and time zone (droidvm-utc, droidvm-tz below) are the OS image's settime.sh boot job's.
             'droidvm-disable-jobs=com.apple.watchdogd,com.apple.identityservicesd,com.apple.locationd,com.apple.CommCenter,com.apple.bluetoothd',
-            'mac-amfi-launch-permissive=1', 'union-hide-lower=1', 'malloc-ranges-off=1', 'arm64_maxoffset=0x7FFE000000',
+            # arm64_maxoffset: the 47-bit user map end of k27 0075 (piano-uva47, docs: 128 TiB user VA); a 39-bit kernel (0074 and older, or
+            # piano-uva47=0) refuses the value (above its MAX) and keeps its compiled 0x7FFE000000, so the line is safe on both.
+            'mac-amfi-launch-permissive=1', 'union-hide-lower=1', 'malloc-ranges-off=1', 'arm64_maxoffset=0x7FFFFE000000',
             # 0042: userspace sees 24 MHz over the architected counter (19.2 MHz on SM8750 as in the VM).
             'droidvm-timebase-hz=24000000',
             'exec-env=com.apple.WebKit.WebContent:GIGACAGE_ENABLED=no',
@@ -376,19 +380,28 @@ def uefi_payload(work):
     return image
 
 
-def macos_payload(work, kc, trust, seed, adt, utc):
+def macos_payload(work, kc, trust, seed, adt, utc, extra_ram=False):
     stage = work / 'macos-stage'
     payloads = stage / 'EFI/UniXNU/Payloads'
     payloads.mkdir(parents=True)
     shutil.copyfile(kc, payloads / 'kernel.macho')
     shutil.copyfile(trust, payloads / 'kernel.macho.trustcache')
     shutil.copyfile(seed, payloads / 'scratch-data.img')
-    shutil.copyfile(adt, payloads / 'kernel.macho.adt')
+    adt_file = payloads / 'kernel.macho.adt'
+    shutil.copyfile(adt, adt_file)
     addon, sensor_pack = sensor_pack_addon(adt)
     firmware, addon = firmware_addon(payloads, kc, adt, addon)
     if addon is not None:
         (payloads / 'kernel.macho.gpuaddon').write_bytes(addon)
         (payloads / 'kernel.macho.gpuaddon').chmod(0o600)
+    if extra_ram:
+        spec = importlib.util.spec_from_file_location('adt_extra_ram', DEVICE / 'tooling/adt/adt_extra_ram.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        try:
+            adt_file.write_bytes(module.ensure_extra_ram_placeholder(adt_file.read_bytes()))
+        except ValueError as error:
+            raise SystemExit(f'--extra-ram: {error}') from error
     # PIANO_EXTRA_ARGS: more kernel arguments for one test image (e.g. piano-usb=2, docs/drivers/usb-device-debug.md).
     extra = os.environ.get('PIANO_EXTRA_ARGS', '').split()
     store = {'data-persist', 'data-store-replace', 'data-store-flatten'} & {x.split('=', 1)[0] for x in extra}
@@ -426,7 +439,6 @@ def macos_payload(work, kc, trust, seed, adt, utc):
         if not ba.kc_has_boot_args(kc):
             raise SystemExit(f'the arguments need the ADT\'s piano-boot-args ({len(" ".join(tail))} bytes beyond the line), and the kernel '
                              f'in {kc} has no k27 0066: build the collection with K27_KERNEL=<a 0066 kernel>')
-        adt_file = payloads / 'kernel.macho.adt'
         adt_file.write_bytes(ba.with_set(adt_file.read_bytes(), BOOT_ARGS_SET, tail))
         merged, status = ba.merged(smp, adt_file.read_bytes())
         if status != 'appended':
@@ -458,7 +470,8 @@ def macos_payload(work, kc, trust, seed, adt, utc):
     payload(stage, image, 'PIANOESP', size_mib)
     return image, {'cmdline_1cpu': one, 'cmdline_8cpu': smp, 'boot_args': boot_args, 'payload_mib': size_mib, 'fast_boot': fast_boot_level(),
                    'deny_exec': deny_exec_env(),
-                   'data_store': store_record, 'sensor_pack': sensor_pack, 'firmware': firmware}
+                   'data_store': store_record, 'sensor_pack': sensor_pack, 'firmware': firmware,
+                   'extra_ram': extra_ram, 'adt_sha256': sha(adt_file)}
 
 
 def kernel_field(fd, dtb, work, name):
@@ -500,8 +513,11 @@ def main():
     p.add_argument('--trust', type=Path)
     p.add_argument('--seed', type=Path)
     p.add_argument('--adt', type=Path)
+    p.add_argument('--extra-ram', action='store_true', help='add the shared extra-RAM reservation placeholder to the payload ADT')
     p.add_argument('--utc', type=int, default=int(time.time()))
     a = p.parse_args()
+    if a.extra_ram and not all((a.kc, a.trust, a.seed, a.adt)):
+        p.error('--extra-ram requires --kc, --trust, --seed and --adt')
     if sha(MKBOOTIMG) != MKBOOTIMG_SHA256:
         raise SystemExit(f'{MKBOOTIMG} is not the Ubuntu RAM set\'s mkbootimg.py')
     a.out.mkdir(parents=True, exist_ok=True)
@@ -525,13 +541,10 @@ def main():
         report['images'][image.name] = {**info, 'payload_sha256': sha(ramdisk), 'payload_bytes': ramdisk.stat().st_size,
                                         'sha256': sha(image), 'bytes': image.stat().st_size}
         if a.kc:
-            ramdisk, extra = macos_payload(work, a.kc, a.trust, a.seed, a.adt, a.utc)
+            ramdisk, extra = macos_payload(work, a.kc, a.trust, a.seed, a.adt, a.utc, a.extra_ram)
             image, info = pack(a.out, a.fd, a.dtb, ramdisk, work, f'boot-piano-macos-ram-{a.fd_name}')
             report['images'][image.name] = {**info, **extra, 'payload_sha256': sha(ramdisk), 'payload_bytes': ramdisk.stat().st_size,
                                             'kc_sha256': sha(a.kc), 'trust_sha256': sha(a.trust),
-                                            # the payload's ADT: the input's, or its copy with the firmware addon's slot
-                                            'adt_sha256': (extra['boot_args'] or {}).get('adt_sha256') or extra['firmware'].get('adt_sha256')
-                                            or sha(a.adt),
                                             'seed_sha256': sha(a.seed), 'sha256': sha(image), 'bytes': image.stat().st_size}
     (a.out / f'build-{a.fd_name}.json').write_text(json.dumps(report, indent=2) + '\n')
     for name, info in report['images'].items():

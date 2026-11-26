@@ -5,6 +5,8 @@
 // validates and enqueues. The worker pumps HFI during asynchronous guest waits;
 // output lookups/maps are scoped to a copy. Synchronous completion stays on the worker.
 #include <IOKit/IOLib.h>
+#include <pexpert/pexpert.h>
+#include <sys/proc.h>
 #include <IOKit/IOService.h>
 #include <IOKit/IOUserClient.h>
 #include <IOKit/IOMemoryDescriptor.h>
@@ -23,6 +25,7 @@ volatile uint32_t droidvm_vthost_sessions, droidvm_vthost_frames_in, droidvm_vth
 volatile uint32_t droidvm_vthost_error_stage, droidvm_vthost_replies, droidvm_vthost_unknown, droidvm_vthost_last_unknown;
 volatile int32_t droidvm_vthost_error_value;
 int proc_selfpid(void);
+task_t proc_task(proc_t);
 }
 namespace {
 constexpr int kBadData = -12909, kUnsupported = -12910, kBadState = -12903, kDecodeError = -12911, kNoMemory = -12904;
@@ -47,6 +50,8 @@ struct Session {
   int replyError=0;
   uint8_t replyUuid[16]={};
   IOUserClient *surfaces=nullptr;
+  bool surfacesBorrowed=false;
+  OSObject *kernelSurface=nullptr;   // piano-video-vt-borrow=3: the surface object itself (no user-client lookup, no lease)   // piano-video-vt-borrow: the owner task's own IOSurfaceRoot client, never closed by us
   unsigned surfaceOpens=0,surfaceCloses=0,maps=0;
   pianovideo::vtsurface::Lease surfaceLease;
   uint32_t writeSurfaceID=0;
@@ -120,6 +125,127 @@ bool unlockSurfaceWrite(Session *s){
   if(rc||bytes!=sizeof seed){failure(s,82,rc?int(rc):kBadData);return false;}
   return true;
 }
+// LT-B5 (ANALYSIS.md section 12 of 20261124-browser-gpu): a sandboxed client's surfaces may refuse a lookup by ID through a second
+// IOSurfaceRoot client of the same task (27.3 "disallowing global lookups"; WebKit's GPU process: kIOReturnNotPermitted). With boot-arg
+// piano-video-vt-borrow=1 the lookup is retried once through that task's own existing IOSurfaceRoot client (IOUserClientCreator
+// "pid N, ..."), which already holds the surface. The borrowed client is retained, never closed by us.
+void closeSurface(Session *s);
+// B1 records survive the kernel ring buffer: the last 8 B1 lines as properties piano-video-vt-b1-<n> on the PV driver service (ioreg).
+static void b1Record(const char *line){
+  static unsigned seq=0;OSDictionary *m=IOService::nameMatching("AppleVideoToolboxParavirtualizationDriver");
+  IOService *pv=m?IOService::copyMatchingService(m):nullptr;OSSafeReleaseNULL(m);if(!pv)return;
+  char key[40];snprintf(key,sizeof key,"piano-video-vt-b1-%u",seq++%8);pv->setProperty(key,line);pv->release();
+}
+// default 3 (the kernel-surface copy) since y12i; piano-video-vt-borrow=0 off, 1/2 the diagnostic lookup walks
+static int pianoVtBorrowMode(){static int b=-1;if(b<0){uint32_t v=3;PE_parse_boot_argn("piano-video-vt-borrow",&v,sizeof v);b=int(v);}return b;}
+static bool pianoVtBorrow(){return pianoVtBorrowMode()>=1;}
+// piano-video-vt-borrow=2 (diagnostic, LT-B5): once per boot, try the refused surface ID through EVERY IOSurfaceRoot client and record
+// which creator's client accepts it (find_surface admits the owner task or a client that knows it); each accepted lookup is undone at
+// once on that same client (selector 56 invalidate, 1 release: the lease's own pair). Nothing is copied.
+static IOReturn clientMethod(IOUserClient *u,uint32_t selector,uint32_t id,void *out,uint32_t *bytes){
+  uint64_t scalar=id;IOExternalMethodArguments a={};a.version=kIOExternalMethodArgumentsCurrentVersion;a.selector=selector;
+  a.scalarInput=&scalar;a.scalarInputCount=1;a.structureOutput=out;a.structureOutputSize=bytes?*bytes:0;
+  IOUserClient2022 *c=OSDynamicCast(IOUserClient2022,u);
+  const IOReturn rc=c?c->externalMethod(selector,reinterpret_cast<IOExternalMethodArgumentsOpaque *>(&a)):u->callExternalMethod(selector,&a);
+  if(bytes)*bytes=uint32_t(a.structureOutputSize);return rc;
+}
+static void b1Record(const char *line);
+static void diagRecord(const char *line){   // separate keys: the 8-slot B1 ring overwrote the diagnostic in qualvtg6
+  static unsigned seq=0;if(seq>=24)return;OSDictionary *m=IOService::nameMatching("AppleVideoToolboxParavirtualizationDriver");
+  IOService *pv=m?IOService::copyMatchingService(m):nullptr;OSSafeReleaseNULL(m);if(!pv)return;
+  char key[40];snprintf(key,sizeof key,"piano-video-vt-diag-%02u",seq++);pv->setProperty(key,line);pv->release();
+}
+static void diagOwner(IOUserClient *mine,uint32_t id){
+  static bool done=false;if(done||pianoVtBorrowMode()!=2)return;done=true;
+  IOService *root=surfaceRoot();if(!root)return;constexpr uint32_t bytes=0xc68;uint8_t *buf=static_cast<uint8_t *>(IOMallocZero(bytes));
+  unsigned tried=0,ok=0;OSIterator *it=buf?root->getClientIterator():nullptr;
+  if(it){while(OSObject *o=it->getNextObject()){IOUserClient *u=OSDynamicCast(IOUserClient,o);if(!u||u==mine)continue;++tried;
+      uint32_t n=bytes;const IOReturn rc=clientMethod(u,4,id,buf,&n);
+      if(!rc){++ok;OSObject *c=u->copyProperty("IOUserClientCreator");OSString *cs=OSDynamicCast(OSString,c);
+        clientMethod(u,56,id,nullptr,nullptr);clientMethod(u,1,id,nullptr,nullptr);
+        char line[160];snprintf(line,sizeof line,"diag id %u ACCEPTED by %s",id,cs?cs->getCStringNoCopy():"?");IOLog("PianoVideoVT B1: %s\n",line);diagRecord(line);
+        OSSafeReleaseNULL(c);}}
+    it->release();}
+  char line[160];snprintf(line,sizeof line,"diag id %u tried %u clients, %u accepted",id,tried,ok);IOLog("PianoVideoVT B1: %s\n",line);diagRecord(line);
+  if(buf)IOFree(buf,bytes);OSSafeReleaseNULL(root);
+}
+// Every IOSurfaceRoot client of the task (a sandboxed process may hold several: CoreVideo's, Metal's), retained, in registry order; the
+// diagnostic line lists how many clients each pid has.
+// pid > 0: that task's clients ("pid N,"); pid == 0: every client whose creator names a WebKit process ("com.apple.WebKit"), other pids
+// included. IOSurface.kext find_surface (27.3) admits a lookup when the surface's owner task (+0x170) is the looking task, or the client
+// already knows the surface, or the surface is global. WebKit re-assigns its decode-pool surfaces to the WebContent task
+// (IOSurfaceSetOwnershipIdentity, s_set_ownership) and the pool reuses them, so the GPU task's own client is refused.
+static unsigned ownerSurfaceClients(IOUserClient *mine,int pid,IOUserClient **out,unsigned max){
+  IOService *root=surfaceRoot();if(!root)return 0;
+  char want[24];snprintf(want,sizeof want,"pid %d,",pid);const size_t n=strlen(want);
+  unsigned count=0,total=0;OSIterator *it=root->getClientIterator();
+  if(it){while(OSObject *o=it->getNextObject()){IOUserClient *u=OSDynamicCast(IOUserClient,o);if(!u||u==mine)continue;++total;
+      OSObject *c=u->copyProperty("IOUserClientCreator");OSString *cs=OSDynamicCast(OSString,c);
+      const bool match=cs&&(pid>0?!strncmp(cs->getCStringNoCopy(),want,n):strnstr(cs->getCStringNoCopy(),", com.apple.WebKit",cs->getLength()+1)!=nullptr);
+      if(match&&pid==0){char line[160];snprintf(line,sizeof line,"candidate %s",cs->getCStringNoCopy());IOLog("PianoVideoVT B1: %s\n",line);b1Record(line);}
+      OSSafeReleaseNULL(c);
+      if(match&&count<max){u->retain();out[count++]=u;}}
+    it->release();}
+  {char line[160];snprintf(line,sizeof line,"IOSurfaceRoot has %u other clients, %u of pid %d",total,count,pid);
+   IOLog("PianoVideoVT B1: %s\n",line);b1Record(line);}
+  OSSafeReleaseNULL(root);return count;
+}
+// LT-B5 qualvtg7: no IOSurfaceRoot client of any of the 24 accepts the surface (diag), so its owner task (WebKit re-owns decode-pool
+// surfaces to the WebContent process, which has no IOSurfaceRoot client: its sandbox) is reached by opening a client FOR that task
+// (IOSurfaceRoot::newUserClient from the kernel, as for the GPU task): find_surface's rule (1) owner == task then admits it. The
+// candidates are the other com.apple.WebKit processes with pids near the GPU process's (WebKit launches its processes together).
+static IOUserClient *ownerTaskClient(int gpuPid,uint32_t id,int *ownerPid){
+  IOService *root=surfaceRoot();if(!root)return nullptr;constexpr uint32_t bytes=0xc68;uint8_t *buf=static_cast<uint8_t *>(IOMallocZero(bytes));
+  IOUserClient *found=nullptr;unsigned tried=0;
+  // borrow=2 (diagnostic): every process, pid 0..99999 (qualvtg8: no WebKit task owns it); borrow=1: WebKit tasks near the GPU pid
+  const bool all=pianoVtBorrowMode()==2;
+  for(int pid=all?0:gpuPid-400;buf&&!found&&pid<=(all?99999:gpuPid+400);++pid){
+    if((!all&&pid<=1)||pid==gpuPid)continue;char name[32]={};proc_name(pid,name,sizeof name);
+    if(!all&&strncmp(name,"com.apple.WebKit",16))continue;
+    if(all&&(!name[0]||pid==0))continue;
+    proc_t pr=proc_find(pid);if(!pr)continue;task_t t=proc_task(pr);
+    IOUserClient *c=nullptr;const IOReturn orc=t?root->newUserClient(t,t,0,nullptr,&c):kIOReturnNotFound;++tried;
+    IOReturn lrc=kIOReturnNotFound;
+    if(!orc&&c){uint32_t n=bytes;lrc=clientMethod(c,4,id,buf,&n);
+      if(!lrc){clientMethod(c,56,id,nullptr,nullptr);clientMethod(c,1,id,nullptr,nullptr);found=c;*ownerPid=pid;}
+      else{c->clientClose();c->release();}}
+    proc_rele(pr);
+    if(!all||!lrc){char line[160];snprintf(line,sizeof line,"owner-task try pid %d %s: open %08x lookup %08x",pid,name,orc,lrc);IOLog("PianoVideoVT B1: %s\n",line);diagRecord(line);}
+  }
+  char line[160];snprintf(line,sizeof line,"owner-task scan id %u: %u WebKit tasks tried, %s",id,tried,found?"FOUND":"none");IOLog("PianoVideoVT B1: %s\n",line);diagRecord(line);
+  if(buf)IOFree(buf,bytes);OSSafeReleaseNULL(root);return found;
+}
+// LT-B5 (owner 11:55: carry the output surface itself instead of a by-ID lookup): piano-video-vt-borrow=3 takes the IOSurface object
+// straight from IOSurfaceRoot's table when every lookup path refuses it (qualvtg4-9: no client of any of 507 tasks is admitted by
+// find_surface). Field offsets of the pinned 27.3 IOSurface.kext (KC kc273-mac17j, ~/scratch/iosurface-re disassembly):
+//   IOSurfaceRoot: +0xd0 IOSurface ** table, +0xd8 uint32 count, +0x140 IOLock * (lookupSurface takes it around find_surface)
+//   IOSurface: +0x10 id, +0x30 IOMemoryDescriptor *, +0x80 pixel format, +0x88 alloc offset, +0x90 alloc size, +0x98 plane count,
+//              +0x180 plane records (56 bytes: +0 width, +8 height, +0x18 offset, +0x20 bytes per row)
+// The copy maps [alloc offset, +alloc size) of the surface's own memory descriptor into the kernel. Guarded: the id read back,
+// 420v/x420 two planes, sizes in bounds; any mismatch refuses (no guess).
+static OSObject *kernelSurfaceFor(uint32_t id,contract::Surface &v){
+  IOService *root=surfaceRoot();if(!root)return nullptr;
+  const uint8_t *r=reinterpret_cast<const uint8_t *>(root);OSObject *found=nullptr;
+  IOLock *lock=*reinterpret_cast<IOLock *const *>(r+0x140);
+  if(lock){IOLockLock(lock);
+    OSObject *const *table=*reinterpret_cast<OSObject *const *const *>(r+0xd0);const uint32_t count=*reinterpret_cast<const uint32_t *>(r+0xd8);
+    if(table&&id<count){OSObject *o=table[id];const uint8_t *b=reinterpret_cast<const uint8_t *>(o);
+      if(o&&*reinterpret_cast<const uint32_t *>(b+0x10)==id){o->retain();found=o;}}
+    IOLockUnlock(lock);}
+  OSSafeReleaseNULL(root);
+  if(!found)return nullptr;
+  const uint8_t *b=reinterpret_cast<const uint8_t *>(found);
+  v=contract::Surface();v.id=id;v.base=1;v.format=*reinterpret_cast<const uint32_t *>(b+0x80);v.size=*reinterpret_cast<const uint64_t *>(b+0x90);
+  v.planes=*reinterpret_cast<const uint32_t *>(b+0x98);
+  const uint8_t *pl=*reinterpret_cast<const uint8_t *const *>(b+0x180);
+  if(pl&&v.planes==2)for(unsigned i=0;i<2;++i){const uint8_t *q=pl+56*i;
+    v.plane[i]={*reinterpret_cast<const uint64_t *>(q),*reinterpret_cast<const uint64_t *>(q+8),*reinterpret_cast<const uint64_t *>(q+0x18),
+                *reinterpret_cast<const uint64_t *>(q+0x20),0};}
+  char line[200];snprintf(line,sizeof line,"kernel surface id %u format %08x planes %u alloc %llu+%llu p0 %llux%llu off %llu bpr %llu p1 off %llu bpr %llu",id,v.format,v.planes,
+    *reinterpret_cast<const uint64_t *>(b+0x88),v.size,v.plane[0].width,v.plane[0].height,v.plane[0].offset,v.plane[0].stride,v.plane[1].offset,v.plane[1].stride);
+  IOLog("PianoVideoVT B3: %s\n",line);diagRecord(line);
+  return found;
+}
 bool lookupSurface(Session *s,uint32_t id,contract::Surface &v) {
   constexpr uint32_t bytes=0xc68;
   if(!id || s->surfaceLease.held()){failure(s,45,kBadState);return false;}
@@ -133,7 +259,39 @@ bool lookupSurface(Session *s,uint32_t id,contract::Surface &v) {
   }
   uint8_t *result=static_cast<uint8_t *>(IOMallocZero(bytes));if(!result){failure(s,41,kNoMemory);return false;}
   uint32_t resultBytes=bytes;
-  const IOReturn rc=surfaceMethod(s,4,id,result,&resultBytes);
+  IOReturn rc=surfaceMethod(s,4,id,result,&resultBytes);
+  if(rc==kIOReturnNotPermitted)diagOwner(s->surfaces,id);
+  if(rc==kIOReturnNotPermitted&&pianoVtBorrow()&&pianoVtBorrowMode()<3&&!s->surfacesBorrowed){
+    IOUserClient *owners[8]={};unsigned n=ownerSurfaceClients(s->surfaces,s->client->pid,owners,8);
+    {const unsigned room=8-n;IOUserClient *more[8]={};const unsigned m=ownerSurfaceClients(s->surfaces,0,more,8);
+     for(unsigned j=0;j<m;++j){bool dup=false;for(unsigned k=0;k<n;++k)if(owners[k]==more[j])dup=true;
+       if(!dup&&n<8&&j<room+8){owners[n++]=more[j];}else more[j]->release();}}
+    {char line[160];snprintf(line,sizeof line,"lookup id %u refused through our client; %u owner-task client(s) (pid %d)",id,n,s->client->pid);
+     IOLog("PianoVideoVT B1: %s\n",line);b1Record(line);}
+    if(n){closeSurface(s);
+      for(unsigned i=0;i<n;++i){
+        if(s->surfacesBorrowed){owners[i]->release();continue;}
+        s->surfaces=owners[i];s->surfacesBorrowed=true;memset(result,0,bytes);resultBytes=bytes;
+        rc=surfaceMethod(s,4,id,result,&resultBytes);
+        {char line[160];snprintf(line,sizeof line,"lookup id %u through owner-task client %u of %u status %08x",id,i+1,n,rc);
+         IOLog("PianoVideoVT B1: %s\n",line);b1Record(line);}
+        if(rc){OSSafeReleaseNULL(s->surfaces);s->surfacesBorrowed=false;}
+      }
+      if(!s->surfaces){rc=kIOReturnNotPermitted;}
+    }
+    if(rc==kIOReturnNotPermitted){   // the owner task itself (WebContent): a client of our own for it
+      int owner=-1;IOUserClient *c=ownerTaskClient(s->client->pid,id,&owner);
+      if(c){if(s->surfaces){closeSurface(s);}s->surfaces=c;s->surfacesBorrowed=false;++s->surfaceOpens;memset(result,0,bytes);resultBytes=bytes;
+        rc=surfaceMethod(s,4,id,result,&resultBytes);
+        char line[160];snprintf(line,sizeof line,"lookup id %u through a client for owner pid %d status %08x",id,owner,rc);IOLog("PianoVideoVT B1: %s\n",line);diagRecord(line);}
+    }
+  }
+  if(rc==kIOReturnNotPermitted&&pianoVtBorrowMode()==3){
+    OSSafeReleaseNULL(s->kernelSurface);contract::Surface k;s->kernelSurface=kernelSurfaceFor(id,k);
+    const bool kok=s->kernelSurface&&contract::surface(k,s->config.s.width,s->config.s.height,s->config.pixelFormat());
+    if(!kok){OSSafeReleaseNULL(s->kernelSurface);}
+    if(kok){v=k;IOFree(result,bytes);IOLog("PianoVideoVT B3: lookup id %u through the kernel surface object (no lease)\n",id);return true;}
+  }
   // A successful method owns both references, even if layout validation fails.
   if(!rc){s->surfaceLease.acquire(id);++s->surfaceLookups;}
   bool ok=!rc && resultBytes==bytes;
@@ -142,7 +300,33 @@ bool lookupSurface(Session *s,uint32_t id,contract::Surface &v) {
   IOLog("PianoVideoVT V6p: lookup token %llu request %llu id %u status %08x held %u\n",s->frame.token,s->guest.request,id,rc,unsigned(s->surfaceLease.held()));
   IOFree(result,bytes);if(!ok)failure(s,42,rc?int(rc):kBadData);return ok;
 }
+bool copyFrameKernel(Session *s,const Frame &f,const contract::Surface &v){
+  OSObject *surf=s->kernelSurface;s->kernelSurface=nullptr;if(!surf){failure(s,90,kBadState);return false;}
+  const uint8_t *b=reinterpret_cast<const uint8_t *>(surf);
+  IOMemoryDescriptor *md=*reinterpret_cast<IOMemoryDescriptor *const *>(b+0x30);const uint64_t off=*reinterpret_cast<const uint64_t *>(b+0x88);
+  bool ok=false;
+  if(md&&off<=md->getLength()&&v.size<=md->getLength()-off&&!md->prepare()){
+    IOMemoryMap *map=md->createMappingInTask(kernel_task,0,kIOMapAnywhere,off,v.size);
+    uint8_t *dst=map?reinterpret_cast<uint8_t *>(map->getVirtualAddress()):nullptr;
+    struct Publisher {
+      uintptr_t line;
+      Publisher(){uint64_t ctr;__asm__ volatile("mrs %0, ctr_el0":"=r"(ctr));line=uintptr_t(4)<<((ctr>>16)&15);}
+      void clean(const uint8_t *start,uint64_t length){
+        const uintptr_t end=uintptr_t(start)+length;
+        for(uintptr_t a=uintptr_t(start)&~(line-1);a<end;a+=line)__asm__ volatile("dc cvac, %0"::"r"(a):"memory");
+      }
+      void finish(){__asm__ volatile("dsb sy":::"memory");}
+    } publisher;
+    ok=dst&&map->getLength()>=v.size&&pianovideo::vtsurface::copyAndPublish(f.layout,f.length,const_cast<const uint8_t *>(f.cpu),v,dst,publisher);
+    OSSafeReleaseNULL(map);md->complete();
+  }
+  {char line[120];snprintf(line,sizeof line,"kernel copy token %llu id %u %s",f.token,v.id,ok?"OK":"FAILED");IOLog("PianoVideoVT B3: %s\n",line);static unsigned n=0;if(n++<4)diagRecord(line);}
+  surf->release();
+  if(!ok)failure(s,91,kNoMemory);
+  return ok;
+}
 bool copyFrame(Session *s,const Frame &f,const contract::Surface &lookup) {
+  if(s->kernelSurface)return copyFrameKernel(s,f,lookup);
   if(s->writeSurfaceID || !f.memory || f.memory->getLength()<f.length || !f.cpu || !contract::layout(f.layout,f.length) || !contract::surface(lookup,f.layout.width,f.layout.height,f.layout.format)){failure(s,60,kBadData);return false;}
   constexpr uint32_t resultSize=0xc68;
   uint8_t *result=static_cast<uint8_t *>(IOMallocZero(resultSize));
@@ -205,7 +389,9 @@ bool releaseSurface(Session *s){
   return ok;
 }
 void closeSurface(Session *s){
-  if(s->surfaces){s->surfaces->clientClose();OSSafeReleaseNULL(s->surfaces);++s->surfaceCloses;s->surfaceLease.closed();s->writeSurfaceID=0;}
+  OSSafeReleaseNULL(s->kernelSurface);
+  if(s->surfaces){if(!s->surfacesBorrowed)s->surfaces->clientClose();OSSafeReleaseNULL(s->surfaces);s->surfacesBorrowed=false;
+    ++s->surfaceCloses;s->surfaceLease.closed();s->writeSurfaceID=0;}
 }
 bool request(Session *s,Writer &w,const uint8_t *b,uint64_t id,uint32_t type){
   // Queue transport while holding the cancellation fence. The send callback
@@ -500,15 +686,22 @@ int queue(Session *s,const uint8_t *m,uint32_t n,uint64_t request,contract::Inpu
 void inventory(Client *c,const Header &h) {
   Plist *p=new Plist();if(!p){status(c,h,kNoMemory);return;}uint8_t b[4096];int entries[2]={};
   const bool ready=piano_video_native_ready();
-  if(h.type==cc("decs")&&ready){entries[0]=contract::inventoryEntry(*p,false);entries[1]=contract::inventoryEntry(*p,true);}
-  const int list=p->array(entries,h.type==cc("decs")&&ready?2:0);
+  // LT-B5 (cryptex1-qual5/6, ctl1): a WebKit client (Safari's GPU process, admitted by the grant) is offered AVC only. With our HEVC
+  // entry VT in the GPU process picks it for every HEVC stream and has no in-process fallback when the native envelope (1080p) declines a
+  // 4K one (Safari hevc 2160p: code 4; it plays in software through VTDecoderXPCService on the installed y12h). Without the entry, HEVC
+  // stays on that path exactly as before the grant; AVC above 1080p already falls back (its VTMaxDecodeLevel 42).
+  char who[32]={};proc_name(c->pid,who,sizeof who);const bool webkit=!strncmp(who,"com.apple.WebKit",16);
+  unsigned n=0;
+  if(h.type==cc("decs")&&ready){entries[n++]=contract::inventoryEntry(*p,false);if(!webkit)entries[n++]=contract::inventoryEntry(*p,true);}
+  const int list=p->array(entries,n);
   Writer w(b,sizeof b);w.header(h.type,FlagReply,h.uuid,h.request);w.plist(h.type==cc("decs")?cc(",dec"):cc(",enc"),*p,list);w.u32(cc(",ver"),6);send(c,w,b);delete p;
-  IOLog("PianoVideoVT V9: inventory version6 avc1 hvc1 ready %u encoders0 rating400\n",unsigned(ready));
+  IOLog("PianoVideoVT V9: inventory version6 avc1%s ready %u encoders0 rating400 (pid %d)\n",webkit?"":" hvc1",unsigned(ready),c->pid);
 }
 void capabilities(Client *c,const Header &h,const uint8_t *m,uint32_t n){
   int32_t codec=0,version=0;
   const bool supported=paramS32(m,n,cc(",cod"),codec)&&(uint32_t(codec)==cc("avc1")||uint32_t(codec)==cc("hvc1"))&&
-    paramS32(m,n,cc(",ver"),version)&&version==6&&piano_video_native_ready();
+    paramS32(m,n,cc(",ver"),version)&&version==6&&piano_video_native_ready()&&
+    !(uint32_t(codec)==cc("hvc1")&&[&]{char who[32]={};proc_name(c->pid,who,sizeof who);return !strncmp(who,"com.apple.WebKit",16);}());
   if(!supported){status(c,h,kUnsupported);return;}
   Plist *p=new Plist();if(!p){status(c,h,kNoMemory);return;}uint8_t b[2048];
   const int root=contract::capabilities(*p,uint32_t(codec)==cc("hvc1"));Writer w(b,sizeof b);

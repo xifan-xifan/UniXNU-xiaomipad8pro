@@ -190,7 +190,10 @@ struct Sim {
               (plan.icl_why == PIANO_CHG_ICL_CONTRACT_5V && cfg.strict_contract &&
                (!cfg.hv || st.hv == PIANO_CHG_HV_BLOCKED || plan.fallback == PIANO_CHG_FALLBACK_SOURCE ||
                 plan.fallback == PIANO_CHG_FALLBACK_HEALTH) &&   // T-14: a 9 V mode settled at 5 V
-               (in.valid & PIANO_CHG_IN_CONTRACT) && in.contract_protocol == 1 && in.contract_mv == 5000 &&
+               (in.valid & PIANO_CHG_IN_CONTRACT) &&
+               ((in.contract_protocol == 1 && in.contract_mv == 5000) ||   // charge/mipps2: or PPS at 5 V on a listed APDO
+                (in.contract_protocol == 2 && in.contract_mv < 6000 &&
+                 piano_charge_listed_object(&in, 1, in.contract_mv, in.contract_ma))) &&
                w.value <= in.contract_ma))));   // above the cap only a measured 5 V step with source authority
       if (w.property == PIANO_CHG_FCC)   // cfg.hv_caps (charge/pd1): the stock rows only at a 9 V session in force
         CHECK(w.value <= (cfg.strict_contract && cfg.hv_caps && st.hv == PIANO_CHG_HV_ON ? PIANO_CHG_FCC_ABS_MAX :
@@ -1587,8 +1590,11 @@ struct StrictSim : Sim {
   bool iclReadable = true, busReadable = true;
   uint32_t contractGen = 1, contractLink = 1, contractMv = 5000, contractMa = 3000;
   uint32_t fixed9 = 3000, pps9 = 3000, safe = PIANO_CHG_SAFE_ALL, faults = 0;
+  uint8_t mippsPending = 0;   // charge/mipps2: MiPPS will run on this attach
   uint8_t protocol = 1;
-  StrictSim() {cfg.strict_contract = 1; cfg.limit = 1; cfg.hv = 1; pd(kPd5and9);}
+  // charge/mipps2: the default source advertises the PPS APDO its contract offers (pps9) in its 0x21011 list too: a request may only
+  // name an object the list holds (the ladder), so the contract's and the list's offers must agree, as on the tablet
+  StrictSim() {cfg.strict_contract = 1; cfg.limit = 1; cfg.hv = 1; pd({{5000, 5000, 3000}, {9000, 9000, 2000}, {3300, 11000, 3000}});}
   void step(uint64_t dt = 5000)
   {
     now += dt; fill();
@@ -1602,7 +1608,18 @@ struct StrictSim : Sim {
     in.contract_link_generation = contractLink;
     in.contract_mv = contractMv; in.contract_ma = contractMa;
     in.fixed9_ma = fixed9; in.pps9_ma = pps9; in.contract_protocol = protocol;
+    // the contract's 9 V offers come from the same source list ChargeLink reads (an offer the list lacks does not exist)
+    if (in.valid & PIANO_CHG_IN_PDOS) {
+      bool f9 = false, a9 = false;
+      for (unsigned i = 0; i < in.pdos; ++i) {
+        if (in.pdo[i][0] == 9000 && in.pdo[i][1] == 9000) f9 = true;
+        if (in.pdo[i][0] < in.pdo[i][1] && in.pdo[i][0] <= 9000 && in.pdo[i][1] >= 9000) a9 = true;
+      }
+      if (!f9) in.fixed9_ma = 0;
+      if (!a9) in.pps9_ma = 0;
+    }
     in.safety = safe; in.faults = faults;
+    in.mipps_pending = mippsPending;
     piano_charge_decide(&cfg, &in, &st, &plan); check();
     if (!ackWrites) return;
     for (unsigned i = 0; i < plan.writes; ++i) {
@@ -1704,7 +1721,7 @@ static void testDailyFiveVoltBudget()
     case 1: s.sourceValid = false; break;
     case 2: s.contractLink++; break;
     case 3: s.notifyPending = true; break;
-    case 4: s.protocol = 2; break;
+    case 4: s.protocol = 2; s.pd(kPd5and9); break;   // PPS at 5 V on no listed APDO (charge/mipps2: a listed one may)
     case 5: s.bothGauges = false; break;
     case 6: s.safe &= ~PIANO_CHG_SAFE_LPD_DRY; break;
     case 7: s.safe &= ~PIANO_CHG_SAFE_DTPT; break;
@@ -2285,6 +2302,37 @@ static void testT14NineVolt()
   {   // without hv_caps nothing changes: the stage-A ceilings at 9 V
     StrictSim s; daily(s); s.cfg.hv_caps = 0; at9(s, 3000, 3000);
     CHECK(s.busMv == 9000 && s.icl == 1600 && s.fcc == 1500);
+  }
+  // charge/pd2: PPS 9 V (mode 2) takes in_pps 2500 only with a cool connector reading, like the fixed rule; the row 1600 otherwise
+  auto pps9 = [&](StrictSim &s, uint32_t apdoMa) {
+    daily(s); s.cfg.hv = 2;
+    s.pd({{5000, 5000, 3000}, {9000, 9000, 3000}, {3300, 11000, apdoMa}}); s.fixed9 = 3000; s.pps9 = apdoMa;
+    s.contractMa = std::min<uint32_t>(apdoMa, 3000);
+    for (unsigned i = 0; i < 40 && s.busMv != 9000; ++i) s.step();
+    s.run(6);
+  };
+  {   // a 5 A APDO, a cool connector: PPS, 2500 in, 3500 charge
+    StrictSim s; pps9(s, 5000);
+    CHECK(s.busMv == 9000 && s.protocol == 2 && s.st.hv_pps && s.icl == 2500 && s.fcc == 3500 && s.plan.icl_why == PIANO_CHG_ICL_9V);
+  }
+  {   // no connector reading: the row 1600 (was 2500 before charge/pd2)
+    StrictSim s; s.boardValid = 0; pps9(s, 5000); s.boardValid = 0; s.run(4);
+    CHECK(s.busMv == 9000 && s.protocol == 2 && s.icl == 1600 && s.fcc <= 3200);
+  }
+  {   // a connector at 51 C -> the row; 60 C -> 100 mA; cool -> 2500 again
+    StrictSim s; pps9(s, 5000); CHECK(s.icl == 2500);
+    s.conn2Dc = 515; s.run(2); CHECK(s.icl == 1600 && s.fcc <= 3200);
+    s.conn2Dc = 600; s.run(2); CHECK(s.icl == 100);
+    s.conn2Dc = 300; s.run(20); CHECK(s.busMv == 9000 && s.icl == 2500);
+  }
+  {   // a 2 A APDO: its own current, the row does not bind
+    StrictSim s; pps9(s, 2000);
+    CHECK(s.busMv == 9000 && s.protocol == 2 && s.icl == 2000);
+  }
+  {   // 80/75 unchanged at PPS
+    StrictSim s; pps9(s, 5000);
+    s.soc = 80; s.run(20); CHECK(s.busMv == 5000 && s.st.hold && s.enable == 0);
+    s.soc = 75; s.run(30); CHECK(!s.st.hold && s.enable == 1 && s.busMv == 9000 && s.icl == 2500);
   }
 }
 

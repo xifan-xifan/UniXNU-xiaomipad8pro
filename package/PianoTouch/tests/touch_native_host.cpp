@@ -12,7 +12,7 @@
 //   - TouchNative.h through the tracker (TouchTrack.h) and the injection's points (TouchInject.h), as PianoTouch's frame thread runs it:
 //     a tap (one down, one up, path index 1, the position over the desktop), a drag, two fingers (distinct path indices, a lift of one
 //     while the other moves), eight plus one fingers, a palm resting (never a touch), a finger turning palm (a cancel of every touch,
-//     then nothing until every contact is up), frames lost (nativeCancel), the rotation (90 degrees: desktop axes vs panel axes), idle
+//     then nothing until every contact is up), frames lost (nativeCancel), all four corners at every rotation in both axis modes, idle
 //     (no report at rest), path indices under BackBoard's 30.
 //   c++ -std=c++20 -Wall -Wextra -Werror -I.. touch_native_host.cpp -o /tmp/touch_native_host && /tmp/touch_native_host
 #include "TouchNative.h"
@@ -526,7 +526,7 @@ static void testLost()
 
 static void testRotation()
 {
-  {  // 90 degrees, desktop axes (default): the panel's (x, y) is the desktop's (h - 1 - y, x) over 2136 x 3200
+  {  // 90 degrees, desktop axes: the panel's (x, y) is the desktop's (h - 1 - y, x) over 2136 x 3200
     Rig rig;
     rig.degrees = 90;
     for (int i = 0; i < 4; ++i) rig.frame({{400, 1800, kFingerNodes}});
@@ -541,6 +541,29 @@ static void testRotation()
     const Child &ch = rig.events.front().children.front();
     CHECK(std::fabs(ch.x - 400.0 / 3199) < 0.003 && std::fabs(ch.y - 1800.0 / 2135) < 0.003);
     rig.lift();
+  }
+  // Physical corner order TL, TR, BL, BR. The HID report uses that same order in panel mode.
+  enum { TL, TR, BL, BR };
+  const InjectContact corners[] = {
+    {0, 0, kFingerNodes}, {kPanelW - 1, 0, kFingerNodes},
+    {0, kPanelH - 1, kFingerNodes}, {kPanelW - 1, kPanelH - 1, kFingerNodes},
+  };
+  const unsigned desktopCorners[][4] = {{TL, TR, BL, BR}, {TR, BR, TL, BL}, {BR, BL, TR, TL}, {BL, TL, BR, TR}};
+  const double xy[][2] = {{0, 0}, {1, 0}, {0, 1}, {1, 1}};
+  for (unsigned turn = 0; turn < 4; ++turn) {
+    for (bool panelAxes : {true, false}) {
+      for (unsigned corner = 0; corner < 4; ++corner) {
+        Rig rig(panelAxes);
+        rig.degrees = 90 * turn;
+        for (int i = 0; i < 4; ++i) rig.frame({corners[corner]});
+        const bool gotTouch = !rig.events.empty() && rig.events.front().children.size() == 1;
+        CHECK(gotTouch);
+        if (!gotTouch) continue;
+        const Child &ch = rig.events.front().children.front();
+        const unsigned expected = panelAxes ? corner : desktopCorners[turn][corner];
+        CHECK(ch.touch && ch.x == xy[expected][0] && ch.y == xy[expected][1]);
+      }
+    }
   }
 }
 

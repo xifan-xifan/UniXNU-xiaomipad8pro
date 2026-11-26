@@ -186,7 +186,7 @@ class EndToEnd(unittest.TestCase):
     def test_type_key_move_status(self):
         tablet = FakeTablet()
         tablet.start()
-        secret = 'Hunter2!'
+        secret = 'Hunter2!'  # a fixture, not a secret (privacy-scan: ok)
         code, out, err = self.run_main(tablet, 'type', secret, '--enter')
         self.assertEqual(code, 0, err)
         self.assertNotIn(secret, out + err)

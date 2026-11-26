@@ -76,6 +76,7 @@ which are unchanged.
 | `piano-keyboard-hall-pull=1\|3` | 0 | opt-in TLMM pull override for gpio80 (1 down, 3 up); 0 preserves the DT value (the cover3 probe uses 3) |
 | `piano-keyboard-hall-active-low=0` | 1 | Ubuntu DT polarity: 1 means raw low is closed and high is open; 0 inverts it |
 | `piano-keyboard-hall-trace=1` | 0 | log every gpio80 poll as raw level, logical level, edge-latch state and accepted state |
+| `piano-keyboard-hall-sim=1` | 0 | registers `machdep.piano_keyboard_hall_sim` (root writes 0 closed, 1 open, -1 the sensor): a test's cover, accepted and published like gpio80's (PianoPolicy and the clamshell see a close/open), real samples ignored while set; a system wake gives the cover back to the sensor (`HallSim.h`, `keyboard_host` `testHallSim`). Without the argument the sysctl does not exist. What only a physical close adds: the magnet, gpio80 and the kernel's cover-open wake |
 | `piano-keyboard-lid=1` / `2` | 0 | tell IOPMrootDomain the hall state as a clamshell: 1 with clamshell sleep disabled first, 2 with it allowed |
 | `piano-keyboard-touchpad=V` | 1 | touchpad command value on attach (2: not sent) |
 | `piano-keyboard-dpi=N` | 400 | pointer resolution declared to macOS (120..4000); lower = faster |

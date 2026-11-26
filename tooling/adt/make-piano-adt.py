@@ -85,6 +85,8 @@ def main():
     # XNU's RAM window (/chosen darwinboot-memory-size) instead of configs/k27-adt.toml's owned_memory_size: 0x200000000 for an image
     # or ESP booted by an FD whose DarwinBoot lacks firmware/patches/darwinboot/0001 (it refuses more than 8 GiB).
     p.add_argument('--ram-window', type=lambda v: int(v, 0), help='bytes, 2 MiB steps, 256 MiB to 13 GiB')
+    p.add_argument('--extra-ram', action='store_true',
+                   help='add the 384-byte /chosen/piano-extra-ram placeholder for DarwinBoot GPU and region0 pools')
     p.add_argument('--bt-address-file', type=Path, help='the unit Bluetooth address (default: private/bluetooth-address if present)')
     p.add_argument('--no-bt-address', action='store_true', help='no /arm-io/piano-bt node')
     # The OS line's identity table (default configs/k27-adt.toml, or PIANO_ADT_IDENTITY): configs/k273-adt.toml is the 27.3 line's
@@ -126,11 +128,16 @@ def main():
                                               ('transport-speed', struct.pack('<I', 3200000))]))
     with arm_io_children(extra):
         tree = generate(dtb, config, unique_chip_id=a.unique_chip_id, data=a.data, trust=a.trust, addon=a.addon)
+    if a.extra_ram:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from adt_extra_ram import add_extra_ram
+        tree = add_extra_ram(tree)
     a.output.parent.mkdir(parents=True, exist_ok=True)
     a.output.write_bytes(tree)
     print(f'{a.output}: {len(tree)} bytes (hardware {dtb}, identity {identity.name}){", with /arm-io/gop-display" if a.gop_display else ""}'
           f'{", with the GpuAddon slot" if a.addon else ""}'
-          f'{", with /arm-io/piano-bt (a private Bluetooth address)" if address else ""}')
+          f'{", with /arm-io/piano-bt (a private Bluetooth address)" if address else ""}'
+          f'{", with /chosen piano-extra-ram" if a.extra_ram else ""}')
 
 
 if __name__ == '__main__':

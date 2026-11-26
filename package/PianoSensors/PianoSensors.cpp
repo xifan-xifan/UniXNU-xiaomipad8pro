@@ -25,6 +25,7 @@
 // -rpc-ladder=0 (an init2 answered with an error is not tried with the next framing), -rpc-deadline=S (15: the attach -> listening at
 // most, then the session is released; 5..45); level 4: -als=0|1|2 (1: follow PianoBacklight's automatic mode; 2: always; 0:
 // never), -rotate=0|1|2 (1: follow piano-rotate; 2: always; 0: never), -accel-hz=N (10), -accel-batch=MS (0), -axes=a.. (a+y+x+z).
+// piano-sensors-accel-sample-time=1 times the orientation hold with SSC timestamps (default 0).
 // Without piano-sensors the driver declines in probe() and maps nothing.
 // Properties on the PianoSensors service (stable; sensors.md §5 lists them with their units).
 #include <IOKit/IOService.h>
@@ -78,7 +79,7 @@ struct Args {
   // level 4 (sensors.md §5c), and the consumers' own arguments it follows
   uint32_t als, rotate, accelHz, accelBatch, accelCover, conditionTrace;
   uint32_t backlight, backlightAuto, rotateAgent, rotateTest;
-  bool backlightAndroid;
+  bool backlightAndroid, accelSampleTime;
   char axesText[32];
   SfxAxes axes;
   int axesGiven, axesOk;
@@ -121,6 +122,7 @@ void readArgs()
   if (gArgs.accelHz < 1 || gArgs.accelHz > 100) gArgs.accelHz = SS_ACCEL_HZ;
   gArgs.accelBatch = bootArg("piano-sensors-accel-batch", 0);
   if (gArgs.accelBatch > 1000) gArgs.accelBatch = 1000;
+  gArgs.accelSampleTime = bootArg("piano-sensors-accel-sample-time", 0) == 1;
   gArgs.conditionTrace = bootArg("piano-sensors-condition-trace", 0);
   gArgs.backlight = bootArg("piano-backlight", 0);         // PianoBacklight's level: its automatic mode needs 2
   gArgs.backlightAuto = bootArg("piano-backlight-auto", 0);
@@ -961,6 +963,8 @@ bool PianoSensors::start(IOService *provider)
          gArgs.rotateTest);
   if (gArgs.level >= 4 && gArgs.accelCover)
     note("accel: bench acquisition with the cover allowed (piano-sensors-accel-cover=1); display, sleep and guard still gate it");
+  if (gArgs.level >= 4 && gArgs.accelSampleTime)
+    note("accel: SSC sample time for orientation (piano-sensors-accel-sample-time=1)");
   if (gArgs.level == 4) registerFaultObserve();
   gSelf = this;
   setProperty("piano-sensors", gArgs.level, 32);
@@ -998,6 +1002,7 @@ bool PianoSensors::start(IOService *provider)
     ss_defaults(&sc);
     sc.accel_hz = gArgs.accelHz;
     sc.accel_batch_ms = gArgs.accelBatch;
+    sc.accel_sample_time = gArgs.accelSampleTime;
     sc.axes = gArgs.axes;
     ss_init(gEngine, &kSsOps, &sc);
     for (int i = 0; i < SS_STREAMS; ++i) openStreamPort(i);

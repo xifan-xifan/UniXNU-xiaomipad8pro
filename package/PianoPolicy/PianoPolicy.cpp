@@ -71,6 +71,7 @@
 #include <sys/errno.h>
 #include <stdarg.h>
 #include "Policy.h"
+#include <PianoGpuAndroidPreset.h>
 
 using namespace pianopolicy;
 
@@ -104,6 +105,7 @@ uint32_t bootArg(const char *name, uint32_t fallback, bool *given = nullptr)
   if (given) *given = found;
   return found ? v : fallback;
 }
+bool rawBootArg(void *, const char *name, uint32_t *value) { return PE_parse_boot_argn(name, value, sizeof *value); }
 uint32_t clampArg(uint32_t v, uint32_t lo, uint32_t hi) { return v < lo ? lo : v > hi ? hi : v; }
 
 void readArgs()
@@ -123,8 +125,10 @@ void readArgs()
   // DCVS maximum (342 MHz unless piano-gpu-dcvs-max or piano-gpu-maxlevel is given), PianoThermal's level and passive GPU ceiling.
   gArgs.keyboardLid = bootArg("piano-keyboard-lid", 0);
   bool dcvsGiven = false, levelGiven = false;
-  gArgs.gpuDcvsMax = bootArg("piano-gpu-dcvs-max", 342, &dcvsGiven);
-  gArgs.gpuMaxLevel = bootArg("piano-gpu-maxlevel", 0, &levelGiven);
+  // gpu/throttle1: PianoA830's Android-curve preset (PianoGpuAndroidPreset.h: 1100 MHz / level 14 when no GPU knob is given)
+  const uint32_t gpuLevel = bootArg("piano-gpu", 0);
+  gArgs.gpuDcvsMax = pianogpu::presetArg(rawBootArg, nullptr, gpuLevel, "piano-gpu-dcvs-max", 342, &dcvsGiven);
+  gArgs.gpuMaxLevel = pianogpu::presetArg(rawBootArg, nullptr, gpuLevel, "piano-gpu-maxlevel", 0, &levelGiven);
   gArgs.gpuMaxGiven = (dcvsGiven && gArgs.gpuDcvsMax > gArgs.gpuMhz) || (levelGiven && gArgs.gpuMaxLevel);
   gArgs.thermal = clampArg(bootArg("piano-thermal", 0), 0, 2);
   gArgs.thermalGpuMhz = clampArg(bootArg("piano-thermal-gpu-mhz", 160), 100, 1100);
@@ -176,6 +180,7 @@ int numberProperty(IOService *s, const char *key)
 
 // ---------------------------------------------------------------------------------------------------------------- sysctls
 volatile uint32_t gLidArm;
+volatile uint32_t gLidSleepAC;   // machdep.piano_policy_lid_sleep_ac: the AC opt-in, from piano-policy-lid-sleep-ac at start
 volatile uint32_t gLpm;                 // machdep.piano_policy_lpm
 volatile uint32_t gHpm;                 // machdep.piano_policy_hpm (Energy Mode step E2)
 IOLock *gStatusLock;
@@ -223,9 +228,22 @@ int sysctlLidArm(struct sysctl_oid *oidp, void *, int, struct sysctl_req *req)
   return 0;
 }
 
+// The AC lid demand-sleep opt-in at run time (one boot can test both AC behaviours; the owner can choose without a new profile).
+int sysctlLidSleepAC(struct sysctl_oid *oidp, void *, int, struct sysctl_req *req)
+{
+  int v = int(__atomic_load_n(&gLidSleepAC, __ATOMIC_ACQUIRE));
+  const int err = sysctl_handle_int(oidp, &v, 0, req);
+  if (err || !req->newptr) return err;
+  if (v != 0 && v != 1) return EINVAL;
+  __atomic_store_n(&gLidSleepAC, uint32_t(v), __ATOMIC_RELEASE);
+  note("sleep-contract1: AC lid demand-sleep %s by the runtime switch (real AC preserved)", v ? "opted in" : "off");
+  kickFromSysctl();
+  return 0;
+}
+
 // machdep.piano_policy (read only) and machdep.piano_policy_lpm (root writes), registered at start. Filled in at run time rather
 // than by SYSCTL_OID's static initializer: its parent and handler are signed pointers on arm64e.
-struct sysctl_oid gOidStatus, gOidLpm, gOidHpm, gOidLidArm;
+struct sysctl_oid gOidStatus, gOidLpm, gOidHpm, gOidLidArm, gOidLidSleepAC;
 
 }  // namespace
 
@@ -339,6 +357,7 @@ bool PianoPolicy::start(IOService *provider)
   fConfig.act = gArgs.level >= 2;
   fConfig.lid = gArgs.lid != 0;
   fConfig.lidSleepAC = gArgs.lidSleepAC == 1;
+  __atomic_store_n(&gLidSleepAC, fConfig.lidSleepAC ? 1u : 0u, __ATOMIC_RELEASE);
   note("sleep-contract1: AC lid demand-sleep %s (real AC preserved)", fConfig.lidSleepAC ? "opted in" : "off");
   fConfig.lidConflict = gArgs.keyboardLid != 0;
   fConfig.profile = gArgs.profile != 0;
@@ -401,6 +420,10 @@ bool PianoPolicy::start(IOService *provider)
           "PianoPolicy: macOS Low Power Mode (0/1), mirrored by the agent");
   fillOid(gOidLidArm,"piano_policy_lid_arm",CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED,sysctlLidArm,"I","Explicit lid sleep gate; physical polarity observation first");
   sysctl_register_oid(&gOidLidArm);
+  fillOid(gOidLidSleepAC, "piano_policy_lid_sleep_ac", CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, sysctlLidSleepAC, "I",
+          "PianoPolicy: AC lid demand-sleep opt-in (0/1; piano-policy-lid-sleep-ac at boot)");
+  sysctl_register_oid(&gOidLidSleepAC);
+  note("machdep.piano_policy_lid_sleep_ac registered (%u)", __atomic_load_n(&gLidSleepAC, __ATOMIC_ACQUIRE));
   sysctl_register_oid(&gOidStatus);
   sysctl_register_oid(&gOidLpm);
   fillOid(gOidHpm, "piano_policy_hpm", CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, sysctlHpm, "I",
@@ -548,6 +571,7 @@ Inputs PianoPolicy::gather()
   IOService *kb = __atomic_load_n(&fKeyboard, __ATOMIC_ACQUIRE);
   const int hall = numberProperty(kb, "piano-keyboard-hall");
   in.lidSleepArmed=__atomic_load_n(&gLidArm,__ATOMIC_ACQUIRE)!=0;
+  in.lidSleepAC = int(__atomic_load_n(&gLidSleepAC, __ATOMIC_ACQUIRE));
   in.lid = hall < 0 ? Lid::unknown : hall ? Lid::open : Lid::closed;
   in.attached = numberProperty(kb, "piano-keyboard-attached") == 1;
   IOService *ps = __atomic_load_n(&fPowerSource, __ATOMIC_ACQUIRE);

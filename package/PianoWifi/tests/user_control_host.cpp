@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Copyright (c) 2026 Leo Zhang.
+// c++ -std=c++20 -Wall -Wextra -Werror -I.. user_control_host.cpp -o /tmp/user_control_host && /tmp/user_control_host
 #include "WifiUserControl.h"
 #include "WifiApple80211.h"
 #include <cstdio>
@@ -7,8 +8,44 @@ using namespace pianowifi;
 using namespace pianowifi::a80211;
 static unsigned failures;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); ++failures; } } while (0)
+
+static void joinReceipt()
+{
+  WifiJoinRequest request;
+  request.cancel();
+  CHECK(!request.currentReceipt(1, 0, 0, false, false));
+  request.accept(1, 2, 0);
+  CHECK(request.currentReceipt(2, 0, 0, false, false) == 1); // airportd pending at boot
+  request.consume();
+  CHECK(request.currentReceipt(3, 0, 1, true, false) == 1);
+  CHECK(!request.currentReceipt(3, 0, 1, false, false)); // loss before authorization
+  CHECK(!request.currentReceipt(2 + WifiJoinRequest::kTimeoutMs, 0, 1, true, false));
+  CHECK(request.finish(1, 1, 4, 0));
+  CHECK(request.currentReceipt(4, 0, 1, true, true) == 1); // live duplicate, including PS-only change
+  CHECK(!request.currentReceipt(5, 0, 0, true, true)); // another station's generation
+  CHECK(!request.currentReceipt(5, 0, 1, false, false)); // link loss without a new radio pass
+  request.cancel(); // SET19 OFF
+  CHECK(request.generation == 1 && !request.currentReceipt(6, 0, 1, true, true));
+  CHECK(!request.currentReceipt(7, 1, 0, false, false)); // radio ready after ON
+  request.accept(2, 8, 1);
+  request.consume();
+  CHECK(request.finish(2, 1, 9, 1));
+  CHECK(request.currentReceipt(10, 1, 2, true, true) == 2); // radio retained on sleep/wake
+  CHECK(!request.currentReceipt(11, 2, 2, true, true)); // old receipt across parked sleep/wake
+  request.accept(3, 12, 2);
+  CHECK(!request.currentReceipt(13, 3, 0, false, false)); // pending receipt across a restart
+  request.consume();
+  CHECK(request.finish(3, 1, 14, 3)); // queued request establishes a live association on the new pass
+  CHECK(request.currentReceipt(14, 3, 3, true, true) == 3);
+  request.accept(4, 15, 3);
+  request.consume();
+  CHECK(request.finish(4, 2, 16, 3));
+  CHECK(!request.currentReceipt(16, 3, 4, true, false));
+}
+
 int main()
 {
+  joinReceipt();
   WifiUserControl u;
   CHECK(u.allowed(u.read()));
   // Sleep preparation can disconnect without changing logical radio power.
@@ -57,24 +94,24 @@ int main()
   CHECK(request.canStart(100)); // RAM-only profile mode
   request.cancel();
   CHECK(request.nativeOwner && !request.canStart(100) && request.result(100) == 2);
-  request.accept(10, 100);
+  request.accept(10, 100, 0);
   CHECK(request.canStart(100) && request.result(100) == 0);
   request.consume();
   CHECK(!request.canStart(101) && request.result(9599) == 0);
-  CHECK(request.result(9600) == 9 && request.finish(10, 1, 9600));
+  CHECK(request.result(9600) == 9 && request.finish(10, 1, 9600, 0));
   CHECK(request.result(9601) == 9 && !request.canStart(9601));
-  request.accept(11, 9700);
-  CHECK(!request.finish(10, 1, 9700) && request.result(9700) == 0);
+  request.accept(11, 9700, 0);
+  CHECK(!request.finish(10, 1, 9700, 0) && request.result(9700) == 0);
   request.consume();
-  CHECK(request.finish(11, 1, 9701) && request.result(9701) == 1);
+  CHECK(request.finish(11, 1, 9701, 0) && request.result(9701) == 1);
   CHECK(!request.canStart(20000)); // wake/link loss cannot replay it
   request.cancel();             // SET22, or physical OFF
   CHECK(request.result(20001) == 2 && !request.canStart(20001));
-  CHECK(!request.finish(11, 1, 20002) && request.result(20002) == 2);
-  request.accept(12, 20003);
+  CHECK(!request.finish(11, 1, 20002, 0) && request.result(20002) == 2);
+  request.accept(12, 20003, 0);
   CHECK(request.canStart(20003) && request.result(20003) == 0);
   request.consume();
-  CHECK(request.finish(12, 2, 20004) && request.result(20004) == 2);
+  CHECK(request.finish(12, 2, 20004, 0) && request.result(20004) == 2);
   const uint32_t first = u.disconnect();
   CHECK(u.join());
   const uint32_t later = u.disconnect();

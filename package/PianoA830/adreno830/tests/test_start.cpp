@@ -584,10 +584,12 @@ IOReturn NativeAdrenoGmuContext::bringUp(const NativeAdrenoGmuContextConfig &con
 }
 static uint8_t buffers[GpuBufferCount][0x1c000];
 /* pagani-gpu-va=16 as the real context answers on an SMMU without a 34-bit IAS or the 32 MiB of tables: the 4 GiB aperture.
- * UniXNU-piano (GPU-SLOTS): the macOS default is pagani-gpu-va=64 (DeviceInfo 0x20000000 + 0xFE0000000, a 36-bit input). */
+ * UniXNU-piano (GPU-SLOTS): the macOS default is pagani-gpu-va=64 (DeviceInfo 0x20000000 + 0xFE0000000, a 36-bit input).
+ * gpu/slots2: the macOS default is pagani-gpu-va=256, which is the 64 GiB request without paged mode (these runs' pool mode) and the
+ * 256 GiB aperture (0x20000000 + 0x3FE0000000, a 38-bit input) with piano-gpu-mem=paged. */
 static bool wideFallback;
 #ifdef ADRENO830_MACOS
-static constexpr uint32_t kDefaultVa=64;static constexpr uint64_t kDefaultVaSize=0xFE0000000ull;static constexpr uint32_t kDefaultInputBits=36;
+static constexpr uint32_t kDefaultVa=256;static constexpr uint64_t kDefaultVaSize=0xFE0000000ull;static constexpr uint32_t kDefaultInputBits=36;
 #else
 static constexpr uint32_t kDefaultVa=16;static constexpr uint64_t kDefaultVaSize=0x3E0000000ull;static constexpr uint32_t kDefaultInputBits=34;
 #endif
@@ -595,15 +597,16 @@ IOReturn NativeAdrenoGpuContext::bringUp(const NativeAdrenoGpuContextConfig &con
                                          NativeAdrenoGmuContextReport *report)
 {
     CHECK(config.bank==0 && config.asid==1 && config.slot==0 && config.lpac_slot==3 && config.sid==0 && config.lpac_sid==1);
-    CHECK((config.aperture_gib==4 || config.aperture_gib==2 || config.aperture_gib==16 || config.aperture_gib==64) &&
-          config.pool_mib==512 && config.write_combined_pool);
+    CHECK((config.aperture_gib==4 || config.aperture_gib==2 || config.aperture_gib==16 || config.aperture_gib==64 ||
+           config.aperture_gib==256) && config.pool_mib==(config.paged?0u:512u) && config.write_combined_pool);
     if(ioScript.smmu)ioScript.smmu(smmuIoSeen,"context",config.bank);
     *report={};report->step=Ready;
     uint16_t step=0,reason=0;
     if(IOReturn r=hit("NativeAdrenoGpuContext::bringUp",&step,&reason)) {report->step=step;return r;}
     ready_=true;used_=true;output_bits_=36;pool_mib_=config.pool_mib;
-    aperture_=uint64_t(config.aperture_gib>=16 && wideFallback?4:config.aperture_gib)<<30;
-    report->table_pages=aperture_>GpuApertureBytes16G?uint32_t(TablePages64G):aperture_>GpuApertureBytes?uint32_t(TablePages16G):
+    const uint32_t gib=config.aperture_gib==256 && !config.paged?64u:config.aperture_gib;   /* gpu/slots2: 256 GiB only paged */
+    aperture_=uint64_t(gib>=16 && wideFallback?4:gib)<<30;
+    report->table_pages=config.paged?1u:aperture_>GpuApertureBytes16G?uint32_t(TablePages64G):aperture_>GpuApertureBytes?uint32_t(TablePages16G):
         aperture_<GpuApertureBytes?uint32_t(TablePages2G):uint32_t(TablePages);
     return kIOReturnSuccess;
 }
@@ -982,7 +985,8 @@ extern "C" IOReturn native_adreno_publish(NativeAdrenoVm *vm,NativeAdrenoSubmit 
 {
     /* The input size follows the aperture the context built: 34 bits for the 16 GiB one, else 32 (UniXNU-piano: 36 for 64 GiB). */
     CHECK(vm && submit && ring && clock && clock->now_us && timer && info &&
-          input_bits==(info->va_start+info->va_size>0x400000000ull?36u:info->va_start+info->va_size>0x100000000ull?34u:32u));
+          input_bits==(info->va_start+info->va_size>0x1000000000ull?38u:info->va_start+info->va_size>0x400000000ull?36u:
+                       info->va_start+info->va_size>0x100000000ull?34u:32u));
     publishedInfo=*info;publishedOutputBits=output_bits;publishedInputBits=input_bits;
     return hit("native_adreno_publish");
 }
@@ -1644,6 +1648,22 @@ int main()
     CHECK(run(&b)==kIOReturnSuccess && publishedInfo.va_size==0x3E0000000ull && publishedInputBits==34);
     b=board13t();b.knobs.va=64;   /* and 64 for the 64 GiB one */
     CHECK(run(&b)==kIOReturnSuccess && publishedInfo.va_size==0xFE0000000ull && publishedInputBits==36);
+    /* gpu/slots2: 256 asks for the 256 GiB one only in paged mode (else the 64 GiB request); paged with 64 keeps the 64 GiB one (the
+     * A/B switch); the wide fallback takes the paged request down to 4 GiB as well. */
+    b=board13t();b.knobs.va=256;
+    CHECK(run(&b)==kIOReturnSuccess && publishedInfo.va_size==0xFE0000000ull && publishedInputBits==36);
+    native_adreno_gpu_mem_paged=1;
+    b=board13t();b.knobs.va=256;
+    CHECK(run(&b)==kIOReturnSuccess && publishedInfo.va_start==0x20000000 && publishedInfo.va_size==0x3FE0000000ull &&
+          publishedInputBits==38);
+    b=board13t();b.knobs.va=64;
+    CHECK(run(&b)==kIOReturnSuccess && publishedInfo.va_size==0xFE0000000ull && publishedInputBits==36);
+    b=board13t();b.knobs.va=256;wideFallback=true;
+    CHECK(run(&b)==kIOReturnSuccess && publishedInfo.va_size==0xE0000000ull && publishedInputBits==32);
+    wideFallback=false;
+    native_adreno_gpu_mem_paged=0;
+    b=board13t();b.knobs.va=128;   /* not an aperture: S0 refuses it */
+    CHECK(run(&b)!=kIOReturnSuccess);
     b=board13t();wideFallback=true;
     CHECK(run(&b)==kIOReturnSuccess && publishedInfo.va_size==0xE0000000ull && publishedInputBits==32);
     wideFallback=false;

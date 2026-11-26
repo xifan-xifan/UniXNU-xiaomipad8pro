@@ -172,6 +172,8 @@ recommendation: C for input devices, A kept open for audio if the owner accepts 
 | `piano-bt-blind=1` | 0 | vote a rail whose PMIC state could not be read (PianoWifi's `piano-wifi-blind`) |
 | `piano-bt-addr=0` | 1 | keep the NVM's default address even when the ADT has the unit's own |
 | `piano-bt-stop=N` | 0 | return after step N (201..205, 301..306, 400..412); the state of that step stays (a sleep still takes it down) |
+| `piano-bt-lemask=0` | 1 at level 5 (0 before bt/hid1, 2026-11-26) | level 5: OR LE Data Length Change (bit 6) and LE PHY Update Complete (bit 11) into the host's LE Set Event Mask (§8.5); root changes it at run time with `machdep.piano_bt_lemask` (applies to bluetoothd's next HCI start) |
+| `piano-bt-lerdy=1` | 0 | level 5: the LE link-ready assist (§8.5); `machdep.piano_bt_lerdy` at run time |
 
 ## 7. Build, kernel collection
 
@@ -605,6 +607,61 @@ PianoBluetooth: stage 499: the ladder reached its level
 Record: the version words, the board id (selects the NVM file), the build label, the HCI/LMP versions, `first reset` (answered or not),
 the read time of the rampatch, the counts. A `FAILED at step N (...; last opcode .... status .. hardware error ..)` line names the
 step, the command and the controller's answer.
+
+### 8.5 LE link ready (2026-11-21, host-tested; tablet result pending)
+
+The owner's LE connects of 2026-11-20 completed (LE Connection Complete, the remote version and features read) and then sat in
+bluetoothd's `ready-state: LE_READY_WAIT_FOR_LENGTH` until a supervision timeout or a local cancel; GATT, SMP and HID never started.
+The 27.3 bluetoothd (26C5035r) picks its LE event mask by chipset: a type-zero (third-party) controller gets `0x1f`, which the
+path-A runtime extends to `0x101f` (Extended Advertising Report); every other chipset gets a mask with bits 5, 6, 9 and 11. Its
+LE link-ready state machine is the same for all: after the remote features it waits for `LE Data Length Change` when both sides
+support data length extension (and for `LE PHY Update Complete` when both support 2M), and it sends neither LE Set Data Length nor
+LE Set PHY itself during link set-up: it relies on the controller's own procedures (it wrote the suggested default 251/2120 and the
+default PHY 2M). Both events are masked for type zero, so the wait never ends. Linux sets both bits for this chip's features
+(`hci_le_set_event_mask_sync`), which is why LE devices work under Ubuntu.
+
+`piano-bt-lemask=1` ORs both bits into every LE Set Event Mask that enables LE Connection Complete, in the H4 stream from
+bluetoothd to the controller (`HciH4.h` `H4LeMaskPatcher`, stateful across writes, no other byte touched). The kext logs each mask
+(`bt-lemask1: LE event mask 000000000000101f -> 000000000000185f`) and counts the link events it relays (`piano-bt-h4-le-connections`,
+`-le-length-changes`, `-le-phy-updates`, `-disconnections`; the first 32 logged with status, handle and reason, never an address).
+Note that bluetoothd's own HCI trace shows the mask before the patch.
+
+`piano-bt-lerdy=1` (2026-11-24, host-tested; default 0; `machdep.piano_bt_lerdy` switches it at run time) covers the case the mask
+alone cannot: a controller and peer that never run the data length or PHY procedure (the event is only sent when a procedure
+changes something). `HciH4.h` `LeReadyAssist` follows each LE link: once its remote features are read, if neither a Data Length
+Change nor an ATT client request or SMP Pairing Request from the host has passed after 0.75 s, it hands the host, between two
+controller packets, the Data Length Change a procedure that changed nothing would produce (27 octets / 328 us both ways, the link's
+true values in that case); after 1.5 s, for a 2M peer without a PHY Update Complete, one with status 0 on LE 1M both ways; after
+2.25 s the same Data Length Change again (the 27.3 bluetoothd completes its length probe on an event with unchanged values when
+the first one made it rescale). A real event cancels its kind; the host's GATT/SMP start ends the assist for the link. Each
+injection is logged (`bt-lerdy1: injected LE data length change 27/328 handle=... step=N`) and counted
+(`piano-bt-h4-lerdy-features`, `-host-started`, `-injected-length`, `-injected-phy`). bluetoothd's HCI trace records the injected
+events as if the controller had sent them.
+
+The hands-free test peer: `le-test/le-peripheral SECONDS NONCE [plain|secure|hid]` on a Mac next to the tablet (from a Terminal
+window or a session started from one; over ssh CoreBluetooth reports unauthorized). `secure` adds an encryption-required
+characteristic, so `piano-bt-probe --le-pair` on the tablet makes bluetoothd pair (LE Secure Connections, Just Works) and the Mac
+logs `secure-read`. `hid` shows that CoreBluetooth refuses a third-party HID service (`hid_service_added=0 error=8`, measured on
+macOS 27.2): HID over GATT itself needs a real keyboard or mouse. `piano-bt-probe --le-rssi SECONDS` reports the RSSI distribution
+of the test peripheral's advertisements (the RF check at a known distance).
+
+### 8.6 Radio health (bt-radio1, 2026-11-26, host-tested; tablet result pending)
+
+The 11-22 owner session's HCI trace (1739 LE extended advertising reports in 27 minutes) had 1570 of them (90 %) at -101 dBm or
+below, the best at -41 dBm; the strong reports came only in about 1.5 s windows every 120 s that line up with PianoWifi's background
+scans. The same boot's 121 classic inquiries (GIAC, 12.8 s each, status 0) returned no Inquiry Result of any kind, so a BR/EDR
+keyboard in pairing mode cannot be found either. The analysis (private notes, 2026-11-24 and 2026-11-26) ranks Wi-Fi's hold on the
+shared 2.4 GHz front end first: station power save off (`piano-wifi-ps=0`, while Linux and Android doze between beacons), and the
+firmware's default dual-MAC configuration with asynchronous SBS left on (Android sends `WMI_PDEV_SET_MAC_CONFIG` with it cleared).
+
+To read this on any boot without a bluetoothd trace, the kext buckets the RSSI of every report it relays (`HciH4.h` `RadioRssi`):
+LE Advertising Report, LE Extended Advertising Report, Inquiry Result with RSSI, Extended Inquiry Result; the plain Inquiry Result
+(no RSSI) and Inquiry Complete are counted. Buckets: >= -60, -61..-75, -76..-90, -91..-100, <= -101 dBm. Properties
+`piano-bt-radio-le-rssi` and `piano-bt-radio-classic-rssi` (five counts, `a/b/c/d/e`), `piano-bt-radio-le-reports`,
+`piano-bt-radio-classic-results`, `piano-bt-radio-inquiries`; a console line at most every 30 s when the count changed:
+`bt-radio1: LE reports=N rssi>=-60/-75/-90/-100/below=a/b/c/d/e best=B; classic results=N (no rssi N) rssi=... inquiries=N`.
+No address is kept. A healthy receiver with Apple devices in the room puts most LE reports above -90 dBm; the 11-22 boot would
+have read `55/10/81/23/1570 best=-41`.
 
 ## 9. Fallback
 

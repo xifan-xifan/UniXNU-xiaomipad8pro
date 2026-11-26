@@ -16,7 +16,8 @@
 #     tooling/metal/turnip-a830/NativeAdrenoABICompat.h for the one v1/Adreno740 name the backend uses and v2 lacks;
 #   - the plugin: $PIANO_K27_TREE/overlay/metal/NativeAdrenoMetalPlugin.mm, the frontend $TURNIP_TREE/drivers/AdrenoMetal through
 #     $PIANO_K27_TREE/scripts/piano-frontend-patch.py and then tooling/metal/turnip-a830/frontend/*.patch (2026-11-11: the console after a
-#     login; with them the plugin is linked here, no longer the VM's binary), the prebuilt bridge $PIANO_K27_TREE/out/metal/bridge/libnative_metal_bridge.a (metal2vulkan,
+#     login; with them the plugin is linked here, no longer the VM's binary), the plugin source with tooling/metal/turnip-a830/plugin/*.patch
+#     (2026-11-25, plugin 0012) as a patched copy in out/turnip-a830/plugin, the prebuilt bridge $PIANO_K27_TREE/out/metal/bridge/libnative_metal_bridge.a (metal2vulkan,
 #     GPL-2.0+/LGPL-3.0+, built on the private build host by $PIANO_K27_TREE/scripts/build-metal-bridge-macos.py), as $PIANO_K27_TREE/build-metal-plugin-piano.sh;
 #   - $TURNIP_TREE/scripts/macho-weak-self-binds.py (dyld's flat lookups of Mesa's weak entry points).
 # Provenance and licences: tooling/metal/UPSTREAM.
@@ -174,9 +175,29 @@ if [ ${#FRONTEND_PATCHES[@]} -gt 0 ] || [ -f "$P/abort_reporter.mm" ]; then CXX+
 printf '%s\n' "${CXX[@]}" > "$O/plugin/flags.new"
 if ! cmp -s "$O/plugin/flags.new" "$O/plugin/flags"; then rm -f "$O/plugin/plugin.o" "$O/plugin/frontend.o" "$O/plugin/reporter.o"; mv "$O/plugin/flags.new" "$O/plugin/flags"
 else rm -f "$O/plugin/flags.new"; fi
-if stale "$O/plugin/plugin.o" "$K/overlay/metal/NativeAdrenoMetalPlugin.mm" "$U/NativeBridgeMetalFrontend.h"; then
-  "${CXX[@]}" "$K/overlay/metal/NativeAdrenoMetalPlugin.mm" -o "$O/plugin/plugin.o"
+# The plugin's source: the k27 tree's overlay as it is, or, with tooling/metal/turnip-a830/plugin/*.patch (in order; plugin 0012: a
+# client with no writable cache directory opens without the disk cache), a patched copy at out/turnip-a830/plugin/plugin.mm. The
+# effective source's hash is kept (plugin/plugin.src): a change of it, also back to the unpatched overlay, recompiles plugin.o.
+PLUGIN_SRC=$K/overlay/metal/NativeAdrenoMetalPlugin.mm
+PLUGIN_PATCHES=()
+for p in "$P"/plugin/*.patch; do [ -f "$p" ] && PLUGIN_PATCHES+=("$p"); done
+if [ ${#PLUGIN_PATCHES[@]} -gt 0 ]; then
+  cp "$PLUGIN_SRC" "$O/plugin/plugin.mm.new"
+  for p in "${PLUGIN_PATCHES[@]}"; do
+    patch -s "$O/plugin/plugin.mm.new" < "$p" || { echo "plugin patch $p does not apply" >&2; exit 1; }
+  done
+  put "$O/plugin/plugin.mm.new" "$O/plugin/plugin.mm"; rm -f "$O/plugin/plugin.mm.new" "$O/plugin/plugin.mm.new.orig"
+  PLUGIN_SRC=$O/plugin/plugin.mm
+else
+  rm -f "$O/plugin/plugin.mm"
 fi
+echo "$(sha "$PLUGIN_SRC") ${#PLUGIN_PATCHES[@]}" > "$O/plugin/plugin.src.new"
+if ! cmp -s "$O/plugin/plugin.src.new" "$O/plugin/plugin.src"; then rm -f "$O/plugin/plugin.o"; mv "$O/plugin/plugin.src.new" "$O/plugin/plugin.src"
+else rm -f "$O/plugin/plugin.src.new"; fi
+if stale "$O/plugin/plugin.o" "$PLUGIN_SRC" "$U/NativeBridgeMetalFrontend.h"; then
+  "${CXX[@]}" "$PLUGIN_SRC" -o "$O/plugin/plugin.o"
+fi
+if [ ${#PLUGIN_PATCHES[@]} -gt 0 ]; then echo "plugin: $K/overlay/metal/NativeAdrenoMetalPlugin.mm + ${#PLUGIN_PATCHES[@]} patch(es) -> $PLUGIN_SRC"; fi
 python3 "$K/scripts/piano-frontend-patch.py" "$U/NativeBridgeMetalFrontend.mm" "$O/plugin/frontend.mm.new" 2> "$O/plugin/frontend-patch.log"
 for p in ${FRONTEND_PATCHES[@]+"${FRONTEND_PATCHES[@]}"}; do
   patch -s "$O/plugin/frontend.mm.new" < "$p" || { echo "frontend patch $p does not apply" >&2; exit 1; }

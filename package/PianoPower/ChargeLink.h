@@ -63,6 +63,8 @@ struct LinkView {
   uint32_t wakes = 0;                         // system wakes so far
   bool willSleep = false, shutdown = false;   // a handover is asked for
   bool mippsBusy = false;                     // MiPPS runs or owes its 0x21002 = 0: no voltage step (an authentication)
+  bool cpFirst = false;                       // charge/mipps2: the armed pump would start from this 5 V (no 9 V request now)
+  bool mippsPending = false;                  // charge/mipps2: MiPPS will run on this attach and has not finished (no 9 V first)
 };
 
 struct LinkReadback {
@@ -163,6 +165,8 @@ class ChargeLink {
     if (has(McaTermVolt)) {x.valid |= PIANO_CHG_IN_FV; x.fv_raw = m.value[McaTermVolt];}
     if (has(McaVerify)) {x.valid |= PIANO_CHG_IN_VERIFY; x.verify = m.value[McaVerify];}
     if (v.mippsBusy) {x.valid |= PIANO_CHG_IN_VERIFY; x.verify = 1;}
+    x.mipps_pending = (v.mippsPending || v.mippsBusy) ? 1 : 0;
+    x.cp_first = v.cpFirst ? 1 : 0;
     if (has(McaTbat)) {x.valid |= PIANO_CHG_IN_TBAT; x.tbat_c = m.value[McaTbat];}
     if (has(McaAiclStatus)) {x.valid |= PIANO_CHG_IN_AICL; x.aicl_ma = m.value[McaAiclStatus];}
     if (has(McaPdos)) {
@@ -179,6 +183,20 @@ class ChargeLink {
     if (v.contract && piano_contract_status_fresh(v.contract, v.nowMs) && v.contract->connected && v.contract->sink &&
         !v.contract->pd)
       x.valid |= PIANO_CHG_IN_NONPD;
+    // charge/mipps2: a fresh PD sink status whose RDO does not decode against the firmware's list (a verified MiPPS adapter's vendor
+    // object). 0x21011 is the firmware's own list, not the source's objects by position: cp-first2 had RDO object 7 with a 4-entry
+    // list whose first slot was no 5000/5000 object, cp-first1 object 7 with 2 entries. So no position test here: any RDO object
+    // 1-7 with this cycle's list read. Ubuntu's 5 V PD input (xiaomi_mca_5v_input, xiaomi_mca_pd_5v_ma) never looks at the RDO; the
+    // policy gives the class's 5 V row from a 5000/5000 entry at any slot (else 500 mA) and never a contract (no 9 V, PPS or pump).
+    if (v.contract && piano_contract_status_fresh(v.contract, v.nowMs) && v.contract->connected && v.contract->sink &&
+        v.contract->pd && !v.contract->valid && v.contract->last_error == PIANO_CONTRACT_RDO && (x.valid & PIANO_CHG_IN_PDOS) &&
+        x.pdos) {
+      const unsigned object = (v.contract->rdo >> 28) & 15u;
+      if (object >= 1 && object <= 7) {
+        x.valid |= PIANO_CHG_IN_PD_UNMAPPED;
+        x.rdo_object = uint8_t(object);
+      }
+    }
     if (v.contract) x.contract_observing = v.contract->linked && !v.contract->quarantined &&
         v.contract->stage != PianoContractIdle &&
         (v.contract->last_error == PIANO_CONTRACT_OK || v.contract->last_error == PIANO_CONTRACT_CHANGED);
@@ -189,7 +207,7 @@ class ChargeLink {
       x.valid |= PIANO_CHG_IN_CONTRACT | PIANO_CHG_IN_SOURCE;
       x.contract_generation = c.generation;
       x.contract_link_generation = m.links;
-      x.contract_mv = c.mv; x.contract_ma = c.ma; x.contract_protocol = c.protocol;
+      x.contract_mv = c.mv; x.contract_ma = c.ma; x.contract_protocol = c.protocol; x.contract_object = c.object;
       x.fixed9_ma = x.pps9_ma = 0;
       bool fixed5 = false;
       for (unsigned i = 0; i < c.pdos && i < 7; ++i) {

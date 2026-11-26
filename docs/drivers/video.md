@@ -890,3 +890,13 @@ No HFI packet was sent and ETB/EBD/PSC/decoded were all zero. The aggregate refu
 failed. Its wallpaper capture showed no resolved motion across26.45seconds; the actual fallback factory was not recorded.
 V9e removes the unnecessary maximum-size reservation while preserving every buffer capacity, both scratch generations,
 Ncap10, invalid guards and quarantine. This allocation correction is host-checked;1080p HEVC remains tablet-unqualified.
+
+### RAM16G: the AVC arena from region0 (R3, docs/extra-ram.md)
+
+With `piano-extra-ram=1 piano-video-extra-ram=1` (both default 0), level 6 backs the 256 MiB AVC boot reservation with 128 slabs of
+the region0 modem run (0x89e00000 + 274 MiB, published by DarwinBoot in `/chosen/piano-extra-ram`, use 3), self-tested by the shared
+pool (`package/include/PianoExtraRam*.h`) before the reservation. That frees 256 MiB of XNU's window for the whole boot. The bank
+translates every page as before (`VideoHw.h arenaPagePa`). The CPU view is one write-combined map, zeroed through itself, because no
+cached alias exists. Loans are subranges of the same physical descriptor. Any shortfall falls back to the XNU allocation unchanged and
+is logged as `RAM16G arena from XNU: ...`. The pool's report is `machdep.piano_extra_ram_video` (root). HEVC arenas larger than the
+run stay XNU-backed.

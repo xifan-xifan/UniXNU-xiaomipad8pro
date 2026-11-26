@@ -1,0 +1,40 @@
+# Monthly dependency check: every pinned source still fetches, which pins upstream has moved past (a report, not a failure), the
+# Apple OSS pins of the kernel environment, and that Apple's CDN still serves the 27.3 IPSW's index (only its central directory and
+# BuildManifest are read; no member is downloaded). docs/ci.md.
+name: dependencies
+
+on:
+  schedule:
+    - cron: '23 5 1 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pins:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pinned commits fetch
+        run: python3 scripts/fetch-pins.py --verify
+      - name: Pins behind their upstream branch (report)
+        run: python3 scripts/fetch-pins.py --outdated
+      - name: The k27 tree's pinned tree id
+        run: bash tooling/k27/fetch-k27-tree.sh "$RUNNER_TEMP/k27-tree"
+
+  apple-oss:
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apple OSS pins of the kernel environment
+        run: WORK="$RUNNER_TEMP/ci" bash tooling/ci/k27-kernel.sh verify
+      - name: The IPSW's index is still served (no member downloaded)
+        run: python3 tooling/k273/ipsw-members.py list > "$RUNNER_TEMP/ipsw-members.txt" && grep -c . "$RUNNER_TEMP/ipsw-members.txt"
+      - name: Runner toolchain (for the build workflow)
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          xcrun -f ld-classic || echo "::warning::no ld-classic in this Xcode: the kernel build needs LD_CLASSIC (docs/ci.md)"

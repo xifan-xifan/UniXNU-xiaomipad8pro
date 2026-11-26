@@ -240,6 +240,15 @@ constexpr uint32_t kRemoteStateSuspend = 0, kRemoteStateResume = 1; // iris_set_
 // 0xe0000000 limit); the UC region (queue table + three queues + the SFR) at its start, 1 MiB aligned, declared 4 MiB
 // (ALIGN(SFR + queues, 1 MiB) as iris_vpu_setup_ucregion_memory_map computes it).
 constexpr uint64_t kXnuDramBase = 0x8c0000000ull, kXnuDramEnd = 0xc00000000ull;   // dts/piano.dts memory@8c0000000 (DpuHw.h)
+// RAM16G R3 (docs/extra-ram.md): the region0 run the arena may also come from, the disabled modem's memory (package/include/
+// PianoExtraRam.h kAllowed "modem", firmware/patches/darwinboot/region0-allow.json; PianoVideo.cpp asserts they agree). Only the
+// session arena: the UC region, scratch and tables stay XNU pages. The stream's bank translates (VideoSmmu.h), so any PA below the
+// bank's output size works; the CPU view is the same write-combined one the XNU-backed arena has.
+constexpr uint64_t kExtraArenaBase = 0x89e00000ull, kExtraArenaEnd = 0x9b000000ull;
+constexpr bool arenaPagePa(uint64_t pa)
+{
+  return !(pa & 4095) && ((pa >= kXnuDramBase && pa < kXnuDramEnd) || (pa >= kExtraArenaBase && pa < kExtraArenaEnd));
+}
 constexpr uint32_t kIovaBase = 0x80000000u;
 constexpr uint32_t kQueueTableBytes = 456;                          // 288 + 3 x 56
 constexpr uint32_t kQueueAreaBytes = (kQueueTableBytes + 3 * kHfiQueueBytes + 4095) & ~4095u;   // 0x301000

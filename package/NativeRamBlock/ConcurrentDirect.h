@@ -24,7 +24,11 @@ struct DirectAdmission {
   uint64_t waits = 0;
   bool online = false, parallel = false, held = false, fenced = false;
 
-  void configure(unsigned count) { depth = count; online = parallel = true; }
+  void configure(unsigned count, bool startParallel) {
+    depth = count;
+    online = true;
+    parallel = startParallel;
+  }
 
   // Called with the gate. Stage waiters never hold a page range or an inflight slot.
   template<class Env> int take(Env &env, Request &request) {

@@ -16,6 +16,8 @@
 #define PIANO_WIFI_PROFILE_MAGIC 0x314a5750u   /* "PWJ1" */
 #define PIANO_WIFI_PROFILE_VERSION 1u
 #define PIANO_WIFI_PROFILE_SYSCTL "machdep.piano_wifi_join"
+#define PIANO_WIFI_CURRENT_JOIN_OID "piano_wifi_join_current"
+#define PIANO_WIFI_CURRENT_JOIN_SYSCTL "machdep." PIANO_WIFI_CURRENT_JOIN_OID
 #define PIANO_WIFI_PROFILE_PATH "/private/var/db/piano-wifi/profile"
 
 enum { PianoWifiSecOpen = 0, PianoWifiSecWpa2Psk = 1 };

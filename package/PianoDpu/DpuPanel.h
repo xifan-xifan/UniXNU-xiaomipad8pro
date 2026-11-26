@@ -2,12 +2,13 @@
 // PianoDpu B1e: the panel's light sleep with the display (docs/drivers/dpu.md §4.5), portable (tests/dpu_panel_host.cpp).
 //
 // Off (after PianoBacklight turned the backlight off on the same display-power change): DCS display-off (0x28), 20 ms, sleep-in
-// (0x10), 100 ms (the panel's stock term sequence and Ubuntu's P81 shutdown timing, K:72cfce4c86e5), then the DPU's timing engines
+// (0x10), 100 ms (the panel's stock term sequence and Ubuntu's P81 shutdown timing, K:72cfce4c86e5), then the timing engines
 // stopped, INTF2 (the slave) before INTF1, each until INTF_STATUS bit 0 clears (at most 40 ms, Ubuntu's slave poll, K:c55958fa09dd):
-// the DPU stops fetching (3.28 GB/s at 120 Hz) and the panel stops being driven. Nothing else: the DSI controllers, the PHYs, MDSS,
+// clear programmable fetch once timing has stopped. The DPU stops fetching (3.28 GB/s at 120 Hz). The DSI controllers, the PHYs, MDSS,
 // the CTL (never reset while anything scans), the panel's reset gpio98 and its supplies (vddio L12B; AVDD/AVEE from the KTZ8866's
 // bias, ENP/ENN = gpio117/118) all stay as they are (DpuSlices.h's store guard cannot reach TLMM at all).
-// On: CTL_INTF_FLUSH + CTL_FLUSH bit 31, then INTF1 and INTF2 enabled back to back (msm's order: flush before the timing engine,
+// On: restore the live fetch starts and enable bits, CTL_INTF_FLUSH + CTL_FLUSH bit 31, then INTF1 and INTF2 enabled back to back
+// (msm's order: flush before the timing engine,
 // master first), both counting again in lockstep, then DCS sleep-out (0x11), 120 ms, display-on (0x29), 10 ms; the caller re-applies
 // the PCC and PianoBacklight lights the panel.
 // The DCS commands go out while the video stream runs (the command engine sends in the vertical blanking; its DMA reads the
@@ -43,6 +44,53 @@ constexpr uint32_t kDmaBroadcast = 1u << 31, kDmaMaster = 1u << 30, kDmaFromBuff
 constexpr uint32_t kTrigDmaMask = 7u, kTrigDmaSw = 4u, kTrigBlockDmaInFrame = 1u << 12;
 constexpr uint32_t kDmaCtrl1Bit = 1u << 1;
 constexpr uint32_t kDmaDoneTimeoutUs = 50000, kDmaBusyTimeoutUs = 20000, kEngineStopUs = 40000, kEngineStartUs = 50000;
+
+struct CounterInit {
+  bool enabled = false;   // COUNT_EN readback
+  bool moving = false;    // both links' live counters
+};
+
+template <class Io>
+CounterInit initCounters(Io &io, LivePath &p)
+{
+  if (!p.ok) return {};
+  CounterInit result;
+  result.enabled = countersOn(io, p);
+  // On piano the enable register can read zero while the counters run. Prove motion before using the line counter to time DCS.
+  const Frames first = readFrames(io);
+  const uint32_t lineStart[2] = {io.rd(intfReg(1, kIntfLineCount)), io.rd(intfReg(2, kIntfLineCount))};
+  bool lineMoved[2] = {};
+  const uint64_t end = first.us + 50000;   // at least two frame edges at either 60 or 120 Hz
+  while (io.nowUs() < end) {
+    io.sleepMs(1);
+    const Frames now = readFrames(io);
+    for (unsigned i = 0; i < 2; ++i) {
+      const uint32_t line = io.rd(intfReg(i + 1, kIntfLineCount));
+      if (line > p.link[i].vtotal || lineStart[i] > p.link[i].vtotal) return result;
+      lineMoved[i] |= line != lineStart[i];
+    }
+    const int32_t a = int32_t(now.f[0] - first.f[0]), b = int32_t(now.f[1] - first.f[1]);
+    if (lineMoved[0] && lineMoved[1] && a >= 2 && b >= 2 && a - b >= -1 && a - b <= 1) {
+      result.moving = true;
+      break;
+    }
+  }
+  return result;
+}
+
+// Owned by the request lock. If a dispatched transition failed, the caller may still have a wake to complete.
+struct RequestGate {
+  bool ready = false;
+  bool wakePending = false;
+
+  template <class Log>
+  bool admit(bool on, Log log) const
+  {
+    if (ready || (on && wakePending)) return true;
+    log(on ? "panel: wake refused: panel sleep unavailable" : "panel: sleep refused: panel sleep unavailable");
+    return false;
+  }
+};
 
 inline bool dcsAllowed(uint8_t c) { return c == kDcsDisplayOff || c == kDcsSleepIn || c == kDcsSleepOut || c == kDcsDisplayOn; }
 struct Packet {
@@ -136,9 +184,10 @@ Sent sendDcs(Io &io, uint8_t command, const Options &o)
   }
   // Without the hardware's block, trigger in the front porch (INTF1's lines 2242 .. vtotal - 8).
   if (!(s.before[0].trig & kTrigBlockDmaInFrame) || !(s.before[1].trig & kTrigBlockDmaInFrame)) {
-    const uint32_t vt = io.rd(intfReg(1, kIntfVsyncPeriod)) / ((io.rd(intfReg(1, kIntfHsyncCtl)) >> 16) | 1u);
+    const uint32_t ht = io.rd(intfReg(1, kIntfHsyncCtl)) >> 16;
+    const uint32_t vt = ht ? io.rd(intfReg(1, kIntfVsyncPeriod)) / ht : 0;
     s.waitedBlanking = true;
-    if (vt > kVActiveEnd + 16 && !waitLines(io, kVActiveEnd + 2, vt - 8, vt, 3 * vt * kLineNs / 1000)) {
+    if (vt <= kVActiveEnd + 16 || !waitLines(io, kVActiveEnd + 2, vt - 8, vt, kDmaDoneTimeoutUs)) {
       s.why = "INTF1's line counter never reached the front porch";
       // nothing triggered: restore below as after a finished transfer
       s.done[0] = s.done[1] = true;
@@ -193,6 +242,29 @@ struct Engines {
   int32_t latchUs = -1;
   unsigned stores = 0, refused = 0;
 };
+
+struct Fetch {
+  uint32_t config[2] = {};
+  uint32_t start[2] = {};
+};
+
+template <class Io>
+bool programFetch(Io &io, const Fetch &fetch, bool enable, Engines &e)
+{
+  auto wr = [&](uint64_t pa, uint32_t v) {
+    ++e.stores;
+    if (!io.wr(pa, v)) ++e.refused;
+  };
+  for (unsigned i = 0; i < 2; ++i) {
+    if (!(fetch.config[i] & kIntfConfigProgFetch)) continue;
+    const uint32_t config = enable ? fetch.config[i] : fetch.config[i] & ~kIntfConfigProgFetch;
+    if (enable) wr(intfReg(i + 1, kIntfProgFetch), fetch.start[i]);
+    wr(intfReg(i + 1, kIntfConfig), config);
+    if (io.rd(intfReg(i + 1, kIntfConfig)) != config ||
+        (enable && io.rd(intfReg(i + 1, kIntfProgFetch)) != fetch.start[i])) return false;
+  }
+  return !e.refused;
+}
 // Stop one INTF's engine (index 1 or 2) and wait until it reports stopped.
 template <class Io>
 int32_t stopEngine(Io &io, unsigned intf, Engines &e)
@@ -215,9 +287,13 @@ int32_t stopEngine(Io &io, unsigned intf, Engines &e)
 // stop one engine may still run: INTF2 alone is started at INTF1's frame start (its line counter wrapping), so the halves stay in
 // phase; INTF1 alone (INTF2 running) cannot be aligned that way and is reported.
 template <class Io>
-Engines startEngines(Io &io, const LivePath &p)
+Engines startEngines(Io &io, const LivePath &p, const Fetch &fetch)
 {
   Engines e;
+  if (!programFetch(io, fetch, true, e)) {
+    e.why = "could not restore programmable fetch";
+    return e;
+  }
   auto wr = [&](uint64_t pa, uint32_t v) {
     ++e.stores;
     if (!io.wr(pa, v)) ++e.refused;
@@ -225,6 +301,10 @@ Engines startEngines(Io &io, const LivePath &p)
   const bool on1 = io.rd(intfReg(1, kIntfStatus)) & kIntfStatusOn, on2 = io.rd(intfReg(2, kIntfStatus)) & kIntfStatusOn;
   wr(ctlReg(unsigned(p.ctl), kCtlIntfFlush), kIntfFlushDsi);
   wr(ctlReg(unsigned(p.ctl), kCtlFlush), kFlushIntf);
+  if (e.refused) {
+    e.why = "the store guard refused the INTF wake flush";
+    return e;
+  }
   const char *phase = nullptr;
   if (on1 && !on2) {
     const unsigned vt = p.link[0].vtotal ? p.link[0].vtotal : kVtotal120;
@@ -259,6 +339,7 @@ Engines startEngines(Io &io, const LivePath &p)
   if (on) e.rate = measureRate(io, 100);
   if (e.refused) e.why = "the store guard refused a store";
   else if (!on) e.why = "a timing engine did not report running within 50 ms";
+  else if (e.latchUs < 0) e.why = "the INTF wake flush did not latch";
   else if (!e.rate.milliHz) e.why = "the frame counter did not move after the start";
   else if (!e.rate.lockstep) e.why = "INTF2 does not count INTF1's frames (the halves are out of step)";
   else if (phase) e.why = phase;
@@ -275,7 +356,9 @@ struct Result {
   const char *why = "";
   unsigned step = 0;         // the step reached (failed in, when !ok)
   bool restored = false;     // a failure undone: the panel shows again
+  bool safeAwake = false;    // refusal before DCS reached either panel link
   bool enginesStopped = false;
+  Fetch fetch;
   Sent dcs[2];               // the two commands of the sequence
   Engines engines;
   uint64_t tUs[6] = {};      // when each step started (relative to the call)
@@ -286,8 +369,8 @@ struct Result {
 template <class Io>
 void undoOff(Io &io, const LivePath &p, const Options &o, Result &r, bool sleeping)
 {
-  if (r.enginesStopped || (io.rd(intfReg(2, kIntfEn)) & 1u) == 0 || (io.rd(intfReg(1, kIntfEn)) & 1u) == 0) {
-    const Engines e = startEngines(io, p);
+  if (r.step >= 3) {
+    const Engines e = startEngines(io, p, r.fetch);
     r.stores += e.stores;
     r.refused += e.refused;
     if (!e.ok) return;
@@ -299,6 +382,7 @@ void undoOff(Io &io, const LivePath &p, const Options &o, Result &r, bool sleepi
     io.sleepMs(o.sleepOutMs);
   }
   r.restored = sendDcs(io, kDcsDisplayOn, o).ok;
+  if (r.restored) io.sleepMs(o.displayOnMs);
 }
 
 template <class Io>
@@ -313,13 +397,18 @@ Result panelOff(Io &io, const LivePath &p, const Options &o)
   r.step = 1;
   r.tUs[0] = io.nowUs() - t0;
   r.dcs[0] = sendDcs(io, kDcsDisplayOff, o);
-  if (!r.dcs[0].ok) return fail(r.dcs[0].why);   // nothing changed (or a link still owns the command)
+  if (!r.dcs[0].ok) {
+    r.safeAwake = !r.dcs[0].stores ||
+                  (r.dcs[0].waitedBlanking && r.dcs[0].done[0] && r.dcs[0].done[1] && !r.dcs[0].refused);
+    return fail(r.dcs[0].why);
+  }
   io.sleepMs(o.displayOffMs);
   r.step = 2;
   r.tUs[1] = io.nowUs() - t0;
   r.dcs[1] = sendDcs(io, kDcsSleepIn, o);
   if (!r.dcs[1].ok) {
-    if (r.dcs[1].done[0] && r.dcs[1].done[1]) undoOff(io, p, o, r, false);
+    if (!r.dcs[1].stores || (r.dcs[1].done[0] && r.dcs[1].done[1] && !r.dcs[1].refused))
+      undoOff(io, p, o, r, !r.dcs[1].waitedBlanking && r.dcs[1].stores);
     return fail(r.dcs[1].why);
   }
   io.sleepMs(o.sleepInMs);
@@ -330,6 +419,10 @@ Result panelOff(Io &io, const LivePath &p, const Options &o)
   }
   r.step = 3;
   r.tUs[2] = io.nowUs() - t0;
+  for (unsigned i = 0; i < 2; ++i) {
+    r.fetch.config[i] = io.rd(intfReg(i + 1, kIntfConfig));
+    r.fetch.start[i] = io.rd(intfReg(i + 1, kIntfProgFetch));
+  }
   r.engines.us[1] = stopEngine(io, 2, r.engines);   // the slave first
   r.enginesStopped = true;
   if (r.engines.us[1] < 0) {
@@ -343,6 +436,13 @@ Result panelOff(Io &io, const LivePath &p, const Options &o)
     undoOff(io, p, o, r, true);
     return fail(r.engines.refused ? "the store guard refused a store" : "INTF1's timing engine did not stop within 40 ms");
   }
+  // Keep prefetch active for the last scanned frame. The wake flush latches
+  // the restored configuration before the first complete frame is sent.
+  r.step = 5;
+  if (!programFetch(io, r.fetch, false, r.engines)) {
+    undoOff(io, p, o, r, true);
+    return fail("could not disable programmable fetch");
+  }
   r.tUs[4] = io.nowUs() - t0;
   r.ok = true;
   r.why = "ok";
@@ -350,7 +450,7 @@ Result panelOff(Io &io, const LivePath &p, const Options &o)
 }
 
 template <class Io>
-Result panelOn(Io &io, const LivePath &p, const Options &o, bool enginesStopped)
+Result panelOn(Io &io, const LivePath &p, const Options &o, bool enginesStopped, const Fetch &fetch)
 {
   Result r;
   const uint64_t t0 = io.nowUs();
@@ -361,7 +461,7 @@ Result panelOn(Io &io, const LivePath &p, const Options &o, bool enginesStopped)
   r.step = 1;
   if (enginesStopped) {
     r.tUs[0] = io.nowUs() - t0;
-    r.engines = startEngines(io, p);
+    r.engines = startEngines(io, p, fetch);
     if (!r.engines.ok) return fail(r.engines.why);
   }
   r.step = 2;

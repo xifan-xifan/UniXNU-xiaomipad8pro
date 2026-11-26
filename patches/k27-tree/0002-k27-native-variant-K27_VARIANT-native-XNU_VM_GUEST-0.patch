@@ -1,0 +1,279 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: leozhang <zwj8727@gmail.com>
+Date: Tue, 10 Nov 2026 19:47:38 +0800
+Subject: [PATCH 2/2] k27 native variant: K27_VARIANT=native (XNU_VM_GUEST=0),
+ patches 0053 and 0054
+
+0053: the PSCI conduit of halt_all_cpus from the ADT's /psci method (hvc in the VM, smc natively); XNU_VM_GUEST is the
+one build flag (1: HVC fallback, the VM kernel; 0: SMC fallback). 0054: Affinity2 in the reset handler's and
+ml_get_cpu_number's CPU lookups (SM8750 prime cores 0x10000/0x10100). build-k27-piano.sh K27_VARIANT=vm|native keeps
+separate object trees.
+
+From the maintainer's local k27 checkout, commit 11ac316.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ build-k27-piano.sh                            |  25 ++-
+ ...native-variant-psci-conduit-from-adt.patch | 145 ++++++++++++++++++
+ .../0054-k27-sm8750-mpidr-affinity2.patch     |  46 ++++++
+ 3 files changed, 213 insertions(+), 3 deletions(-)
+ create mode 100644 patches/xnu-12377/0053-k27-native-variant-psci-conduit-from-adt.patch
+ create mode 100644 patches/xnu-12377/0054-k27-sm8750-mpidr-affinity2.patch
+
+diff --git a/build-k27-piano.sh b/build-k27-piano.sh
+index a623f39..d5d5691 100755
+--- a/build-k27-piano.sh
++++ b/build-k27-piano.sh
+@@ -3,6 +3,11 @@
+ # 作者的 out/x12377/build-kernel.sh 未公开；这里按 k27/build-kernel27.sh 传给它的参数、UniXNU 的 XNU make 调用重写。
+ # 底座：Droid-VM/UniXNU wip/droidvm 的 ipados27 板 bootstrap 出来的 xnu-12377 arm64e 环境（fakeroot、firehose、ArmDTPlatform/ArmCpu）。
+ #   build-k27-piano.sh [make target...]      环境：JOBS（默认 10）SEGADDRS=0（不用 KC 段地址，先链一个普通内核量尺寸）
++#   K27_VARIANT=vm (default) | native: the one build switch of patch 0053. vm = -DXNU_VM_GUEST=1, today's VM kernel, objects in
++#   k27-obj. native = -DXNU_VM_GUEST=0 (PSCI fallback SMC when the ADT has no /psci; the ADT's /psci method decides at run time in
++#   both), objects in k27-native-obj, an APFS clone (cp -c) of k27-obj on first use so the native build is incremental too. XNU's
++#   make does not track -D flags: the objects of the sources that test the flag's value are removed whenever the variant's
++#   objects were last built with the other value.
+ set -euo pipefail
+ export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+ # k27 的 iokit/DriverKit/Makefile 用了 GNU 风格的 sed -i（作者在 Linux 上构建）
+@@ -13,6 +18,20 @@ UP=$B/UniXNU-up/out/droidvm/ipados-27.0.1-24A446/droidvm_ipados27/tree
+ T=$M/out/k27/xnu
+ X=$M/out/x12377
+ O=$X/build/xnu
++VARIANT=${K27_VARIANT:-vm}
++case $VARIANT in
++  vm) VM_GUEST=1; OBJ=$O/k27-obj ;;
++  native) VM_GUEST=0; OBJ=$O/k27-native-obj
++    [ -d $OBJ ] || { [ -d $O/k27-obj ] && cp -c -R $O/k27-obj $OBJ; } ;;
++  *) echo "K27_VARIANT must be vm or native" >&2; exit 2 ;;
++esac
++if [ -d $OBJ/DEVELOPMENT_ARM64_BCM2837 ] && [ "$(cat $OBJ/.xnu-vm-guest 2>/dev/null)" != $VM_GUEST ]; then
++  # osfmk/arm64/machine_routines.c (ML_PSCI_CONDUIT_DEFAULT) is the only source whose code depends on the value; the rest test defined()
++  for f in $(grep -rlE '^#(el)?if +XNU_VM_GUEST\b' $T/osfmk $T/bsd $T/iokit $T/libkern $T/pexpert $T/san $T/security 2>/dev/null); do
++    rm -f $OBJ/DEVELOPMENT_ARM64_BCM2837/*/DEVELOPMENT/$(basename ${f%.*}).o
++  done
++fi
++mkdir -p $OBJ; echo $VM_GUEST > $OBJ/.xnu-vm-guest
+ FR=$X/fakeroot
+ # KDK 去掉 Tightbeam：它的 libTightbeam.a 是 macOS 平台的，iOS 平台链接（ld-classic）拒收；exclaves 在这台 VM 上不存在
+ KDKROOT=$M/out/k27/kdk-notb
+@@ -36,7 +55,7 @@ LDX="-B$X/ldc -Wl,-no_fixup_chains -Wl,-threaded_starts_section"
+ LD_ARCHIVES="$LDX -L$FH -lfirehose_kernel -Wl,-force_load,$DT -Wl,-force_load,$CPU ${K27_EXTRA_LD:-}"
+ OWNER="-DXNU_NATIVE_RAM_BLOCK=1 -DXNU_OWNER_DATA_MOUNT=1 -DXNU_OWNER_CACHE_MOUNT=1 -DXNU_OWNER_UNION_SYSTEMOS=1 -DXNU_OWNER_BOOT_MANIFEST=1 -DXNU_OWNER_CACHE_STARTUP=1"
+ WNO="-Wno-reserved-identifier -Wno-pre-c11-compat -Wno-missing-designated-field-initializers -Wno-suggest-override -Wno-unnecessary-virtual-specifier -Wno-suggest-destructor-override -Wno-ms-bitfield-padding"
+-EXTRA_CFLAGS="$WNO -DXNU_VM_GUEST=1 -DXNU_NATIVE_CS_HASH_CACHE=1 $OWNER -DXNU_ARM_DT_PLATFORM=1 -DXNU_ARMCPU=1 -DXNU_NATIVE_PAN=1 -DXNU_SOURCE_CORECRYPTO14=0 -DXNU_NATIVE_TRUST_CACHE=1 ${XNU_EXTRA_CFLAGS:-}"
++EXTRA_CFLAGS="$WNO -DXNU_VM_GUEST=$VM_GUEST -DXNU_NATIVE_CS_HASH_CACHE=1 $OWNER -DXNU_ARM_DT_PLATFORM=1 -DXNU_ARMCPU=1 -DXNU_NATIVE_PAN=1 -DXNU_SOURCE_CORECRYPTO14=0 -DXNU_NATIVE_TRUST_CACHE=1 ${XNU_EXTRA_CFLAGS:-}"
+ export CCC_OVERRIDE_OPTIONS='+-Wno-error=missing-designated-field-initializers'
+ SEG=()
+ if [ "${SEGADDRS:-1}" = 1 ]; then SEG=("XNU_KC_SEGADDRS=$(bash $M/k27/segaddrs.sh)"); fi
+@@ -52,5 +71,5 @@ make -C $T "${@:-build}" SDKROOT=iphoneos ARCH_CONFIGS=ARM64 MACHINE_CONFIGS=BCM
+   "pe_init.o_CFLAGS_ADD=-DXNU_DT_PANIC_REGION=1" "start.o_SFLAGS_ADD=-DXNU_NATIVE_ARCH_TIMER=1" \
+   "copyio.o_CFLAGS_ADD=-march=armv8.1-a" "pcb.o_CFLAGS_ADD=-march=armv8.1-a" "platform_tests.o_CFLAGS_ADD=-march=armv8.1-a" \
+   ${SEG[@]+"${SEG[@]}"} \
+-  OBJROOT=$O/k27-obj SYMROOT=$O/k27-sym DSTROOT=$O/k27-dst
+-ls -la $O/k27-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped* 2>/dev/null
++  OBJROOT=$OBJ SYMROOT=${OBJ%-obj}-sym DSTROOT=${OBJ%-obj}-dst
++ls -la $OBJ/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped* 2>/dev/null
+diff --git a/patches/xnu-12377/0053-k27-native-variant-psci-conduit-from-adt.patch b/patches/xnu-12377/0053-k27-native-variant-psci-conduit-from-adt.patch
+new file mode 100644
+index 0000000..300e5a1
+--- /dev/null
++++ b/patches/xnu-12377/0053-k27-native-variant-psci-conduit-from-adt.patch
+@@ -0,0 +1,145 @@
++From 3ca6c555117176398656dcc03c8a103f2e695eeb Mon Sep 17 00:00:00 2001
++From: leozhang <zwj8727@gmail.com>
++Date: Tue, 10 Nov 2026 18:48:07 +0800
++Subject: [PATCH] k27: one kernel for the VM and the HLOS: the PSCI conduit
++ from the ADT (/psci method), XNU_VM_GUEST=0 for the native build
++
++- halt_all_cpus's PSCI SYSTEM_OFF/SYSTEM_RESET (0051) goes through the conduit the ADT's /psci "method" names, read once in
++  ml_parse_cpu_topology (ml_read_psci_conduit; ml_psci_conduit, ml_psci_conduit_from_dt for the host rig), as Linux's
++  psci_probe and ArmCpu's CPU_ON do: "hvc" in the crosvm/Gunyah VM, "smc" natively at EL1. The same kernel collection runs
++  in both; the VM ADT has said "hvc" all along, so the VM kernel behaves as before.
++- XNU_VM_GUEST is the one build flag: 1 (build-k27-piano.sh's default, the VM kernel) makes HVC the fallback when the ADT has
++  no usable /psci; 0 (K27_VARIANT=native) makes it SMC. The other XNU_VM_GUEST code is the piano's k27 in both variants and
++  now tests defined(XNU_VM_GUEST): 0052's 12 GiB zone VA and 0051's dead-union-parent release (the union root, not the VM).
++  0050's 16-bit ASIDs (XNU_VM_GUEST_TLB, BCM2837.h) and 0051's bootstrap-table sizing are unconditional already.
++
++Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
++---
++ bsd/vfs/vfs_subr.c             |  4 +--
++ osfmk/arm64/machine_routines.c | 56 +++++++++++++++++++++++++++++++---
++ osfmk/kern/zalloc.c            |  2 +-
++ 3 files changed, 54 insertions(+), 8 deletions(-)
++
++diff --git a/bsd/vfs/vfs_subr.c b/bsd/vfs/vfs_subr.c
++index 282c705..9cec12f 100644
++--- a/bsd/vfs/vfs_subr.c
+++++ b/bsd/vfs/vfs_subr.c
++@@ -2661,7 +2661,7 @@ vnode_rele_ext(vnode_t vp, int fmode, int dont_reenter)
++ }
++ 
++ 
++-#if XNU_VM_GUEST
+++#if defined(XNU_VM_GUEST)   /* the piano's k27, VM and native alike: the union root, not the VM */
++ uint32_t vnode_rele_dead_past_zero;
++ #endif
++ 
++@@ -2681,7 +2681,7 @@ vnode_rele_internal(vnode_t vp, int fmode, int dont_reenter, int locked)
++ #endif
++ 	/* Enable atomic ops on v_usecount without the vnode lock */
++ 	old_usecount = os_atomic_dec_orig(&vp->v_usecount, relaxed);
++-#if XNU_VM_GUEST
+++#if defined(XNU_VM_GUEST)
++ 	if (old_usecount < 1 && vp->v_type == VBAD) {
++ 		/*
++ 		 * A reclaimed vnode a child still names as its parent across mounts: the union of the SystemOS
++diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
++index 2b62e95..1f59ef3 100644
++--- a/osfmk/arm64/machine_routines.c
+++++ b/osfmk/arm64/machine_routines.c
++@@ -923,6 +923,44 @@ ml_get_machine_mem(void)
++ 	return machine_info.memory_size;
++ }
++ 
+++#if defined(XNU_VM_GUEST)
+++/*
+++ * The PSCI conduit of this kernel's own PSCI calls (halt_all_cpus), read from the ADT's /psci "method" at boot like Linux's
+++ * psci_probe and ArmCpu's psciConduit, so that the same kernel runs as a VM guest (crosvm/Gunyah: "hvc") and natively as the
+++ * HLOS ("smc"). Without a usable /psci node the build's default applies: XNU_VM_GUEST=1 (the VM kernel, build-k27-piano.sh's
+++ * default) keeps HVC as before this change, XNU_VM_GUEST=0 (K27_VARIANT=native) takes SMC.
+++ */
+++#define ML_PSCI_CONDUIT_HVC     1
+++#define ML_PSCI_CONDUIT_SMC     2
+++#if XNU_VM_GUEST
+++#define ML_PSCI_CONDUIT_DEFAULT ML_PSCI_CONDUIT_HVC
+++#else
+++#define ML_PSCI_CONDUIT_DEFAULT ML_PSCI_CONDUIT_SMC
+++#endif
+++SECURITY_READ_ONLY_LATE(uint32_t) ml_psci_conduit = ML_PSCI_CONDUIT_DEFAULT;
+++SECURITY_READ_ONLY_LATE(uint32_t) ml_psci_conduit_from_dt = 0;   /* 1: from /psci method; 0: the build's default */
+++
+++static void
+++ml_read_psci_conduit(void)
+++{
+++	DTEntry entry;
+++	void const *prop = NULL;
+++	unsigned int size = 0;
+++
+++	if (SecureDTLookupEntry(NULL, "/psci", &entry) != kSuccess ||
+++	    SecureDTGetProperty(entry, "method", &prop, &size) != kSuccess || prop == NULL || size < 3) {
+++		return;
+++	}
+++	if (strncmp((const char *)prop, "smc", 3) == 0) {
+++		ml_psci_conduit = ML_PSCI_CONDUIT_SMC;
+++		ml_psci_conduit_from_dt = 1;
+++	} else if (strncmp((const char *)prop, "hvc", 3) == 0) {
+++		ml_psci_conduit = ML_PSCI_CONDUIT_HVC;
+++		ml_psci_conduit_from_dt = 1;
+++	}
+++}
+++#endif /* defined(XNU_VM_GUEST) */
+++
++ __attribute__((noreturn))
++ void
++ halt_all_cpus(boolean_t reboot)
++@@ -934,15 +972,20 @@ halt_all_cpus(boolean_t reboot)
++ 		printf("CPU halted\n");
++ 		PEHaltRestart(kPEHaltCPU);
++ 	}
++-#if XNU_VM_GUEST
+++#if defined(XNU_VM_GUEST)
++ 	/*
++-	 * A VM guest ends here: PSCI SYSTEM_RESET or SYSTEM_OFF through the conduit crosvm's FDT names (/psci method "hvc"),
++-	 * so the hypervisor ends the VM and crosvm exits (or restarts it), where the platform expert has no power-off of its
++-	 * own and its reset went through SMC, which Gunyah does not route to PSCI.
+++	 * The piano's k27 ends here: PSCI SYSTEM_RESET or SYSTEM_OFF through the conduit the ADT's /psci method names
+++	 * (ml_read_psci_conduit), the one ArmCpu's CPU_ON uses too. In the VM that is "hvc" (crosvm's FDT): Gunyah ends the VM
+++	 * and crosvm exits (or restarts it), where the platform expert has no power-off of its own and its reset went through
+++	 * SMC, which Gunyah does not route to PSCI. Natively (the HLOS at EL1) it is "smc", the firmware's PSCI.
++ 	 */
++ 	{
++ 		register uint64_t x0 __asm__("x0") = reboot ? 0x84000009ULL : 0x84000008ULL;
++-		__asm__ volatile ("hvc #0" : "+r"(x0) : : "x1", "x2", "x3", "memory");
+++		if (ml_psci_conduit == ML_PSCI_CONDUIT_SMC) {
+++			__asm__ volatile ("smc #0" : "+r"(x0) : : "x1", "x2", "x3", "memory");
+++		} else {
+++			__asm__ volatile ("hvc #0" : "+r"(x0) : : "x1", "x2", "x3", "memory");
+++		}
++ 	}
++ #endif
++ 	while (1) {
++@@ -1363,6 +1406,9 @@ ml_parse_cpu_topology(void)
++ 	assert(topology_info.boot_cpu != NULL);
++ 	ml_read_chip_revision(&topology_info.chip_revision);
++ 	ml_cluster_power_override(&topology_info.cluster_power_down);
+++#if defined(XNU_VM_GUEST)
+++	ml_read_psci_conduit();
+++#endif
++ 
++ 	/*
++ 	 * Set TPIDR_EL0 to indicate the correct cpu number & cluster id,
++diff --git a/osfmk/kern/zalloc.c b/osfmk/kern/zalloc.c
++index c831172..2fb471d 100644
++--- a/osfmk/kern/zalloc.c
+++++ b/osfmk/kern/zalloc.c
++@@ -170,7 +170,7 @@ ZONE_DEFINE_TYPE(percpu_u64_zone, "percpu.64", uint64_t,
++ #if   XNU_PLATFORM_MacOSX
++ #define ZONE_MAP_MAX            (32ULL << 30)
++ #define ZONE_MAP_VA_SIZE        (128ULL << 30)
++-#elif XNU_VM_GUEST
+++#elif defined(XNU_VM_GUEST)   /* the piano's k27, VM and native alike (build-k27-piano.sh) */
++ /*
++  * VM guest (4 KiB pages, no ARM_LARGE_MEMORY): the kernel map shares its VA window with the physical
++  * aperture, which grows with the guest's RAM. With 24 GiB reserved for zones the pointer ranges were
++-- 
++2.55.0
++
+diff --git a/patches/xnu-12377/0054-k27-sm8750-mpidr-affinity2.patch b/patches/xnu-12377/0054-k27-sm8750-mpidr-affinity2.patch
+new file mode 100644
+index 0000000..869a20b
+--- /dev/null
++++ b/patches/xnu-12377/0054-k27-sm8750-mpidr-affinity2.patch
+@@ -0,0 +1,46 @@
++From de16623d957cccff6dfb78d8eca4a79842af9702 Mon Sep 17 00:00:00 2001
++From: leozhang <zwj8727@gmail.com>
++Date: Tue, 10 Nov 2026 19:46:25 +0800
++Subject: [PATCH] k27: SM8750 MPIDRs: Affinity2 in the reset handler's and
++ ml_get_cpu_number's CPU lookups
++
++piano's prime cores are MPIDR 0x10000 and 0x10100 (cluster in Aff2, as UniXNU-sm8750-common's sm8750-smp.patch handles for
++the UniXNU kernels). k27 masked Aff1|Aff0 in both lookups, so natively cpu6 and cpu7 would have found cpu0's and cpu1's
++cpu_data. Both now mask Aff2|Aff1|Aff0; in the crosvm VM Aff2 is 0 and nothing changes.
++
++Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
++---
++ osfmk/arm64/machine_routines.c | 3 ++-
++ osfmk/arm64/start.s            | 2 +-
++ 2 files changed, 3 insertions(+), 2 deletions(-)
++
++diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
++index 1f59ef3..d95796c 100644
++--- a/osfmk/arm64/machine_routines.c
+++++ b/osfmk/arm64/machine_routines.c
++@@ -1487,7 +1487,8 @@ ml_get_boot_cluster_type(void)
++ int
++ ml_get_cpu_number(uint32_t phys_id)
++ {
++-	phys_id &= MPIDR_AFF1_MASK | MPIDR_AFF0_MASK;
+++	/* SM8750 (piano natively): the two prime cores are MPIDR 0x10000/0x10100, cluster in Aff2; crosvm's vCPUs have Aff2 0. */
+++	phys_id &= MPIDR_AFF2_MASK | MPIDR_AFF1_MASK | MPIDR_AFF0_MASK;
++ 
++ 	for (unsigned i = 0; i < topology_info.num_cpus; i++) {
++ 		if (topology_info.cpus[i].phys_id == phys_id) {
++diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
++index 325192c..e099690 100644
++--- a/osfmk/arm64/start.s
+++++ b/osfmk/arm64/start.s
++@@ -146,7 +146,7 @@ LEXT(reset_vector)
++ 	add		x19, x19, EXT(ResetHandlerData)@pageoff
++ 	mrs		x15, MPIDR_EL1						// Load MPIDR to get CPU number
++ #if HAS_CLUSTER || defined(BCM2837)
++-	and		x0, x15, #0xFFFF					// CPU number in Affinity0, cluster ID in Affinity1 (SM8550 and SM8350 number cores in Affinity1)
+++	and		x0, x15, #0xFFFFFF				// Affinity 0-2: SM8550/SM8350 number cores in Affinity1, SM8750 has its second cluster in Affinity2
++ #else
++ 	and		x0, x15, #0xFF						// CPU number is in MPIDR Affinity Level 0
++ #endif
++-- 
++2.55.0
++

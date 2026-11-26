@@ -1,0 +1,20 @@
+# Self-tests that scripts/ci/self-tests.py does not run on a hosted runner, one path per line, `#` and the reason after it.
+# Reason classes: ARGS (a checker called by a build with its inputs, not a standalone test), INPUT (needs build output, a local
+# checkout or a backup a runner does not have), HEADER (its header's build line names generated inputs), KNOWN-FAIL (fails on
+# main as of the commit named; an open item, to be fixed and taken off this list).
+firmware/selector/test/test-selector-bin.py            # ARGS: checks a built selector (OBJ BIN), called by firmware/selector/Makefile
+tooling/switch/test-pack-selector.py                   # ARGS: checks a packed selector image given as its argument
+tooling/native/tests/test_mic_diag.py                  # ARGS: takes a recorded fixture as its argument
+package/PianoA830/adreno830/tests/run-host-tests.py    # INPUT: the UniXNU kits checkout (package/PianoA830/UniXNU, fetched by the build)
+package/PianoCamera/tests/camera_host.cpp              # HEADER: -I<gen>, the sensor tables generated from data/camera by the build
+package/PianoVideo/tests/bringup_host.cpp              # HEADER: links QcomMdt.o from the kext build
+package/PianoUsbHost/tests/ucsi_host.cpp               # HEADER: needs PianoUsbHw.h's include path from build-native-piano-usbhost.sh
+package/PianoWifi/tests/qmi_host.cpp                   # HEADER: its build line compiles a .c file as C++ (-Werror,-Wdeprecated)
+tooling/persist/test-data-store.py                     # INPUT: imports the UniXNU checkout's unixnu.bootimg (fetch-pins.py UniXNU)
+tooling/persist/test-persist.py                        # INPUT: reads the maintainer's partition-table backup
+tooling/persist/test-switch-pair.py                    # INPUT: reads the maintainer's partition-table backup
+tooling/k27/run-a830-host-tests.py                     # KNOWN-FAIL ffec0acd: test_a830votes fails (56 pass); also 6.5 min
+tooling/native/test_piano_input.py                     # KNOWN-FAIL ffec0acd: test_refused_command_releases_and_reports ('Z 1' != 'R')
+tooling/native/tests/test_desk_login.py                # KNOWN-FAIL ffec0acd: the fake sleep does float arithmetic in bash $(( ))
+tooling/metal/turnip-a830/test-cache-fallback-host.sh   # needs a built NativeAdrenoMetal.bundle argument (run by hand after tooling/metal/build-turnip-a830.sh)
+tooling/metal/turnip-a830/test-family-host.sh   # needs a built NativeAdrenoMetal.bundle argument (run by hand after tooling/metal/build-turnip-a830.sh)

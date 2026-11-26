@@ -354,18 +354,24 @@ static IOReturn hostScsi (uint8_t lun, const uint8_t *cdb, unsigned cdbLength, b
   return hostScsiDir (ufsSlot (0), lun, cdb, cdbLength, dataBytes ? 2U : 0U, dataBytes, timeoutUs, scsiStatus);
 }
 
-// Query read request (opcode 0x03 READ ATTRIBUTE / 0x05 READ FLAG). Returns the value field.
-static IOReturn hostQueryRead (uint8_t opcode, uint8_t idn, uint32_t *value)
+// Query request on slot 0 (bring-up only, nothing else in flight). Opcodes 0x03 READ ATTRIBUTE / 0x05 READ FLAG as a standard
+// read request (function 0x01); UniXNU-piano 2026-11-25: 0x06 SET FLAG / 0x07 CLEAR FLAG as a standard write request (function
+// 0x81, as Linux ufshcd_query_flag) and the index field (RootDevice.h). Returns the value field (a flag: its value byte). A
+// response code other than 0 (an IDN the device does not have, a flag it refuses) is kIOReturnError and leaves the transport as
+// it was; a malformed response quarantines it as every other command does.
+static IOReturn hostQuery (uint8_t opcode, uint8_t idn, uint8_t index, uint32_t *value)
 {
-  if (!value || (opcode != 3 && opcode != 5)) return kIOReturnBadArgument;
+  const bool write = opcode == 6 || opcode == 7;
+  if (!value || (opcode != 3 && opcode != 5 && !write)) return kIOReturnBadArgument;
   const UfsSlot slot = ufsSlot (0);
   if (!hostClearUcd (slot)) return kIOReturnNotReady;
   uint8_t *ucd = slot.ucd;
   ucd[0] = 0x16;                      // QUERY REQUEST
   ucd[3] = 1;
-  ucd[5] = 0x01;                      // standard read request (header dword 1, byte 1)
+  ucd[5] = write ? 0x81 : 0x01;       // standard write / read request (header dword 1, byte 1)
   ucd[12] = opcode;
   ucd[13] = idn;
+  ucd[14] = index;
   uint32_t ocs = 0xf;
   IOReturn status = hostSubmit (slot, 0, 0, 200000, &ocs);
   if (status != kIOReturnSuccess) {
@@ -375,13 +381,20 @@ static IOReturn hostQueryRead (uint8_t opcode, uint8_t idn, uint32_t *value)
   if (status != kIOReturnSuccess) return status;
   const uint8_t *rsp = ucd + kRspOffset;
   if (rsp[10] || rsp[11]) return hostProtocolError (4);
-  if (rsp[12] != opcode || rsp[13] != idn || rsp[14] || rsp[15]) return hostProtocolError (5);
+  if (rsp[12] != opcode || rsp[13] != idn || rsp[14] != index || rsp[15]) return hostProtocolError (5);
   if (rsp[6] != 0) {
     gRootDiagnostic.result = static_cast<uint32_t> (kIOReturnError);
     return kIOReturnError;
   }
   *value = loadBe32 (rsp + 20);
   return kIOReturnSuccess;
+}
+
+// The original read-only entry point (index 0).
+static IOReturn hostQueryRead (uint8_t opcode, uint8_t idn, uint32_t *value)
+{
+  if (opcode != 3 && opcode != 5) return kIOReturnBadArgument;
+  return hostQuery (opcode, idn, 0, value);
 }
 
 // ---- Command slots ------------------------------------------------------------------------------------------------
