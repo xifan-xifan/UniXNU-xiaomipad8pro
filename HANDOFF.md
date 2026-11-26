@@ -1,3 +1,16 @@
+## 2026-11-26 - v5 的 RAM 启动后平板从 USB 总线消失（需现场供电）；顺带结掉两件事
+
+跑的是 `fastboot boot out/persistent/boot-piano-macos-persistent-v5-ufs.img`（100,663,296 B，sha `5de858b8157e9572...`），同时用 `tooling/native/usbcap.py` 抓 PianoDwc3 的 CDC-ACM（`1209:0001`）210 秒。`Sending/Booting OKAY`，控制台 **0 字节**；设备回到 ABL fastboot，`fastboot oem log` 无响应，随后**完全从 USB 总线消失**（无 fastboot、无 adb、无串口，轮询约 9 分钟无变化）。主机侧没有任何命令能从这个状态恢复，**需要现场给电（长按电源到重启，或充一会儿再开机）**。这是本目标里第一次出现"RAM-only 启动之后需要物理操作"，按风险记录，不当成正常步骤。
+
+**结掉的事 1：持久镜像的 AVB 身份**。解析 footer：v5-ufs 与 `boot-piano-macos-persistent-v4-avb.img` 的 `AVB0` 都在 100,593,664，**认证块 sha256 完全相同**（`0744ca237cc3be29...`）。而 v4-avb 正是 11-25 真刷进 `boot_a` 并从盘启动过的那份（设备读回哈希 `0d52dd5e...` 与它一致）。所以 **v5 与 v4 一样可刷**，早先记录的"主机 AVB key ≠ 设备 key ⇒ 主机产物只能 `fastboot boot`"对这两份持久镜像**不成立**（它们本来就是按本机签名链出、并且实证过能从盘启动）；那句话只对未签名的离线 RAM 镜像成立。
+
+**结掉的事 2：装机状态的真实缺口**。`out/persistent/installed.json`（11-24 23:23）记的装机 ESP 是 `esp-device.img`（1 GiB，sha `68c28df15bcf55a5...`，分区入口 37、`first_lba 124289792` —— **我们自己的几何**），输入全部是本机产物：KC `529265c7839c...`、ADT `4e904d90e92e...`、信任包 `9d225ea325b3...`、Data seed `48dbc08d5955...`（非参考机 pin）；`build-esp.py` 的 `daily` profile 保留 `native-ufs-root`，也就是说**装机 ESP 要的是 UFS 根，而这台的盘上从来没有根镜像**。这解释了刚才 RAM 启动为什么什么都没发生：ESP 指向的根没有 manifest 可找。里程碑的真实形状因此是：启动链与 ESP 已就位且是我们自己的，**缺的是介质上的载荷**。
+
+由此两条明确记录：(1) 根镜像已构建且验证过（20,936,916,992 B `e682bd1f9b9c...`），本机写计划由我们自己 GPT 头生成的 profile 定死：`linux_data` first `107512576`、5,111,552 块、末 `112624127`、余 `11,665,664` 块、Data reserve 起 `124027648`；真正写入要**走写计划而不是手搓 `dd`**。(2) 参考机几何那次危险现在**可测**了：参考计划会把根写到 LBA `71789568`，落在我们 `userdata` 内部 —— 下次维护会话应先只读读那一段有没有根 manifest，确认盘上没有会干扰根选择的陈旧 manifest，再谈真实写入。
+
+另外：上游 `d70c16ce..23f6425f` 那 8 个提交全是显示/GPU 验证类（PianoDpu M3/M5、GOP FourCC、presented-cadence 探针、Showcase 图片），与切换器、持久化、公开缺口无关，当前阻塞点没有可取件。
+
+详见 `docs/results-2026-11-26-ram-boot-v5-device-drop.md`。
 ## 2026-11-26 - storage-abi 不是"缺包"：两条公开件路线都试过，都是错的味道；`xnu-m` 只是命名别名
 
 **少了一个缺口**：`-I $PIANO_K27_TREE/out/x12377/xnu-m/osfmk` 只要把 `out/x12377/xnu-m` 软链到树自己的 xnu（`out/k27/xnu`，`osfmk/` 就在那儿）即可解析 —— 它是**命名别名**而不是私有输入，别名已保留。剩下没解释的只有 `inc-gfx`（8 个 kext 脚本用到）。
