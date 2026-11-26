@@ -1,3 +1,21 @@
+## 2026-11-26 - 装机集第一次带计时的从盘启动：72 秒回 ABL；pstore 控制台能读，XNU 文本拿到了
+
+`run-disk-boot-experiment.ps1`（新增）：写 macOS 集（`init_boot_a` `96057eb2`/`vendor_boot_a` `7cbb06b9`/`boot_a` `0d52dd5e`，
+写前逐个验哈希）→ 从盘启动 → 每 5 s 记状态迁移 → 无论结果恢复 HyperOS 三元组。`t0=12:36:35`，**t+72 s 回到 ABL**，
+`hyperos=up`。72 s 既不是预看门狗挂死的 30–45 s，也不是 guard 的 180 s 判定：核大约死在 40 s 上下（guard 每 10 s 喂狗，
+32 s 咬；或"两拍没中断"检查随时可触发）。`1209:0001` 串口全程未出现 —— 仍没走到第 12 个 kext。
+装机集失败启动自带"回 ABL + 主机一条命令回 Android"的闭环，**无人值守的 Android→macOS→Android 机制已成立**。
+
+`run-pstore-after-disk-boot.ps1`（新增）：回到 ABL 后不经 Android，直接 reader 冷读 `pstore-console=0x9cb00000`，
+**成功取回 8192 字节**（5904 非零）。环头是早期引导文本（GIC `pg:` 行、`Darwin Kernel Version 25.5.0` 横幅、内核 VM/zone 引导），
+有 SMP 交错损坏但可判读。`run-pstore-ring-sweep.ps1`（新增）把"macOS 停 → ABL → reader → dump → reader 超时自启系统"
+做成环，每周期取一个 8 KiB 页扫环尾找最新文本（环大小 `0x700000`）。详见 `docs/results-2026-11-26-timed-disk-boot-72s.md`。
+
+WSL 复核：`grep -rln piano_delay_timer_service|piano_gicv3_init` 在 `/root/piano-native` 全部源码树里**零命中**，
+`/tmp` 里也没有 paclr 基线树 —— 中断路径只存在于已构建的集合二进制里。因此"解 DAIF.F/Group 0"的下一步产物
+只能走**集合原位二进制补丁**（zero-hole + trampoline，11-25 已有 1657 字节孔的先例），源码级重编需要先重建基线树。
+
+设备侧本轮：两次持久写入均为三个 slot-A 分区（用户已授权），结束在 HyperOS。
 ## 2026-11-26 - 读回通道真相（冷会话可读、热会话必坏）与"载荷已带中断路径"
 
 **读回**：`oem dump` 与 11-25 记的恰好相反 —— **热会话必坏、冷会话可读**（Android→ABL→reader 后第一条命令就 dump：
