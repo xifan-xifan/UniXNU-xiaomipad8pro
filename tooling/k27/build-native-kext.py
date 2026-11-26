@@ -30,6 +30,7 @@ parser.add_argument('--target', help='rewrite the recipe triple: a recipe kept f
 parser.add_argument('--compiler', help="the recipe names its own compiler; a host without that path (or with a clang that lacks Apple's warning spellings) builds with --compiler instead, as the Mac runs of 2026-11-21 did with xcrun -f clang")
 parser.add_argument('--c-recipe', default='bsd/DEVELOPMENT/bsd_init.o.json',
                     help="the kernel C file whose flags the C sources take (osfmk/DEVELOPMENT/startup.o.json for osfmk's private headers)")
+parser.add_argument('--objects-extra', action='append', default=[], help='prebuilt .o files to add to the kext object list (a generated policy object, a C object built by a second run): the kernel collection links them with the rest')
 parser.add_argument('--probe-warnings', action='store_true', help="drop the appended warning switches the compiler does not know (two of them are Apple-fork spellings; an unknown switch is fatal under the kernel's -Werror)")
 
 def accepted(compiler, flag, cwd):
@@ -111,5 +112,6 @@ for source in args.sources:
     if result.returncode:
         sys.exit(result.stdout + result.stderr)
     objects.append(str(destination))
+objects += [str(Path(o).resolve()) for o in args.objects_extra]
 (out / 'objects.json').write_text(json.dumps(objects, indent=1) + '\n')
 print(f'{args.name}: {len(objects)} object(s) in {out}')
