@@ -88,3 +88,35 @@ Android. The runner no longer assumes a TTY, no longer issues a second command
 after a faulted dump, and no longer parses `slot-retry-count` by stripping
 non-digits (that concatenated the slot name and the value into `60005`).
 No partition, GPT, boot image or userdata write was issued in any of these runs.
+
+## Where `returned: Unsupported` comes from, from the upstream source
+
+The UniXNU core checkout in WSL (`/root/piano-native/UniXNU`) explains the
+photo's wording in its own device record,
+`docs/devices/nx769j-xwsjjctz.md:152`:
+
+> The xnu entry type resolves through `UNIXNU_LOADER_PROTOCOL` and only
+> DarwinBoot installs it, so with `loader = firmware` and no DarwinBoot module in
+> `DXE.inc` the entry fails with `returned: Unsupported`, an error that names
+> neither the protocol nor the missing module.
+
+The menu line under it is upstream too:
+`package/UniXNUPkg/Library/UniXNULib/Main.c:114` prints
+`drivers %u loaded / %u failed    kits %u    acpi %u` and the entry is run from
+the same loop, so nothing in `tooling/` is involved in either string.
+
+Two ways that applies to piano, and they are not yet separated. DarwinBoot may be
+absent from FD A, which would make both `xnu` entries fail and would explain why
+the probe run ended after 37 s with nothing to read back: no kernel ever started.
+Or DarwinBoot is present and the entry's own payload or arguments are refused.
+The second possibility is the less likely one to hold on its own, because
+`tooling/persist/common.py` (`fd_ram_window`, used by
+`tooling/adt/check-ram-window.py`) reads a DarwinBoot memory bound out of FD A,
+and `out/fd/piano-uefi-A-bundled.fd.ram-window` records `0x340000000`, which is
+patch `firmware/patches/unixnu/0002`. A direct check is cheap and host-only: read
+`FILE_GUID` from
+`drivers/DarwinBoot/DarwinBootPkg/Driver/DarwinBoot.inf` and scan the FD for it
+(mixed-endian form), and grep the entry-execution path for the notice to learn
+which call returns `EFI_UNSUPPORTED`. Do that before touching the collection or
+the payload again: if DarwinBoot is missing from FD A, every image built with it
+boots nothing, and no amount of kernel-side work will show.

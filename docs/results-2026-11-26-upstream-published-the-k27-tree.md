@@ -87,3 +87,31 @@ or in WSL; the FD and the firmware-side pieces can, and did, build there.
   + `firmware/selector` + our own AVB key, G7), and the FD at the new pins.
 - The build-host question goes to the owner as a single decision, because it is either an operating-system
   upgrade on their laptop or money for an Apple-silicon runner; nothing we can build here substitutes for it.
+
+## 7. Our unit measured against the pinned layout (G6 is real, and now quantified)
+
+The unit's own block mapping, read from HyperOS over adb (`readlink /dev/block/by-name/...`, read only):
+`userdata`, `linux_rootfs`, `linux_data` and `esp` are `sda34/35/36/37` (UFS LUN 0) while `boot_a` and `vbmeta_a` are
+`sde13` and `sde16` (UFS LUN 4). The only GPT heads we hold as backups are LUN 0 (`stock-gpt-head.bin` 34 entries,
+`candidate-gpt-head.bin` 37 entries, both `24576` bytes, disk `510165778432`); **no LUN 4 table was ever saved**, and
+scanning every `.bin` under `out/` for an `EFI PART` at byte 4096 finds only those five LUN 0 files.
+
+`tooling/repro/unit-profile.py` (upstream, run from a snapshot of `upstream/main` in WSL) against our candidate
+LUN 0 head gives the authoritative verdict, kept at `out/unit-profile/piano-7ccdd855-lun0.json` (git-ignored):
+
+    same  LUN 0 blocks: unit 124552192, tooling 124552192
+    DIFF  linux_rootfs first/last LBA: unit 102269696..107512575, tooling 56060928..71789567
+    DIFF  linux_data first/last LBA: unit 107512576..124289791, tooling 71789568..124552186
+    DIFF  ESP (partition 37) already present: unit True, tooling False
+    DIFF  LUN 0 primary GPT sha256: unit 12710135..., tooling 90a9d3bb...
+    verdict: DIFFERENT ... no write session on this unit until it has its own device profile (G6)
+
+So the reference unit's `linux_data` runs to the end of LUN 0 (about 201 GiB) and has no ESP at install time, while
+ours is a 64 GiB store with the ESP carved after it. Two consequences for the plan, both cheap and host-side:
+
+- the G6 profile must carry LUN 0 (ours, from the backups we hold) **and** LUN 4 (not captured yet); the boot
+  partitions live on LUN 4, so the profile cannot be written from what we have, and the LUN 4 head has to be read
+  once, read-only, from a RAM maintenance boot or from the Ubuntu install tooling's backup step.
+- `unixnu.lock` and `tooling/repro/pins.json` are pinned to factory `OS3.0.303.0.WPYCNXM` while this unit runs
+  `OS3.0.309.0.WPYCNXM` (upstream gap G11). The per-unit firmware inputs (DSP, GPU zap, Wi-Fi, Bluetooth, touch,
+  amplifier presets) have to be taken from our own stock partitions and hashed, not borrowed from the 3.0.303 set.
