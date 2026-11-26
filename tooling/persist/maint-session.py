@@ -817,6 +817,17 @@ class Session:
             time.sleep(0.5)
         return False
 
+    def shell_alive(self):
+        """Whether the maintenance image's shell is answering on PIANO_MAINT_HOST right now (its telnet port)."""
+        host = self.env.get('PIANO_MAINT_HOST')
+        if not host:
+            return False
+        try:
+            socket.create_connection((host, 2323), timeout=2).close()
+            return True
+        except OSError:
+            return False
+
     def wait_shell(self, seconds=180):
         host = self.env.get('PIANO_MAINT_HOST', '<PIANO_MAINT_HOST>')
         self.log(f'  host  wait up to {seconds} s for the maintenance shell (PIANO_MAINT_HOST port 2323)')
@@ -1388,10 +1399,15 @@ def maint_boot(s):
     image, tried = maint_image()
     s.need(image is not None, f'{MAINT_IMAGE.name} sha256 {MAINT_IMAGE_SHA256[:16]}: ' +
            (str(image) if image else 'none of ' + ', '.join(str(t) for t in tried) + ' (set PIANO_V110)'))
-    if not s.wait(s.serial, True, 120):
-        raise Stop('ABL fastboot not found (power + volume-down 15-20 s)')
-    s.fastboot('boot', str(image or MAINT_IMAGE), timeout=180)
-    s.wait_shell()
+    # A session often resumes with the image already booted (the previous one ended in maint-exit, or a step stopped and
+    # the tablet was left in the shell). Booting again is harmless but slow and it re-dials the USB link, so ask first.
+    if s.shell_alive():
+        s.log('  info  a maintenance shell is already answering on PIANO_MAINT_HOST: no fastboot boot')
+    else:
+        if not s.wait(s.serial, True, 120):
+            raise Stop('ABL fastboot not found (power + volume-down 15-20 s)')
+        s.fastboot('boot', str(image or MAINT_IMAGE), timeout=180)
+        s.wait_shell()
     s.shell('piano-maint idle 3600')
     out = s.shell('. /etc/piano-network; echo "host_ip=$PIANO_HOST_IP"')
     if out is not None:
@@ -1433,12 +1449,20 @@ def map_step(s):
     lun0, rootfs = s.nodes['lun0'], s.nodes['rootfs']
     head, tail = s.region_sha(lun0, 0, 6), s.region_sha(lun0, TAIL_LBA, 5)
     new = (s.gpt or {}).get('gpt-head.bin', {}).get('sha256'), (s.gpt or {}).get('gpt-tail.bin', {}).get('sha256')
+    # A unit that is not the reference one never had either of those tables: its own, read off its own disk into
+    # PIANO_UNIT_PROFILE, are the third thing the medium can legitimately hold (tooling/persist/unit_profile.py).
+    unit = (common.GPT_PRIMARY_SHA256, common.GPT_BACKUP_SHA256) if common.UNIT_PROFILE else None
     if s.execute:
-        state = 'old' if (head, tail) == (common.GPT_PRIMARY_SHA256, common.GPT_BACKUP_SHA256) else 'new' if (head, tail) == new else 'unknown'
-        s.need(state != 'unknown', f'GPT copies are the known old (CRITICAL-BACKUP) or the new (gpt.json) tables: {state}')
+        state = ('old' if (head, tail) == (common.REFERENCE['GPT_PRIMARY_SHA256'], common.REFERENCE['GPT_BACKUP_SHA256'])
+                 else 'new' if (head, tail) == new
+                 else 'unit' if unit and (head, tail) == unit else 'unknown')
+        s.need(state != 'unknown', 'GPT copies are the factory (CRITICAL-BACKUP), gpt.json\'s, or this unit\'s own '
+                              f'(PIANO_UNIT_PROFILE) tables: {state}')
         s.save(gpt_state=state, gpt_head=head, gpt_tail=tail)
     else:
-        s.log(f'  check GPT head/tail = {common.GPT_PRIMARY_SHA256[:16]}/{common.GPT_BACKUP_SHA256[:16]} (old) or gpt.json\'s (new)')
+        s.log(f'  check GPT head/tail = {common.REFERENCE["GPT_PRIMARY_SHA256"][:16]}/'
+              f'{common.REFERENCE["GPT_BACKUP_SHA256"][:16]} (factory), gpt.json\'s (new), or'
+              f'{unit[0][:16] if unit else "-"}/{unit[1][:16] if unit else "-"} (this unit)')
     signed = ((s.boot or {}).get('signed') or {}).get(s.a.boot_image, {}).get('sha256')
     pair = {}
     for key, digest in (('boot_a', common.BOOT_A_SHA256), ('vendor_boot_a', common.VENDOR_BOOT_A_SHA256),
@@ -1879,7 +1903,11 @@ def check_step(s):
     s.need(got in (s.state.get('boot_a_sha256'), s.state.get('boot_a_written')) if s.execute else None, f'boot_a as expected ({got})')
     boot_now = got if s.execute else s.tablet_boot_a()
     head, tail = s.region_sha(lun0, 0, 6), s.region_sha(lun0, TAIL_LBA, 5)
-    s.need((head, tail) == (s.gpt['gpt-head.bin']['sha256'], s.gpt['gpt-tail.bin']['sha256']) if s.execute else None, 'GPT = the new tables')
+    known = {((s.gpt or {}).get('gpt-head.bin', {}).get('sha256'),
+             (s.gpt or {}).get('gpt-tail.bin', {}).get('sha256')): 'new',
+             (common.GPT_PRIMARY_SHA256, common.GPT_BACKUP_SHA256): 'unit' if common.UNIT_PROFILE else 'old'}
+    s.need(known.get((head, tail)) == s.state.get('gpt_state') if s.execute else None,
+           f'GPT = the tables map found ({s.state.get("gpt_state")}); now read {known.get((head, tail)) or "unknown"}')
     v = s.shell(f'sgdisk -v /dev/{lun0}')
     s.need('No problems found' in v if v is not None else None, 'sgdisk -v clean')
     esp_now = s.tablet_esp() if not s.execute else None
