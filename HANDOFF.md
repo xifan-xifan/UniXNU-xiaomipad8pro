@@ -1307,3 +1307,34 @@ out/persistent/boot-piano-macos-persistent-v4-avb.img`（stock props patch level
 
 环境坑（新）：本机沙箱会把 git 读到的 LF 显示成 CRLF（`git status` 虚报 1641 个改动、`git checkout` 报
 index.lock Permission denied）；同一命令改在沙箱外执行即全部消失。别再去"修"这些假差异。
+
+
+## 2026-11-26（续二）- Mac 上发现上游 27.3 线的完整构建现场；k27 树已按钉取到并校验；27.3 RAM 装配启动
+
+`tooling/k27/fetch-k27-tree.sh /root/piano-native/k27-tree`（WSL UbuntuPiano）：`Droid-VM/macOS-DroidVM @ abcbc18f`
++ `patches/k27-tree` 两补丁，结果 tree `544f9468…` 与 `unixnu.lock` 逐位相符。**native k27 源码缺口由上游公开关闭。**
+
+Mac（zhangqi@192.168.31.183，macOS 27.2.1 26B131 + Xcode 27.2 27B52 = 技能认证组合，106 GiB 可用）今晨 06:39–09:53
+已由前一线程跑完上游复现套件的大半（检出 `~/Codex/upstream-tip` @ `d70c16c`）：
+`out/inputs/k273/26C5035r`（16 G IPSW 成员）、`out/inputs/k273/kc/kc273-mac17j.bin`、
+`out/inputs/k273/root/{root.img,root.json,scratch-data.img,kernel.macho.trustcache,systemos.img}` ——
+`root.json` 的 OS 卷 `84581E99-85BE-4957-AC53-2947E887B3E4` 正是本机内核在等的 root UUID（今天写的 `linux_rootfs` 同源）；
+k273 树克隆 `out/k273/k27-tree`（`3b9dc8c` + `patches/k273-kc`，`kernel-k273-0075-s0001-native.macho` 已重链），
+`~/Codex/k27-tree`（27.0.1 基线树 + x12377 fakeroot 588 M + `kernel-k27-0066-native.macho`），
+`out/native-kexts` 全部原生 kext 今晨重编。缺的只有 FD 与最终装配。
+
+装配现场补具（全走复用，不重编）：本机 Windows 的已验证 FD `44531624…`（`ram-window 0x340000000`）scp 到
+`upstream-tip/out/fd/` 三件套；`out/kc/kc27.bin`（gop-display vtable ABI 源，= 解包 vma2 集合）取本机
+`out/k27-independent-20261120/host-run/vma2-abi-reference/vma2-reference.kc`（81,444,864 B，
+sha256 `ca55ea8c…`，Mach-O fileset）放入克隆树 `out/kc/kc27.bin`；`~/.config/piano/env` 写上
+`PIANO_K27_TREE=/Users/zhangqi/Codex/k27-tree`。14:56 起后台跑
+
+    K273_ROOT=k273 K273_ROOT_PART=linux_rootfs PIANO_GPU=2 PIANO_DATA_PERSIST=0 \
+      tooling/k273/build-k273-image.sh        # 日志 out/build-k273-image-20261126.log
+
+（root 从 `linux_rootfs` 取，因为本机 `linux_data` 没有 Ubuntu root；Data 易失 `data-persist=0`。产物
+`out/k27/kc-k27-native.bin`、`out/adt/piano-k27.adt`、`out/ram`、`out/ram-dump`。）
+
+若装配成功，下一步就是上游姿势的 RAM 启动：`fastboot boot out/ram/boot-piano-macos-ram-*.img`（RAM-only，零持久写，
+已总授权），对照 ufs266 的 AMFI `autda` PAC 死亡现场看 0075 集合是否天然免疫（我们的集合带 364797 链指针的旧基线
+与 200+ 原位补丁，上游集合由 `kc-build273-piano.py` 一次成型 —— 若上游集合活着，AMFI 线就地终结，别再喂自己的集合）。
