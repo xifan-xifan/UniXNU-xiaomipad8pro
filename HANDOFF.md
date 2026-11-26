@@ -1524,3 +1524,20 @@ ADT 侧排除嫌疑：`out/adt/piano-k27.adt` 里 SystemOS 的 UUID 与镜像实
 若行为不变，就坐实"根 `/sbin` 来自 OS 层"，修法要落在让 SystemOS 层覆盖 `/sbin` 或按 UniXNU `d830d23` 补 `apfs-boot-shim=1`。
 23:45 按用户要求**暂停**：平板已自动回到 HyperOS（每轮都自己回来了，无需用户操作），Mac 侧临时镜像与挂载已清理，
 新 seed `fc86cb25…`/identity `8e1a87e1…` 留在 Mac `/private/tmp/seed8748/scratch-data.img`。
+00:20 第三发判据（`bd128e97…`，`k27-deny-exec=/sbin/mount`）也失败：`(mount-phase-1) posix_spawn(): 1: Operation not permitted`
+→ `RequireSuccess` → panic（113 s 回 ABL）。同时纠正一处我上一轮写错的判断：替身脚本是 `[ "$1" = "-P" ] && exit 0` 再
+`exec mount.real`，`&&` 短路，带 `-P` 时**不会** exec 原版；所以 `-mr`（禁 `mount.real`）里 `apfs_boot_util[4]` 照样跑，
+只能说明**设备上 `/sbin/mount` 是 Apple 原版**，替身不在设备上。查 `docs/results-2026-11-21-stock-root-v2-assembly.md` 坐实：
+本机 `linux_rootfs` 上那份根卷（`db3629e5…`）的 SystemOS 窗口是 `14330ed9…` = **IPSW 解密的 Apple SystemOS cryptex 原件**
+（2,917,138,432 B，一个不含 `/sbin` 的扩展卷），参考机用的是 `make-systemos.sh` 自造的 SystemOS 卷（带 `sbin/{fsck,mount,mount.real}`）。
+00:35 读完上游 11-26 晚间状态与安装指南（FETCH_HEAD `d5f0c76d`，基线后 201 提交）：上游日常安装版 **v13.1y12q**（75/0）
+已能持久从磁盘启动并保留机主数据；**这道墙就是上游自述缺口 G1b**，正解原文是"在本仓库自行重写垫片并在 `make-systemos.sh`
+加 `SYSTEMOS_SHIMS` 开关，这会改变固定清单的 `sbin` 组，需要新固定值 + 一次平板验证"。整棵上游树 grep `mount-phase`/
+`apfs_boot_util` 为 0 次 —— 他们看不到这堵墙。主线因此定稿（不再找绕过）：
+00:40 起在 Mac 上按成员取 Apple 输入（`fetch-ipsw.py --dry-run` 已通：峰值 31.5 GB、输入卷剩 95 GB、唯一依赖 `ipsw`
+其实已装在 `/opt/homebrew/bin`，脚本内补 PATH 即可；实取 `Cryptex1,SystemOS` 2,368 MiB，`Cryptex1,AppOS` 52 MiB 本机已有，
+13.8 GB 的 OS 盘不必下载 —— `root.img` 的 OS 窗口逐字节就是 pin 的 `40d8282e…`）。下一步：`make-systemos.sh` 造带垫片的
+SystemOS 卷 → 用**我们自己生成的 RSA-3072 密钥**经 `kits/VerifiedRoot/tools/manifest.py` 出现信封与哈希表（内核比对的
+`verified_root_key` 就是我们 kext 里嵌的那把公钥，不需要厂商私钥）→ 组 v2 根镜像 → 只写 `linux_rootfs` 根卷区（ESP 与
+store 窗口不动）→ RAM 判读 `mount-phase-1` 是否 `exit 0`。详见
+[这一篇](docs/results-2026-11-27-deny-mount-also-fails-upstream-g1b-is-our-wall.md)。
