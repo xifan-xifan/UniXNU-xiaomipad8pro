@@ -1,3 +1,26 @@
+## 2026-11-26（续）- 本机 Data store 建成（state 3、窗口 117735999），owner Data 卷仍缺：`offline scratch Data mount failed: 2`
+
+镜像 `c00039100df40233b75fbecfe647386308c1282f59ec13e45596f93216daf3ea`（`tooling/k27/build-verified-store.sh` 的产物，
+Mac `out/ram-verified-store/`、Windows `out\k273-ram-verified-store\`）：只在上一个镜像上加
+`data-persist=2 data-store-part=linux_data data-store-lba=117735999`。控制台证明 store 真起来了
+（`data-store-lba=117735999: window at LBA 117735999, store new, bound to it`、`Data store state 3 … direct 1,
+seed 7e9bd39b, generation 1`），但 `kern_exec.c:8681` 还是 ENOENT —— `native_ram_block_volume_seed` 拿不到那个卷。
+`selectVolumeSeed`（`NativeRamBlock.cpp:1239`）返回 0 只能是两种：带该卷 UUID 的 IOMedia **一个都没有**，或者**多于一个**
+（`if (++matches != 1) { selected = false; break; }`）。旁证：Data 容器 disk0 被 APFS 认出但 `stable checkpoint indices:
+desc 0 data 0`，全程没出现 `disk0s1`；同时 verified NativeUfs 这一轮把两个根窗口各发布了两遍（disk2/disk3 同尺寸、
+disk4/disk5 同尺寸）。两种解释各自需要什么证据、以及最小探针（在 `selectVolumeSeed` 里临时打印每个 IOMedia 的 UUID/name
+与 matches），都写在 `docs/results-2026-11-26-k273-data-store-on-this-unit.md`。
+
+**几何这关必须记住**：`tooling/persist/common.py` 的 `DATA_LAST` 是参考机的值，`check_store_size` 只认它算出的
+`data-store-lba=117998394`，本机构建因此被拒。fork 的正解是给 `PIANO_UNIT_PROFILE` 指 `out/unit-profile/piano-7ccdd855.json`
+（`apply_unit_profile()` 在 import 时生效，本机 `DATA_LAST=124289791` → 窗口 117735999，与已装 ESP 记的一致）。
+Mac 的 `upstream-tip` 里那份 `common.py` 是上游旧版（没有 `apply_unit_profile`），已用 fork 版覆盖，上游版备份在
+Mac `/tmp/common-upstream-backup.py`。**别把参考机的 LBA 抄到本机**（v2 计划早就警告过，这次是实打实的拒绝）。
+
+**判读/工具的小坑（本轮踩过）**：store 那一轮 pstore 转储解码质量下降（`xnu-log.py decode` 的多数表决阈值从 6/11 降到 3/11，
+正文有零星位翻转），关键行仍可读出；兜底是直接抽可打印串。`run-console-ram-k273.ps1` 已参数化（`-ImgRel`/`-Tag`/`-ImageSha`，
+默认读同目录 `.sha256` sidecar），别再为每轮复制脚本。
+
 ## 2026-11-26（续）- verified 根打通：owner cache 门过了、launchd 起来、SystemOS cryptex 挂上；下一道门是 owner Data 卷（本机没有 store）
 
 路线 1（上游 verified 根）本机打通到用户层：镜像 `2ffa854c6a441e468b30642cc14347286b32c5ac327d6ea082b8b02ba973ef0c`
