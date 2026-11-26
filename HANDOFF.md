@@ -1,3 +1,16 @@
+## 2026-11-26 - LUN4 GPT 头采集完成：本机 LUN4 与参考机完全一致，G6 只是 LUN0 的问题；维护会话零写入（已取证）
+
+**本轮动了设备，但只有只读**：`fastboot boot out/inputs/v110/release/boot/boot-ram-maintenance.img`（49,180,672 B，sha `54001a50a13f...`，等于 pin），经 USB NCM `192.168.88.2:2323` 用 `tooling/native/maint-shell.py` 进 root shell，全程 6 次 `dd` 读 + base64 回传，退出用 `sync; piano-maint fastboot` 回 ABL，再 `fastboot reboot`。零写入的三条证据：(1) 运行中的 `piano.diag=maintenance`，`mount | grep -E "sd|ufs"` **空**（7 个挂载全是 ramfs/proc/sys/dev），UFS 只是枚举（`sda` 124,552,192x4KiB、`sde` 3,031,040x512、`sdb/sdc` 24576、`sdd` 16384、`sdf` 131072）没有任何文件系统被挂上；(2) 会话里没有任何分区工具与写命令；(3) 回 HyperOS 后自动 `sys.boot_completed=1`、`OS3.0.309.0.WPYCNXM`、`slot_suffix=_a`。采集管道字节精确：重读 LUN0 头的哈希等于早先记录的 `12710135635beee2...`。
+
+**LUN4 头（本机）**：24,576 B、4 KiB 扇区、378,880 块、primary sha `dfdc685d3418977d...`、disk guid `C3A31221-C703-CB3A-1E7F-C0BDC1D8BFBD`。关键分区：boot_a 入口 12/分区号 13/first 77350、vbmeta_a 15/16、dtbo_a 16/17、vendor_boot_a 22/23、init_boot_a 27/28，boot_a 与 vendor_boot_a 都是 24,576 块 = 100,663,296 B。`common.py` 注释里写的正是 `13-boot_a`/`16-vbmeta_a`/`23-vendor_boot_a`/`28-init_boot_a`，且 `BOOT_A_START_512, BOOT_A_SIZE_512 = 618800, 196608` 与这个头算出的值**完全相同**。**结论：G6 在这台机器上只是 LUN0 的问题**（userdata/linux_rootfs/linux_data 的 LBA 是我们自己的），LUN4 的分区号、boot_a 字节偏移、分区大小都已经和参考机一致。`unit_profile.py --lun0 ... --lun4 ...` 现在能出覆盖两个 LUN 的完整 profile（`out/unit-profile/piano-7ccdd855.json`），`PIANO_UNIT_PROFILE` 指向它即可重绑，`REFERENCE` 仍保留参考值，verdict 因 LUN0 仍为 DIFFERENT(2)。
+
+**ld-classic 已就位**：`/Users/zhangqi/bin/ld-classic` → 自建 `ld64-957.1`。上游取法是 `$LD_CLASSIC` 或 `xcrun -f ld-classic`，而 `check-host.sh` 检查的是 k27 树里的 `out/x12377/ldc/ld` —— 两棵树都已有 `ldc`，这项输入不需要我们再动。
+
+**kext 头缺口重新核查（比上轮记录的要小）**：这次把 27.2 KDK 真正展开了（`pbzx` 负载只有 `pkgutil --expand-full` 能吃，`tar` 不行；展开 5.2 GB 在 `~/Codex/kdk/full`），里面**没有** `IOBlockStorage*.h`，也没有 `IOKit/storage` 目录；k27 树 `installhdrs` 的 `IOKitUser/` 22 个文件每个约 44 字节，`IOBlockStorageDevice.h` 就是一行 `#include <DriverKit/IOBlockStorageDevice.h>`（上一轮被文件名骗到的原因）。**但 macOS SDK 里确实有这棵树**：`$(xcrun --show-sdk-path)/System/Library/Frameworks/IOKit.framework/Headers/storage/` 有 31 个头（含 `IOBlockStorageDevice.h`），`-I .../storage-abi/include` 的形状与之吻合，且可从 Apple 公开件复现。没解决的是 ABI：那是用户侧 IOKit 头，而 `NativeUfs`/`NativeRamBlock` 用内核 recipe 编译并链进 KC、对上 Apple IOStorageFamily，校验用的 `interface-audit.json` 没公开，`storage-abi`/`xnu-m/osfmk`/`inc-gfx` 也没有任何生成脚本（`audit-reference.py` 要读的 `sources/` 子树本机根本不存在）。因此 SDK 版对象集只能叫**我们自己的未验证重建**并明确标注；`xnu-m/osfmk` 与 `inc-gfx` 两个未知头 SDK 解释不了。
+
+上游已推进到 `23f6425f`（比 Mac 上的快照多 8 个提交，本机已抓；Mac 连不上 GitHub，上游只能经本机转发）。`docs/STATUS.md` 仍写着"其他机器的安装指南（in progress）"，Android/macOS 切换器仍是 "RAM only, read-only - a full switch has not been run"，他们的 v13.1y12m 只是自己底座安装上的 ESP-only 更新，仓库只发布哈希不发布镜像，所以我们没法下载他们的系统。
+
+详见 `docs/results-2026-11-26-lun4-head-and-kdk-recheck.md`。
 ## 2026-11-26 - G6 落成代码：从我们自己的 GPT 头生成 device profile，写入工具可以按它覆盖几何（本机测试全绿）
 
 `tooling/persist/common.py` 里写死的是参考机分区 LBA，而 `build-gpt.py`/`maint-session.py`/`build-dual-esp.py` 与根镜像内嵌的计划器都读这些常量；我们这台 `linux_data` first 是 `107512576`，参考值 `71789568` 落在 `userdata`(3632128..102269695) 内部 —— 照发布的工具跑就会把 19.5 GiB 根镜像写进 Android 的 userdata，而 linux_data 一字节不动。这就是上游 G6（"第二台设备没有 device profile 之前不得写入"）在代码里的具体形态，本轮**在代码里关闭**而不只是记录。
