@@ -1,3 +1,35 @@
+## 2026-11-26 - 27.3 集合挂上根后死在 owner cache 授权门（EAUTH=80）：我们的 NativeUfs 是 unverified 构建，没人应答 `native_ufs_block_authenticates`
+
+420 s 窗口版 `out/k273-ram420/boot-piano-macos-ram-A-420.img`（`0db5d160…`，与 `50d7b253…` 同装配只改窗口）：`17:09:44 fastboot boot`
+→ **100 s 就回 ABL**（不是 420）→ reader 冷读 `rc=0` → `17:12:48 hyperos=up`。控制台 20,025 B：前半与 45 s 那次逐字相同
+（`mount-complete volume Macintosh HD` 27.3 根 → `VM Swap Subsystem is ON`），随后
+
+    panic(cpu 0 caller 0xfffffff000bbfa2c08): offline owner SystemOS mount failed: 80 @kern_exec.c:8675
+    piano-psci-halt: PE_halt_restart(1) at 77006 ms: PSCI SYSTEM_RESET
+
+`80` 是 macOS 的 **EAUTH**（不是 APFS 错误码：根本没开始挂载）。链条已核到底：`patches/xnu-12377/0002` 的
+`native_owner_cache_prepare` 要求 `native_verified_block_root_authorized(root_device)`；该函数由树自带的
+`overlay/droidvm/drivers/NativeVirtioBlock.cpp` 静态编进内核（`verifiedVolumeQuery`），并向块驱动要
+`native_ufs_block_authenticates`，而那是个 `__attribute__((weak))` 默认 `return -1`。真实定义只在
+`package/NativeUfs/NativeUfs.cpp:2444` 的 `#if NATIVE_VERIFIED_BLOCK`（2281-2452）里，而 `tooling/k27/build-native-ufs.sh:14`
+给我们的是 `-D NATIVE_UFS_UNVERIFIED_ROOT=1` —— 控制台自证 `NativeUfs: UNVERIFIED development root: 2 windows published without owner policies`。
+旧 0054 集合根本没这条链（其控制台无 `SystemOS` 行），所以这是上游树带来的新门，不是回退。
+
+**上游是怎么过的**：`docs/k273-line.md:121` 记维护者首次 27.3 启动到 `owner cache` **stage 6**，之后 launchd/WindowServer/loginwindow/SecurityAgent
+全在（`piano-gpu=2`、desk-dev 画像、Turnip `NativeAdrenoMetal`、seed 沿用 27.0.1 线）。11-21 那轮的 verified 装配记录仍在库里
+（`results-2026-11-21-verifiedroot-host.md` 钉 `kits/VerifiedRoot`=`974f043d…`；`-owner-collection-replay.md` 链到 `ufs-verified.o`
+并有 `_vr_open/_vr_verify_block/_vr_xnu_crypto`；`-verified-ufs-without-poll.md` 给出合并对象 `c5e6e1c1…` 定义 `_verified_root_policies`；
+`-stock-root-v2-assembly.md` 对 root.img 全部 OS/SystemOS 块按归档公锚逐块验过）。**那些 .o 本机已不在**，但 `kits/VerifiedRoot`
+是 `UniXNU/UniXNU` 的公开子模块，构建脚本是 `unixnu-research/UniXNU/scripts/build-verified-root-probe.py`。
+
+**下一步（路线 1，上游路线）**：Mac 上 `git submodule update --init kits/VerifiedRoot`（钉 `974f043d…`）→ 以 `NATIVE_VERIFIED_BLOCK=1`
+（去掉 `NATIVE_UFS_UNVERIFIED_ROOT`）重编 NativeUfs → 用 `linux_rootfs` 里那份 root.img 自己的 SHNGROOT 清单重生成 policy 对象
+（只做签名**验证**，公锚在镜像里，不需要私钥）→ 重装 RAM 图（同一装配，`piano-reset-after=420`）。
+路线 2（`XNU_OWNER_CACHE_MOUNT=0`）只改一个编译开关，但会连 `DYLD_SHARED_CACHE_DIR=/private/preboot/…` 与 SystemOS 组合一起丢掉，
+与上游桌面不等价，暂不走。GPU/zap 缺口（309 每机 zap `e73f3a4c…` vs 上游钉的 303 `bb942413…`）仍在桌面里程碑处等着，本轮不解。
+详见 `docs/results-2026-11-26-k273-ram-420s-owner-eauth.md`。
+
+设备侧本轮：**零持久写入**（一次 `fastboot boot`，Data volatile），结束在 HyperOS 3.0.309。
 ## 2026-11-26 - 上游血统的 27.3 RAM 图挂上了 27.3 根，45 秒窗口到点自复位；旧集合的 AMFI 死法不在新集合里
 
 `tooling/native/run-console-ram-k273.ps1`（新增，直接沿用 `run-console-after-ram-boot.ps1` 的无人值守环）跑

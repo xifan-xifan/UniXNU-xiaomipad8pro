@@ -5,15 +5,15 @@
 # piano-reset-to=bootloader) -> the image resets itself into ABL -> one reader boot -> one cold dump
 # of 9cb00000 700000 (the k273 mailbox; today proved readable from the session right after a stop,
 # 7 MiB staged fine) -> kill fastboot and let the reader boot the installed system (HyperOS now).
-param([string]$Serial='7ccdd855', [string]$Base='9cb00000', [string]$Size='700000', [int]$WaitBack=300, [int]$WaitReader=150)
+param([string]$Serial='7ccdd855', [string]$Base='9cb00000', [string]$Size='700000', [int]$WaitBack=760, [int]$WaitReader=150)
 $ErrorActionPreference='Continue'
 $root = Join-Path $PSScriptRoot '..\..'
 $pt = Join-Path $root 'out\pt33\platform-tools'
 $f = Join-Path $pt 'fastboot.exe'; $a = Join-Path $pt 'adb.exe'
-$img = Join-Path $root 'out\k273-ram\boot-piano-macos-ram-A-bundled.img'
+$img = Join-Path $root 'out\k273-ram420\boot-piano-macos-ram-A-420.img'
 $reader = Join-Path $root 'out\no-demura-control\reader.img'
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$dir = Join-Path $root ("logs\native-runs\ram-k273-$stamp")
+$dir = Join-Path $root ("logs\native-runs\ram-k273-420-$stamp")
 New-Item -ItemType Directory -Force $dir | Out-Null
 $log = Join-Path $dir 'run.log'
 function Line($m){ $line = "$((Get-Date).ToString('HH:mm:ss.fff')) $m"; Add-Content -LiteralPath $log -Value $line; $line }
@@ -23,7 +23,7 @@ function AdbDevices { ((& $a devices 2>&1 | Out-String)) }
 function WaitFast([string]$s,[int]$seconds){ $until=(Get-Date).AddSeconds($seconds); do{ if((FastDevices) -match "(?m)^$s\s+fastboot"){ return $true }; Start-Sleep -Milliseconds 800 }while((Get-Date) -lt $until); return $false }
 function WaitReader([int]$seconds){ $until=(Get-Date).AddSeconds($seconds); do{ if((FastDevices) -match '(?m)^piano-uefi\s+fastboot'){ return $true }; Start-Sleep -Milliseconds 500 }while((Get-Date) -lt $until); return $false }
 try {
-  if((ShaH $img) -ne '50d7b25312cd2186c8260b286c14e9f4881d1da5223db22cfb5e038670165b00'){ Line 'probe image identity mismatch'; exit 1 }
+  if((ShaH $img) -ne '0db5d160f8ebe8797efa0cb67fefc147ad52c9588274be71ee5725d528be7784'){ Line 'probe image identity mismatch'; exit 1 }
   if((ShaH $reader) -ne '708d0e79ffa8adae5227eae5dbdff27121da4fa7e9530db31f71dd5153570468'){ Line 'reader identity mismatch'; exit 1 }
   $s = ''
   if(!(WaitFast $Serial 5)){
@@ -32,7 +32,7 @@ try {
   }
   $t0 = Get-Date
   (& $f -s $Serial boot $img 2>&1 | Out-String) -replace '\s+',' ' | ForEach-Object { Line ("boot: " + (($_ -replace '^(.{0,120}).*') )) }
-  Line 'probe image booted; waiting for its own reset back to ABL (piano-reset-after=45 baked into the image)'
+  Line 'probe image booted; waiting for its own reset back to ABL (piano-reset-after=420 baked into the image)'
   $until=(Get-Date).AddSeconds($WaitBack); $back=$false
   while((Get-Date) -lt $until){ if((FastDevices) -match "(?m)^$Serial\s+fastboot"){ $back=$true; break }; Start-Sleep -Milliseconds 800 }
   Line ("ABL back after {0:N0} s: {1}" -f ((Get-Date)-$t0).TotalSeconds,$back)
