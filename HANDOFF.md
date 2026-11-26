@@ -1,3 +1,19 @@
+## 2026-11-26 - storage-abi 不是"缺包"：两条公开件路线都试过，都是错的味道；`xnu-m` 只是命名别名
+
+**少了一个缺口**：`-I $PIANO_K27_TREE/out/x12377/xnu-m/osfmk` 只要把 `out/x12377/xnu-m` 软链到树自己的 xnu（`out/k27/xnu`，`osfmk/` 就在那儿）即可解析 —— 它是**命名别名**而不是私有输入，别名已保留。剩下没解释的只有 `inc-gfx`（8 个 kext 脚本用到）。
+
+**两条看起来该行的路都试过并且都不行**（试验已回滚，shim 目录已删，树恢复原状）：
+
+1. macOS SDK 的 `IOKit.framework/Headers/storage/`（31 个头）确实存在，软链后编译器真的能打开 `IOBlockStorageDevice.h`；接着缺 `<TargetConditionals.h>`，把 SDK `usr/include` 顶层 216 个头也软链进去后，编译一路走到 `NativeUfs.cpp:2853`，最后 53 个错误，决定性的一条是 `RootPublication.h:81: comparison of distinct pointer types ('IORegistryEntry *' and 'NativeUfsBlock *')` —— **SDK 里那个 `IOBlockStorageDevice` 是用户侧类**，基类链上没有内核的 `IORegistryEntry`。文件名一样、味道不对。
+2. 树自己的 `iokit/IOKitUser/*.h`（12377 的新拼写，23 个文件，`installhdrs` 就是导出到 `Kernel.framework/.../IOKitUser/`）里，`IOBlockStorageDevice.h` **只有一行** `#include <DriverKit/IOBlockStorageDevice.h>`；而这个 Mac 上 Xcode 的所有 SDK 与完整展开的 27.2 KDK（`~/Codex/kdk/full`，5.2 GB）里都没有任何 `DriverKit` 路径下的 `IOBlockStorageDevice.h`。内核侧那份类定义在本机以任何拼写都不存在。
+
+**曾经编出来过**：`~/Codex/UniXNU-xiaomipad8pro/out/native-kexts/NativeUfs-iobsd/NativeUfs.o`（198,144 B，11-23）是真的对象 —— `xcrun nm -m` 里有 46 个 storage 相关项与未定义符号 `IOBlockStorageDevice::gMetaClass`、`::requestIdle`、`::doSetPriority(IOBlockStorageDeviceExtent*, unsigned long long)`、`::setProperties(OSObject*)`，都是 IOStorageFamily 的内核 C++ 符号。但那套头**本机已无残留**：两个检出里没有任何脚本/补丁提到这个变体名，`~/.zsh_history` 没有记录（agent 跑的是非交互 shell），全盘 `find` 只在上述两处转发头里能找到 `IOBlockStorageDevice.h`。
+
+所以缺口的真实形状是：**`storage-abi` 是手写的 ABI 描述，不是包**。它自带的校验是静态的 —— `scripts/audit-reference.py` 要跑 `sources/UniXNU-droidvm` 里的 `audit-storage-interface-static.py` 与 `build/storage-abi/interface-audit.json`，而那份 `UniXNU-droidvm` 源码没公开（k27 树 `patches/droidvm-gpu/` 里只有 2 个 DroidVM GPU 补丁）。自己重写就等于自己声明类布局且无任何校验手段，正是目标规则里"未验证不得混入主线"的那一类。内核、根镜像、KC 基座仍是我们自己且已验证；**原生 kext 对象集仍然挡在"用我们自建产物进桌面"前面**。
+
+顺带记录环境事实：KDK 的 `pbzx` 负载只有 `pkgutil --expand-full` 能吃（`tar` 报 Unrecognized archive format），已展开在 `~/Codex/kdk/full`（DMG 已卸载，源 DMG 保留）；`ld-classic` 这项输入已定（树里有 `out/x12377/ldc`，`/Users/zhangqi/bin/ld-classic` 是 `ld64-957.1`）。本轮设备未动。
+
+详见 `docs/results-2026-11-26-storage-abi-two-public-routes-tried.md`。
 ## 2026-11-26 - LUN4 GPT 头采集完成：本机 LUN4 与参考机完全一致，G6 只是 LUN0 的问题；维护会话零写入（已取证）
 
 **本轮动了设备，但只有只读**：`fastboot boot out/inputs/v110/release/boot/boot-ram-maintenance.img`（49,180,672 B，sha `54001a50a13f...`，等于 pin），经 USB NCM `192.168.88.2:2323` 用 `tooling/native/maint-shell.py` 进 root shell，全程 6 次 `dd` 读 + base64 回传，退出用 `sync; piano-maint fastboot` 回 ABL，再 `fastboot reboot`。零写入的三条证据：(1) 运行中的 `piano.diag=maintenance`，`mount | grep -E "sd|ufs"` **空**（7 个挂载全是 ramfs/proc/sys/dev），UFS 只是枚举（`sda` 124,552,192x4KiB、`sde` 3,031,040x512、`sdb/sdc` 24576、`sdd` 16384、`sdf` 131072）没有任何文件系统被挂上；(2) 会话里没有任何分区工具与写命令；(3) 回 HyperOS 后自动 `sys.boot_completed=1`、`OS3.0.309.0.WPYCNXM`、`slot_suffix=_a`。采集管道字节精确：重读 LUN0 头的哈希等于早先记录的 `12710135635beee2...`。
