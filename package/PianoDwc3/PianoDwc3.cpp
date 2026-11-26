@@ -131,6 +131,7 @@ struct Args {
   uint32_t hid;       // piano-usb-hid=1: a keyboard and a pointer for macOS, driven from the Mac over a third port (piano input)
   uint32_t hidHold;   // piano-usb-hid-hold=MS: keys/buttons still down this long after the last command are released (default 3000)
   uint32_t net;       // piano-usb-net=1: a CDC-NCM network function after the ports, an Ethernet interface for macOS (PianoUsbNet)
+  uint32_t netTxFlow; // piano-usb-net-txflow=1: stall and retry TX when the frame ring fills (default 0)
   uint32_t netFifo;   // piano-usb-net-fifo: 1 (default) the TX FIFO plan for the endpoints in use, 0 keep the sizes the reset left
   uint32_t irq;       // piano-usb-irq=1: the core's interrupt (SPI 133) wakes the USB thread (default 0: polled, adaptive)
   uint32_t idle;      // piano-usb-idle: 1 (default) the adaptive wait (UsbIdle.h), 0 the old loop (1 ms after every quiet pass)
@@ -171,6 +172,7 @@ void readArgs()
   gArgs.hid = bootArg("piano-usb-hid", 0);
   gArgs.hidHold = bootArg("piano-usb-hid-hold", 3000);
   gArgs.net = bootArg("piano-usb-net", 0);
+  gArgs.netTxFlow = bootArg("piano-usb-net-txflow", 0);
   gArgs.netFifo = bootArg("piano-usb-net-fifo", 1);
   gArgs.irq = bootArg("piano-usb-irq", 0);
   gArgs.idle = bootArg("piano-usb-idle", 1);
@@ -2009,7 +2011,7 @@ void usbStatus()
             gHid.commands, gHid.keyboard, gHid.consumer, gHid.pointer, gHid.releases, gHid.autoReleases, gHid.errors, gHid.sendErrors);
   if (gGadget.net()) {
     const ncm::NetStats &n = gGadget.netStats;
-    char line[400];
+    char line[512];
     pianonet::status(line, sizeof line);
     cprintf("net: %s\n", line);
     cprintf("net: alternate %u, NTB input size %u, filter %#x, %u notifications, %u zero-length packets, %u alternate changes\n", n.alt,
@@ -2869,7 +2871,7 @@ bool PianoDwc3::start(IOService *provider)
   // once IOBSD is up (PianoUsbNet.cpp), under this service, registered as for the HID devices. Without them the device keeps its
   // ACM-only shape.
   if (gArgs.net) {
-    if (!pianonet::init(&gGadget.netStats) || !pianonet::startThread(this)) {
+    if (!pianonet::init(&gGadget.netStats, gArgs.netTxFlow == 1) || !pianonet::startThread(this)) {
       note("net: no queues or thread: the network function is left out");
       gArgs.net = 0;
     } else {

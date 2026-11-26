@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- UniXNU-piano: the direct Data store switched to concurrent admission once per boot, after the mount and the store's state 2
+     (docs/data-store.md "Concurrent mode at boot"). Install as /Library/LaunchDaemons/com.unixnu.piano-data-concurrent.plist
+     (root:wheel 644) with the script at /usr/local/libexec/piano-data-concurrent (root:wheel 755): configs/userland.toml.
+     Remove PIANO_DATA_CONCURRENT_AT_BOOT (or this plist) to disable it; rollback on a running boot: sudo sysctl -w machdep.piano_data_concurrent=0. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.unixnu.piano-data-concurrent</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>/usr/local/libexec/piano-data-concurrent</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PIANO_DATA_CONCURRENT_AT_BOOT</key><string>1</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><false/>
+</dict>
+</plist>

@@ -14,7 +14,7 @@
 #      configd's interface list is ready (the registry's quiet or the login wave): its line says after how long;
 #   3. for 600 s, every 10 s: the address on the interface, else one console line with what is there instead (its inet addresses and
 #      scutil --nwi's IPv4 part: the check of H1) and the address set again (ipconfig MANUAL).
-# Without piano-usb-net=N (N not 0) in kern.bootargs: exits at once. Lines "piano-usbnet-address: ..." on the console.
+# Without a nonzero piano-usb-net=N boot argument, exits at once. Lines "piano-usbnet-address: ..." on the console.
 # A test runs it with PIANO_USBNET_PATH (stub commands first), PIANO_USBNET_OUT (a file), PIANO_USBNET_WAIT/_GUARD/_PERIOD.
 set -u
 PATH=${PIANO_USBNET_PATH:-/usr/sbin:/usr/bin:/sbin:/bin}
@@ -23,8 +23,9 @@ fixed=169.254.80.2 mask=255.255.0.0 mac=02:50:49:41:4e:02 svc="Piano USB"
 wait_s=${PIANO_USBNET_WAIT:-300} guard_s=${PIANO_USBNET_GUARD:-600} period=${PIANO_USBNET_PERIOD:-10}
 say() { printf 'piano-usbnet-address: %.230s\n' "$1" >> "$out" 2> /dev/null; }
 
-case " $(sysctl -n kern.bootargs 2> /dev/null) " in
-  *" piano-usb-net="[1-9]*) ;;
+. "$(dirname "$0")/piano-bootargs.sh"
+case "$(piano_bootarg piano-usb-net)" in
+  [1-9]*) ;;
   *) exit 0 ;;
 esac
 

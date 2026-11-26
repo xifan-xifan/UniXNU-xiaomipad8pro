@@ -22,20 +22,48 @@ line: static_if_init() reads it before the device tree is up. Order is kept with
 the line, so for one name the last value still wins as before.
 """
 import argparse
+import hashlib
+import json
+import mmap
+import os
 import re
 import struct
 import sys
+import tempfile
 from pathlib import Path
 
 DEVICE = Path(__file__).resolve().parents[2]
 HEADER = DEVICE / 'tooling/k27/piano-bootargs/piano_bootargs_policy.h'
 LINE_MAX = 1000        # the tools' budget for DarwinBoot's line (it passes at most 1023 bytes)
+LEGACY_MAX = 1023     # BOOT_LINE_LENGTH - 1, k27 0066's kern.bootargs clip
 MERGED_MAX = 4095      # PIANO_BOOT_ARGS_SIZE - 1
 PROP = 'piano-boot-args'
 SET_MAX = 15           # PIANO_BOOT_ARGS_SET_MAX
 KC_MARKER = b'piano-boot-args: /chosen/%s (%u bytes): %u bytes appended'
+MERGED_SYSCTL_MARKER = b'Piano merged boot arguments (0066 ADT tail)\0'
+READER_ABI = b'kern.piano_bootargs\0PianoBootArgs ABI 1\0'
 KEEP = ('piano-reset-after', 'piano-reset-to', 'piano-boot-guard', PROP)
 SET_RE = re.compile(r'[A-Za-z0-9._-]{1,%d}' % SET_MAX)
+
+MERGED_READERS = {
+    'pianousb-shell': ('piano-usb-shell',),
+    'piano-usbnet-address': ('piano-usb-net',),
+    'piano-rotated': ('piano-rotate', 'piano-rotate-map', 'piano-rotate-settle', 'piano-rotate-interval',
+                      'piano-rotate-detach', 'piano-rotate-cover', 'piano-rotate-test'),
+    'piano-brightness-sync': ('piano-backlight-native', 'piano-backlight-auto'),
+}
+# For these readers only the legacy prefix is guaranteed by this build.
+LEGACY_READERS = {
+    'piano-camera-grab': ('piano-camera-grab',),
+    'piano-lw-quiet': ('piano-lw-quiet',),
+    'NativeSoftMetal': ('soft-metal', 'soft-metal-report', 'soft-metal-fb8', 'soft-metal-stubs',
+                        'soft-metal-all', 'soft-metal-family'),
+    'NativeAdrenoMetal': ('piano-metal-report', 'piano-metal-barriers', 'piano-tu-debug'),
+    'Turnip surface residency': ('piano-surface-residency',),
+    'Turnip BO clear': ('piano-tu-bo-clear',),
+    'settime.sh': ('droidvm-utc', 'droidvm-tz'),
+}
+SHORT_READERS = {'NativeSoftMetal', 'NativeAdrenoMetal'}  # pass 1023 bytes to sysctl, including the NUL
 
 
 def name_of(arg):
@@ -63,7 +91,7 @@ def fit(args, set_name, reserve=0, force=False):
     if any(name_of(x) == PROP for x in args):
         raise SystemExit(f'the arguments already have {PROP}=: give the whole (merged) arguments, the tools make the selector')
     line = ' '.join(args)
-    if not force and len(line) + reserve < LINE_MAX:
+    if not force and len(line.encode()) + reserve < LINE_MAX:
         return args, []
     tail = [x for x in args if movable(x)]
     if not tail:
@@ -71,12 +99,14 @@ def fit(args, set_name, reserve=0, force=False):
     kept = [x for x in args if not movable(x)] + [f'{PROP}={set_name}']
     prop_name(set_name)
     line = ' '.join(kept)
-    if len(line) + reserve >= LINE_MAX:
-        raise SystemExit(f'kernel command line is {len(line) + reserve} bytes even with every piano-* argument in the ADT '
+    line_bytes = len(line.encode()) + reserve
+    if line_bytes >= LINE_MAX:
+        raise SystemExit(f'kernel command line is {line_bytes} bytes even with every piano-* argument in the ADT '
                          f'({len(" ".join(tail))} bytes); DarwinBoot passes at most 1023 (the tools keep it under {LINE_MAX})')
     text = ' '.join(tail)
-    if len(line) + reserve + 1 + len(text) > MERGED_MAX:
-        raise SystemExit(f'the boot-args with the ADT\'s tail would be {len(line) + reserve + 1 + len(text)} bytes; the kernel takes '
+    merged_bytes = line_bytes + 1 + len(text.encode())
+    if merged_bytes > MERGED_MAX:
+        raise SystemExit(f'the boot-args with the ADT\'s tail would be {merged_bytes} bytes; the kernel takes '
                          f'{MERGED_MAX} (k27 0066 PIANO_BOOT_ARGS_SIZE)')
     return kept, tail
 
@@ -171,7 +201,7 @@ def selector(args):
 def merged(line, adt):
     """(boot-args, status) as k27 0066 makes them of LINE with this ADT: status appended, none, off, bad-set, missing, empty,
     bad-char or too-long (the merged text is LINE then)."""
-    line = line[:1023]
+    line = line.encode()[:LEGACY_MAX].decode(errors='ignore')
     sel = selector(line.split())
     if sel == '0':
         return line, 'off'
@@ -188,13 +218,104 @@ def merged(line, adt):
     if not text:
         return line, 'empty'
     out = f'{line} {text}' if line else text
-    if len(out) > MERGED_MAX:
+    if len(out.encode()) > MERGED_MAX:
         return line, 'too-long'
     return out, 'appended'
 
 
 def kc_has_boot_args(kc):
     return KC_MARKER in Path(kc).read_bytes()
+
+
+def merged_reader_destinations(files):
+    """Destinations of the migrated readers, based on the files the stager built."""
+    libexec = '/usr/local/libexec/'
+    found = {libexec + name for name in MERGED_READERS if READER_ABI in files.get(libexec + name, b'')}
+    usbnet = libexec + 'piano-usbnet-address'
+    if (b'/piano-bootargs.sh"' in files.get(usbnet, b'') and
+            b'sysctl -n kern.piano_bootargs' in files.get(libexec + 'piano-bootargs.sh', b'')):
+        found.add(usbnet)
+    return found
+
+
+def recorded_readers(artifact, record_path, seed=False):
+    if not record_path.is_file():
+        return set()
+    try:
+        record = json.loads(record_path.read_text())
+        expected = record['outputs']['seed']['file_sha256'] if seed else record['archive_sha256']
+        with artifact.open('rb') as stream:
+            if hashlib.file_digest(stream, 'sha256').hexdigest() != expected:
+                raise ValueError(f'{artifact.name} differs from {record_path.name}')
+        return {Path(f['dest']).name for f in record['files'] if f.get('merged_bootargs') is True}
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise SystemExit(f'{record_path}: cannot verify the staged boot-argument readers ({error})') from error
+
+
+def staged_readers(seed, live, layer):
+    sources = []
+    if seed is not None:
+        sources.append(recorded_readers(seed, seed.with_name('userland.json'), seed=True))
+    if live:
+        path = layer or os.environ.get('PIANO_BOOTARGS_LIVE_DIR')
+        if path:
+            path = Path(path)
+            sources.append(recorded_readers(path / 'userland-update.tar', path / 'live.json'))
+        else:
+            sources.append(set())
+    return set.intersection(*sources) if sources else set()
+
+
+def legacy_clip(full):
+    """k27 0066's whole-argument clip, using byte offsets."""
+    end = LEGACY_MAX
+    if len(full) > end and full[end] != ord(' '):
+        end = full.rfind(b' ', 0, end) + 1
+    return full[:end].rstrip(b' ')
+
+
+def check_userland(entries, adt, kc, *, seed=None, live=False, layer=None):
+    """Check the final lines against the KC and userland that can run on each entry."""
+    with Path(kc).open('rb') as stream, mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as image:
+        has_tail = image.find(KC_MARKER) >= 0
+        has_full = image.find(MERGED_SYSCTL_MARKER) >= 0
+    readers = None
+    for entry, line in entries.items():
+        raw = line.encode()
+        if len(raw) >= LINE_MAX or b'\0' in raw:
+            raise SystemExit(f'{entry}: bootloader argument line must stay under {LINE_MAX} bytes without embedded NUL')
+        full, status = merged(line, adt)
+        if status not in ('appended', 'none', 'off'):
+            raise SystemExit(f'{entry}: kernel rejects the ADT boot-argument tail ({status})')
+        if status == 'appended' and not has_tail:
+            raise SystemExit(f'{entry}: kernel needs k27 0066 to append the ADT boot-argument tail')
+        full = full.encode()
+        clipped = legacy_clip(full)
+        if len(clipped) == len(full) and len(clipped) < LEGACY_MAX:
+            continue
+        names = {name_of(word) for word in full.decode().split(' ') if word}
+        hidden = {name_of(word) for word in full[len(clipped):].decode().split(' ') if word}
+        for reader, keys in (LEGACY_READERS | MERGED_READERS).items():
+            unreadable = names if reader in SHORT_READERS and len(clipped) == LEGACY_MAX else hidden
+            blocked = sorted(unreadable.intersection(keys))
+            if not blocked:
+                continue
+            detail = f'{entry}: {reader} cannot read {", ".join(blocked)} through kern.bootargs'
+            if reader in MERGED_READERS and has_full:
+                if readers is None:
+                    readers = staged_readers(seed, live, layer)
+                if reader in readers:
+                    continue
+            if reader == 'piano-brightness-sync':
+                print(f'{detail}. The driver properties still supply brightness readiness.', file=sys.stderr)
+                continue
+            if reader not in MERGED_READERS:
+                reason = 'keep its arguments in the legacy prefix and within its reader buffer'
+            elif not has_full:
+                reason = 'rebuild the kernel collection with k27 0076'
+            else:
+                reason = 'provide the matching staged userland (seed record or PIANO_BOOTARGS_LIVE_DIR for a resumed store)'
+            raise SystemExit(f'{detail}. {reason}.')
 
 
 def header_numbers():
@@ -213,9 +334,68 @@ def tiny_adt():
     return struct.pack('<II', 1, 2) + prop('name', b'device-tree\0') + other + chosen_node
 
 
+def test_userland_visibility():
+    patch, = (DEVICE / 'patches/k27').glob('0076-*.patch')
+    text = patch.read_bytes()
+    assert b'sysctl_io_string(req, PE_boot_args(), 0, 0, NULL)' in text
+    assert b'SYSCTL_PROC(_kern, OID_AUTO, piano_bootargs,' in text
+    assert b'CTLFLAG_LOCKED | CTLFLAG_RD | CTLFLAG_KERN | CTLTYPE_STRING' in text
+    assert MERGED_SYSCTL_MARKER.rstrip(b'\0') in text
+    assert legacy_clip(b'x' * 1023 + b' y') == b'x' * 1023
+    assert legacy_clip(b'x' * 1022 + b' y') == b'x' * 1022
+
+    line = 'piano-boot-args=ram'
+    pad = 'piano-pad=' + 'a' * (1016 - len(line) - len(' piano-pad= '))
+    args = ['piano-usb-shell=1', 'piano-usb-net=1', 'piano-rotate=2']
+    adt = with_set(tiny_adt(), 'ram', [pad, *args])
+    full, status = merged(line, adt)
+    assert status == 'appended' and full.index(args[0]) == 1016
+    assert len(legacy_clip(full.encode())) == 1015
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        kc = root / 'kernel'
+        layer = root / 'layer'
+        layer.mkdir()
+        archive = layer / 'userland-update.tar'
+        archive.write_bytes(b'host fixture')
+        libexec = '/usr/local/libexec/'
+        staged = {libexec + 'pianousb-shell': READER_ABI, libexec + 'piano-rotated': READER_ABI,
+                  libexec + 'piano-usbnet-address': b'. "$(dirname "$0")/piano-bootargs.sh"'}
+        assert libexec + 'piano-usbnet-address' not in merged_reader_destinations(staged)
+        staged[libexec + 'piano-bootargs.sh'] = b'sysctl -n kern.piano_bootargs'
+        files = [{'dest': dest, 'merged_bootargs': True} for dest in sorted(merged_reader_destinations(staged))]
+        (layer / 'live.json').write_text(json.dumps({'archive_sha256': hashlib.sha256(archive.read_bytes()).hexdigest(),
+                                                    'files': files}))
+        seed = root / 'seed'
+        seed.write_bytes(b'host seed fixture')
+        (root / 'userland.json').write_text(json.dumps({
+            'outputs': {'seed': {'file_sha256': hashlib.sha256(seed.read_bytes()).hexdigest()}}, 'files': files,
+        }))
+
+        def refused(wanted, **sources):
+            try:
+                check_userland({'fixture': line}, adt, kc, **sources)
+            except SystemExit as error:
+                assert wanted in str(error), error
+            else:
+                raise AssertionError(f'expected refusal: {wanted}')
+
+        kc.write_bytes(KC_MARKER)
+        refused('with k27 0076', live=True, layer=layer)
+        kc.write_bytes(KC_MARKER + MERGED_SYSCTL_MARKER)
+        refused('pianousb-shell cannot read piano-usb-shell')
+        check_userland({'fixture': line}, adt, kc, seed=seed, live=True, layer=layer)
+        archive.write_bytes(b'stale fixture')
+        refused('userland-update.tar differs from live.json', live=True, layer=layer)
+        adt = with_set(tiny_adt(), 'ram', [pad, 'piano-tu-debug=none'])
+        refused('NativeAdrenoMetal cannot read piano-tu-debug', seed=seed)
+
+
 def self_test():
     size, set_max, prop = header_numbers()
     assert (size - 1, set_max, prop) == (MERGED_MAX, SET_MAX, PROP), 'boot_args.py and piano_bootargs_policy.h disagree'
+    test_userland_visibility()
     # nothing moves while the line fits
     short = ['debug=0x14e', 'piano-gpu=2', 'data-persist=0']
     assert fit(short, 'ram') == (short, [])

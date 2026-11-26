@@ -9,19 +9,17 @@ One row per feature. Every status comes from a run on the tablet; host tests, an
 - **Partial**: works, with the gaps named in the note.
 - **Not yet**: not working, or never run on the tablet.
 
-The installed daily build is **v13.1y12m** (installed 2026-11-26, an ESP-only update on v13.1y12l; its install round: 67 PASS,
-3 FAIL, all checker misses whose evidence shows the feature working; its RAM qualification: 429 PASS, its FAILs test or harness
-issues or switches that are off on the daily line). "Verified" names the build and date of
-the newest run that showed the result. Daily results: [results-2026-11-26.md](results-2026-11-26.md) and the earlier
-`results-*.md` pages.
+The installed daily build is **v13.1y12q** (2026-11-26; install check 75/0), with Data concurrent mode and USB debug network TX flow control on by default; display fixes stay behind switches that default to off.
+"Verified" names the build and date of the newest run that showed the result. Daily results are in
+[results-2026-11-26.md](results-2026-11-26.md) and the earlier `results-*.md` pages.
 
 ✅ fully supported · 🟡 partial / in progress · ❌ not supported
 
 | Feature | Status | Verified (build, date) | Note |
 | --- | --- | --- | --- |
-| Boot from disk, persistent install | ✅ Works (installed) | v13.1y12m, 2026-11-26 | Disk boot, exact ESP profile, the owner's Data store resumed, boot guard healthy, no panic. v13.1y12m was an ESP-only update on v13.1y12l: install round 67 PASS; its 3 FAILs are checker misses (a console line cut short, a too-broad pattern, a log read in the wrong window) whose evidence shows the feature working. Installs write only changed parts, after backups, with read-back checks and a rollback to the previous build. |
-| Display | ✅ Works (installed), 60 Hz | v13.1y12m, 2026-11-26 | Frames reach the panel through PianoDpu flips on the boot framebuffer's pipes; the CPU still does per-frame work (a cache clean, split over 4 threads). No underrun, revert or SMMU fault over the session. Native screenshots on the device, taken from the display driver, are on in the daily line. Native panel sleep, Night Shift and refresh switching are built but off by default (in qualification). |
-| 120 Hz | 🟡 RAM only | RAM gpu-hz120-2, 2026-11-21 | 120 Hz is exposed and kept across display off/on; 73-78 new frames/s are presented. The daily profile stays at 60 Hz. |
+| Boot from disk, persistent install | ✅ Works (installed) | v13.1y12q, 2026-11-26 (install check 75/0) | Boots from disk. Installs write only changed parts after backups, verify them by reading them back, and support rollback to the previous build. |
+| Display | ✅ Works (installed), 60 Hz | v13.1y12q, 2026-11-26 | PianoDpu flips on the boot framebuffer's pipes and native screenshots are on; colours on the installed desktop are correct (webcam check after the install). Native panel sleep, Night Shift and refresh switching are off by default. Night Shift routing turned the desktop blue on qualification boots: the colour-matrix (PCC) coefficients were written with the cross terms transposed and negative values in sign-magnitude form, which the hardware reads as two's complement. The fix (v13.1y12s) passes the host tests; the tablet check is pending. The native panel sleep fix (DSI controller state after wake) is also pending its tablet check. |
+| 120 Hz | 🟡 Partial | v13.1y12p and v13.1y12q test profiles, 2026-11-26 | macOS offers 120 Hz on the fixed-120 profile and both panel links scan at 120.0 Hz. The profile is off by default. Apps reach roughly 58–60 fps. Swaps take about 13 ms against an 8.33 ms period due to GPU-fence wait and vblank acceptance. A fix is under analysis. |
 | Touch screen (native) | ✅ Works (installed) | v13.1y12l, 2026-11-26; gestures on RAM touch-native3, 2026-11-23 | A native built-in Touch Screen bound to the display: tap, long press (right click), pan and scroll in scroll views, pinch, rotate, smart magnify, palm rejection, 90 degree axes (44/0 on RAM). Installed: published from boot and acquired by the system. Long use by hand on the native path is pending. |
 | Keyboard cover and trackpad | ✅ Works (installed) | owner hands-on, v12, 2026-11-19; v13.1y12l, 2026-11-26 | Typing and the trackpad work; the cover is known to the login window. |
 | Wi-Fi | 🟡 Works (installed), partial | v13.1y12l, 2026-11-26; v13.1x, 2026-11-21 | Joins at boot (WPA2, DHCP, DNS); radio off/on from the switch rejoins; a forced link loss rejoins within seconds; country code set. Pending: joining by clicking a network row by hand, auto-rejoin after a hotspot goes away and comes back, and a multi-access-point office network. |
@@ -43,16 +41,16 @@ the newest run that showed the result. Daily results: [results-2026-11-26.md](re
 | GPU: paged memory | ✅ Works (installed) | v13.1y12l, 2026-11-26 | 4 KiB paged GPU memory (cap 7168 MiB, no fixed pool), no refusals, no page faults; hang recovery by replay on by default. |
 | GPU: Android-level frequency curve | ✅ Works (installed) | v13.1y12l, 2026-11-26 | The Android 14-level table up to 1100 MHz with its skin and thermal steps and a KGSL-style governor; the Android CPU table. Sustained 3D bench about 50-54 fps at 734 MHz (RAM, 2026-11-23). |
 | GPU: 4 GiB windows | ✅ Works (installed) | v13.1y12l, 2026-11-26 | 64 client windows of 4 GiB in a 256 GiB aperture, 1 GiB per object, no GPU open refused. Fixes the Core Image 4032-pixel out-of-memory paths (Metal image check 30/30). |
-| Safari: WebGL 2 and WebGPU | ✅ Works (installed) | v13.1y12m, 2026-11-26 | WebGL 2 on, WebGPU adapter "adreno" (a WebGPU page at about 52 fps with a correct readback); Safari's GPU process opens the accelerator. |
-| Safari: hardware video decode | ✅ Works (installed) | v13.1y12m, 2026-11-26; v13.1y12i, 2026-11-25 | H.264 up to 1920x1088 decodes on the Iris video core: 1080p 600 frames, 0 dropped. |
-| Safari: HEVC and 4K | ✅ Works (installed), software | v13.1y12j, 2026-11-25; plays again on v13.1y12m | HEVC 2160p 600/0 at 29.9 fps and H.264 2160p 591/5, in Apple's software decoders (by design). VP9 and AV1 are not supported. |
-| Chrome: GPU acceleration | ✅ Works (installed) | v13.1y12m, 2026-11-26; videos on v13.1y12l | With Chrome's GPU sandbox on and no flags: WebGL through ANGLE on Metal (Adreno 830, about 38 fps in the WebGL test on v13.1y12m), GPU compositing, canvas 2D 56 fps, scrolling 60 fps with no frame over 34 ms. Every test video played with 0-1 dropped frames: H.264 and HEVC at 1080p and 2160p, VP9 and AV1 at 1080p (HEVC through VideoToolbox, the others in Chrome's software decoders). No crash report. Chrome is not used on RAM boots (it can exhaust the RAM-backed Data disk). |
-| Chrome: WebGPU | ✅ Works (installed) | v13.1y12m, 2026-11-26 | Without flags: adapter Qualcomm "adreno-8xx", WebGPU contexts 6 of 6, compute results correct, a WebGPU frame drawn and read back. Kernel patch 0075 gives processes a 47-bit user address space, so Chrome's V8 sandbox reserves its full region (1152 GB). Open detail: one of Chrome's 17 processes reports a non-secure V8 sandbox mode (under investigation). |
+| Safari: WebGL 2 and WebGPU | ✅ Works (installed) | v13.1y12o, 2026-11-26 | WebGL 2 and WebGPU passed again. On v13.1y12m, the WebGPU adapter was "adreno" and the test page ran at about 52 fps with correct readback. |
+| Safari: hardware video decode | ✅ Works (installed) | v13.1y12o, 2026-11-26; v13.1y12i, 2026-11-25 | H.264 up to 1920x1088 decodes on the Iris video core. The 1080p test again reported zero dropped frames. |
+| Safari: HEVC and 4K | ✅ Works (installed), software | v13.1y12j, 2026-11-25; HEVC replayed on v13.1y12o | HEVC 2160p 600/0 at 29.9 fps and H.264 2160p 591/5 on v13.1y12j, in Apple's software decoders. VP9 and AV1 are not supported. |
+| Chrome: GPU acceleration | ✅ Works (installed) | v13.1y12o, 2026-11-26; earlier tests on v13.1y12m and v13.1y12l | WebGL measured 37.7 fps through ANGLE on Metal (Adreno 830) with the GPU sandbox on and no flags. Earlier checks covered GPU compositing, canvas 2D at 56 fps, scrolling at 60 fps with no frame over 34 ms, and video playback with 0-1 dropped frames: H.264 and HEVC at 1080p and 2160p, VP9 and AV1 at 1080p (HEVC through VideoToolbox, the others in Chrome's software decoders). Those checks produced no crash report. Chrome can exhaust the RAM-backed Data disk on RAM boots. |
+| Chrome: WebGPU | ✅ Works (installed) | v13.1y12o, 2026-11-26 | Without flags, 6 of 6 WebGPU contexts opened on Qualcomm "adreno-8xx", with correct compute results and frame readback. Kernel patch 0075 gives processes a 47-bit user address space. All 17 Chrome processes reported secure V8 sandbox mode and a 1152 GB reservation, resolving the transient v13.1y12m finding. |
 | Video playback (QuickTime) | ✅ Works (installed) | v13.1x, 2026-11-21 | AVC High and HEVC Main10 decoded in hardware; about 100 s each with 0 transient or dark frames on the webcam. |
 | Energy modes | 🟡 Partial | v13.1y12l, 2026-11-26 | Low Power, Automatic and High Power (the daily setting) set with `pmset` reach the power and thermal policy. The picker in System Settings is not verified by hand. |
 | Login window idle CPU | ✅ Works (installed) | v13.1y12l, 2026-11-26 | Fixed: an audio daemon looped at the login window (about 1.3 cores); it is now held until the login. |
 | App launches | ✅ Works (installed) | v13.1y12l, 2026-11-26 | Calculator, TextEdit and Notes open their first window in under 2.5 s. |
-| USB debug (console, root shell, ssh) | ✅ Works (installed) | v13.1y12l, 2026-11-26 | USB-C debug console with a monitor that returns to the bootloader, root shell and ssh over the cable; no endpoint wedge over the boot. |
+| USB debug (console, root shell, ssh) | ✅ Works (installed) | v13.1y12q (installed), 2026-11-26 | USB-C debug console, root shell and SSH over the cable work. Patch 0076 lets the shell read boot arguments past the legacy 1024-byte cut. A full TX queue used to drop frames during large single transfers; TX flow control (66/66 exact transfers in its test) is on by default since v13.1y12q. |
 | OS switcher (Android / macOS) | 🟡 RAM only, read-only | RAM v13.1y12e, 2026-11-24 | The boot-flag sysctls read the flag; writes are refused by design. A full switch has not been run. |
 | USB host / OTG | ❌ Not yet | RAM usb-a2d, 2026-11-18 (empty port) | Host mode starts on an empty port; VBUS supply and a real device are not done. |
 | External display (USB-C DP) | ❌ Not yet | none | Design only. |
@@ -60,7 +58,7 @@ the newest run that showed the result. Daily results: [results-2026-11-26.md](re
 | Hardware video encode | ❌ Not yet | camera recordings, 2026-11-25 | Recordings use the software encoder. |
 | IR blaster, stylus, torch | ❌ Not yet | none | Drivers built or designed, not run. |
 | Memory (16 GB) | 🟡 Partial | v13.1y12l, 2026-11-26 | The installed system uses a 13 GiB window (13310 MiB; was 8 GiB). At idle: 47 % free, no compression, no swap, no memory pressure. In progress: the GPU memory tier and the driver pools. |
-| Internal storage (UFS) | 🟡 Partial | v13.1y12l, 2026-11-26 (first measurement) | On the Data volume, against Android on the same unit: 4K random read at queue depth 1 equals Android (15580 vs 14967 IOPS), but reads do not scale with queue depth (8 in flight: 15696 vs 88663); writes are 0.18-0.24x Android (sequential 519 vs 2137 MB/s, 4K random 6494 vs 36693 IOPS); a reader drops from 14490 to 1300 IOPS while a writer runs. WriteBooster is already on from the boot firmware. Fixes are in progress. |
+| Internal storage (UFS) | 🟡 Partial | v13.1y12q (installed: concurrent mode live); v13.1y12o (Data A/B) and scratch-window tests, 2026-11-26 | Compared with serial operation on Data, concurrent mode delivered 4.9× the 4 KiB random-read IOPS at QD8 and 5.6× at QD32. At QD8, 1 MiB sequential reads reached 4.8× throughput, 1 MiB sequential writes reached 1.5×, and 4 KiB random writes reached 0.9× IOPS. Mixed-reader p99 fell from 2528 to 269 µs. The reboot canary survived. Concurrent, write-back and queue modes each kept every acknowledged `F_FULLFSYNC` record after a direct reset in scratch-window tests. Concurrent mode is on in the installed v13.1y12q (switched on after the Data mount). Write-back and queue modes stay off. |
 | Fingerprint, NPU | ❌ Deferred | none | No Secure Enclave (no Touch ID); no Core ML backend on this SoC. |
 
 ## Known gaps
@@ -68,11 +66,12 @@ the newest run that showed the result. Daily results: [results-2026-11-26.md](re
 - Bluetooth pairing (the LE event-mask fix is on the daily line; a hands-on keyboard and mouse test is pending; radio coexistence
   under analysis) and Bluetooth audio.
 - Closing the cover on battery (attended check); the Energy Mode picker; the brightness slider by hand.
-- Chrome: one of 17 processes reports a non-secure V8 sandbox mode (under investigation); Chrome on RAM boots.
+- Chrome on RAM boots.
 - Charge pump / MiPPS fast charging; PPS 9 V.
-- 120 Hz in daily use; native panel sleep, Night Shift and refresh switching (built, off by default, in qualification); the GPU
-  memory tier and driver pools.
-- Disk: no read scaling with queue depth, writes 0.18-0.24x Android, reads stall behind writes (fixes in progress).
+- The fixed 120 Hz profile drives the panel at 120 Hz, with app cadence still around 58–60 fps. Native panel sleep, Night Shift
+  and refresh switching are built, off by default and in qualification. The GPU memory tier and driver pools are in progress.
+- Data concurrent mode is live on the installed build; at QD8, 4 KiB random writes ran at 0.9× the serial rate in testing. Write-back and queue modes stay off.
+- Night Shift colour fix (blue tint on qualification boots) and native panel sleep DSI fix: built (v13.1y12s), tablet check pending.
 - USB host devices, external display, auto-rotate (in analysis), hardware video encode, VP9/AV1 in Safari.
 - The install guide for other units (in progress).
 - Hand checks pending on the installed system: microphone recording in an app, QuickTime recording by hand, FaceTime self-view,
@@ -87,6 +86,7 @@ of each file are listed in [media/SOURCES.md](media/SOURCES.md).
 
 | Scene | Media | Status |
 | --- | --- | --- |
+| Safari video playback, a 12 s clip (24 native frames, 0.5 s apart) | <img src="media/y12m-safari-video-clip.gif" width="320" alt="Safari video clip"> | ✅ native capture, v13.1y12m |
 | About This Mac (Snapdragon 8 Elite, 13 GB visible, macOS 27.3) | <img src="media/y12m-about.jpg" width="320" alt="About This Mac"> | ✅ native capture, v13.1y12m |
 | Displays settings (built-in display, brightness, True Tone, Night Shift) | <img src="media/y12m-display-settings.jpg" width="320" alt="Displays settings"> | ✅ native capture, v13.1y12m |
 | Battery settings (charging, Energy Mode High Power) | <img src="media/y12m-battery-settings.jpg" width="320" alt="Battery settings"> | ✅ native capture, v13.1y12m |

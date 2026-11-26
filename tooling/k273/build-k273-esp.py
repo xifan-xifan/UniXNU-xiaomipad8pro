@@ -272,7 +272,7 @@ def main():
 
         # -- the arguments past DarwinBoot's line: the ADT's /chosen/piano-boot-args-macos (k27 0066) -----------------------------
         split = None
-        if len(line) >= LINE_MAX or a.split or base_split:   # a reassembled (split) base is split again
+        if len(line.encode()) >= LINE_MAX or a.split or base_split:   # a reassembled (split) base is split again
             if b'piano-boot-args: /chosen/' not in kc.read_bytes():
                 raise SystemExit(f'{a.entry}: a {len(line)}-byte line needs the ADT tail, and this collection\'s kernel lacks k27 0066')
             kept, tail = boot_args.fit(line.split(), 'macos', force=True)
@@ -324,7 +324,7 @@ def main():
         k_entry['args'] = line
         entries = [k_entry]
         diag = diag_line(line, a.diag_reset_after)
-        diag_info = {'bytes': len(diag), 'included': len(diag) < LINE_MAX}
+        diag_info = {'bytes': len(diag.encode()), 'included': len(diag.encode()) < LINE_MAX}
         if diag_info['included']:
             entries.append({**k_entry, 'id': f'{a.entry}-diag', 'title': f'macOS 27.3, reset to fastboot after {a.diag_reset_after} s',
                             'args': diag})
@@ -335,6 +335,8 @@ def main():
         for e in entries:
             if len(e['args']) >= LINE_MAX or '"' in e['args'] or '\\' in e['args']:
                 raise SystemExit(f'{e["id"]}: kernel command line of {len(e["args"])} bytes, or a quote or backslash in it')
+        boot_args.check_userland({e['id']: e['args'] for e in entries if e['id'] != 'fastboot'},
+                                 adt.read_bytes(), kc, seed=a.seed, live=True)
         new_text = config_text(base['image'], config['boot']['timeout'], entries, store, seed)
         parsed = tomllib.loads(new_text)
         if parsed['boot']['default'] != a.entry or parsed['entry'][0] != (k_entry if (overrides or edits or a.drop_arg or split) else entry):

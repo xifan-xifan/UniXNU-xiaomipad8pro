@@ -24,25 +24,25 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
-#include <sys/sysctl.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
 #include <util.h>
 
-// piano-usb-shell=N in kern.bootargs with N not 0 (PianoDwc3 creates /dev/pianousb for any nonzero number).
+#include "../../../package/include/PianoBootArgs.h"
+
+// piano-usb-shell=N in the boot arguments with N not 0 (PianoDwc3 creates /dev/pianousb for any nonzero number). The whole merged
+// line (kern.piano_bootargs, k27 0076): piano-usb-shell itself is one of the arguments that live past kern.bootargs' 1023-byte clip.
 static int shellArgument(void)
 {
-  char args[2048];
-  size_t size = sizeof args - 1;
-  if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) != 0) return 0;
-  args[size] = 0;
-  static const char key[] = "piano-usb-shell=";
-  for (char *p = args; (p = strstr(p, key)) != NULL; p += sizeof key - 1) {
-    if (p != args && p[-1] != ' ') continue;
-    return strtoul(p + sizeof key - 1, NULL, 0) != 0;
-  }
-  return 0;
+  char args[PIANO_BOOT_ARGS_MAX];
+  pianoBootArgs(args);
+  size_t length;
+  const char *value = pianoBootArgValue(args, "piano-usb-shell", &length);
+  if (!value || !length) return 0;
+  char *end;
+  const unsigned long number = strtoul(value, &end, 0);
+  return end == value + length && number != 0;
 }
 
 static int copy(int from, int to)

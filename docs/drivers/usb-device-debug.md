@@ -168,6 +168,7 @@ IOPlatformExpertDevice ── PianoDwc3 (start, matching thread)   read-only pro
 | `piano-usb-hid=1` | 0 | (needs `piano-usb=2`) a keyboard and a pointer HID device for macOS and the third port that drives them (§12); without it the USB device is the two-port one, unchanged |
 | `piano-usb-hid-hold=MS` | 3000 | a key or button still down this long after the last input command is released |
 | `piano-usb-net=1` | 0 | (needs `piano-usb=2`) the CDC-NCM network function after the ports and its Ethernet interface on the tablet (§14); without it the USB device is exactly the ACM-only one |
+| `piano-usb-net-txflow=1` | 0 | (needs `piano-usb-net=1`) retain and retry frames through the family output queue when the TX frame ring fills. [Reset analysis and RAM qualification](usb-net-reset.md) |
 | `piano-usb-net-fifo=0` | 1 | with `piano-usb-net=1`: keep the TX FIFO sizes the core reset left instead of the plan of §14.2 (a first-run experiment) |
 | `piano-usb-idle=0` | 1 | the old USB loop (1 ms after every quiet pass) instead of the adaptive wait of §15 |
 | `piano-usb-irq=1` | 0 | the core's interrupt (SPI 133) ends the USB thread's waits (§15); falls back to polling by itself |

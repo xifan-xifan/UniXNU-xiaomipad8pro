@@ -53,7 +53,8 @@ fi
 python3 "$D/tooling/k27/build-native-kext.py" PianoDpu "$P/PianoDpu.cpp" "$P/DpuFlip.cpp" "$P/DpuSlices.cpp" "$P/DpuSnapshot.cpp" "$D/tooling/k27/NativeKextGlue.cpp" -I "$P" \
   -D "PIANO_DPU_IOSURFACE_CACHE_MODE=$IOSURFACE_CACHE_MODE" --obj "${K27_OBJ:-k27-native-obj}"
 KERNEL=${K27_KERNEL:-$K/out/k27/kernel-k27-0059-native.macho}
-# piano-dpu-ahb-vote takes PianoA830's GCC vote lock word (sm8750_gcc_vote_owner): PianoA830 links first, a library of PianoDpu.json.
+# The AHB lock and 144 Hz RPMh helpers come from PianoA830, a library of PianoDpu.json.
 [ ! -f "$KERNEL" ] || python3 "$D/tooling/k27/check-kext-imports.py" "$O/objects.json" "$KERNEL" --library-prefix _sm8750_gcc_vote_owner \
+  --library-prefix _Sm8750CmdDbCopy --library-prefix _Sm8750CmdDbBcm --library-prefix _Sm8750BcmCommand --library-prefix _Sm8750RpmhWriteActive \
   --library-prefix __ZNK9IOSurface12getCacheModeEv \
   | cut -c1-160 >&2

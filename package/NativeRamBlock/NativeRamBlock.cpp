@@ -689,7 +689,8 @@ int NativeRamBlock::directModeSysctl(struct sysctl_oid *oid, void *arg, int, str
   if (!disk.commitGate) error = ENOTSUP;
   else if (!disk.admission.beginFence(env)) error = ENXIO;
   else {
-    if (disk.writeState.failed() || disk.admission.quarantined) error = EIO;
+    const bool degraded = __atomic_load_n(&native_data_persist_state, __ATOMIC_RELAXED) == 5;
+    if (disk.writeState.failed() || !disk.admission.modeChangeAllowed(value != 0, degraded)) error = EIO;
     else if (disk.admission.parallel != (value != 0)) {
       disk.admission.parallel = value != 0;
       disk.admission.peak = 0;
@@ -712,16 +713,17 @@ int NativeRamBlock::directStatsSysctl(struct sysctl_oid *, void *arg, int, struc
   const unsigned peak = disk.admission.peak;
   const uint64_t waits = disk.admission.waits;
   const uint64_t pubs = __atomic_load_n(&disk.bitmapPublications, __ATOMIC_RELAXED);
+  const unsigned state = __atomic_load_n(&native_data_persist_state, __ATOMIC_RELAXED);
   env.unlock();
   // The store commands since boot (both modes; not reset with the mode): ops and microseconds per kind, the longest call.
   auto us = [](uint64_t ticks) { uint64_t ns = 0; absolutetime_to_nanoseconds(ticks, &ns); return (unsigned long long)(ns / 1000); };
-  char line[320];
+  char line[352];
   snprintf(line, sizeof(line), "mode=%s depth=%u inflight_max=%u waits=%llu bitmap_publications=%llu "
-           "store_rd=%llu/%lluus store_wr=%llu/%lluus store_sync=%llu/%lluus store_max=%lluus",
+           "store_rd=%llu/%lluus store_wr=%llu/%lluus store_sync=%llu/%lluus store_max=%lluus store_state=%u",
            parallel ? "concurrent" : direct ? "single-gate" : "volatile", depth, peak, waits, pubs,
            (unsigned long long)native_ufs_store_rd_ops, us(native_ufs_store_rd_ticks), (unsigned long long)native_ufs_store_wr_ops,
            us(native_ufs_store_wr_ticks), (unsigned long long)native_ufs_store_sync_ops, us(native_ufs_store_sync_ticks),
-           us(native_ufs_store_max_ticks));
+           us(native_ufs_store_max_ticks), state);
   return SYSCTL_OUT(req, line, strlen(line) + 1);
 }
 
@@ -741,8 +743,9 @@ void NativeRamBlock::registerDirectSysctls()
     oid.oid_version = SYSCTL_OID_VERSION;
     sysctl_register_oid(&oid);
   };
-  install(modeOid, "piano_data_concurrent", CTLTYPE_INT | CTLFLAG_RW, "I", "Direct Data mode (boot opt-in required)",
-          directModeSysctl);
+  if (commitGate)
+    install(modeOid, "piano_data_concurrent", CTLTYPE_INT | CTLFLAG_RW, "I", "Direct Data mode (boot opt-in required)",
+            directModeSysctl);
   install(statsOid, "piano_data_io", CTLTYPE_STRING | CTLFLAG_RD, "A", "Direct Data I/O mode and counters",
           directStatsSysctl);
   sysctlsRegistered = true;
@@ -1009,7 +1012,7 @@ void NativeRamBlock::stop(IOService *provider)
     IOLockUnlock(gate);
   }
   if (sysctlsRegistered) {
-    sysctl_unregister_oid(&modeOid);
+    if (commitGate) sysctl_unregister_oid(&modeOid);
     sysctl_unregister_oid(&statsOid);
     sysctlsRegistered = false;
   }

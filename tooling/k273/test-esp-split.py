@@ -129,6 +129,15 @@ def main():
               and rb.get('line_bytes') == len(b_line) and rb.get('tail_bytes') == len(b_tail),
               'the record notes the reassembly (base_split_rebuilt)')
 
+        # The diagnostic reset arguments move a switch that was visible in the daily entry past the clip.
+        offset = (b_line + ' ' + b_tail).index('piano-usb-shell=1')
+        diag_extra = len(' piano-reset-after=240 piano-reset-to=bootloader')
+        pad = 'qual-padding=' + 'q' * (1016 - offset - diag_extra - len(' qual-padding='))
+        rc, log = tk.build(out, 'esp-split', '--arg', pad, '--name', 'hidden-switch', expect=1)
+        check(rc != 0 and 'macos-27.3-diag: pianousb-shell cannot read piano-usb-shell' in log
+              and not (out / 'hidden-switch.img').exists(),
+              'the build refuses a USB shell switch hidden only in the diagnostic entry')
+
         # -- a line that splits by size: the reassembled merge is over the budget on its own ------------------------------------------------------------
         long_line = tk.line_273() + ' piano-pad0=1234567890123 piano-pad1=1234567890123'
         tk.make_dual(out, 'esp-dual66l', long_line, inputs)

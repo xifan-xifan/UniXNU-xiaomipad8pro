@@ -14,7 +14,7 @@
 //            their runtime names and checked against the type encodings they had on macOS 26.6 before any call; if anything differs
 //            the agent rotates nothing and says why. Every rotation is read back with the public CGDisplayRotation;
 //   tells    PianoTouch the rotation shown (its "piano-touch-rotation" property, TouchRotation.h), never one only asked for.
-// Nothing runs unless the kernel boot argument piano-rotate is 1 or more (sysctl kern.bootargs):
+// Nothing runs unless the kernel boot argument piano-rotate is 1 or more (sysctl kern.piano_bootargs):
 //   piano-rotate=1   observe: inputs and decisions logged, nothing changed
 //   piano-rotate=2   + WindowServer's rotation
 //   piano-rotate=3   + PianoTouch told
@@ -43,9 +43,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/sysctl.h>
 #include <time.h>
 #include "AutoRotate.h"
+#include "PianoBootArgs.h"
 #include "TouchRotation.h"
 
 #define APP "com.unixnu.piano-rotated"
@@ -79,37 +79,24 @@ static uint64_t nowMs(void)
 }
 
 // ------------------------------------------------------------------------------------------------------------- boot arguments
-static char gBootArgs[2048];
+static char gBootArgs[PIANO_BOOT_ARGS_MAX];
 
+// The whole merged boot-args (kern.piano_bootargs, k27 0076): the rotation keys can sit past kern.bootargs' 1023-byte clip.
 static void readBootArgs(void)
 {
-    size_t n = sizeof gBootArgs - 1;
-    if (sysctlbyname("kern.bootargs", gBootArgs, &n, NULL, 0) != 0) n = 0;
-    gBootArgs[n < sizeof gBootArgs ? n : sizeof gBootArgs - 1] = 0;
+    pianoBootArgs(gBootArgs);
 }
 
 // NAME=VALUE (or a bare NAME, "1") from the boot arguments, or NULL.
 static const char *bootArg(const char *name, char *out, size_t cap)
 {
-    const size_t len = strlen(name);
-    for (const char *p = gBootArgs; *p;) {
-        while (*p == ' ') ++p;
-        const char *word = p;
-        while (*p && *p != ' ') ++p;
-        const size_t n = (size_t)(p - word);
-        if (n == len && !strncmp(word, name, len)) {
-            snprintf(out, cap, "1");
-            return out;
-        }
-        if (n > len && !strncmp(word, name, len) && word[len] == '=') {
-            size_t v = n - len - 1;
-            if (v >= cap) v = cap - 1;
-            memcpy(out, word + len + 1, v);
-            out[v] = 0;
-            return out;
-        }
-    }
-    return NULL;
+    size_t length;
+    const char *value = pianoBootArgValue(gBootArgs, name, &length);
+    if (!value || !cap) return NULL;
+    if (length >= cap) length = cap - 1;
+    memcpy(out, value, length);
+    out[length] = 0;
+    return out;
 }
 
 static long bootNumber(const char *name, long fallback, long lo, long hi)

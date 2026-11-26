@@ -55,6 +55,8 @@ struct Options {
   bool boe = true;
   bool hwGatedAhb = false;
   bool panelUnavailable = false;
+  bool allowUnqualified = false;  // host model exercise of all hardware timings
+  unsigned fixedHz = kBootModeHz;
 };
 
 struct Result {
@@ -63,8 +65,29 @@ struct Result {
   const char *restoreWhy = nullptr;
   bool reverted = false;
   bool timingTouched = false;
+  int ctl = -1;
+  uint32_t pendingFlush = 0;
+  uint32_t underruns = 0, restoreTransitionUnderruns = 0;
+  CounterInit counters;
   Rate rate;
 };
+
+template <class Log>
+void logFailure(const Result &r, unsigned hz, Log log)
+{
+  if (r.pendingFlush) {
+    log("mode: %u -> %u Hz: %s (CTL%d, CTL_FLUSH 0x%08x); refused", r.from, hz, r.why, r.ctl, r.pendingFlush);
+  } else if (r.counters.sampled && !r.counters.moving) {
+    const auto &c = r.counters;
+    log("mode: %u -> %u Hz: %s (count-en %x/%x, frame deltas %d/%d, lines %u/%u -> %u/%u, line moved %u/%u); refused",
+        r.from, hz, r.why, c.countEn[0], c.countEn[1], c.frameDelta[0], c.frameDelta[1], c.firstLine[0], c.firstLine[1],
+        c.lastLine[0], c.lastLine[1], unsigned(c.lineMoved[0]), unsigned(c.lineMoved[1]));
+  } else {
+    log("mode: %u -> %u Hz: %s; %s%s", r.from, hz, r.why,
+        !r.reverted ? "refused" : r.restoreWhy ? "restore failed: " : "old mode restored; switching disabled",
+        r.restoreWhy ? r.restoreWhy : "");
+  }
+}
 
 // Use one bonded FIFO transfer of four short packets. The final header owns the last-packet flag.
 // Check both line counters again with local interrupts off, including when firmware has enabled the DMA block.
@@ -231,7 +254,7 @@ const char *verifyTiming(Io &io, const LivePath &before, const LinkWords words[2
 }
 
 template <class Io>
-const char *verifyRate(Io &io, unsigned hz, unsigned vtotal, Rate &rate)
+const char *verifyRate(Io &io, unsigned hz, unsigned vtotal, Rate &rate, uint32_t *underruns = nullptr)
 {
   rate = measureRate(io, 38);
   const uint64_t expected = hz * 1000ull, tolerance = expected / 50;
@@ -243,7 +266,9 @@ const char *verifyRate(Io &io, unsigned hz, unsigned vtotal, Rate &rate)
   const unsigned phase = a >= b ? a - b : b - a;
   if (a >= vtotal || b >= vtotal || (phase > 12 && phase < vtotal - 12))
     return "INTF line counters are out of phase";
-  if (io.modeUnderruns()) return "an INTF underran";
+  const uint32_t pending = io.modeUnderruns();
+  if (underruns) *underruns = pending;
+  if (pending) return "an INTF underran";
   return nullptr;
 }
 
@@ -251,6 +276,10 @@ template <class Io>
 Result switchTiming(Io &io, unsigned hz, const Options &o)
 {
   Result r;
+  if (!o.allowUnqualified && hz != o.fixedHz) {
+    r.why = "the requested mode is not qualified";
+    return r;
+  }
   if (o.panelUnavailable) {
     r.why = "the panel is off or its scanout is unavailable";
     return r;
@@ -291,7 +320,10 @@ Result switchTiming(Io &io, unsigned hz, const Options &o)
     }
   }
   r.from = before[0].hz;
-  if (r.from == hz) return r;
+  if (!o.allowUnqualified && r.from != kInheritedModeHz && r.from != kBootModeHz) {
+    r.why = "the inherited mode is not qualified for the boot switch";
+    return r;
+  }
   const Mode &previous = *modeByHz(r.from);
   const bool groupChanges = !sameGroup(previous, *target);
   panel::LinkSaved saved[2];
@@ -299,8 +331,23 @@ Result switchTiming(Io &io, unsigned hz, const Options &o)
     r.why = "DSI command path is not idle in software-triggered video mode";
     return r;
   }
-  if (io.rd(ctlReg(unsigned(p.ctl), kCtlFlush)) || !countersOn(io, p)) {
-    r.why = "CTL flush is pending or the INTF counters are unavailable";
+  r.ctl = p.ctl;
+  r.pendingFlush = io.rd(ctlReg(unsigned(p.ctl), kCtlFlush));
+  if (r.pendingFlush) {
+    r.why = "CTL flush is pending";
+    return r;
+  }
+  r.counters = initCounters(io, p);
+  if (!r.counters.moving) {
+    r.why = "INTF counters not advancing in lockstep";
+    return r;
+  }
+  if (hz == kHighModeHz && !o.allowUnqualified && !io.voteModeBandwidth(*target)) {
+    r.why = "the 144 Hz MM0 bandwidth vote did not complete";
+    return r;
+  }
+  if (r.from == hz) {
+    r.why = verifyRate(io, hz, before[0].vtotal, r.rate, &r.underruns);
     return r;
   }
   if (!io.clearModeUnderruns()) {
@@ -312,7 +359,7 @@ Result switchTiming(Io &io, unsigned hz, const Options &o)
   if (!r.why) r.why = verifyTiming(io, p, after, o.hwGatedAhb);
   if (!r.why && groupChanges)
     r.why = sendRateGroup(io, rateGroup(*target, o.boe), after[0], commandTriggered);
-  if (!r.why) r.why = verifyRate(io, hz, after[0].vtotal, r.rate);
+  if (!r.why) r.why = verifyRate(io, hz, after[0].vtotal, r.rate, &r.underruns);
   if (!r.why) r.why = verifyTiming(io, p, after, o.hwGatedAhb);
   if (!r.why || !r.timingTouched) return r;
 
@@ -327,10 +374,6 @@ Result switchTiming(Io &io, unsigned hz, const Options &o)
   if (recovery.ctl != p.ctl || recovery.intfActive != p.intfActive || recovery.intfMaster != p.intfMaster ||
       !recovery.link[0].engine() || !recovery.link[1].engine()) {
     r.restoreWhy = "the bonded CTL path changed during the switch";
-    return r;
-  }
-  if (!io.clearModeUnderruns()) {
-    r.restoreWhy = "could not clear INTF underrun status for the restore";
     return r;
   }
   const auto &window = recovery.link[0].period == before[0].period ? before[0] : after[0];
@@ -349,8 +392,18 @@ Result switchTiming(Io &io, unsigned hz, const Options &o)
         r.restoreWhy = "DSI command path was not restored";
     }
   }
+  if (r.restoreWhy) return r;
+
+  // The failed mode may still underrun up to the old timing latch and panel command.
+  // Start the recovery observation only after old timing and command state read back.
+  r.restoreTransitionUnderruns = io.modeUnderruns();
+  if (!io.clearModeUnderruns()) {
+    r.restoreWhy = "could not clear INTF underrun status on the restored timing";
+    return r;
+  }
   Rate restoredRate;
-  if (!r.restoreWhy) r.restoreWhy = verifyRate(io, r.from, before[0].vtotal, restoredRate);
+  r.restoreWhy = verifyRate(io, r.from, before[0].vtotal, restoredRate);
+  if (!r.restoreWhy) r.restoreWhy = verifyTiming(io, p, before, o.hwGatedAhb);
   return r;
 }
 

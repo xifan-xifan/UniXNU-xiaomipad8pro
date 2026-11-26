@@ -642,6 +642,11 @@ def main():
                           'source': base['record']['source']} if base else None
     data_store['layer'] = layer
     lines = args_of(a, profile, a.utc)
+    ba = common.ram_images().boot_args_module()
+    readers = {'live': True, 'layer': a.layer, 'seed': None if data_store['same_seed'] else inputs['seed']}
+    ba.check_userland({k: lines[k] for k in ('macos', 'macos-diag')}, inputs['adt'].read_bytes(), inputs['kc'], **readers)
+    if prev:
+        ba.check_userland({'macos-prev': lines['macos']}, prev['adt'].read_bytes(), prev['kc'], **readers)
     config = config_text(a, lines, prev, guard)
     name = a.name or f'esp-{a.profile}-{a.default}'
     a.out.mkdir(parents=True, exist_ok=True)

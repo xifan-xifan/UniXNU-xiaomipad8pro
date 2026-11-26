@@ -38,6 +38,8 @@
 #include <IOKit/IOMessage.h>
 #include <IOKit/pwr_mgt/RootDomain.h>
 #include <kern/clock.h>
+#include <kern/sched_prim.h>
+#include <kern/thread.h>
 #include <libkern/c++/OSArray.h>
 #include <libkern/c++/OSData.h>
 #include <libkern/c++/OSDictionary.h>
@@ -50,6 +52,7 @@
 #include "../PianoDpu/DpuModes.h"
 #include "../PianoDp/DpFake.h"                 // D6: the second, RAM-backed test display (piano-dp-fake)
 #include "GopCompose.h"                        // the composition and the swap pipeline (portable, tests/gop_host.cpp)
+#include "GopFence.h"
 #include "GopPanelPower.h"
 #include "../PianoBacklight/PianoBacklightClient.h"
 #include "../PianoTouch/PianoTouchClient.h"
@@ -324,8 +327,8 @@ private:
     // get_timing_attributes_gated at one fRefreshHz period (the family's answers 1/60 s whatever the mode), IOMFBDisplayRefresh published
     // from it before the service registers, and the VBL tick on absolute deadlines. Off: the family's slot and the relative tick, as before.
     bool fRefreshContract = false;
-    bool fDpuModes = false;
-    IOReturn setPianoDpuMode(unsigned hz);
+    unsigned fDpuModeHz = 0;
+    IOReturn setPianoDpuMode(unsigned hz, unsigned &verifiedHz);
     mutable uint32_t fTimingAttributeCalls = 0;
     // The panel's physical size (ADT panel-width-mm / panel-height-mm, boot-arg native-gop-display-mm=WIDTHxHEIGHT; default piano's
     // 239x163 mm, about 340 dpi at 3200x2136). macOS offers its HiDPI ("looks like" half the pixels) modes by the density these give.
@@ -488,8 +491,8 @@ private:
     Rect fGlyphLogged;
     // The GPU's fence rule (PianoA830, docs/drivers/gpu.md): WindowServer swaps a frame when its command buffer is scheduled, not when
     // the GPU finished it, and the family's IOSurface fences do not see the A830's work. So a swap records the newest fence the GPU
-    // had handed out when it was programmed, and its copy first waits until the GPU retired that fence (at most fGpuFenceWaitMs, then
-    // it copies anyway). PianoA830's registered service is found by class and asked with callPlatformFunction("native-adreno-fences"),
+    // had handed out when it was programmed, and its worker first waits until the GPU retired that fence.
+    // PianoA830's registered service is found by class and asked with callPlatformFunction("native-adreno-fences"),
     // so neither kext links against the other; without it, or with boot-arg native-gop-display-gpu-fence=0, nothing waits.
     // Since 2026-11-12 a frame the GPU has not finished is never copied (50 ms before, then copied anyway: the login's white bands):
     // native-gop-display-gpu-fence-ms (default 1000, 10..10000) is only the hang guard; a job whose wait hits it is left undrawn (the
@@ -500,6 +503,11 @@ private:
     const OSSymbol *fGpuFenceSymbol;
     uint64_t fGpuLookupNext;          // mach time of the next lookup while none was found
     uint64_t fGpuWaits, fGpuWaitNs, fGpuWaitMaxNs, fGpuTimeouts;
+    uint32_t fGpuFencePollMode = gopfence::Unavailable;  // atomic, sampled once per wait
+    struct sysctl_oid fGpuFencePollOid = {};
+    struct FencePollTiming {
+        uint64_t waits = 0, sleeps = 0, sleepNs = 0, lateSleeps = 0;
+    } fFencePollTiming[2];  // legacy and deadline statistics, under fCopyLock
     // The display power for other drivers (docs/policy.md 5.6): every power change call publishes "piano-display-power" (boolean),
     // and a change of it is messaged to the interested clients (kIOMessageServicePropertyChange, the property's name), always.
     // The backlight callout (boot-arg piano-backlight=2 only; without it nothing more runs): each call is then also handed to
@@ -509,7 +517,7 @@ private:
     bool fPowerPublished, fPowerPublishedOn;   // what "piano-display-power" was last messaged as
     gopcompose::PanelPower fPanelPower;        // under fCopyLock
     uint32_t fPanelSystem, fPanelAPI;          // under fCopyLock: raw states for the backlight
-    bool fPanelWantsTouch, fPanelNeedsWake;
+    bool fPanelWantsTouch, fPanelNeedsWake, fPanelBacklightOnly;
     IOService *fPanelTouch;                   // the copy thread's reference for the active touch hold
     // The VBL tick while the display is off (2026-11-12, docs/power.md "Idle wakeups by driver"): it stops once nothing is queued,
     // waiting, refreshed or retried (a submitted swap calls swap_begin_gated anyway, the display's power-on starts it again), instead of
@@ -542,7 +550,7 @@ private:
     uint32_t fAuditShown, fAuditWanted, fAuditBad, fAuditCount;
     void publishDisplayPower(bool on);
     void backlightCallout(bool on);
-    bool setPanelPower(bool on, uintptr_t system, uintptr_t api);
+    void setPanelPower(bool on, uintptr_t system, uintptr_t api);
     void swapBrightness(const uint8_t *rec);   // 2026-11-21: the swap's nits to PianoBacklight
     int32_t fSwapNitsLast = -1;
     uint32_t fSwapNitsSent = 0;
@@ -676,6 +684,19 @@ static void registerFlipLosslessSysctl()
     o.oid_version = SYSCTL_OID_VERSION;
     o.oid_refcnt = 0;
     sysctl_register_oid(&o);
+}
+
+static int gpuFenceDeadlineSysctl(struct sysctl_oid *oid, void *arg, int, struct sysctl_req *req)
+{
+    auto *mode = static_cast<uint32_t *>(arg);
+    int value = __atomic_load_n(mode, __ATOMIC_ACQUIRE) == gopfence::Deadline;
+    const int err = sysctl_handle_int(oid, &value, 0, req);
+    if (err || !req->newptr)
+        return err;
+    if (value != 0 && value != 1)
+        return EINVAL;
+    __atomic_store_n(mode, value == 1 ? gopfence::Deadline : gopfence::Legacy, __ATOMIC_RELEASE);
+    return 0;
 }
 
 static IOPMPowerState gPowerStates[2] = {   // AppleParavirtDisplay's gPowerState
@@ -816,7 +837,7 @@ bool NativeGopDisplay::start(IOService *provider)
         fRefreshHz = 60;
     uint32_t modes = 0;
     PE_parse_boot_argn("piano-dpu-modes", &modes, sizeof(modes));
-    fDpuModes = modes == 1 && !fExternal;
+    fDpuModeHz = fExternal ? 0 : pianodpu::modes::bootModeHz(modes);
     uint32_t builtin = 0;
     PE_parse_boot_argn("native-gop-display-builtin", &builtin, sizeof(builtin));
     fBuiltin = builtin == 1 && !fExternal;   // D6's second display stays external
@@ -1098,6 +1119,21 @@ bool NativeGopDisplay::start(IOService *provider)
     }
     if (fShotEnabled)
         registerShot();
+    if (gopfence::deadlineControlAvailable(fDpuModeHz, fRefreshHz, fFlipMode, fGpuFences && fGpuFenceSymbol)) {
+        auto &oid = fGpuFencePollOid;
+        oid.oid_parent = &sysctl__machdep_children;
+        oid.oid_number = OID_AUTO;
+        oid.oid_kind = CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_OID2;
+        oid.oid_arg1 = &fGpuFencePollMode;
+        oid.oid_name = "native_gop_fence_deadline";
+        oid.oid_handler = gpuFenceDeadlineSysctl;
+        oid.oid_fmt = "I";
+        oid.oid_descr = "NativeGopDisplay 120 Hz fence poll sleep (0 legacy, 1 system-critical)";
+        oid.oid_version = SYSCTL_OID_VERSION;
+        __atomic_store_n(&fGpuFencePollMode, gopfence::Legacy, __ATOMIC_RELEASE);
+        sysctl_register_oid(&oid);
+        GOPLOG("120 Hz GPU fence poll: machdep.native_gop_fence_deadline=0 (root writes 0/1)\n");
+    }
     GOPLOG("started, display %ux%u at %u Hz, %ux%u mm, %s copies, thumbnail %s%u s (at most %u, 0: no limit)\n",
           display_width(), display_height(), fRefreshHz, fWidthMM, fHeightMM, fRefreshPolicy ? "with refresh" : "no refresh",
           fThumbPeriod ? "every " : "off: ", fThumbPeriod, fThumbLimit);
@@ -1107,6 +1143,10 @@ bool NativeGopDisplay::start(IOService *provider)
 void NativeGopDisplay::stop(IOService *provider)
 {
     GOPLOG("stop\n");
+    if (__atomic_load_n(&fGpuFencePollMode, __ATOMIC_ACQUIRE) != gopfence::Unavailable) {
+        sysctl_unregister_oid(&fGpuFencePollOid);
+        __atomic_store_n(&fGpuFencePollMode, gopfence::Unavailable, __ATOMIC_RELEASE);
+    }
     if (fShotRegistered) {
         sysctl_unregister_oid(&fShotOid);   // drains active handlers before the boot mapping is released
         fShotRegistered = false;
@@ -1158,9 +1198,9 @@ bool NativeGopDisplay::start_hardware()
 {
     if (!createDisplayAttributes())
         return false;
-    if (fDpuModes)
-        GOPLOG("M3: display attributes published (%u timings, %lux%lu@%u active, 8-bit SDR sRGB)\n",
-               pianodpu::modes::kModeCount, fVideo.v_width, fVideo.v_height, fRefreshHz);
+    if (fDpuModeHz)
+        GOPLOG("M3: display attributes published (one %lux%lu@%u timing, 8-bit SDR sRGB)\n",
+               fVideo.v_width, fVideo.v_height, fRefreshHz);
     else
         GOPLOG("display attributes published (one %lux%lu@%u timing, 8-bit SDR sRGB)\n", fVideo.v_width, fVideo.v_height, fRefreshHz);
     fVBL = IOTimerEventSource::timerEventSource(this, vblFired);
@@ -1429,6 +1469,21 @@ IOReturn NativeGopDisplay::swap_begin_gated()
         if (fGpuWaits)
             GOPLOG("%llu copies waited for the GPU's fence, mean %llu us max %llu us, %llu gave up after %u ms\n", fGpuWaits,
                   fGpuWaitNs / fGpuWaits / 1000, fGpuWaitMaxNs / 1000, fGpuTimeouts, fGpuFenceWaitMs);
+        if (__atomic_load_n(&fGpuFencePollMode, __ATOMIC_ACQUIRE) != gopfence::Unavailable) {
+            FencePollTiming samples[2];
+            IOLockLock(fCopyLock);
+            for (unsigned arm = 0; arm < 2; ++arm) {
+                samples[arm] = fFencePollTiming[arm];
+                fFencePollTiming[arm] = {};
+            }
+            IOLockUnlock(fCopyLock);
+            for (unsigned arm = 0; arm < 2; ++arm) {
+                const auto &s = samples[arm];
+                if (s.waits)
+                    GOPLOG("GPU fence poll %s: %llu waits, %llu sleeps, %llu us total sleep, %llu sleeps over 2 ms\n",
+                           arm ? "deadline" : "legacy", s.waits, s.sleeps, s.sleepNs / 1000, s.lateSleeps);
+            }
+        }
         if (fCopyMode) {   // what the copy mode saved: refresh copies not made (at this period's mean copy time), the reads' cost
             const uint64_t mean = fCopies ? fCopyNs / fCopies : 0;
             GOPLOG("copy mode %#x: %llu refresh copies skipped (about %llu ms of copying saved, mean copy %llu us); "
@@ -1675,17 +1730,19 @@ void NativeGopDisplay::backlightCallout(bool on)
 
 // The copy worker drains the in-flight job before it gets here. On wake the
 // work loop publishes display power and allows the backlight to light again.
-bool NativeGopDisplay::setPanelPower(bool on, uintptr_t system, uintptr_t api)
+void NativeGopDisplay::setPanelPower(bool on, uintptr_t system, uintptr_t api)
 {
     void *const enable = reinterpret_cast<void *>(uintptr_t(on));
     if (on) {
         if (fPanelNeedsWake) {
-            IOService *dpu = dpuService(true);
-            if (!dpu || dpu->callPlatformFunction("PianoDpuPanel", false, enable, nullptr, nullptr, nullptr) != kIOReturnSuccess) {
-                GOPLOG("panel wake failed, swaps held and backlight kept dark\n");
-                return false;
-            }
             fPanelNeedsWake = false;
+            IOService *dpu = dpuService(true);
+            const IOReturn result = dpu ? dpu->callPlatformFunction("PianoDpuPanel", false, enable, nullptr, nullptr, nullptr)
+                                        : kIOReturnNotReady;
+            if (result != kIOReturnSuccess) {
+                fPanelBacklightOnly = true;
+                GOPLOG("panel wake failed (%#x), using backlight-only power for this boot\n", result);
+            }
         } else if (fDpuNightShift) {
             // Backlight-only wake still needs the PCC replay.
             nightShiftCall("PianoDpuNightShiftModeSet");
@@ -1693,16 +1750,18 @@ bool NativeGopDisplay::setPanelPower(bool on, uintptr_t system, uintptr_t api)
         if (fPanelTouch)
             fPanelTouch->callPlatformFunction(pianotouch::kFunctionPanel, false, enable, nullptr, nullptr, nullptr);
         OSSafeReleaseNULL(fPanelTouch);
-        return true;
+        return;
     }
 
+    if (fPanelBacklightOnly)
+        return;   // the display gate has already queued the backlight blank
     IOService *dpu = dpuService(true);
     IOService *backlight = pianobacklight::service();
     if (!dpu || !backlight || !fBacklightCallout || backlight->callPlatformFunction(
             pianobacklight::kFunctionDisplay, false, nullptr, reinterpret_cast<void *>(system), reinterpret_cast<void *>(api),
             this) != kIOReturnSuccess) {
         GOPLOG("panel sleep refused: DPU service or confirmed backlight blank unavailable\n");
-        return false;
+        return;
     }
     if (fPanelWantsTouch) {
         if (!fPanelTouch) {
@@ -1713,15 +1772,16 @@ bool NativeGopDisplay::setPanelPower(bool on, uintptr_t system, uintptr_t api)
         if (!fPanelTouch || fPanelTouch->callPlatformFunction(pianotouch::kFunctionPanel, false, nullptr, nullptr, nullptr,
                                                             nullptr) != kIOReturnSuccess) {
             GOPLOG("panel sleep refused: touch SPI did not park\n");
-            return false;
+            return;
         }
     }
     const IOReturn result = dpu->callPlatformFunction("PianoDpuPanel", false, nullptr, nullptr, nullptr, nullptr);
+    if (result == kIOReturnTimeout)
+        fPanelBacklightOnly = true;
     // A refusal after DCS started still needs the wake call to check whether the panel recovered.
     fPanelNeedsWake |= result == kIOReturnSuccess || result == kIOReturnIOError;
     if (result != kIOReturnSuccess && result != kIOReturnNotReady)
         GOPLOG("panel sleep refused by PianoDpu (%#x)\n", result);
-    return result == kIOReturnSuccess;
 }
 
 // AppleParavirtDisplay::program_hardware_gated (its slot 473): show the swap, then complete it. Every layer the swap hands over goes into
@@ -2221,30 +2281,54 @@ bool NativeGopDisplay::waitGpuFence(uint32_t fence, bool *answered)
     if (!gpu)
         return false;
     const uint64_t start = mach_absolute_time();
-    uint64_t waited = 0;
-    bool retiredInTime = false;
-    for (;;) {
-        uint32_t submitted = 0, retired = 0;
-        if (gpu->callPlatformFunction(fGpuFenceSymbol, false, &submitted, &retired, nullptr, nullptr) != kIOReturnSuccess)
-            break;
-        *answered = true;
-        if (static_cast<int32_t>(retired - fence) >= 0) {
-            retiredInTime = true;
-            break;
+    const uint32_t mode = __atomic_load_n(&fGpuFencePollMode, __ATOMIC_ACQUIRE);
+    const bool deadline = mode == gopfence::Deadline;
+    FencePollTiming sample;
+    const auto elapsed = [start] {
+        uint64_t ns = 0;
+        absolutetime_to_nanoseconds(mach_absolute_time() - start, &ns);
+        return ns;
+    };
+    const auto readFence = [&](uint32_t *retired) {
+        uint32_t submitted = 0;
+        return gpu->callPlatformFunction(fGpuFenceSymbol, false, &submitted, retired, nullptr, nullptr) == kIOReturnSuccess;
+    };
+    const auto sleepPoll = [&](uint32_t delayNs) {
+        const uint64_t before = mode == gopfence::Unavailable ? 0 : elapsed();
+        if (deadline) {
+            // The interval uses a 1 ns scale. Only the display worker waits on this channel.
+            if (assert_wait_timeout_with_leeway(reinterpret_cast<event_t>(&fGpuFencePollMode), THREAD_UNINT,
+                    TIMEOUT_URGENCY_SYS_CRITICAL | TIMEOUT_URGENCY_LEEWAY, delayNs, 0, 1) == THREAD_WAITING)
+                thread_block(THREAD_CONTINUE_NULL);
+        } else {
+            IOSleep(1);
         }
-        absolutetime_to_nanoseconds(mach_absolute_time() - start, &waited);
-        if (waited >= fGpuFenceWaitMs * 1000000ull) {
-            fGpuTimeouts++;
-            break;
+        if (mode != gopfence::Unavailable) {
+            const uint64_t slept = elapsed() - before;
+            sample.sleeps++;
+            sample.sleepNs += slept;
+            sample.lateSleeps += slept > 2 * gopfence::kPollNs;
         }
-        IOSleep(1);
+    };
+    const auto result = gopfence::wait(fence, fGpuFenceWaitMs * 1000000ull, deadline, readFence, elapsed, sleepPoll);
+    const uint64_t waited = elapsed();
+    if (mode != gopfence::Unavailable) {
+        IOLockLock(fCopyLock);
+        auto &sum = fFencePollTiming[deadline ? 1 : 0];
+        sum.waits++;
+        sum.sleeps += sample.sleeps;
+        sum.sleepNs += sample.sleepNs;
+        sum.lateSleeps += sample.lateSleeps;
+        IOLockUnlock(fCopyLock);
     }
-    absolutetime_to_nanoseconds(mach_absolute_time() - start, &waited);
+    *answered = result.answered;
+    if (result.timedOut)
+        fGpuTimeouts++;
     fGpuWaits++;
     fGpuWaitNs += waited;
     if (waited > fGpuWaitMaxNs)
         fGpuWaitMaxNs = waited;
-    return retiredInTime;
+    return result.retired;
 }
 
 // The copy thread, without waiting: whether the GPU retired fence (true when it does not answer).
@@ -2273,9 +2357,9 @@ void NativeGopDisplay::copyLoop()
         if (fPanelPower.begin(on)) {
             const uint32_t system = fPanelSystem, api = fPanelAPI;
             IOLockUnlock(fCopyLock);
-            const bool ok = setPanelPower(on, system, api);
+            setPanelPower(on, system, api);
             IOLockLock(fCopyLock);
-            fPanelPower.finish(on, ok);
+            fPanelPower.finish(on);
             if (fPanelPower.wakeComplete) {
                 IOLockUnlock(fCopyLock);
                 fJobDone->interruptOccurred(nullptr, nullptr, 0);
@@ -3081,32 +3165,43 @@ static bool appendTiming(OSArray *timings, OSArray *colors, uint32_t id, uint32_
     return ok;
 }
 
-IOReturn NativeGopDisplay::setPianoDpuMode(unsigned hz)
+IOReturn NativeGopDisplay::setPianoDpuMode(unsigned hz, unsigned &verifiedHz)
 {
     IOService *dpu = dpuService(true);
-    return dpu ? dpu->callPlatformFunction("PianoDpuMode", false, reinterpret_cast<void *>(uintptr_t(hz)), nullptr, nullptr, nullptr)
+    return dpu ? dpu->callPlatformFunction("PianoDpuMode", false, reinterpret_cast<void *>(uintptr_t(hz)), &verifiedHz, nullptr, nullptr)
                : kIOReturnNotReady;
 }
 
 // All timings share one 8-bit SDR sRGB color element.
 bool NativeGopDisplay::createDisplayAttributes()
 {
-    if (fDpuModes) {
+    if (fDpuModeHz) {
+        using namespace pianodpu::modes;
         IOReturn status = kIOReturnUnsupported;
+        unsigned verifiedHz = 0;
         if (fVideo.v_width == pianodpu::kPanelWidth && fVideo.v_height == pianodpu::kPanelHeight) {
-            // The survey and flip ladder run on separate threads. Establish 60 Hz before the family registers us.
+            // The survey and flip ladder run on separate threads. Verify scanout before the family registers us.
             for (unsigned attempt = 0; attempt < 80; ++attempt) {
-                status = setPianoDpuMode(60);
+                status = setPianoDpuMode(fDpuModeHz, verifiedHz);
                 if (status != kIOReturnNotReady)
                     break;
                 IOSleep(50);
             }
         }
-        fDpuModes = status == kIOReturnSuccess;
-        if (fDpuModes) {
-            fRefreshHz = 60;
+        if (status == kIOReturnOffline) {
+            GOPLOG("M3: scanout recovery could not be verified\n");
+            return false;
+        }
+        if (status == kIOReturnSuccess || status == kIOReturnAborted) {
+            if (!verifiedHz) return false;
+            fRefreshHz = verifiedHz;
             fRefreshContract = true;
         } else {
+            if (fDpuModeHz != kBootModeHz) {
+                GOPLOG("M3 initial %u Hz mode could not be verified (%#x)\n", fDpuModeHz, status);
+                return false;
+            }
+            fDpuModeHz = 0;
             GOPLOG("M3 initial 60 Hz mode refused (%#x), publishing the boot profile's single timing\n", status);
         }
     }
@@ -3121,9 +3216,10 @@ bool NativeGopDisplay::createDisplayAttributes()
                static_cast<unsigned long long>(words[goprefresh::kMinFixed]),
                static_cast<unsigned long long>(goprefresh::periodNs(fRefreshHz)), static_cast<unsigned long long>(words[goprefresh::kMinAbs]));
         if (!published) {   // never a half-told rate: the old contract whole (60 Hz timing, the family's slot, the relative tick)
+            if (fDpuModeHz)
+                return false;
             fRefreshContract = false;
             fRefreshHz = 60;
-            fDpuModes = false;
             GOPLOG("refresh contract refused: back to 60 Hz\n");
         }
     }
@@ -3133,8 +3229,7 @@ bool NativeGopDisplay::createDisplayAttributes()
     OSDictionary *chromaticity = OSDictionary::withCapacity(3), *whitePoint = point(20493, 21561);
     OSDictionary *transport = OSDictionary::withCapacity(2), *sourceLimits = OSDictionary::withCapacity(5);
     OSDictionary *scalingLimits = OSDictionary::withCapacity(2), *numLayers = OSDictionary::withCapacity(1);
-    const unsigned count = fDpuModes ? pianodpu::modes::kModeCount : 1;
-    OSArray *colors = OSArray::withCapacity(1), *timings = OSArray::withCapacity(count), *timingColors = OSArray::withCapacity(1);
+    OSArray *colors = OSArray::withCapacity(1), *timings = OSArray::withCapacity(1), *timingColors = OSArray::withCapacity(1);
     OSObject *color = ioavColorWithCapabilities(2, 8, 0, 0, 0, 16, false, nullptr, nullptr, nullptr, nullptr);
     do {
         if (!attributes || !product || !chromaticity || !whitePoint || !transport || !sourceLimits || !scalingLimits || !numLayers || !colors ||
@@ -3144,13 +3239,8 @@ bool NativeGopDisplay::createDisplayAttributes()
         at<uint32_t>(color, kElementScore) = kColorID;
         if (!colors->setObject(color) || !timingColors->setObject(color))
             break;
-        // Keep 60 Hz at the daily timing ID. The panel table is in descending order.
-        for (unsigned i = 0; i < count; ++i) {
-            const auto *mode = fDpuModes ? &pianodpu::kModes[count - 1 - i] : nullptr;
-            if (!appendTiming(timings, timingColors, kTimingID + i, width, height, mode ? mode->hz : fRefreshHz, mode))
-                break;
-        }
-        if (timings->getCount() != count)
+        const auto *mode = fDpuModeHz ? pianodpu::modes::modeByHz(fRefreshHz) : nullptr;
+        if (!appendTiming(timings, timingColors, kTimingID, width, height, fRefreshHz, mode))
             break;
         // The serial number is the size: WindowServer keeps the chosen mode per display identity. LegacyManufacturerID is the EDID
         // vendor code of the three letters ("XMI": 24 << 10 | 13 << 5 | 9 = 0x61a9), what a panel's EDID gives IOMFB and what
@@ -3238,42 +3328,16 @@ IOReturn NativeGopDisplay::get_timing_attributes_gated(IOMFB::RefreshTimingAttri
 // The mode of a color and a timing element (the IDs published above); AppleParavirtDisplay's block takes the timing's active size.
 IOReturn NativeGopDisplay::set_digital_out_mode(unsigned int colorID, unsigned int timingID)
 {
-    const unsigned index = timingID - kTimingID;
-    if (colorID != kColorID || index >= (fDpuModes ? pianodpu::modes::kModeCount : 1))
+    if (colorID != kColorID)
         return kIOReturnBadArgument;
-    if (fDpuModes) {
-        const unsigned hz = pianodpu::kModes[pianodpu::modes::kModeCount - 1 - index].hz;
-        if (hz != fRefreshHz) {
-            const IOReturn status = setPianoDpuMode(hz);
-            if (status != kIOReturnSuccess)
-                return status;
-            const unsigned previous = fRefreshHz;
-            fRefreshHz = hz;   // slot 423 supplies the new refresh property
-            if (!iomfbSetDisplayRefreshProperties(this) || !setProperty("DPTimingModeId", timingID, 32)) {
-                const IOReturn restored = setPianoDpuMode(previous);
-                if (restored == kIOReturnSuccess) {
-                    fRefreshHz = previous;
-                    iomfbSetDisplayRefreshProperties(this);
-                } else {
-                    GOPLOG("M3: refresh property failed, restoring %u Hz returned %#x\n", previous, restored);
-                }
-                return kIOReturnIOError;
-            }
-            if (fVBL && fVBLDue) {
-                uint64_t period;
-                nanoseconds_to_absolutetime(goprefresh::periodNs(hz), &period);
-                fVBLDue = goprefresh::nextDeadline(0, mach_absolute_time(), period);
-                fVBL->wakeAtTime(fVBLDue);
-            }
-            GOPLOG("M3: timing %u, refresh property and VBL at %u Hz\n", timingID, hz);
-            return kIOReturnSuccess;   // PianoDpu already replayed Night Shift inside the mode transaction.
-        }
-    }
+    if (timingID != kTimingID)
+        return fDpuModeHz ? kIOReturnUnsupported : kIOReturnBadArgument;
     at<uint32_t>(this, kDisplayWidth) = static_cast<uint32_t>(fVideo.v_width);
     at<uint32_t>(this, kDisplayHeight) = static_cast<uint32_t>(fVideo.v_height);
     setProperty("DisplayWidth", fVideo.v_width, 32);
     setProperty("DisplayHeight", fVideo.v_height, 32);
-    setProperty("DPTimingModeId", timingID, 32);
+    if (!setProperty("DPTimingModeId", timingID, 32) && fDpuModeHz)
+        return kIOReturnNoResources;
     if (fDpuNightShift)
         nightShiftCall("PianoDpuNightShiftModeSet");
     return kIOReturnSuccess;

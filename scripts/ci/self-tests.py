@@ -5,7 +5,7 @@
     python3 scripts/ci/self-tests.py [--list] [--only SUBSTR] [--jobs N] [--junit FILE]
 
 What runs:
-  - Python test scripts (test-*.py, test_*.py, run-*-tests.py) under package/, tooling/, firmware/;
+  - Python test scripts (test-*.py, test_*.py, run-*-tests.py) under package/, tooling/, firmware/, scripts/;
   - shell test scripts (test-*.sh, run-tests.sh, run-*-host.sh, tests/run.sh) there;
   - C/C++ host tests (package/**/tests/*.c, *.cpp) whose header carries their build line
     (`c++ -std=c++20 ... NAME.cpp -o /tmp/NAME && /tmp/NAME`): compiled in their own directory, the binary in a temporary
@@ -14,7 +14,8 @@ Anything listed in scripts/ci/self-tests.skip (one path per line, `#` and a reas
 needs that a hosted runner does not have (Apple content, out/, the tablet, a Linux host). A test that is neither run nor skipped
 is reported, so a new test cannot fall out of CI unnoticed.
 
-The tests run with an empty HOME and without PIANO_* variables, so nothing local leaks in. Exit status 1 when any test fails.
+The tests run with an empty HOME and without PIANO_* variables, so nothing local leaks in. The summary ends with up to ten of
+the slowest tests. Exit status 1 when any test fails.
 """
 import argparse
 import concurrent.futures
@@ -30,6 +31,7 @@ from xml.sax.saxutils import escape
 
 ROOT = Path(__file__).resolve().parents[2]
 SKIP_FILE = ROOT / 'scripts/ci/self-tests.skip'
+A830_HOST_TESTS = 'package/PianoA830/adreno830/tests/run-host-tests.py'
 TIMEOUT = int(os.environ.get('SELFTEST_TIMEOUT', '600'))
 PY_RE = re.compile(r'(^|/)(test[-_][^/]*\.py|run-[^/]*tests?\.py)$')
 SH_RE = re.compile(r'(^|/)(test-[^/]*\.sh|run-tests\.sh|run-[^/]*-host\.sh|tests/run\.sh)$')
@@ -94,12 +96,14 @@ def env_for(home):
 
 
 def run_one(kind, path, line):
-    start = time.time()
+    start = time.monotonic()
     with tempfile.TemporaryDirectory(prefix='selftest-') as tmp:
         home = os.path.join(tmp, 'home'); os.mkdir(home)
         env = env_for(home)
         full = ROOT / path
-        if kind == 'py':
+        if path == A830_HOST_TESTS:
+            cmd, cwd = [sys.executable, str(ROOT / 'scripts/ci/adreno830-host.py'), tmp], ROOT
+        elif kind == 'py':
             cmd, cwd = [sys.executable, str(full)], ROOT
         elif kind == 'sh':
             cmd, cwd = ['bash', str(full)], ROOT
@@ -117,7 +121,7 @@ def run_one(kind, path, line):
             ok, output = r.returncode == 0, (r.stdout + r.stderr)
         except subprocess.TimeoutExpired as e:
             ok, output = False, f'timeout after {TIMEOUT} s\n{(e.stdout or b"")!s}'
-    return path, ok, time.time() - start, output
+    return path, ok, time.monotonic() - start, output
 
 
 def main():
@@ -161,6 +165,11 @@ def main():
                 cases.append(f'<testcase classname="selftest" name="{escape(p)}"><skipped message="{escape(skips[p])}"/></testcase>')
         Path(a.junit).write_text(f'<?xml version="1.0"?>\n<testsuite name="self-tests" tests="{len(cases)}" '
                                  f'failures="{len(failed)}">{"".join(cases)}</testsuite>\n')
+    if results:
+        slowest = sorted(results, key=lambda result: (-result[2], result[0]))[:10]
+        print(f'\nSlowest {len(slowest)} tests:')
+        for path, _, secs, _ in slowest:
+            print(f'{secs:6.1f}s {path}')
     return 1 if failed else 0
 
 

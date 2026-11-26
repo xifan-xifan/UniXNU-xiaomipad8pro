@@ -81,6 +81,12 @@ struct DirectAdmission {
     return false;
   }
   template<class Env> void endFence(Env &env) { fenced = false; env.wake(); }
+
+  // A read failure can degrade the store without latching a write failure or losing a DMA stage.
+  bool modeChangeAllowed(bool enable, bool degraded) const {
+    return !quarantined && (!enable || parallel || !degraded);
+  }
+
   template<class Env> void stop(Env &env) {
     online = false;
     env.wake();

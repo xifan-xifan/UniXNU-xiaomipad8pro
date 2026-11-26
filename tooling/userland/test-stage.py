@@ -1121,7 +1121,7 @@ def live_tests(tmp):
         code, out = rig.run()
         want = {'system/com.unixnu.pianousb-shell', 'system/com.unixnu.piano-policy-agent', 'system/com.unixnu.piano-pmset-defaults',
                 'system/com.unixnu.piano-still-wallpaper', 'system/com.unixnu.piano-wifi-join', 'system/com.unixnu.piano-camera-grab',
-                'system/com.unixnu.piano-wifi-supplicant', 'system/com.unixnu.piano-airportd-kick', 'system/com.unixnu.piano-usbnet-address',
+                'system/com.unixnu.piano-wifi-supplicant', 'system/com.unixnu.piano-airportd-kick', 'system/com.unixnu.piano-usbnet-address', 'system/com.unixnu.piano-data-concurrent',
                 f'gui/{rig.uid}/com.unixnu.piano-rotated', f'gui/{rig.uid}/com.unixnu.piano-login-front',
                 f'gui/{rig.uid}/com.unixnu.piano-passd-policy', f'gui/{rig.uid}/com.unixnu.piano-slim-session',
                 f'gui/{rig.uid}/com.unixnu.piano-camera-default', f'gui/{rig.uid}/com.unixnu.piano-coreimage-restore',

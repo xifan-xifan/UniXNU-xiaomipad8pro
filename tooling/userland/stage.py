@@ -80,6 +80,8 @@ from pathlib import Path
 D = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(D / 'tooling/persist'))
 import common  # noqa: E402  (tooling/persist/common.py: seed identity, trust cache hashes, the installed seed)
+sys.path.insert(0, str(D / 'tooling/adt'))
+from boot_args import merged_reader_destinations  # noqa: E402
 
 FORMAT = 3   # optional captured camera approval and signed apps exist before launchd
 INSTALLER = D / 'tooling/userland/install.sh'
@@ -1054,9 +1056,11 @@ def add_trust(trust_bytes, cdhashes):
 
 
 def files_record(built):
+    merged_readers = merged_reader_destinations({f['dest']: data for f, data in built})
     return [{'unit': f['unit'], 'dest': f['dest'], 'kind': f['kind'], 'label': f.get('label', '-'), 'on': f['on'],
              'owner': f['owner'], 'mode': f['mode'], 'build': f['build'], 'from': rel(f['path']), 'sha256': f['sha256'],
-             'cdhash': f['cdhash']} for f, _ in built]
+             'cdhash': f['cdhash'],
+             **({'merged_bootargs': True} if f['dest'] in merged_readers else {})} for f, _ in built]
 
 
 def store_notes(identity, input_identity, seed):

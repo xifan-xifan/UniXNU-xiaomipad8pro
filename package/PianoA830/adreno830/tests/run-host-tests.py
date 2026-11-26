@@ -8,6 +8,7 @@ kern/clock.h by tests/Adreno830HostClock.h). Each test must exit 0 and print its
 the pinned line. Tests not in the table (new modules) are discovered: tests/test_sm8750_<name>.c is built with the
 platform/sm8750 sources whose name contains <name> (or all of them), tests/test_<name>.cpp with the repository sources
 named like <name>; a test may instead list its sources in a comment line "host-test: <path> <path> ...".
+Paths starting with kits/ in that line are relative to --unixnu.
 With a UniXNU build tree (--tree, or found under --unixnu), every kernel object is also compiled with the tree's real
 XNU compile records and the archive symbols are checked (scripts/build-adreno830.py into build/host-tests/kernel).
 """
@@ -175,7 +176,8 @@ class Runner:
         c_sources = [s for s in sources if s.suffix == '.c']
         cpp_sources = [s for s in sources if s.suffix == '.cpp']
         objects = list(self.host_objects(kinds))
-        includes = self.includes + ['-I', self.kits / 'ArmSmmu4K', '-I', self.kits / 'AdrenoPM4', '-I', ROOT / 'platform/sm8750']
+        includes = self.includes + ['-I', self.kits / 'ArmSmmu4K', '-I', self.kits / 'AdrenoPM4',
+                                    '-I', self.kits / 'AdrenoFirmware', '-I', ROOT / 'platform/sm8750']
         if test.suffix == '.c' and not cpp_sources:
             command = ['xcrun', 'clang', '-std=c11', *FLAGS, '-I', ROOT / 'platform/sm8750', '-I', TESTS, test, *c_sources,
                        '-o', binary]
@@ -219,11 +221,11 @@ class Runner:
         print(f'{label}: {lines[-1]}')
 
 
-def discovered_sources(test):
+def discovered_sources(test, unixnu):
     text = test.read_text(errors='replace')
     directive = re.search(r'host-test:\s*([^\n*]+)', text)
     if directive:
-        return [ROOT / item for item in directive.group(1).split()]
+        return [(unixnu if item.startswith('kits/') else ROOT) / item for item in directive.group(1).split()]
     name = test.stem.removeprefix('test_')
     if name.startswith('sm8750_'):
         token = name.removeprefix('sm8750_').replace('_', '')
@@ -254,13 +256,21 @@ def main():
     parser.add_argument('--tree', type=Path, help='UniXNU build tree for the kernel-object check (default: found under --unixnu)')
     parser.add_argument('--macos', action='store_true', help='exercise the native macOS conditional paths')
     parser.add_argument('--out', type=Path, default=ROOT / 'build/host-tests')
+    parser.add_argument('--skip', action='append', default=[], metavar='NAME', help='skip an individual test (repeatable)')
     parser.add_argument('names', nargs='*', help='run only these tests (e.g. test_status)')
     args = parser.parse_args()
-    runner = Runner(args)
     tests = sorted(TESTS.glob('test_*.c*'))
+    unknown_skips = sorted(set(args.skip) - {test.stem for test in tests})
+    if unknown_skips:
+        parser.error('unknown tests to skip: ' + ', '.join(unknown_skips))
+    runner = Runner(args)
     for test in tests:
         name = test.stem
         if args.names and name not in args.names:
+            continue
+        if name in args.skip:
+            print(f'SKIP {name}: requested by --skip')
+            runner.skipped.append(name)
             continue
         if name in RETIRED:
             print(f'SKIP {name}: {RETIRED[name]}')
@@ -270,7 +280,7 @@ def main():
             sources, kinds, expected, note = KNOWN[name]
             sources = [ROOT / s for s in sources]
         else:
-            sources, kinds, expected, note = discovered_sources(test), ['smmu', 'pm4'] if test.suffix == '.cpp' else [], None, 'discovered'
+            sources, kinds, expected, note = discovered_sources(test, args.unixnu), ['smmu', 'pm4'] if test.suffix == '.cpp' else [], None, 'discovered'
         binary, error = runner.build(name, test, sources, kinds)
         if not binary:
             runner.failures.append(f'{name}: build failed\n{error[-3000:]}')

@@ -448,6 +448,9 @@ def macos_payload(work, kc, trust, seed, adt, utc, extra_ram=False):
                      'adt_sha256': sha(adt_file)}
         print(f'piano-boot-args: {len(tail)} argument(s), {boot_args["tail_bytes"]} bytes in /chosen/{boot_args["property"]}; lines '
               f'{len(one)}/{len(smp)} bytes, boot-args {len(merged)} bytes (8 CPUs)', file=sys.stderr)
+    resumes = store_record['data_persist'] == 2
+    seed_reader_source = seed if not resumes or not store_record['same_seed'] else None
+    ba.check_userland({'macos-1cpu': one, 'macos-8cpu': smp}, adt_file.read_bytes(), kc, seed=seed_reader_source, live=resumes)
     entry = ('[[entry]]\nid = "{id}"\ntitle = "{title}"\ntype = "xnu"\npath = "Payloads/kernel.macho"\n'
              'initrd = "Payloads/scratch-data.img"\nargs = "{args}"\n')
     (stage / 'EFI/UniXNU/unixnu.toml').write_text(

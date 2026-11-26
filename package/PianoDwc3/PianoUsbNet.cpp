@@ -6,8 +6,7 @@
 // Not built-in, and not the primary interface: PianoNullEthernet stays the built-in en0 whose MAC TimeSync takes at boot (with or
 // without a cable); configd names this one (en1, or the next free unit). MAC 02:50:49:41:4e:02, fixed (UsbDescriptors.h).
 //
-// The controller pattern is PianoNullEthernet's (see UPSTREAM): no output queue, outputPacket under a lock from
-// the stack's threads, inputPacket from one thread only, the same overrides plus the link from the USB side and an own work loop.
+// The controller pattern is PianoNullEthernet's (see UPSTREAM), with an optional family output queue for TX backpressure.
 // The data path: outputPacket copies the frame into a queue the USB thread empties into the NTB IN buffer; the USB thread puts the
 // datagrams of each NTB OUT into the other queue, this file's thread turns them into mbufs. Only counts are logged.
 #include <IOKit/IOLib.h>
@@ -19,7 +18,7 @@
 #include <IOKit/network/IOEthernetController.h>
 #include <IOKit/network/IOEthernetInterface.h>
 #include <IOKit/network/IONetworkMedium.h>
-#include <IOKit/network/IOOutputQueue.h>   // kIOReturnOutputDropped
+#include <IOKit/network/IOBasicOutputQueue.h>
 #pragma clang diagnostic pop
 #include <libkern/c++/OSString.h>
 #include <kern/thread.h>
@@ -33,14 +32,17 @@ using namespace pianousb;
 namespace {
 constexpr uint32_t kQueueBytes = 64 * 1024;   // each way: about 40 full frames
 constexpr uint32_t kMinWireFrame = 60;        // shorter frames go out zero-padded, as a NIC sends them
+constexpr UInt32 kOutputPackets = 1024;      // pending mbufs in IONetworkingFamily
 
 IOLock *gNetLock;
 ncm::FrameRing gToHost, gFromHost;
+ncm::TxGate gTxGate;            // under gNetLock
 const ncm::NetStats *gGadget;
 pianonet::Counters gCount;
+bool gTxFlow;                  // immutable after init
 bool gLinkUp, gLinkChanged;     // under gNetLock
 uint32_t gLinkBps;
-volatile bool gEnabled;         // the interface is up (enable() .. disable())
+bool gEnabled;                  // written under gNetLock, read atomically outside it
 uint8_t *gFrame;                // the receive thread's frame buffer
 
 uint64_t nowNs()
@@ -51,18 +53,41 @@ uint64_t nowNs()
 }
 }  // namespace
 
+// Use the k27 family's exported implementations directly. The build headers need not match the queue's virtual slots.
+bool oqStart(IOBasicOutputQueue *) __asm("__ZN18IOBasicOutputQueue5startEv");
+bool oqStop(IOBasicOutputQueue *) __asm("__ZN18IOBasicOutputQueue4stopEv");
+bool oqService(IOBasicOutputQueue *, IOOptionBits) __asm("__ZN18IOBasicOutputQueue7serviceEj");
+UInt32 oqFlush(IOBasicOutputQueue *) __asm("__ZN18IOBasicOutputQueue5flushEv");
+bool oqSetCapacity(IOBasicOutputQueue *, UInt32) __asm("__ZN18IOBasicOutputQueue11setCapacityEj");
+UInt32 oqDropCount(IOBasicOutputQueue *) __asm("__ZN18IOBasicOutputQueue12getDropCountEv");
+
 class PianoUsbNet : public IOEthernetController {
   OSDeclareDefaultStructors(PianoUsbNet)
 
   IOEthernetInterface *fInterface = nullptr;
   IOWorkLoop *fWorkLoop = nullptr;
   IONetworkMedium *fMedium = nullptr;
+  IOBasicOutputQueue *fQueue = nullptr;   // retained by IONetworkController
+
+  UInt32 sendFrame(mbuf_t packet, bool flow);
+  UInt32 outputQueuedPacket(mbuf_t packet, void *) { return sendFrame(packet, true); }
+  void startTxQueue();
+  void resetTxQueue();
+  static IOReturn serviceTxAction(OSObject *, void *, void *, void *, void *);
 
 protected:
   bool createWorkLoop() override
   {
     fWorkLoop = IOWorkLoop::workLoop();
     return fWorkLoop != nullptr;
+  }
+  IOOutputQueue *createOutputQueue() override
+  {
+    if (gTxFlow) {
+      // Only this handler may return the retry status. A direct outputPacket call consumes the mbuf as before.
+      fQueue = IOBasicOutputQueue::withTarget(this, static_cast<IOOutputAction>(&PianoUsbNet::outputQueuedPacket), 0);
+    }
+    return fQueue;
   }
 
 public:
@@ -75,20 +100,25 @@ public:
   }
   IOReturn enable(IONetworkInterface *) override
   {
-    gEnabled = true;
+    IOLockLock(gNetLock);
+    __atomic_store_n(&gEnabled, true, __ATOMIC_RELAXED);
+    IOLockUnlock(gNetLock);
+    startTxQueue();
     return kIOReturnSuccess;
   }
   IOReturn disable(IONetworkInterface *) override
   {
-    gEnabled = false;
     IOLockLock(gNetLock);
+    __atomic_store_n(&gEnabled, false, __ATOMIC_RELAXED);
     gToHost.clear();
+    gFromHost.clear();
     IOLockUnlock(gNetLock);
+    resetTxQueue();
     return kIOReturnSuccess;
   }
   // The thread that starts us waited for IOBSD already; the family's own wait would only cost the same check again.
   UInt32 getFeatures() const override { return kIONetworkFeatureNoBSDWait; }
-  UInt32 outputPacket(mbuf_t packet, void *param) override;
+  UInt32 outputPacket(mbuf_t packet, void *) override { return sendFrame(packet, false); }
   IOReturn setPromiscuousMode(bool) override { return kIOReturnSuccess; }   // a point-to-point link: the Mac sends what is ours
   IOReturn setMulticastMode(bool) override { return kIOReturnSuccess; }
   IOReturn setMulticastList(IOEthernetAddress *, UInt32) override { return kIOReturnSuccess; }
@@ -100,6 +130,8 @@ public:
     setLinkStatus(up ? kIONetworkLinkValid | kIONetworkLinkActive : kIONetworkLinkValid, up ? fMedium : nullptr, up ? bps : 0);
   }
   void deliver(const uint8_t *frame, uint32_t length);
+  void serviceTx() { fWorkLoop->runAction(&PianoUsbNet::serviceTxAction, this); }
+  UInt32 queueDrops() const { return fQueue ? oqDropCount(fQueue) : 0; }
   IOEthernetInterface *interface() const { return fInterface; }
 };
 
@@ -108,6 +140,10 @@ OSDefineMetaClassAndStructors(PianoUsbNet, IOEthernetController)
 bool PianoUsbNet::start(IOService *provider)
 {
   if (!IOEthernetController::start(provider)) return false;
+  if (gTxFlow && (!fQueue || getOutputQueue() != fQueue)) {
+    IOLog("PianoDwc3: net: cannot install the TX flow-control queue\n");
+    return false;
+  }
   OSDictionary *media = OSDictionary::withCapacity(1);
   fMedium = IONetworkMedium::medium(IOMediumType(kIOMediumEthernetAuto) | IOMediumType(kIOMediumOptionFullDuplex), 480 * 1000000ULL);
   if (!media || !fMedium || !IONetworkMedium::addMedium(media, fMedium) || !publishMediumDictionary(media)) {
@@ -125,36 +161,87 @@ bool PianoUsbNet::start(IOService *provider)
   fInterface->setProperty(kIOBuiltin, false);
   fInterface->setProperty(kIOPrimaryInterface, false);
   fInterface->registerService();
+  IOLog("PianoDwc3: net: piano-usb-net-txflow=%u\n", unsigned(gTxFlow));
   return true;
 }
 
-// From the stack's threads (no output queue). A frame is copied into the queue for the USB thread, or dropped when the queue is
-// full or the Mac does not run the link.
-UInt32 PianoUsbNet::outputPacket(mbuf_t packet, void *)
+// Queue lifecycle and restart run under the controller work loop, as do enable and disable. No family queue call holds gNetLock.
+void PianoUsbNet::startTxQueue()
 {
-  const size_t length = mbuf_pkthdr_len(packet);
-  bool queued = false;
+  if (!fQueue) return;
+  // Start at zero capacity after creation or a flush so start() cannot drain on this thread.
+  oqStart(fQueue);
+  oqSetCapacity(fQueue, kOutputPackets);
+}
+
+void PianoUsbNet::resetTxQueue()
+{
+  if (fQueue) {
+    oqSetCapacity(fQueue, 0);
+    oqStop(fQueue);
+    oqFlush(fQueue);
+  }
   IOLockLock(gNetLock);
-  if (length < ncm::kMinFrame || length > ncm::kMaxFrame) {
+  gTxGate.resetDone();
+  IOLockUnlock(gNetLock);
+}
+
+IOReturn PianoUsbNet::serviceTxAction(OSObject *owner, void *, void *, void *, void *)
+{
+  auto *net = static_cast<PianoUsbNet *>(owner);
+  IOLockLock(gNetLock);
+  const bool reset = gTxGate.needsReset(), restart = gTxGate.takeRestart(), enabled = gEnabled;
+  if (restart && !reset && enabled) ++gCount.txRestarts;
+  IOLockUnlock(gNetLock);
+  if (reset) {
+    // A down/up pair can arrive before the net thread sees it. Flush the old mbufs before reopening TX.
+    net->resetTxQueue();
+    if (enabled) net->startTxQueue();
+  } else if (restart && enabled) {
+    // Let the family drain TX on its callout thread so this thread can keep delivering RX.
+    // Service still invalidates a stall from an in-flight callback.
+    oqService(net->fQueue, IOBasicOutputQueue::kServiceAsync);
+  }
+  return kIOReturnSuccess;
+}
+
+UInt32 PianoUsbNet::sendFrame(mbuf_t packet, bool flow)
+{
+  using Result = ncm::TxGate::Result;
+  const size_t length = mbuf_pkthdr_len(packet);
+  IOLockLock(gNetLock);
+  const Result result = gTxGate.offer(gToHost, length, gLinkUp && gEnabled, flow,
+      [packet](uint8_t *d, uint32_t off, uint32_t n) { return mbuf_copydata(packet, off, n, d) == 0; });
+  switch (result) {
+  case Result::badLength:
     ++gCount.sendRefused;
-  } else if (gLinkUp && gEnabled &&
-             gToHost.putWith(uint32_t(length), [packet](uint8_t *d, uint32_t off, uint32_t n) { return mbuf_copydata(packet, off, n, d) == 0; })) {
-    queued = true;
+    break;
+  case Result::queued:
     ++gCount.sent;
     gCount.sentBytes += length;
-  } else {
+    break;
+  case Result::drop:
     ++gCount.sendDrops;
+    break;
+  case Result::stall:
+    ++gCount.txStalls;
+    break;
   }
   IOLockUnlock(gNetLock);
+  if (result == Result::stall) {
+    pianonet::usbKick();
+    return kIOReturnOutputStall;   // the family keeps the mbuf at the head of its queue
+  }
   freePacket(packet);
-  if (queued) pianonet::usbKick();
-  return queued ? kIOReturnOutputSuccess : kIOReturnOutputDropped;
+  if (result != Result::queued) return kIOReturnOutputDropped;
+  pianonet::usbKick();
+  return kIOReturnOutputSuccess;
 }
 
 // The receive thread only (inputPacket calls must be serialized).
 void PianoUsbNet::deliver(const uint8_t *frame, uint32_t length)
 {
-  if (!fInterface || !gEnabled) { ++gCount.notUp; return; }
+  if (!fInterface || !__atomic_load_n(&gEnabled, __ATOMIC_RELAXED)) { ++gCount.notUp; return; }
   mbuf_t m = allocatePacket(length);
   if (!m || mbuf_copyback(m, 0, length, frame, MBUF_DONTWAIT) != 0) {
     if (m) freePacket(m);
@@ -205,10 +292,13 @@ void counts(char *line, unsigned size)
 {
   const ncm::NetStats z = {}, &g = gGadget ? *gGadget : z;
   snprintf(line, size, "link %s, %s %s; to the Mac %llu frames %llu bytes (%u NTBs), from the Mac %llu frames %llu bytes (%u NTBs); "
-           "NTB errors %u%s%s, bad datagrams %u; drops: send %llu (+%llu bad length), receive %u (queue) %llu (no mbuf) %llu (not up)",
-           g.alt == 1 ? "up" : "down", bsdName() ? bsdName() : "(no name yet)", gEnabled ? "up" : "down", gCount.sent, gCount.sentBytes,
+           "NTB errors %u%s%s, bad datagrams %u; drops: send %llu (+%llu bad length), receive %u (queue) %llu (no mbuf) %llu (not up); "
+           "TX stalls %llu, restarts %llu, queue drops %u",
+           g.alt == 1 ? "up" : "down", bsdName() ? bsdName() : "(no name yet)",
+           __atomic_load_n(&gEnabled, __ATOMIC_RELAXED) ? "up" : "down", gCount.sent, gCount.sentBytes,
            g.txNtbs, gCount.received, gCount.receivedBytes, g.rxNtbs, g.ntbErrors, g.lastError ? ", last: " : "",
-           g.lastError ? g.lastError : "", g.badDatagrams, gCount.sendDrops, gCount.sendRefused, g.rxDrops, gCount.receiveDrops, gCount.notUp);
+           g.lastError ? g.lastError : "", g.badDatagrams, gCount.sendDrops, gCount.sendRefused, g.rxDrops, gCount.receiveDrops, gCount.notUp,
+           gCount.txStalls, gCount.txRestarts, gNet ? gNet->queueDrops() : 0);
 }
 
 // Publishes the controller once IOBSD is up (the family's interface needs BSD), then: link changes and received frames to macOS,
@@ -225,15 +315,17 @@ void netThread(void *arg, wait_result_t)
   uint64_t reported = 0, last[3] = {};
   for (;;) {
     IOLockLock(gNetLock);
-    if (!gFromHost.used() && !gLinkChanged && !first) {
+    if (!gFromHost.used() && !gLinkChanged && !(gNet && gTxGate.needsService()) && !first) {
       uint64_t deadline = 0;
       clock_interval_to_deadline(1000, kMillisecondScale, &deadline);
       IOLockSleepDeadline(gNetLock, &gFromHost, deadline, THREAD_UNINT);
     }
     const bool changed = gLinkChanged || first, up = gLinkUp;
+    const bool serviceTx = gTxGate.needsService();
     const uint32_t bps = gLinkBps;
     gLinkChanged = first = false;
     IOLockUnlock(gNetLock);
+    if (serviceTx && gNet) gNet->serviceTx();
     if (changed && gNet) {
       gNet->applyLink(up, bps);
       IOLog("PianoDwc3: net: link %s%s\n", up ? "up: the Mac runs the NCM data interface" : "down", up ? (bps > 100000000 ? " (480 Mb/s)" : " (12 Mb/s)") : "");
@@ -257,7 +349,7 @@ void netThread(void *arg, wait_result_t)
     if ((sum[0] != last[0] || sum[1] != last[1] || sum[2] != last[2]) && now - reported > 10000000000ull) {
       reported = now;
       for (unsigned i = 0; i < 3; ++i) last[i] = sum[i];
-      char line[400];
+      char line[512];
       counts(line, sizeof line);
       IOLog("PianoDwc3: net: %s\n", line);
     }
@@ -267,9 +359,10 @@ void netThread(void *arg, wait_result_t)
 
 namespace pianonet {
 
-bool init(const ncm::NetStats *gadget)
+bool init(const ncm::NetStats *gadget, bool txFlow)
 {
   gGadget = gadget;
+  gTxFlow = txFlow;
   gNetLock = IOLockAlloc();
   gToHost.buf = static_cast<uint8_t *>(IOMallocData(kQueueBytes));
   gFromHost.buf = static_cast<uint8_t *>(IOMallocData(kQueueBytes));
@@ -291,6 +384,7 @@ unsigned txNext(uint8_t *dst, unsigned room)
   IOLockLock(gNetLock);
   const uint32_t length = gToHost.peek(), wire = length < kMinWireFrame ? kMinWireFrame : length;
   const uint32_t n = length && wire <= room ? gToHost.get(dst, length) : 0;
+  if (n && gTxGate.afterDrain(gToHost)) IOLockWakeup(gNetLock, &gFromHost, false);
   IOLockUnlock(gNetLock);
   if (!n) return 0;
   for (uint32_t i = n; i < wire; ++i) dst[i] = 0;
@@ -307,9 +401,8 @@ unsigned rxSpace()
 
 bool rxFrame(const uint8_t *src, unsigned length)
 {
-  if (!gEnabled) return false;   // nobody to take it: dropped now, nothing stale later
   IOLockLock(gNetLock);
-  const bool ok = gFromHost.put(src, length);
+  const bool ok = gLinkUp && gEnabled && gFromHost.put(src, length);
   IOLockUnlock(gNetLock);
   return ok;
 }
@@ -327,7 +420,11 @@ void link(bool up, uint32_t bitsPerSecond)
   gLinkUp = up;
   gLinkBps = bitsPerSecond;
   gLinkChanged = true;
-  if (!up) gToHost.clear();   // nothing stale for the next session
+  if (!up) {
+    gToHost.clear();   // nothing stale for the next session
+    gFromHost.clear();
+    if (gTxFlow) gTxGate.requestReset();
+  }
   IOLockWakeup(gNetLock, &gFromHost, false);
   IOLockUnlock(gNetLock);
 }

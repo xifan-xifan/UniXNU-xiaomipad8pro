@@ -14,7 +14,9 @@ failure and report it to the owner.** Do not retry a write. Do not work around a
 All paths are relative to this repository's checkout. `tooling/repro/` is the kit this skill calls. Nothing from Apple's IPSW is
 ever committed or shipped: every user fetches it from Apple and rebuilds the derived files on their own Mac.
 
-## 0. Status: what a second unit can do today (2026-11-25)
+## 0. Status: what a second unit can do today (2026-11-26)
+
+The reference tablet runs **v13.1y12o** with kernel patch **0076**. See the [installed results](../../docs/results-2026-11-26.md#v131y12o-installed).
 
 | Section | State for a second unit |
 |---|---|
@@ -302,6 +304,9 @@ On the first boots from the disk (not a RAM image), record each with its console
   on `state 7`, `kept` or `started over` (`docs/data-store.md` §3);
 - the root from the expected partition (`NativeUfs ... root-part=...`, the windows published, the root mounted);
 - over the USB shell or ssh: `sw_vers` gives 27.3 26C5035r, `sysctl hw.model` gives Mac17,11;
+- with 0076, `sysctl -n kern.piano_bootargs` shows the full merged boot line. Check the expected profile arguments, including
+  any past the 1024-byte limit of legacy `kern.bootargs`. The updated helpers read the full line. If the profile enables the
+  USB debug shell, verify that it starts.
 - the login window, then the desktop: touch, keyboard cover, Wi-Fi join, sound, brightness;
 - battery percentage, and charging on a USB-PD charger (Android stays the fallback until this is seen);
 - `fastboot getvar battery-voltage` from ABL before and after;

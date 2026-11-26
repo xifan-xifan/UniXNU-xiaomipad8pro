@@ -2,7 +2,7 @@
 // PianoDpu B1d: Night Light (macOS's Night Shift and colour filters) in the DSPPs' PCC (docs/drivers/dpu.md §4.4), portable
 // (tests/dpu_pcc_host.cpp). No floating point: the kernel has none.
 //
-// The PCC is a 3x3 matrix in each DSPP (DpuHw.h: S3.15, 0x8000 = 1.0, output R from inputs R,G,B at +0x10/+0x14/+0x18, G at
+// The PCC is a 3x3 matrix in each DSPP (DpuHw.h: S3.15, 0x8000 = 1.0, input R to outputs R,G,B at +0x10/+0x14/+0x18, G at
 // +0x1c.., B at +0x28..; enable +0 bit 0), applied to the blended picture before the gamma block, latched with the frame by
 // CTL_DSPP_n_FLUSH bit 4 + CTL_FLUSH bit 29. Both halves of the panel (LM0 -> DSPP0, LM1 -> DSPP1) get the same matrix.
 //
@@ -19,8 +19,8 @@
 //     ramps that are scaled copies of each other are a PCC diagonal exactly (scale of the brightest channel = 1.0).
 // The matrix is linear light (a display pipeline applies it between de-gamma and re-gamma); the PCC works on the encoded values. A
 // diagonal is exact there: d in linear light is d^(1/2.2) encoded, which encodeDiagonal applies (piano-dpu-pcc-encode=0: as sent).
-// Any other matrix is applied as sent (an approximation, logged). Negative coefficients are clamped to 0 unless piano-dpu-pcc-
-// negative=1 (msm drops the sign when it converts a CTM, so how the PCC takes a negative S3.15 word is not established).
+// Any other matrix is applied as sent (an approximation, logged). B1d clamps negative coefficients to 0 unless
+// piano-dpu-pcc-negative=1. M4 uses 18-bit two's complement by default.
 #pragma once
 #include "DpuSlices.h"
 
@@ -214,14 +214,13 @@ struct Words {
   uint32_t w[3][3] = {};
   unsigned clampedNegative = 0, saturated = 0;
 };
-enum class Negative { clamp, twosComplement, signMagnitude };
-inline Words pccWords(const Matrix &m, Negative negative)
+inline Words pccWords(const Matrix &m, bool allowNegative)
 {
   Words r;
   for (unsigned o = 0; o < 3; ++o)
     for (unsigned i = 0; i < 3; ++i) {
       int32_t q = m.m[o][i];
-      if (q < 0 && negative == Negative::clamp) {
+      if (q < 0 && !allowNegative) {
         q = 0;
         ++r.clampedNegative;
       }
@@ -230,19 +229,13 @@ inline Words pccWords(const Matrix &m, Negative negative)
         v = 0x1ffff;
         ++r.saturated;
       }
-      const int32_t min = negative == Negative::signMagnitude ? -0x1ffff : -0x20000;
-      if (v < min) {
-        v = min;
+      if (v < -0x20000) {
+        v = -0x20000;
         ++r.saturated;
       }
-      r.w[o][i] = v < 0 && negative == Negative::signMagnitude ? 0x20000u | uint32_t(-v) : uint32_t(v) & 0x3ffffu;
+      r.w[o][i] = uint32_t(v) & kPccWordMask;
     }
   return r;
-}
-
-inline Words pccWords(const Matrix &m, bool allowNegative)
-{
-  return pccWords(m, allowNegative ? Negative::twosComplement : Negative::clamp);
 }
 
 struct Program {
@@ -257,6 +250,7 @@ struct Apply {
   unsigned dspps = 0, stores = 0, refused = 0;
   int32_t latchUs = -1;
   uint32_t enable[kDsppCount] = {};
+  uint32_t readback[kDsppCount][3][3] = {};   // [DSPP][output][input]
 };
 // Stage all DSPPs before the CTL flush at the next frame start, then read back each DSPP.
 template <class Io>
@@ -296,7 +290,10 @@ Apply applyPrograms(Io &io, const LivePath &p, const Program (&programs)[kDsppCo
     a.enable[d] = io.rd(pccReg(d, 0));
     same &= (a.enable[d] & 1u) == unsigned(programs[d].enabled);
     for (unsigned o = 0; o < 3; ++o)
-      for (unsigned i = 0; i < 3; ++i) same &= (io.rd(pccReg(d, kPccCoef[o][i])) & 0x3ffffu) == programs[d].words.w[o][i];
+      for (unsigned i = 0; i < 3; ++i) {
+        a.readback[d][o][i] = io.rd(pccReg(d, kPccCoef[o][i])) & kPccWordMask;
+        same &= a.readback[d][o][i] == programs[d].words.w[o][i];
+      }
   }
   if (a.refused) a.why = "the store guard refused a store";
   else if (a.latchUs < 0) a.why = "CTL_FLUSH bit 29 did not clear within 60 ms (are the engines running?)";

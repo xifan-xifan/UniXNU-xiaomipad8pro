@@ -111,6 +111,7 @@ race_guard(void *p)
 {
 	struct race *r = p;
 	while (!__atomic_load_n(&r->go, __ATOMIC_ACQUIRE)) {
+		sched_yield();   /* a pure spin starves the other thread on a small CI runner under TSan */
 	}
 	if (piano_restart_guard_enter(&r->word)) {
 		int v = 0;
@@ -126,9 +127,11 @@ race_reset(void *p)
 {
 	struct race *r = p;
 	while (!__atomic_load_n(&r->go, __ATOMIC_ACQUIRE)) {
+		sched_yield();   /* a pure spin starves the other thread on a small CI runner under TSan */
 	}
 	(void)piano_restart_mark(&r->word);
 	while (piano_restart_guard_busy(&r->word)) {
+		sched_yield();
 	}
 	r->reason = 2;
 	return NULL;

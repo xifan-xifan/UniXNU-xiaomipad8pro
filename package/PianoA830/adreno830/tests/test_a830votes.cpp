@@ -7,12 +7,12 @@
  * both define the same thing, against UniXNU kits/AdrenoFirmware/AdrenoHfiVotes.c. All of that in the design profile; the
  * annibale profile of A830Profile.h (kernel-sequences section 14 rows 2, 24, 25) is checked against annibale's own table:
  * three levels 160/222/342 MHz at vlvl 0x32/0x34/0x38 and DDR index 2/2/3, initial level 1, no ACD, x = 0, bus-only bw.
- * host-test: A830Votes.cpp platform/sm8750/Sm8750Rpmh.c platform/sm8750/Sm8750SocInfo.c ../UniXNU/kits/AdrenoFirmware/AdrenoHfiVotes.c */
+ * host-test: A830Votes.cpp platform/sm8750/Sm8750Rpmh.c platform/sm8750/Sm8750SocInfo.c kits/AdrenoFirmware/AdrenoHfiVotes.c */
 #include "A830Votes.h"
 #include "A830Profile.h"
 #include "Adreno830Status.h"
 #include "Sm8750GpuLevels.h"
-#include "../../UniXNU/kits/AdrenoFirmware/AdrenoHfiVotes.h"
+#include "AdrenoHfiVotes.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

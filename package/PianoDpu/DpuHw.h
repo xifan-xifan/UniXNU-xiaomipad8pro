@@ -86,7 +86,7 @@ constexpr uint32_t kSrcSize = 0x00, kSrcXy = 0x08, kOutSize = 0x0c, kOutXy = 0x1
 // only names the active pipes and LMs (msm dpu_hw_ctl.c, core_major_ver >= 12).
 constexpr uint32_t kCtlBase = 0x15000, kCtlStride = 0x1000;
 constexpr unsigned kCtlCount = 6;
-constexpr uint32_t kCtlTop = 0x014, kCtlFlush = 0x018, kCtlStart = 0x01c, kCtlPrepare = 0x0d0, kCtlMerge3dActive = 0x0e4,
+constexpr uint32_t kCtlTop = 0x014, kCtlFlush = 0x018, kCtlStart = 0x01c, kCtlSwReset = 0x030, kCtlPrepare = 0x0d0, kCtlMerge3dActive = 0x0e4,
                    kCtlDscActive = 0x0e8, kCtlWbActive = 0x0ec, kCtlCwbActive = 0x0f0, kCtlIntfActive = 0x0f4,
                    kCtlCdmActive = 0x0f8, kCtlFetchActive = 0x0fc, kCtlMerge3dFlush = 0x100, kCtlDscFlush = 0x104,
                    kCtlIntfFlush = 0x110, kCtlPeriphFlush = 0x128, kCtlPipeActive = 0x12c, kCtlLayerActive = 0x130,
@@ -108,15 +108,21 @@ constexpr uint32_t lmStage(unsigned s) { return 0x40 + 0x30 * s; }
 constexpr uint32_t kLmBlendOp = 0x0, kLmFgSrcSel = 0x4, kLmConstAlpha = 0x8;
 
 // ------------------------------------------------------------------------------------------------------------------- DSPP
-// DSPP0..3 at 0x54000 + 0x2000 n (len 0x1800). PCC (v6) at +0x1700: enable +0 bit 0; coefficients, S3.15 (0x8000 = 1.0) (msm
-// CONVERT_S3_15): output R from inputs (R,G,B) at +0x10/+0x14/+0x18, G +0x1c/+0x20/+0x24, B +0x28/+0x2c/+0x30 (msm dpu_hw_dspp.c's
-// PCC_<input>_<output>_OFF names with dpu_crtc.c's CTM mapping: cfg->g.r = matrix[1], the output-R/input-G term, goes to
-// PCC_GREEN_R_OFF 0x14). GC (v2) at +0x17c0: enable +0 bit 0, LUT swap +0x1c; its LUT is written through REGDMA's hardware-indexed
-// port (msm dpu_hw_gcv2.c), not read here.
+// DSPP0..3 at 0x54000 + 0x2000 n (len 0x1800). PCC v6 at +0x1700, enable bit 0.
+// Qualcomm SDE groups coefficients by input R, G, B, with outputs R, G, B at +0/+4/+8 in each group.
+// See docs/drivers/dpu-m4-pcc-colour.md for the Linux CTM comparison and the signed 18-bit word evidence.
+// GC v2 at +0x17c0: enable bit 0, LUT swap +0x1c, indexed LUT uploads through REGDMA.
 constexpr uint32_t kDsppBase = 0x54000, kDsppStride = 0x2000;
 constexpr unsigned kDsppCount = 4;
 constexpr uint32_t kPcc = 0x1700, kGc = 0x17c0;
-constexpr uint32_t kPccCoef[3][3] = {{0x10, 0x14, 0x18}, {0x1c, 0x20, 0x24}, {0x28, 0x2c, 0x30}};   // [out][in]
+constexpr uint32_t kPccCoef[3][3] = {{0x10, 0x1c, 0x28}, {0x14, 0x20, 0x2c}, {0x18, 0x24, 0x30}};   // [out][in]
+constexpr uint32_t kPccWordMask = 0x3ffffu;
+
+inline int32_t pccSignedQ15(uint32_t raw)
+{
+  const int32_t word = int32_t(raw & kPccWordMask);
+  return word & 0x20000 ? word - 0x40000 : word;
+}
 
 // ---------------------------------------------------------------------------------------------------------- MERGE_3D, DSC
 constexpr uint32_t kMerge3dBase[4] = {0x4e000, 0x4f000, 0x50000, 0x51000};   // MUX +0, MODE +4 (msm dpu_hw_merge3d.c)
@@ -175,7 +181,7 @@ constexpr unsigned kHsync = 32, kHbp = 32, kVsync = 2, kVbp = 104;
 constexpr unsigned modeHtotal(const Mode &m) { return kPanelWidth + m.hfp + kHsync + kHbp; }
 constexpr unsigned modeVtotal(const Mode &m) { return kPanelHeight + m.vfp + kVsync + kVbp; }
 
-// The DDR vote of the boot framebuffer at 120 Hz (DT chosen/framebuffer opp: avg 3 280 896 kB/s, peak 4 257 792 kB/s).
+// Ubuntu's simplefb 120 Hz OPP reference (chosen/framebuffer). PianoDpu does not issue this vote.
 constexpr uint64_t kSplashAvgKBps = 3280896, kSplashPeakKBps = 4257792;
 
 }  // namespace pianodpu

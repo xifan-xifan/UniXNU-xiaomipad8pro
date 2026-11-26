@@ -74,7 +74,7 @@ bool capturePanelPcc(Io &io, const LivePath &p, PanelPcc &base)
     if (!program.enabled && (io.rd(pccReg(d, 4)) || io.rd(pccReg(d, 8)) || io.rd(pccReg(d, 12)))) return false;
     for (unsigned o = 0; o < 3; ++o)
       for (unsigned i = 0; i < 3; ++i)
-        program.words.w[o][i] = io.rd(pccReg(d, kPccCoef[o][i])) & 0x3ffffu;
+        program.words.w[o][i] = io.rd(pccReg(d, kPccCoef[o][i])) & kPccWordMask;
   }
   return true;
 }
@@ -87,13 +87,10 @@ inline PanelPcc nightShiftPrograms(const PanelPcc &base, const NightShift &state
     Matrix baseMatrix = identity();
     if (base.dspp[d].enabled) {
       for (unsigned o = 0; o < 3; ++o)
-        for (unsigned i = 0; i < 3; ++i) {
-          const uint32_t w = base.dspp[d].words.w[o][i];
-          const int32_t q = int32_t(w & 0x1ffffu) * 2;
-          baseMatrix.m[o][i] = w & 0x20000u ? -q : q;
-        }
+        for (unsigned i = 0; i < 3; ++i)
+          baseMatrix.m[o][i] = pccSignedQ15(base.dspp[d].words.w[o][i]) * 2;
     }
-    result.dspp[d] = {pccWords(state.corrected(baseMatrix), Negative::signMagnitude), true};
+    result.dspp[d] = {pccWords(state.corrected(baseMatrix), true), true};
   }
   return result;
 }

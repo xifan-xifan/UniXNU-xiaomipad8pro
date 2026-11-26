@@ -1,6 +1,8 @@
 # CI and releases
 
-GitHub Actions on GitHub-hosted runners only (no self-hosted runner). Four workflows:
+GitHub Actions on GitHub-hosted runners only (no self-hosted runner). The draft release uses the built-in job token; the only optional
+secret is `PIANO_KDK_AUTH` for the KDK (open item 1 below).
+The official actions run on Node.js 24 (`checkout@v7`, `upload-artifact@v7`, `download-artifact@v8`).
 
 | Workflow | When | Runner | What |
 | --- | --- | --- | --- |
@@ -37,10 +39,30 @@ GitHub Actions on GitHub-hosted runners only (no self-hosted runner). Four workf
   test of `package/`, `tooling/`, `firmware/` and `scripts/` that needs no Apple content, no `out/` and no tablet, with an empty
   `HOME` and no `PIANO_*` variables. `scripts/ci/self-tests.skip` names each one it does not run and why (a checker that takes a
   built file, a test that needs build output or a local backup, a header build line that names generated inputs, or `KNOWN-FAIL`:
-  failing on `main` today, an open item). A JUnit report is the only upload.
+  failing on `main` today, an open item). The runner installs `mtools` and `llvm` with Homebrew. `SELFTEST_TIMEOUT=1500` gives each
+  test command up to 1,500 seconds. The log ends with the ten slowest tests (or all tests for smaller runs) and their elapsed times,
+  including compilation for C/C++ tests. A JUnit report is the only upload from `checks.yml`.
+
+The Adreno830 host suite fetches the public `ArmSmmu4K`, `AdrenoPM4` and `AdrenoFirmware` source kits with
+`scripts/fetch-pins.py --only`. It verifies each checkout's HEAD against `unixnu.lock` and adds PianoA830's
+`ArmSmmu4KPaged.c/.h` to the staged SMMU kit. The ArmSmmu4K pin matches the fixed-pool API used by the driver
+([kit provenance](../package/PianoA830/UPSTREAM)). The kits and test binaries share the suite's temporary directory.
+The 1,500-second budget covers fetching, compiling and running the suite with ASan and UBSan.
+
+The suite covers the tier allocator, paged SMMU, PM4 submission, HFI votes and recovery, among other host checks.
+It runs the SHA-256 test vectors and synthetic firmware tests. Validating stock gen80000 images locally requires
+the stock images and the matching pin file, supplied to the runner with `--firmware` and `--pins`. The suite skips
+`test_a830regs`, whose comparison needs the unpublished Mesa register export under `docs/inputs/regs`, and the
+kernel-object check, which needs a built UniXNU tree. The standalone register-header checks still run. Two timing tests run
+only locally: `test_a830fence` (a sliced wait of at least 40 ms) and `test_p1wire` (a parallel wiring speedup), which a loaded
+3-core hosted runner cannot guarantee.
 
 Locally: `python3 scripts/ci/privacy-scan.py [--diff BASE]`, `python3 scripts/ci/self-tests.py [--list] [--only SUBSTR]`,
-`python3 scripts/fetch-pins.py --verify`.
+`python3 scripts/fetch-pins.py --verify`. To repeat the Adreno830 fetch and suite on a Mac with Xcode:
+
+```sh
+SELFTEST_TIMEOUT=1500 python3 scripts/ci/self-tests.py --only package/PianoA830/adreno830/tests/run-host-tests.py
+```
 
 ## The k27 tree
 

@@ -31,9 +31,10 @@ struct PanelPower {
         return true;
     }
 
-    void finish(bool on, bool ok)
+    // Both a panel wake and a backlight-only wake release presentation.
+    void finish(bool on)
     {
-        ready = on && ok;
+        ready = on;
         wakeComplete = ready && wantedOn && !pending;
     }
 

@@ -36,6 +36,7 @@
 #include <vector>
 #include "../CopyRows.h"
 #include "GopCompose.h"
+#include "GopFence.h"
 #include "GopRefresh.h"
 #include "../PianoDpu/PianoDpuFlipClient.h"           // pianoPrepareSurface: how the copy's kept maps prepare a surface
 #include "../../PianoDpu/tests/prepare_model.h"       // XNU's read-only prepare rule, modelled
@@ -1935,6 +1936,54 @@ static void testRefreshContract()
     CHECK(prev == P * 1200 && due == P * 1201);
 }
 
+static void testFencePoll()
+{
+    using namespace gopfence;
+    CHECK(deadlineControlAvailable(120, 120, true, true));
+    CHECK(!deadlineControlAvailable(120, 60, true, true));   // mode switch rolled back
+    CHECK(!deadlineControlAvailable(60, 120, true, true));
+    CHECK(!deadlineControlAvailable(0, 120, true, true));    // standalone refresh advertisement
+    CHECK(!deadlineControlAvailable(120, 120, false, true));
+    CHECK(!deadlineControlAvailable(120, 120, true, false));
+
+    for (bool deadline : {false, true}) {
+        uint64_t now = 0;
+        std::vector<uint32_t> sleeps;
+        auto elapsed = [&] { return now; };
+        auto sleep = [&](uint32_t ns) {
+            sleeps.push_back(ns);
+            now += ns;
+        };
+        auto read = [&](uint32_t *retired) {
+            *retired = now >= 2 * kPollNs ? 0 : UINT32_MAX;
+            return true;
+        };
+        auto r = wait(0, 3 * kPollNs, deadline, read, elapsed, sleep);
+        CHECK(r.answered && r.retired && !r.timedOut);
+        CHECK(sleeps == (std::vector<uint32_t>{kPollNs, kPollNs})); // UINT32_MAX precedes 0
+        sleeps.clear();
+        r = wait(UINT32_MAX, 3 * kPollNs, deadline, read, elapsed, sleep);
+        CHECK(r.answered && r.retired && !r.timedOut && sleeps.empty()); // 0 follows UINT32_MAX
+
+        now = 0;
+        r = wait(1, kPollNs + kPollNs / 2, deadline, read, elapsed, sleep);
+        CHECK(r.answered && !r.retired && r.timedOut);
+        CHECK(sleeps == (std::vector<uint32_t>{kPollNs, deadline ? kPollNs / 2 : kPollNs}));
+
+        now = 0;
+        sleeps.clear();
+        auto lost = [](uint32_t *) { return false; };
+        r = wait(1, 3 * kPollNs, deadline, lost, elapsed, sleep);
+        CHECK(!r.answered && !r.retired && !r.timedOut && sleeps.empty());
+        auto stopsAnswering = [&](uint32_t *retired) {
+            *retired = 0;
+            return now == 0;
+        };
+        r = wait(1, 3 * kPollNs, deadline, stopsAnswering, elapsed, sleep);
+        CHECK(r.answered && !r.retired && !r.timedOut && sleeps.size() == 1);
+    }
+}
+
 // The Night Shift observer's helpers (GopColorLog.h): two's-complement S31.32 as QuartzCore sends set_matrix's words, 16.16 corrections.
 #include "../GopColorLog.h"
 static void testColorLog()
@@ -1964,6 +2013,7 @@ static void testColorLog()
 int main()
 {
     testRefreshContract();
+    testFencePoll();
     testColorLog();
   testGeometry();
   testParallelRows();

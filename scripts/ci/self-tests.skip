@@ -5,7 +5,6 @@
 firmware/selector/test/test-selector-bin.py            # ARGS: checks a built selector (OBJ BIN), called by firmware/selector/Makefile
 tooling/switch/test-pack-selector.py                   # ARGS: checks a packed selector image given as its argument
 tooling/native/tests/test_mic_diag.py                  # ARGS: takes a recorded fixture as its argument
-package/PianoA830/adreno830/tests/run-host-tests.py    # INPUT: the UniXNU kits checkout (package/PianoA830/UniXNU, fetched by the build)
 package/PianoCamera/tests/camera_host.cpp              # HEADER: -I<gen>, the sensor tables generated from data/camera by the build
 package/PianoVideo/tests/bringup_host.cpp              # HEADER: links QcomMdt.o from the kext build
 package/PianoUsbHost/tests/ucsi_host.cpp               # HEADER: needs PianoUsbHw.h's include path from build-native-piano-usbhost.sh

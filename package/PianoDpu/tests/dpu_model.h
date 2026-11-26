@@ -2,8 +2,9 @@
 // A timed register model of piano's panel path for the B1c/B1d/B1e host tests (dpu_refresh_host.cpp, dpu_pcc_host.cpp,
 // dpu_panel_host.cpp): the Io of DpuSlices.h over simulated time. What it models, from the facts in DpuHw.h / DpuSlices.h:
 //   - INTF1/INTF2 timing engines: frame length and line time at a fixed pixel clock, frame and line counters, INTF_STATUS;
-//     EN = 0 stops an engine at its frame end, EN = 1 starts it at once; VSYNC_PERIOD_F0 is a shadow taken at a CTL INTF flush;
-//   - the CTL: FLUSH bits set by writing ones, latched (and cleared) at INTF1's frame start, or at the engines' start when stopped;
+//     INTF1 gates INTF2 while bonded. A handed-off slave latches EN = 0 at its own frame end.
+//     VSYNC_PERIOD_F0 is a shadow taken at a CTL INTF flush;
+//   - the CTL: FLUSH bits latch at INTF1's frame start. A stopped CTL consumes a route change after SW_RESET and START.
 //   - the DSPPs' PCC words: shadows taken at a CTL DSPP flush (CTL_DSPP_n_FLUSH bit 4);
 //   - each DSI controller's video TOTAL with its timing shadow (DB mode, flush) at one of the two candidate places (DbHw), latched at
 //     its INTF's frame start; a frame whose DSI and INTF totals differ, or a TOTAL that changes inside a frame, is a glitch and sets
@@ -44,6 +45,7 @@ struct Dpu {
   DbHw dbHw = DbHw::sunuefi;
   bool blockDma = true;                 // TRIG_CTRL bit 12 as the boot stages left it
   bool dmaHang[2] = {false, false};     // a link's command DMA never finishes
+  bool retainBusyVideo[2] = {};         // losing the INTF input can strand the host video FSM
   int dmaBudget[2] = {-1, -1};          // >= 0: this many more transfers finish, then the link hangs
   bool engineStuck[2] = {false, false}; // EN = 0 does not stop INTF1 / INTF2
   bool engineDead[2] = {false, false};  // EN = 1 does not start it
@@ -53,17 +55,22 @@ struct Dpu {
   uint32_t dropValue = 0;
   unsigned dropCount = 0;
   unsigned underrunAfterDma = 0;       // inject one underrun after this many bonded commands
+  uint32_t minFetchLineNs = 0;          // inject recurring SSPP starvation below this line-time budget
+  bool bandwidthVoteFails = false;
+  uint32_t votedMinFetchLineNs = 0;    // model's service limit after a successful vote
   bool handleUnderrunIrq = false;
   uint32_t irqUnderruns = 0;
   bool resetPccOnTimingChange = false;
   unsigned lateDmas = 0;               // delay this many DMA completions past a short front porch
   bool countEnableIgnored[2] = {false, false};   // COUNT_EN writes do not change the readback or live counters
+  bool ctlResetStuck = false;
   // ---- state
   uint64_t ns = 0;
   std::map<uint64_t, uint32_t> regs;
   std::vector<Store> stores;
   std::vector<uint64_t> refused;
   std::vector<Dcs> dcs;
+  std::vector<size_t> bandwidthVotes; // store log position when the request completed
   unsigned glitches = 0, midFrameTotal = 0, commandsInFrame = 0, desync = 0, irqDepth = 0;
   struct Intf {
     bool on = true, stopPending = false, counting = true;
@@ -71,16 +78,20 @@ struct Dpu {
     uint32_t frames = 1000, period = 2310 * kHtotal, shadow = 2310 * kHtotal, cur = 2310 * kHtotal;
     uint32_t htotal = kHtotal;
     uint32_t fetch = 0;
+    uint64_t underrunAt = UINT64_MAX;
   } intf[3];
   struct Dsi {
     uint32_t total = 2309u << 16 | 575, shadow = 2309u << 16 | 575;
     bool db = false, armed = false;
     std::vector<uint32_t> fifo;
     bool dmaPending = false;
+    bool videoStuck = false;
     uint64_t dmaAt = 0;
     uint32_t intr = 0x00000002;   // the DMA done enable bit on, status clear
   } dsi[2];
   uint32_t ctlFlush = 0, ctlIntfFlush = 0, dsppFlush[4] = {0, 0, 0, 0};
+  uint32_t latchedMaster = kDsiIntfMaster;
+  uint64_t ctlResetDoneNs = 0;
   uint32_t pccShadow[4][13] = {}, pccActive[4][13] = {};
   uint32_t topStatus = 0;
   struct Half {
@@ -111,6 +122,7 @@ struct Dpu {
       regs[dsiReg(l, kDsiCmdDmaCtrl)] = kDmaLowPowerFact | 0x10000000u;
       regs[dsiReg(l, kDsiDmaCtrl1)] = 0x2;
       regs[dsiReg(l, kDsiDmaLength)] = 0;
+      regs[dsiReg(l, kDsiClkCtrl)] = 0x33fu;
     }
   }
   static constexpr uint32_t kDmaLowPowerFact = 1u << 26;
@@ -162,10 +174,19 @@ struct Dpu {
       uint64_t next = UINT64_MAX;
       for (unsigned i = 1; i <= 2; ++i)
         if (intf[i].on && intf[i].start + frameNs(i) < next) next = intf[i].start + frameNs(i);
+      for (unsigned i = 1; i <= 2; ++i)
+        if (intf[i].underrunAt < next) next = intf[i].underrunAt;
       for (unsigned l = 0; l < 2; ++l)
         if (dsi[l].dmaPending && dsi[l].dmaAt < next) next = dsi[l].dmaAt;
       if (next > t) break;
       ns = next;
+      for (unsigned i = 1; i <= 2; ++i) {
+        if (intf[i].underrunAt != next) continue;
+        intf[i].underrunAt = UINT64_MAX;
+        const uint32_t bit = 1u << kIntrIntfUnderrun[i];
+        if (handleUnderrunIrq) irqUnderruns |= bit;
+        else topStatus |= bit;
+      }
       for (unsigned l = 0; l < 2; ++l)
         if (dsi[l].dmaPending && dsi[l].dmaAt == next) finishDma(l);
       bool started[3] = {false, false, false};
@@ -173,7 +194,13 @@ struct Dpu {
         if (!intf[i].on || intf[i].start + frameNs(i) != next) continue;
         if (intf[i].stopPending) {
           intf[i].on = false;
+          dsi[i - 1].videoStuck |= retainBusyVideo[i - 1];
           intf[i].stopPending = false;
+          if (i == 1 && latchedMaster == kDsiIntfMaster) {
+            intf[2].on = false;
+            dsi[1].videoStuck |= retainBusyVideo[1];
+            intf[2].stopPending = false;
+          }
           continue;
         }
         if (intf[i].counting) ++intf[i].frames;
@@ -190,11 +217,22 @@ struct Dpu {
           d.armed = false;
         }
         checkFrame(i);
+        const uint64_t lineNs = uint64_t(intf[i].htotal) * kLineNs / kHtotal;
+        if (lineNs < minFetchLineNs)
+          intf[i].underrunAt = next + (kVActiveEnd - 1) * lineNs;
       }
     }
     ns = t;
   }
   void tick(uint64_t dns) { advanceTo(ns + dns); }
+
+  bool voteModeBandwidth(const Mode &)
+  {
+    bandwidthVotes.push_back(stores.size());
+    if (bandwidthVoteFails) return false;
+    if (votedMinFetchLineNs) minFetchLineNs = votedMinFetchLineNs;
+    return true;
+  }
 
   // ---- the DSI command DMA
   void finishDma(unsigned l)
@@ -239,7 +277,7 @@ struct Dpu {
       return;   // not a FIFO transfer the engine takes: nothing happens
     if (dmaBudget[l] == 0) dmaHang[l] = true;
     if (dmaBudget[l] > 0) --dmaBudget[l];
-    if (dmaHang[l]) {   // the engine took it and never finishes: busy for good
+    if (dmaHang[l] || d.videoStuck) {   // the engine took it and cannot finish without a reset
       d.dmaPending = true;
       d.dmaAt = UINT64_MAX;
       return;
@@ -275,6 +313,7 @@ struct Dpu {
     }
     if (pa == ctlReg(0, kCtlFlush)) return ctlFlush;
     if (pa == ctlReg(0, kCtlIntfFlush)) return ctlIntfFlush;
+    if (pa == ctlReg(0, kCtlSwReset)) return ns < ctlResetDoneNs ? 1 : 0;
     for (unsigned d = 0; d < 4; ++d) {
       if (pa == ctlReg(0, kCtlDspp0Flush + 4 * d)) return dsppFlush[d];
       if (pa >= pccReg(d, 0) && pa <= pccReg(d, 0x30)) return pccShadow[d][(pa - pccReg(d, 0)) / 4];
@@ -283,7 +322,10 @@ struct Dpu {
     for (unsigned l = 0; l < 2; ++l) {
       if (pa == dsiReg(l, kDsiTotal)) return dsi[l].db ? dsi[l].shadow : dsi[l].total;
       if (pa == dsiReg(l, kDsiIntrCtrl)) return dsi[l].intr;
-      if (pa == dsiReg(l, kDsiStatus0)) return dsi[l].dmaPending ? 0x2u | 0x8u : 0x8u;
+      if (pa == dsiReg(l, kDsiStatus0)) {
+        const bool video = (regs[dsiReg(l, kDsiCtrl)] & 2u) && intf[l + 1].on;
+        return (dsi[l].dmaPending ? 2u : 0u) | (video || dsi[l].videoStuck ? 8u : 0u);
+      }
       if (pa == dsiReg(l, kDsiTrigCtrl)) return 4u | (blockDma ? 1u << 12 : 0u);
       if (pa == dsiReg(l, dbModeWord())) return dsi[l].db ? 1u : 0u;
     }
@@ -292,10 +334,10 @@ struct Dpu {
   }
   uint32_t dbModeWord() const { return dbHw == DbHw::sunuefi ? kDsiShadow[2] : kDsiShadow[1]; }
   uint32_t dbFlushWord() const { return dbHw == DbHw::sunuefi ? kDsiShadow[1] : kDsiShadow[0]; }
-  bool wr(uint64_t pa, uint32_t v)
+  bool wr(uint64_t pa, uint32_t v, int panelCtl = -1)
   {
     tick(150);
-    if (!storeAllowed(pa, v, modeWrites)) {
+    if (!storeAllowed(pa, v, modeWrites, panelCtl)) {
       refused.push_back(pa);
       return false;
     }
@@ -318,7 +360,8 @@ struct Dpu {
       }
       if (pa == intfReg(i, kIntfEn)) {
         regs[pa] = v;
-        if (!v && intf[i].on && !engineStuck[i - 1]) intf[i].stopPending = true;
+        const bool gatedSlave = i == 2 && latchedMaster == kDsiIntfMaster;
+        if (!v && intf[i].on && !engineStuck[i - 1] && !gatedSlave) intf[i].stopPending = true;
         if (v && !intf[i].on && !engineDead[i - 1]) {
           intf[i].on = true;
           intf[i].stopPending = false;
@@ -338,6 +381,23 @@ struct Dpu {
         if (v) intf[i].stopPending = false;
         return true;
       }
+    }
+    if (pa == ctlReg(0, kCtlSwReset)) {
+      if (intf[1].on || intf[2].on || ctlFlush) ++glitches;
+      ctlResetDoneNs = ctlResetStuck ? UINT64_MAX : ns + 30000;
+      return true;
+    }
+    if (pa == ctlReg(0, kCtlStart)) {
+      if (!ctlResetDoneNs || ns < ctlResetDoneNs || !ctlFlush || flushStuck) return true;
+      ctlResetDoneNs = 0;
+      const uint32_t active = regs[ctlReg(0, kCtlIntfActive)];
+      latchedMaster = regs[ctlReg(0, kCtlIntfMaster)];
+      latchCtl();
+      if (active == kDsiIntfSlave && !latchedMaster && regs[intfReg(2, kIntfEn)]) {
+        intf[2].on = true;
+        intf[2].start = ns;
+      }
+      return true;
     }
     if (pa == ctlReg(0, kCtlFlush)) {
       ctlFlush |= v;
@@ -364,6 +424,16 @@ struct Dpu {
     for (unsigned l = 0; l < 2; ++l) {
       Dsi &d = dsi[l];
       const unsigned i = l + 1;
+      if (pa == dsiReg(l, kDsiSwReset) && v) {
+        if (intf[1].on || intf[2].on || (regs[dsiReg(l, kDsiCtrl)] & 7u) ||
+            (regs[dsiReg(l, kDsiClkCtrl)] & kDsiResetClocks) != kDsiResetClocks) {
+          ++glitches;
+          return true;
+        }
+        d.dmaPending = d.videoStuck = false;
+        d.fifo.clear();
+        d.intr &= ~1u;
+      }
       if (pa == dsiReg(l, kDsiTotal)) {
         if (d.db) {
           d.shadow = v;
@@ -407,6 +477,8 @@ struct Dpu {
   }
   void delayUs(uint32_t us) { tick(uint64_t(us) * 1000); }
   void sleepMs(uint32_t ms) { tick(uint64_t(ms) * 1000000); }
+  uint64_t pollDeadline(uint32_t us) const { return ns + uint64_t(us) * 1000; }
+  void pollWait(uint64_t deadline, bool) { if (deadline > ns) tick(deadline - ns); }
   uint32_t modeUnderruns() { return (rd(kMdp + kTopIntrStatus) & kUnderrunBits) | irqUnderruns; }
   bool clearModeUnderruns()
   {

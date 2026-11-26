@@ -30,6 +30,7 @@ KERNEL=${K27_KERNEL:-$K/out/k27/kernel-k27-0059-native.macho}
   --library-prefix __ZN20IOEthernetController --library-prefix __ZNK20IOEthernetController --library-prefix __ZTV20IOEthernetController \
   --library-prefix __ZN19IONetworkController --library-prefix __ZNK19IONetworkController --library-prefix __ZN15IONetworkMedium \
   --library-prefix __ZN18IONetworkInterface --library-prefix __ZN19IOEthernetInterface \
+  --library-prefix __ZN18IOBasicOutputQueue \
   --library-prefix _sm8750_gcc_vote_owner --library-prefix _sm8750_rpmh_drv2_owner --library-prefix _piano_spmi_words | cut -c1-160
 # The KC builder checks one vtable per descriptor ("vtable": PianoUsbHID's, at every link). The descriptor's "extra_vtables"
 # (PianoUsbNet against IOEthernetController) are checked here, each by a link of PianoDwc3 with its library PianoA830 (a few seconds)

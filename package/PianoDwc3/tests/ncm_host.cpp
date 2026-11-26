@@ -7,6 +7,7 @@
 #include "TxFifoPlan.h"
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <string>
 #include <vector>
 
@@ -286,6 +287,140 @@ static void ringTests()
   CHECK(r.used() == 0 && r.frames == 0 && r.peek() == 0);
 }
 
+// Model the family retaining a stalled head packet and the USB side taking one NTB per completion.
+struct TxModel {
+  using Result = TxGate::Result;
+  Bytes storage = Bytes(64 * 1024);
+  FrameRing ring{storage.data(), uint32_t(storage.size())};
+  TxGate gate;
+  std::deque<Bytes> pending;
+  bool flow, linkUp = true, stalled = false;
+  unsigned stalls = 0, drops = 0, restarts = 0;
+
+  explicit TxModel(bool enableFlow) : flow(enableFlow) {}
+
+  void output()
+  {
+    while (!stalled && !pending.empty()) {
+      const Bytes &packet = pending.front();
+      const Result result = gate.offer(ring, packet.size(), linkUp, flow,
+          [&](uint8_t *dst, uint32_t off, uint32_t len) { std::memcpy(dst, packet.data() + off, len); return true; });
+      if (result == Result::stall) {
+        stalled = true;
+        ++stalls;
+        break;
+      }
+      drops += result != Result::queued;
+      pending.pop_front();
+    }
+  }
+
+  Frames drainNtb()
+  {
+    Bytes ntb(kNtbMax);
+    NtbWriter writer;
+    writer.begin(ntb.data(), uint32_t(ntb.size()));
+    while (const uint32_t length = ring.get(ntb.data() + writer.offset(), writer.room())) {
+      writer.add(length);
+      gate.afterDrain(ring);
+    }
+    ntb.resize(writer.finish(0));
+    Frames frames;
+    if (!ntb.empty()) CHECK(specDecode(ntb, frames));
+    return frames;
+  }
+
+  void disconnect()
+  {
+    linkUp = false;
+    ring.clear();
+    gate.requestReset();
+  }
+
+  void service()
+  {
+    if (gate.needsReset()) {
+      pending.clear();
+      stalled = false;
+      gate.resetDone();
+    } else if (gate.takeRestart()) {
+      ++restarts;
+      stalled = false;
+      output();
+    }
+  }
+};
+
+static Bytes numberedFrame(unsigned length, uint32_t ordinal)
+{
+  Bytes packet = frame(length, uint8_t(ordinal));
+  put32(packet, 0, ordinal);
+  return packet;
+}
+
+static void txBurstTest(bool flow)
+{
+  constexpr uint32_t burstBytes = 64 * 1024 * 1024;
+  TxModel tx(flow);
+  uint32_t offered = 0, received = 0, ordinal = 0, next = 0, frames = 0;
+  // A 64 MiB writer has a bounded flight of frames. Up to 50 more arrive per tick, while USB drains just one NTB.
+  for (unsigned tick = 0; tick < 10000 && (offered < burstBytes || tx.ring.used() || !tx.pending.empty()); ++tick) {
+    if (tx.pending.size() < 50) {
+      for (unsigned i = 0; i < 50 && offered < burstBytes; ++i) {
+        const uint32_t length = burstBytes - offered < kMaxFrame ? burstBytes - offered : kMaxFrame;
+        tx.pending.push_back(numberedFrame(length, ordinal++));
+        offered += length;
+      }
+      tx.output();
+    }
+    for (const Bytes &packet : tx.drainNtb()) {
+      const uint32_t got = le32(packet, 0);
+      CHECK(flow ? got == next : got >= next);
+      CHECK(packet == numberedFrame(uint32_t(packet.size()), got));
+      next = got + 1;
+      received += uint32_t(packet.size());
+      ++frames;
+    }
+    tx.service();
+  }
+  CHECK(offered == burstBytes && tx.pending.empty() && !tx.ring.used());
+  CHECK(frames + tx.drops == ordinal);
+  if (flow) CHECK(received == burstBytes && tx.stalls && tx.stalls == tx.restarts && !tx.drops);
+  else CHECK(received < burstBytes && tx.drops && !tx.stalls && !tx.restarts);
+  std::printf("TX flow %s: %u/%u bytes, %u drops, %u stalls, %u restarts\n",
+              flow ? "on" : "off", received, offered, tx.drops, tx.stalls, tx.restarts);
+}
+
+static void txRestartTests()
+{
+  using Result = TxGate::Result;
+  TxModel tx(true);
+  for (unsigned n = 0; n < 50; ++n) tx.pending.push_back(numberedFrame(kMaxFrame, n));
+  tx.output();
+  CHECK(tx.stalled && tx.pending.size() == 7 && le32(tx.pending.front(), 0) == 43);
+  for (unsigned i = 0; i < 2; ++i) CHECK(tx.drainNtb().size() == 10);
+  tx.service();
+  CHECK(tx.stalled && tx.restarts == 0);
+  CHECK(tx.drainNtb().size() == 10 && tx.gate.needsService());
+  // A disconnect can race the already-pending restart, including a quick link-up before service runs.
+  tx.disconnect();
+  TxModel::Result blocked = tx.gate.offer(tx.ring, kMaxFrame, true, true,
+      [](uint8_t *, uint32_t, uint32_t) { return true; });
+  CHECK(blocked == Result::drop && !tx.ring.used());
+  tx.linkUp = true;
+  tx.service();
+  CHECK(!tx.stalled && !tx.gate.needsService() && !tx.restarts && tx.pending.empty() && tx.drainNtb().empty());
+  const Bytes fresh = numberedFrame(kMaxFrame, 50);
+  tx.pending.push_back(fresh);
+  tx.output();
+  CHECK(tx.drainNtb() == Frames{fresh});
+  // An invalid length or failed copy is a drop even with flow control engaged.
+  const auto failCopy = [](uint8_t *, uint32_t, uint32_t) { return false; };
+  CHECK(tx.gate.offer(tx.ring, kMaxFrame + 1, true, true, failCopy) == Result::badLength);
+  CHECK(tx.gate.offer(tx.ring, kMaxFrame, true, true, failCopy) == Result::drop);
+  CHECK(!tx.gate.needsService() && !tx.ring.used());
+}
+
 static void fifoTests()
 {
   // piano's core (T1 probe, logs of 2026-11-11): GHWPARAMS0 4020400a 1 01092486 6 1835003f 7 08a00d86, DWC_usb31; GTXFIFOSIZ0
@@ -328,6 +463,9 @@ int main()
   parserTests();
   parameterTests();
   ringTests();
+  txBurstTest(true);
+  txBurstTest(false);
+  txRestartTests();
   fifoTests();
   std::printf("ncm: %s: %d failure(s)\n", failures ? "FAILED" : "ok", failures);
   return failures ? 1 : 0;

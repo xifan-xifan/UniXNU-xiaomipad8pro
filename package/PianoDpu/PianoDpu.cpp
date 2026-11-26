@@ -43,6 +43,7 @@ using namespace pianodpu;
 
 // The writing slices (DpuSlices.cpp).
 bool dpuSlicesWanted();
+void dpuSlicesReadArgs();
 void dpuSlicesStart(IOService *dpu);
 bool dpuSlicesPlatformFunction(const OSSymbol *name, void *p1, void *p2, void *p3, IOReturn *result);
 void dpuSnapshotStart(uint32_t level, uint32_t ahbVote);   // DpuSnapshot.cpp: machdep.piano_dpu_snapshot with piano-dpu-snapshot=1
@@ -589,6 +590,7 @@ bool PianoDpu::start(IOService *provider)
          gArgs.level >= 2 ? "; then B1b (piano-dpu=2): the flips of piano-dpu-flip" : "");
   else note("level 1: loads only, nothing written%s", gArgs.level >= 2 ? "; then B1b (piano-dpu=2): the flips of piano-dpu-flip" : "");
   setProperty("piano-dpu", gArgs.level, 32);
+  dpuSlicesReadArgs();   // the survey may consult these options as soon as its thread runs
   thread_t t = nullptr;
   if (kernel_thread_start(&PianoDpu::thread, this, &t) != KERN_SUCCESS) {
     stage(-1, "no thread");

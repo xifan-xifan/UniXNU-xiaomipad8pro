@@ -308,11 +308,14 @@ static void armedSerialStart()
   assert(disk.admission.online && !disk.admission.parallel && disk.admission.depth == 2);
   assert(disk.admission.take(disk.env, first) == DirectAdmission::kSerial);
   assert(disk.admission.inflight == 0);
+  assert(disk.admission.modeChangeAllowed(true, false));
+  assert(!disk.admission.modeChangeAllowed(true, true));  // a read degraded the store during the mount
   disk.env.unlock();
 
   Buffer original(kBlock, 0x42);
   assert(disk.io(true, 0, original) == kBlock);
   assert(disk.fence(3) && disk.admission.parallel);
+  assert(disk.admission.modeChangeAllowed(false, true));  // rollback remains available after a read error
 
   disk.env.lock();
   const int writer = disk.admission.take(disk.env, first);

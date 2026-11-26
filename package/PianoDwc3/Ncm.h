@@ -5,6 +5,7 @@
 // (notifications), 7 (alternate settings); no other source. Portable (no kernel headers): built into the kext and into
 // tests/ncm_host.cpp and tests/usb_gadget_host.cpp.
 #pragma once
+#include <stddef.h>
 #include <stdint.h>
 
 namespace pianousb {
@@ -202,6 +203,51 @@ struct FrameRing {
 
 private:
   uint8_t &byte(uint32_t i) const { return buf[i & (size - 1)]; }
+};
+
+// Admission and restart for the TX frame ring. The owner serializes all calls with the ring lock.
+class TxGate {
+public:
+  enum class Result { queued, stall, drop, badLength };
+
+  template <class Copy> Result offer(FrameRing &ring, size_t length, bool up, bool flow, Copy &&copy)
+  {
+    if (length < kMinFrame || length > kMaxFrame) return Result::badLength;
+    if (!up || resetting) return Result::drop;
+    const uint32_t n = uint32_t(length);
+    if (flow && !ring.fits(n)) {
+      stalled = true;
+      return Result::stall;
+    }
+    return ring.putWith(n, copy) ? Result::queued : Result::drop;
+  }
+
+  bool afterDrain(const FrameRing &ring)
+  {
+    if (!stalled || ring.space() < ring.size / 2) return false;
+    stalled = false;
+    restart = true;
+    return true;
+  }
+
+  void requestReset()
+  {
+    resetting = true;
+    stalled = restart = false;
+  }
+
+  void resetDone() { stalled = restart = resetting = false; }
+  bool needsReset() const { return resetting; }
+  bool needsService() const { return resetting || restart; }
+  bool takeRestart()
+  {
+    const bool pending = restart;
+    restart = false;
+    return pending;
+  }
+
+private:
+  bool stalled = false, restart = false, resetting = false;
 };
 
 }  // namespace ncm

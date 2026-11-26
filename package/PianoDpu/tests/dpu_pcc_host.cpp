@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// Host test of PianoDpu B1d (DpuPcc.h):
+// Host test of PianoDpu B1d and M4 (DpuPcc.h and DpuNightShift.h):
 //   - macOS's fixed matrix: S31.32 words, both sign conventions, the +-4 limit, rounding to Q16.16;
 //   - the matrix product, the linear-to-encoded gain table against pow(x, 1 / 2.2), the diagonal kept exact, others flagged;
 //   - the PCC's S3.15 words: rounding, saturation, negative coefficients clamped unless allowed;
@@ -206,14 +206,8 @@ static void testNightShift()
   warm[3] = s3132(-0.25);
   CHECK(state.setMatrix(blank) == NightShift::Input::blank && state.corrected().m[1][0] == -kOne / 4);
 
-  // The first two rows of M1's location-9 callback.
-  const uint64_t m1[9] = {0xe93e9100, 0x135da6e0, 0x0363c8b8, 0xffffffffff14915cull, 0xd9047c00, 0x0071a374, 0, 0, 0};
-  auto d = decodeS3132(m1, false);
-  CHECK(d.ok && d.negativeTwos == 1);
-  auto words = pccWords(d.m, Negative::signMagnitude);
-  CHECK(words.w[0][0] == 0x74a0 && words.w[0][1] == 0x09af && words.w[1][0] == 0x20076 && words.w[1][1] == 0x6c82);
-  words = pccWords(diagonal(-4 * kOne, 0, 4 * kOne), Negative::signMagnitude);
-  CHECK(words.w[0][0] == 0x3ffff && words.w[2][2] == 0x1ffff && words.saturated == 2);
+  const auto words = pccWords(diagonal(-4 * kOne, 0, 4 * kOne), true);
+  CHECK(words.w[0][0] == 0x20000 && words.w[2][2] == 0x1ffff && words.saturated == 1);
 
   ReadbackFault io;
   io.pccShadow[0][4] = io.pccActive[0][4] = 0x1234;   // disabled firmware state with different dormant coefficients
@@ -234,8 +228,8 @@ static void testNightShift()
   CHECK(io.storesTo(pccReg(2, 0)) == 0 && io.storesTo(pccReg(3, 0)) == 0);
   for (unsigned d = 0; d < 2; ++d) {
     const uint32_t *pcc = io.pccActive[d];
-    CHECK(pcc[0] == 1 && pcc[4] == 0x8000 && pcc[5] == 0x1000);
-    CHECK(pcc[7] == 0x22000 && pcc[8] == 0x6000 && pcc[12] == 0x4000);
+    CHECK(pcc[0] == 1 && pcc[4] == 0x8000 && pcc[7] == 0x1000);
+    CHECK(pcc[5] == 0x3e000 && pcc[8] == 0x6000 && pcc[12] == 0x4000);
   }
 
   // A slider operation with no callbacks leaves the last colour in place. A repeat also needs no stores.
@@ -247,7 +241,7 @@ static void testNightShift()
   // Slot 314 alone updates the existing matrix. A later slot 309 update uses the retained correction.
   state.setCorrection(kOne / 2);
   CHECK(updateNightShift(io, path, nightShiftPrograms(base, state), last, false).result.ok);
-  CHECK(io.pccActive[0][4] == 0x4000 && io.pccActive[1][7] == 0x21000);
+  CHECK(io.pccActive[0][4] == 0x4000 && io.pccActive[1][5] == 0x3f000);
   warm[8] = s3132(0.75);
   CHECK(state.setMatrix(warm) == NightShift::Input::accepted);
   wanted = nightShiftPrograms(base, state);
@@ -266,10 +260,12 @@ static void testNightShift()
   CHECK(io.pccActive[0][4] == 0x1234 && io.pccActive[1][4] == 0x5678);
 
   // An enabled base keeps its matrix when Night Shift is off. Active colour composes with the base.
-  base.dspp[0] = {pccWords(diagonal(kOne / 2, kOne, kOne), Negative::signMagnitude), true};
+  base.dspp[0] = {pccWords(diagonal(kOne / 2, kOne, kOne), true), true};
+  base.dspp[0].words.w[2][0] = 0x3e000;   // firmware blue from red = -0.25
   CHECK(nightShiftPrograms(base, state).dspp[0].words.w[0][0] == 0x4000);
   CHECK(state.setMatrix(warm) == NightShift::Input::accepted);
   CHECK(nightShiftPrograms(base, state).dspp[0].words.w[0][1] == 0x0800);
+  CHECK(nightShiftPrograms(base, state).dspp[0].words.w[2][1] == 0x3fc00);
   state.setCorrection(6 * kOne);
   CHECK(nightShiftPrograms(base, state).dspp[0].words.w[0][0] == 0x18000);
   state.setCorrection(UINT32_MAX);
@@ -279,6 +275,74 @@ static void testNightShift()
   incomplete.dspps = 1;
   CHECK(!capturePanelPcc(io, incomplete, base));
   CHECK(!updateNightShift(io, incomplete, wanted, last, true).attempted);
+}
+
+static void testNightShiftRegisterWords()
+{
+  // y12q qual2. #1 has seven intact S31.32 words. The last two use the exact
+  // magnitudes from the matching PCC snapshot, lifted back to S31.32.
+  const uint64_t first[9] = {
+    0x00000000e93fd100, 0x00000000135c95a0, 0x0000000003639998,
+    0xffffffffff149e71, 0x00000000d906a900, 0x0000000000719d4f,
+    0xfffffffffe28c2ca, 0xfffffffff94e0000, 0x00000000b7520000,
+  };
+  // The stronger post-login sample is reconstructed from both DSPPs' read-back
+  // at PCC precision, undoing y12q's sign-magnitude packing.
+  const uint64_t stronger[9] = {
+    0x00000000a6920000, 0x000000004fb20000, 0x0000000009bc0000,
+    0xfffffffffc2a0000, 0x0000000061aa0000, 0x0000000000ce0000,
+    0xfffffffffb600000, 0xfffffffff1860000, 0x00000000224a0000,
+  };
+  const uint64_t unity[9] = {1ull << 32, 0, 0, 0, 1ull << 32, 0, 0, 0, 1ull << 32};
+  const uint32_t identityWords[9] = {0x8000, 0, 0, 0, 0x8000, 0, 0, 0, 0x8000};
+  // Physical order +0x10..+0x30, independent of kPccCoef.
+  const uint32_t firstWords[9] = {
+    0x074a0, 0x3ff8a, 0x3ff14, 0x009af, 0x06c84, 0x3fca7, 0x001b2, 0x00039, 0x05ba9,
+  };
+  const uint32_t strongerWords[9] = {
+    0x05349, 0x3fe15, 0x3fdb0, 0x027d9, 0x030d5, 0x3f8c3, 0x004de, 0x00067, 0x01125,
+  };
+  const uint32_t oldWords[9] = {
+    0x05349, 0x027d9, 0x004de, 0x201eb, 0x030d5, 0x00067, 0x20250, 0x2073d, 0x01125,
+  };
+  auto grey = [](const uint32_t (&regs)[9], unsigned output) {
+    return pccSignedQ15(regs[output]) + pccSignedQ15(regs[output + 3]) + pccSignedQ15(regs[output + 6]);
+  };
+  CHECK(grey(oldWords, 0) < 0 && grey(oldWords, 1) < 0 && grey(oldWords, 2) > 0);
+
+  model::Dpu io;
+  const LivePath path = readPath(io);
+  for (unsigned d = 0; d < 2; ++d) {
+    io.pccActive[d][0] = io.pccShadow[d][0] = 1;
+    for (unsigned k = 0; k < 9; ++k)
+      io.pccActive[d][4 + k] = io.pccShadow[d][4 + k] = identityWords[k];
+  }
+  PanelPcc base;
+  CHECK(capturePanelPcc(io, path, base));
+  PanelPcc last = base;
+  NightShift state;
+  const struct {
+    const uint64_t (&raw)[9];
+    const uint32_t (&regs)[9];
+  } cases[] = {{first, firstWords}, {stronger, strongerWords}, {unity, identityWords}};
+  for (const auto &fixture : cases) {
+    CHECK(state.setMatrix(fixture.raw) == NightShift::Input::accepted);
+    state.setCorrection(0x10000);   // the logged slot 314 value
+    const PanelPcc wanted = nightShiftPrograms(base, state);
+    const NightShiftApply update = updateNightShift(io, path, wanted, last, false);
+    CHECK(update.attempted && update.result.ok);
+    for (unsigned d = 0; d < 2; ++d) {
+      CHECK(update.result.enable[d] == 1);
+      for (unsigned k = 0; k < 9; ++k) {
+        CHECK(io.pccActive[d][4 + k] == fixture.regs[k]);
+        CHECK(update.result.readback[d][k % 3][k / 3] == fixture.regs[k]);
+      }
+    }
+    CHECK(fixture.regs[0] >= fixture.regs[8]);   // red gain >= blue gain
+    CHECK(grey(fixture.regs, 0) >= grey(fixture.regs, 1) && grey(fixture.regs, 1) >= grey(fixture.regs, 2));
+    CHECK(grey(fixture.regs, 2) > 0);
+  }
+  CHECK(state.neutral() && same(last, base));
 }
 
 static void testState()
@@ -351,6 +415,7 @@ int main()
   testWords();
   testApply();
   testNightShift();
+  testNightShiftRegisterWords();
   testState();
   testGamma();
   if (failures) {

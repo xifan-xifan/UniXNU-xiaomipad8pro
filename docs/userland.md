@@ -15,6 +15,7 @@ Now there is one manifest, one staging tool, and one installer on the tablet.
 | Unit | Installed files (all root:wheel) | Installed profile | Inert unless | Trust cache |
 |---|---|---|---|---|
 | `pianousb-shell` | `/usr/local/libexec/pianousb-shell` 0755, `/Library/LaunchDaemons/com.unixnu.pianousb-shell.plist` 0644 | on | `piano-usb-shell=1` (without it, it exits at once with status 0 and launchd leaves it stopped) | its CDHash |
+| `piano-data-concurrent` | `/usr/local/libexec/piano-data-concurrent` 0755 (shell script), `/Library/LaunchDaemons/com.unixnu.piano-data-concurrent.plist` 0644 (once per load) | on | With Data mounted in single-gate mode and `machdep.piano_data_io` reporting live `store_state=2`, writes `machdep.piano_data_concurrent=1`. Remove `PIANO_DATA_CONCURRENT_AT_BOOT` from the plist to disable ([data-store.md](data-store.md), "Concurrent mode at boot"). | none (a script) |
 | `piano-policy-agent` | `/usr/local/libexec/piano-policy-agent` 0755 (the shell script), `/Library/LaunchDaemons/com.unixnu.piano-policy-agent.plist` 0644 | on | PianoPolicy (`piano-policy=N`) for the sysctl; the clamshell state for display sleep. One idle `notifyutil -w`, no polling | none (a script) |
 | `piano-rotated` | `/usr/local/libexec/piano-rotated` 0755, `/Library/LaunchAgents/com.unixnu.piano-rotated.plist` 0644 | on | `piano-rotate=N` (exits 0 without it; `KeepAlive SuccessfulExit false`) | its CDHash |
 | `piano-torch` | `/usr/local/bin/piano-torch` 0755 | installed (a command) | PianoTorch at `piano-torch=2` | its CDHash |

@@ -67,7 +67,7 @@ void take(Snapshot &s, Load load, bool hwGatedAhb)
     }
   } io{load, s.loads};
   s.panelIdIo = io.rd(kTlmm + uint64_t(kPanelIdGpio) * kTlmmStride + 4);
-  s.path = slices::readPath(io, hwGatedAhb);
+  s.path = slices::readPath(io, hwGatedAhb, true);
   if (!s.path.clocks.readable) {
     s.vfpVerdict = s.path.why;
     return;

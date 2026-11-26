@@ -595,6 +595,42 @@ static void testRingReplay()
           !W->submit.holdArmed());
 }
 
+/* lead/v131y7 (gpu/recover2 merged onto the R3b daily line of gpu/sustain1): the replay also runs in the guard's daily mode (the daily
+ * line's recovery: a client's hang never closes the qualification; the GMU restarts at level 1 / bus 2), with the same outcome as
+ * testReplay: the culprit alone faulted, WindowServer's and the bench's jobs replayed, not lost, no unsafe exit; and never in the
+ * strict qualification mode (R3b without daily), whose recovery keeps failing every job in flight (the gate's old fault-all). */
+static unsigned gUnsafeExits;
+static void unsafeExit(void *,A830ExitOrigin) {++gUnsafeExits;}
+static void testDailyLine()
+{
+    boot();
+    gUnsafeExits=0;
+    gRecovery.qualification(unsafeExit,nullptr);gRecovery.qualificationR3b();gRecovery.qualificationDaily();
+    const uint32_t f1=submitJob(WS);
+    CHECK(W->submit.armHold(NativeAdrenoRangeBit(HOG))==kIOReturnSuccess);
+    const uint32_t f2=submitJob(HOG),f3=submitJob(WS),f4=submitJob(BENCH);
+    complete(f1,0);
+    const uint64_t wsBefore=gShell.faults(WS);
+    CHECK(gRecovery.recover(A830FaultWatchdog,0x7E57)==kIOReturnSuccess);
+    CHECK(gShell.begins==0 && gShell.beginsReplay==1 && gOps.count("failInflight")==0 && gOps.count("plan")==1 && gOps.count("replay")==1);
+    const NativeAdrenoSubmitPlan &p=gShell.plan;
+    CHECK(p.mode==NativeAdrenoSubmitPlanReplay && p.culprit_range==HOG && p.culprit_fence==f2 && p.restart==f2 && p.replay_jobs==2 &&
+          p.first_replay==f3 && p.last_replay==f4);
+    CHECK(gShell.faults(HOG)==1 && gShell.faults(WS)==wsBefore && gShell.faults(BENCH)==0);
+    CHECK(gRecovery.stats().replayRecoveries==1 && gRecovery.stats().jobsReplayed==2 && gRecovery.stats().recoveries==1 &&
+          !gRecovery.lost() && gUnsafeExits==0 && gRecovery.replaying());
+    complete(f4,0);
+    CHECK(W->submit.waitAll(&ringclock,1000)==kIOReturnSuccess && W->submit.outstanding()==0);
+    /* strict mode: no replay; every job in flight failed at the gate (WindowServer faulted), as before gpu/recover2 */
+    boot();
+    gUnsafeExits=0;
+    gRecovery.qualification(unsafeExit,nullptr);gRecovery.qualificationR3b();
+    submitJob(HOG);submitJob(WS);
+    gRecovery.recover(A830FaultWatchdog,1);
+    CHECK(!gRecovery.replaying() && gShell.beginsReplay==0 && gShell.begins==1 && gOps.count("plan")==0 && gOps.count("replay")==0);
+    CHECK(gShell.faults(WS)>=1 && W->ring.replays()==0);   /* WindowServer faulted with the rest (the old fail-all) */
+}
+
 int main()
 {
     adreno830_profile_value=A830ProfileDesign;
@@ -607,10 +643,11 @@ int main()
     testReplayFailure();
     testAbSwitch();
     testRingReplay();
+    testDailyLine();
     delete W;W=nullptr;
     std::printf("PASS: A830 recovery replay end to end: culprit alone faulted (WindowServer kept), innocent jobs replayed with their own "
                 "fences and context entries, S6 at the restart fence, the hold packet, culprit on the final fence, driver causes "
                 "replay all, repeated culprit refused after %u hangs, third in 60 s final, hang during replay, poisoned/gap/room "
-                "fallbacks, replay failure final at S6.0x18, A/B switch (%u checks)\n",unsigned(NativeAdrenoClientHangLimit),gChecks);
+                "fallbacks, replay failure final at S6.0x18, A/B switch, the R3b daily line replays and strict mode does not (%u checks)\n",unsigned(NativeAdrenoClientHangLimit),gChecks);
     return 0;
 }

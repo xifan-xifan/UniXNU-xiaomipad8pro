@@ -471,8 +471,7 @@ inline LmView viewLm(const LmRegs &l)
 // PCC: S3.15 coefficients in 18 bits (two's complement), 0x8000 = 1.0. In thousandths.
 inline int pccMilli(uint32_t raw)
 {
-  int32_t v = int32_t(raw & 0x3ffffu);
-  if (v & 0x20000) v -= 0x40000;
+  const int32_t v = pccSignedQ15(raw);
   return int((int64_t(v) * 1000 + (v >= 0 ? 16384 : -16384)) / 32768);
 }
 struct PccView {

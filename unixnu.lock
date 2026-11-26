@@ -86,6 +86,21 @@ git = "https://github.com/Shad0w23333/Adreno830.git"
 commit = "1a1321056ffc5428ae925f4680093718b46ca7c2"
 role = "docs/drivers/gpu.md base"
 
+[pin."ArmSmmu4K"]
+git = "https://github.com/UniXNU/ArmSmmu4K.git"
+commit = "3ba92451bd44bb742d11758fbfcd3a446ecad685"
+role = "PianoA830-compatible kit base (package/PianoA830/UPSTREAM)"
+
+[pin."AdrenoPM4"]
+git = "https://github.com/UniXNU/AdrenoPM4.git"
+commit = "282606b528b2595bc4274ea7490b62b323f35a5f"
+role = "PM4 kit used by PianoA830 (package/PianoA830/UPSTREAM)"
+
+[pin."AdrenoFirmware"]
+git = "https://github.com/UniXNU/AdrenoFirmware.git"
+commit = "20ad3d7aca14bd46aecab6335c780f5413fa054b"
+role = "UniXNU catalog pin for the HFI vote reference code used by test_a830votes"
+
 [pin."AdrenoMetal"]
 git = "https://github.com/UniXNU/AdrenoMetal.git"
 commit = "c68f9a1db77961e0f7e18e48f95aeb95ac649650"

@@ -23,7 +23,15 @@ def check(ok, what):
 
 
 STUBS = {
-    'sysctl': 'cat "$T/bootargs"',
+    'sysctl': '''case "$2" in
+  kern.piano_bootargs)
+    if [ -f "$T/merged" ]; then cat "$T/merged"; exit; fi
+    if [ -f "$T/denied" ]; then echo 'sysctl: Operation not permitted' >&2
+    else echo "sysctl: unknown oid 'kern.piano_bootargs'" >&2; fi
+    exit 1 ;;
+  kern.bootargs) cat "$T/bootargs" ;;
+  *) exit 1 ;;
+esac''',
     'ifconfig': '''if [ "$1" = -l ]; then echo "lo0 en0 en1"; exit 0; fi
 if [ "$1" = en1 ]; then echo "en1: flags=8863<UP> mtu 1500"; echo "	ether 02:50:49:41:4e:02"; [ -s "$T/inet" ] && echo "	inet $(cat "$T/inet") netmask 0xffff0000"; exit 0; fi
 echo "$1: flags=8863<UP> mtu 1500"; echo "	ether 02:50:49:41:4e:01"''',
@@ -40,7 +48,7 @@ exit 0''',
 }
 
 
-def run(bootargs, inet, service=None, replace_after=None, guard=4, wait=4):
+def run(bootargs, inet, service=None, replace_after=None, guard=4, wait=4, merged=None, denied=False):
     t = Path(tempfile.mkdtemp(prefix='usbnet-'))
     stubs = t / 'bin'
     stubs.mkdir()
@@ -48,12 +56,17 @@ def run(bootargs, inet, service=None, replace_after=None, guard=4, wait=4):
         (stubs / name).write_text('#!/bin/sh\n' + body + '\n')
         (stubs / name).chmod(0o755)
     (t / 'bootargs').write_text(bootargs + '\n')
+    if merged is not None:
+        (t / 'merged').write_text(merged + '\n')
+    if denied:
+        (t / 'denied').touch()
+    (t / 'piano-usb-net=1').touch()  # a wildcard value must not expand to this file
     (t / 'inet').write_text(inet + '\n' if inet else '')
     if service:
         (t / 'service').write_text(service + '\n')
     env = dict(os.environ, T=str(t), PIANO_USBNET_PATH=f'{stubs}:/usr/bin:/bin', PIANO_USBNET_OUT=str(t / 'console'),
                PIANO_USBNET_WAIT=str(wait), PIANO_USBNET_GUARD=str(guard), PIANO_USBNET_PERIOD='1')
-    p = subprocess.Popen(['/bin/sh', str(SCRIPT)], env=env)
+    p = subprocess.Popen(['/bin/sh', str(SCRIPT)], env=env, cwd=t)
     if replace_after is not None:
         time.sleep(replace_after)
         (t / 'inet').write_text('169.254.33.7\n')   # configd's own configuration: a self-assigned address instead of the fixed one
@@ -67,7 +80,23 @@ check(rc == 0 and console == '' and calls == '', 'no piano-usb-net: nothing done
 rc, console, calls, manual, inet, _ = run('piano-usb-net=0 piano-usb=2', '169.254.80.2')
 check(rc == 0 and console == '', 'piano-usb-net=0: nothing done')
 
-rc, console, calls, manual, inet, service = run('a=1 piano-usb-net=1 b=2', '169.254.80.2', service='Ethernet Adaptor', replace_after=1.5)
+rc, console, calls, *_ = run('piano-usb-net=1', '169.254.80.2', merged='piano-usb-net=0')
+check(rc == 0 and console == '' and calls == '', 'the merged OID takes precedence over the legacy value')
+rc, console, calls, *_ = run('piano-usb-net=1', '169.254.80.2', denied=True)
+check(rc == 0 and console == '' and calls == '', 'permission errors keep the helper inactive')
+
+for args, active in (
+        ('piano-usb-net=1 piano-usb-net=0', False),
+        ('piano-usb-net=0 piano-usb-net=1', True),
+        ('quiet\tpiano-usb-net=1', True),
+        ('piano-usb-net-txflow=1 other=piano-usb-net=1', False),
+        ('piano-usb-net=*', False)):
+    rc, console, calls, *_ = run('', '', merged=args, wait=0)
+    check(rc == 0 and bool(console) == active and not calls, f'exact last boot argument, as data: {args!r}')
+
+legacy = 'a=' + 'x' * 1013
+rc, console, calls, manual, inet, service = run(legacy, '169.254.80.2', service='Ethernet Adaptor', replace_after=1.5,
+                                               merged=legacy + ' piano-usb-net=1 b=2')
 check(rc == 0, 'exit 0')
 check('en1 has 169.254.80.2' in console, 'the fixed address found on en1 (by its MAC)')
 check(manual == 'Ethernet Adaptor 169.254.80.2 255.255.0.0', f'configd\'s own service for en1 set Manual ({manual!r})')

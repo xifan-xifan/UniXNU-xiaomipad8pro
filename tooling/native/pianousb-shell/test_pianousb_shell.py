@@ -10,6 +10,7 @@ while idle (its CPU time over a quiet second and a half).
     python3 tooling/native/pianousb-shell/test_pianousb_shell.py
 """
 import os
+import resource
 import select
 import subprocess
 import sys
@@ -61,16 +62,63 @@ int main(int argc, char **argv)
 }
 '''
 
+GATE_PROBE = r'''
+#define main shellMain
+#define open gateOpen
+#define sysctlbyname gateSysctl
+#include "pianousb-shell.c"
+#undef main
+
+// Stop as soon as the real launcher's gate passes. There is no device access.
+int gateOpen(const char *path, int flags, ...)
+{
+  (void)path;
+  (void)flags;
+  exit(42);
+}
+
+int gateSysctl(const char *name, void *answer, size_t *size, void *newValue, size_t newSize)
+{
+  (void)newValue;
+  (void)newSize;
+  const int merged = strcmp(name, "kern.piano_bootargs") == 0;
+  const char *value = getenv(merged ? "PIANO_TEST_MERGED" : "PIANO_TEST_LEGACY");
+  if (!value || (merged && !strcmp(value, "EPERM"))) {
+    errno = value ? EPERM : ENOENT;
+    return -1;
+  }
+  const size_t required = strlen(value) + 1;
+  if (*size < required) {
+    errno = ENOMEM;
+    return -1;
+  }
+  memcpy(answer, value, required);
+  *size = required;
+  return 0;
+}
+
+int main(int argc, char **argv)
+{
+  if (argc == 3) {
+    size_t length;
+    const char *value = pianoBootArgValue(argv[1], argv[2], &length);
+    if (!value) return 1;
+    printf("%.*s", (int)length, value);
+    return 0;
+  }
+  return shellMain(argc, argv);
+}
+'''
+
 
 def cc(out, *args):
     subprocess.run(['xcrun', 'clang', '-arch', 'arm64', '-mmacosx-version-min=14.0', '-O2', '-Wall', '-Wextra', '-Werror', *args,
                     '-o', str(out)], check=True)
 
 
-def cpu_seconds(pid):
-    text = subprocess.run(['ps', '-o', 'time=', '-p', str(pid)], capture_output=True, text=True).stdout.strip()
-    minutes, seconds = text.split(':') if ':' in text else ('0', text or '0')
-    return int(minutes) * 60 + float(seconds)
+def child_cpu_seconds():
+    usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return usage.ru_utime + usage.ru_stime
 
 
 class PianoUsbShellTest(unittest.TestCase):
@@ -79,11 +127,14 @@ class PianoUsbShellTest(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory(prefix='pianousb-shell-test-')
         d = Path(cls.tmp.name)
         cls.helper, cls.shim, cls.probe = d / 'pianousb-shell', d / 'shim.dylib', d / 'probe'
+        cls.gate = d / 'gate'
         cc(cls.helper, str(HERE / 'pianousb-shell.c'))
         (d / 'shim.c').write_text(SHIM)
         cc(cls.shim, '-dynamiclib', str(d / 'shim.c'))
         (d / 'probe.c').write_text(PROBE)
         cc(cls.probe, str(d / 'probe.c'))
+        (d / 'gate.c').write_text(GATE_PROBE)
+        cc(cls.gate, '-I', str(HERE), str(d / 'gate.c'))
 
     @classmethod
     def tearDownClass(cls):
@@ -121,19 +172,54 @@ class PianoUsbShellTest(unittest.TestCase):
         out = subprocess.run([str(self.probe), self.device], env=self.env, capture_output=True, text=True, timeout=10).stdout.split()
         self.assertEqual(out, ['1', '%x' % select.POLLNVAL], 'the shim must answer poll() on the device as XNU did for /dev/pianousb')
 
+    def test_launch_gate_reads_full_boot_arguments(self):
+        switch = 'piano-usb-shell=1'
+        legacy = 'x' * 1015
+        for merged, clipped, expected in (
+                (legacy + ' ' + switch, legacy, 42),
+                ('x' * (4095 - len(switch) - 1) + ' ' + switch, legacy, 42),
+                ('piano-usb-shell=0', switch, 0),
+                ('piano-usb-shell=0 ' + switch, '', 42),
+                (switch + ' piano-usb-shell=0', switch, 0),
+                ('quiet\t' + switch, '', 42),
+                ('piano-usb-shell-extra=1 other=' + switch, '', 0),
+                ('piano-usb-shell=\t1', '', 0),
+                ('x' * 4096 + ' ' + switch, switch, 0),
+                ('EPERM', switch, 0),
+                (None, switch, 42),
+                (None, legacy, 0)):
+            with self.subTest(merged=merged is not None, length=len(merged or ''), expected=expected):
+                env = dict(os.environ, PIANO_TEST_LEGACY=clipped)
+                env.pop('PIANO_TEST_MERGED', None)
+                if merged is not None:
+                    env['PIANO_TEST_MERGED'] = merged
+                result = subprocess.run([str(self.gate)], env=env, capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, expected, result.stderr)
+
+    def test_shared_parser_matches_complete_keys(self):
+        for line, key, expected in (
+                ('piano-rotated=3 other=piano-rotate=2', 'piano-rotate', None),
+                ('piano-rotate=2 piano-rotated=3\tpiano-rotate=0', 'piano-rotate', '0'),
+                ('piano-backlight-auto=1 piano-backlight-auto-requested=1 piano-backlight-auto=0', 'piano-backlight-auto', '0'),
+                ('piano-backlight-native', 'piano-backlight-native', '1')):
+            with self.subTest(line=line, key=key):
+                result = subprocess.run([str(self.gate), line, key], capture_output=True, text=True, timeout=5)
+                self.assertEqual((result.returncode, result.stdout), (1, '') if expected is None else (0, expected))
+
     def test_relays_both_ways_without_spinning(self):
         self.proc = subprocess.Popen([str(self.helper), self.device, '/bin/sh'], env=self.env, stdin=subprocess.DEVNULL,
                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         self.assertIn(b'a new shell on the tablet', self.read_until(b'(exit starts another)', 10))
         os.write(self.master, b"printf 'piano%sok\\n' -relay-\n")   # the output, piano-relay-ok, is not the command's text
         self.assertIn(b'piano-relay-ok', self.read_until(b'piano-relay-ok', 10), 'no output of the command came back')
-        time.sleep(0.5)
-        before = cpu_seconds(self.proc.pid)
         time.sleep(1.5)
-        self.assertLess(cpu_seconds(self.proc.pid) - before, 0.5, 'the helper spins while idle')
         os.write(self.master, b'exit\n')   # a new shell starts: the banner again
         self.assertIn(b'a new shell on the tablet', self.read_until(b'(exit starts another)', 10))
         self.assertIsNone(self.proc.poll(), 'the helper exited')
+        before = child_cpu_seconds()
+        self.proc.kill()
+        self.proc.wait()
+        self.assertLess(child_cpu_seconds() - before, 0.5, 'the helper spins while idle')
 
 
 if __name__ == '__main__':

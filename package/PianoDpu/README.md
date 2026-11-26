@@ -24,7 +24,7 @@ flips, a ladder of four steps (`piano-dpu-flip=1..4`), the last of which serves 
 - Writing slices, each inert without its own argument (and all on top of `piano-dpu` >= 1): `piano-dpu-refresh=plan|60|120|auto`
   (B1c: 120 <-> 60 Hz by the vertical front porch, verified, reverted on an anomaly, an idle policy), `piano-dpu-pcc=1|2` (B1d: Night
   Light in the DSPPs' PCC from macOS's colour matrices), `piano-dpu-panel=1` (B1e: the panel's light sleep with display sleep over the
-  DSI command FIFO, the timing engines stopped slave first). One thread, its own page maps and a store guard that cannot reach TLMM.
+  DSI command FIFO, master-first shared CTL handoff). One thread, its own page maps and a store guard that cannot reach TLMM.
 
 Design, hardware facts, the staged plan, the boot arguments and the test plan with the expected lines: `docs/drivers/dpu.md`.
 

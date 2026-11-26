@@ -655,13 +655,18 @@ uint32_t flipPendingUnderruns(bool clear)
 
 void flipPanelBegin()
 {
-  if (IOLock *lock = __atomic_load_n(&gLock, __ATOMIC_ACQUIRE)) IOLockLock(lock);
+  if (IOLock *lock = __atomic_load_n(&gLock, __ATOMIC_ACQUIRE)) {
+    IOLockLock(lock);
+    gPanelPaused = true;   // drain the current flip, then reject new ones while the panel worker runs
+    IOLockUnlock(lock);
+  }
 }
 
 void flipPanelEnd(bool paused)
 {
-  gPanelPaused = paused;
   if (IOLock *lock = __atomic_load_n(&gLock, __ATOMIC_ACQUIRE)) {
+    IOLockLock(lock);
+    gPanelPaused = paused;
     IOLockUnlock(lock);
     gWatch.kick();
   }

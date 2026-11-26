@@ -12,11 +12,12 @@ namespace pianonet {
 // The network side's own counts (the NTB counts are the gadget core's ncm::NetStats). Frames are never logged, only counted.
 struct Counters {
   uint64_t sent, sentBytes, sendDrops, sendRefused;            // from macOS to the Mac: queued; queue full or link down; bad length
+  uint64_t txStalls, txRestarts;                              // family queue backpressure and service requests
   uint64_t received, receivedBytes, receiveDrops, notUp;       // from the Mac to macOS: delivered; no mbuf; interface not up
 };
 
 // From PianoDwc3::start, before the USB thread: the queues and the lock (false: no memory, no network function).
-bool init(const pianousb::ncm::NetStats *gadget);
+bool init(const pianousb::ncm::NetStats *gadget, bool txFlow);
 // A thread that waits for IOBSD, publishes the controller under owner, then hands received frames and link changes to macOS.
 bool startThread(IOService *owner);
 

@@ -81,13 +81,14 @@ static std::string directoryOf(const char *path)
 /* 0 compiled, 1 failed, -1 no compiler. */
 static int compile(const std::string &header,const char *language,const char *standard)
 {
-    char unit[]="/tmp/test_a830regs_XXXXXX";
-    const int fd=mkstemp(unit);
+    const char *tmp=std::getenv("TMPDIR");
+    std::string unit=std::string(tmp && *tmp ? tmp : "/tmp")+"/test_a830regs_XXXXXX";
+    const int fd=mkstemp(unit.data());
     if(fd<0)return -1;
     const std::string text="#include \""+header+"\"\nint a830_regs_unit_marker;\n";
-    if(write(fd,text.data(),text.size())!=ssize_t(text.size())) {close(fd);unlink(unit);return -1;}
+    if(write(fd,text.data(),text.size())!=ssize_t(text.size())) {close(fd);unlink(unit.c_str());return -1;}
     close(fd);
-    const char *argv[]={"xcrun","clang","-x",language,standard,"-Wall","-Wextra","-Werror","-Wpedantic","-fsyntax-only",unit,nullptr};
+    const char *argv[]={"xcrun","clang","-x",language,standard,"-Wall","-Wextra","-Werror","-Wpedantic","-fsyntax-only",unit.c_str(),nullptr};
     pid_t pid=0;
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
@@ -96,7 +97,7 @@ static int compile(const std::string &header,const char *language,const char *st
     posix_spawn_file_actions_destroy(&actions);
     int status=0;
     const int result=spawned?-1:waitpid(pid,&status,0)<0?-1:WIFEXITED(status) && !WEXITSTATUS(status)?0:1;
-    unlink(unit);
+    unlink(unit.c_str());
     return result;
 }
 

@@ -32,11 +32,4 @@ uint32_t flipPendingUnderruns(bool clear);   // underruns acknowledged by the in
 void flipPanelBegin();
 void flipPanelEnd(bool paused);
 
-// Serializes the PCC's CTL flush and latch with flips.
-IOLock *flipTransactionLock();
-
-// The panel worker calls these as a pair after the flip ladder has finished.
-void flipPanelBegin();
-void flipPanelEnd(bool paused);
-
 }  // namespace pianodpu

@@ -4,6 +4,7 @@
 // after DpuRefresh.h's own switch on the model), reads both DSI controllers' shadow and command-path words, and its text is bounded.
 //   c++ -std=c++20 -Wall -Wextra -Werror -I.. dpu_snapshot_host.cpp -o /tmp/dpu_snapshot_host && /tmp/dpu_snapshot_host
 #include "DpuSnapshot.h"
+#include "DpuPanel.h"
 #include "dpu_model.h"
 #include <cstdarg>
 #include <cstdio>
@@ -200,6 +201,26 @@ void testHalfSwitched()
   CHECK(t.has("mode: live is none of 144/120/90/60"));
   CHECK(t.has("vfp switch (DpuRefresh.h): a DSI TOTAL does not match") || t.has("vfp switch (DpuRefresh.h): INTF"));
 }
+
+void testPanelAsleep()
+{
+  model::Dpu m;
+  seedY12k(m);
+  CHECK(panel::panelOff(m, slices::readPath(m), panel::Options()).ok);
+  const size_t stores = m.stores.size();
+  Snapshot s;
+  take(s, Load{m}, true);
+  CHECK(m.stores.size() == stores);
+  CHECK(s.readable && !s.path.ok && s.path.ctl == 0 && s.path.intfActive == slices::kDsiIntfSlave && !s.path.intfMaster);
+  CHECK(s.ctlFlush == 0 && s.ctlIntfFlush == 0);
+  for (unsigned i = 0; i < 2; ++i) {
+    CHECK(!s.path.link[i].en && !s.path.link[i].status);
+    CHECK(s.path.link[i].frame == m.intf[i + 1].frames && s.path.link[i].frame > 0);
+  }
+  Text t;
+  format(s, 7, 0, t);
+  CHECK(t.has("ctl0: top f0000000 intf-active 00000004 master 00000000"));
+}
 }  // namespace
 
 int main()
@@ -210,6 +231,7 @@ int main()
   testGateClosed();
   testDsiClockOff();
   testHalfSwitched();
+  testPanelAsleep();
   if (failures) {
     std::printf("PianoDpu snapshot host tests: %d of %d checks FAILED\n", failures, checks);
     return 1;

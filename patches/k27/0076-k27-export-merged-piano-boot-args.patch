@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: UniXNU-piano <noreply@unixnu-piano.invalid>
+Date: Sat, 15 Nov 2026 16:00:00 +0800
+Subject: [PATCH] k27: kern.piano_bootargs: the merged boot-args readable from
+ userland (kern.bootargs keeps its clipped answer)
+
+kern.bootargs keeps its 1024-byte answer for the fixed-size readers (k27 0066's whole-argument clip), so a boot-args line whose
+ADT tail carries arguments past byte 1023 is invisible to our own tools: pianousb-shell's gate on piano-usb-shell would silently
+leave the root shell down, piano-usb-net would skip setting the USB network's debug address, and rotation and brightness
+sync would miss their settings.
+
+- kern.piano_bootargs (arm64 only): the whole merged line PE_boot_args() returns, DarwinBoot's line plus the ADT's tail when 0066
+  appended one, else the line as before. sysctl_io_string() with trunc 0 copies strlen+1 bytes, so a size-only query reports the
+  real length and a 4096-byte buffer (the merged buffer's own size, PIANO_BOOT_ARGS_SIZE) always suffices; a too-small buffer gets
+  ENOMEM, never a silent prefix. Read-only, the same access flags as kern.bootargs: no new privilege, and boot arguments still must
+  never carry secrets.
+- kern.bootargs, PE_boot_args_clip and the stackshot's record (PE_boot_args_bootloader) are untouched: Apple's and third-party
+  fixed-1024-byte readers keep exactly the answer they had.
+- No kernel-stack copy of the merged line: the handler hands PE_boot_args() itself to sysctl_io_string().
+
+The USB shell, USB network address helper, rotation agent and brightness sync read the new name, with kern.bootargs as a
+fallback for older kernels.
+
+---
+ bsd/kern/kern_sysctl.c              |  18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/bsd/kern/kern_sysctl.c b/bsd/kern/kern_sysctl.c
+index 0cbe61d..6df64e2 100644
+--- a/bsd/kern/kern_sysctl.c
++++ b/bsd/kern/kern_sysctl.c
+@@ -2376,6 +2376,24 @@ SYSCTL_PROC(_kern, OID_AUTO, bootargs,
+     NULL, 0,
+     sysctl_sysctl_bootargs, "A", "bootargs");
+ 
++#if defined(__arm64__)
++/* k27 0076: the whole merged boot-args (DarwinBoot's line plus the ADT's tail, 0066) for our own readers. kern.bootargs above
++ * keeps its 1024-byte whole-argument answer for the fixed-size readers. No kernel-stack copy: sysctl_io_string() reads
++ * PE_boot_args() itself; a size-only query reports the real strlen+1, a shorter buffer gets ENOMEM, never a silent prefix.
++ */
++STATIC int
++sysctl_piano_bootargs
++(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
++{
++	return sysctl_io_string(req, PE_boot_args(), 0, 0, NULL);
++}
++
++SYSCTL_PROC(_kern, OID_AUTO, piano_bootargs,
++    CTLFLAG_LOCKED | CTLFLAG_RD | CTLFLAG_KERN | CTLTYPE_STRING,
++    NULL, 0,
++    sysctl_piano_bootargs, "A", "Piano merged boot arguments (0066 ADT tail)");
++#endif
++
+ STATIC int
+ sysctl_kernelcacheuuid(struct sysctl_oid *oidp, void *arg1, int arg2, struct sysctl_req *req)
+ {
