@@ -4,7 +4,7 @@
 Synthetic GPT heads (built here, no device, no backup): the tooling's own unit's geometry, another unit's, and the shapes a
 profile must refuse. Run: python3 tooling/persist/test-unit-profile.py
 """
-import json, struct, subprocess, sys, tempfile, uuid
+import hashlib, json, struct, subprocess, sys, tempfile, uuid
 from pathlib import Path
 
 D = Path(__file__).resolve().parents[2]
@@ -151,5 +151,97 @@ with tempfile.TemporaryDirectory() as td:
     check('the CLI wrote a profile common accepts', json.loads(out.read_text())['root_write_plan']['first_lba'] == 107512576
           and common.apply_unit_profile(out) is not None)
 
+    # --- the installed ESP decides where the root goes (its UniXNU menu, read out of the image) -----------------------------
+    def esp_image(entries, default='macos', tail=0):
+        """A synthetic ESP: UniXNU's TOML menu as the real image holds it, the [boot] block above the entries, then NUL padding -
+        a builder that read only the first KiB would miss nothing, and one that sliced to the end of the last block would read a
+        gigabyte of padding (the real image pads 1,073,741,824 bytes; this fixture keeps both bounds honest)."""
+        text = ('version = 1\n[boot]\ntimeout = 3\n' + (f'default = "{default}"\n' if default else '')
+                + '[kits]\nautoload = false\n')
+        for e in entries:
+            text += f'[[entry]]\nid = "{e["id"]}"\ntype = "{e.get("type", "xnu")}"\n'
+            text += (f'action = "{e["action"]}"\n' if 'action' in e else
+                     f'path = "Payloads/kernel.macho"\ninitrd = "Payloads/scratch-data.img"\nargs = "{e["args"]}"\n')
+        return (text + '\0' * (tail or 4096)).encode()
+
+    root_args = 'native-ufs-root=1 native-ufs-root-part=%s data-store-part=%s data-store-lba=%d data-persist=2'
+    fastboot_args = 'native-ufs-root=0 data-persist=0'
+    good = esp_image([{'id': 'macos', 'args': root_args % ('linux_rootfs', 'linux_data', 117735999)},
+                      {'id': 'macos-diag', 'args': root_args % ('linux_rootfs', 'linux_data', 117735999)},
+                      {'id': 'fastboot', 'args': fastboot_args},
+                      {'id': 'reset', 'type': 'action', 'action': 'reset'}], tail=65536)
+    esp_ok = write(tmp, 'esp-good.img', good)
+    e = unit_profile.esp_entries(esp_ok)
+    check('esp_entries reads the whole menu, its default and each entry',
+          e['default'] == 'macos' and [x['id'] for x in e['entries']] == ['macos', 'macos-diag', 'fastboot', 'reset']
+          and e['entries'][0]['root_partition'] == 'linux_rootfs' and e['entries'][2]['mounts_ufs_root'] is False
+          and e['entries'][3]['action'] == 'reset' and e['entries'][3]['args'] is None,
+          f"{[x['id'] for x in e['entries']]}, default {e['default']}")
+    t = unit_profile.esp_write_target(esp_ok)
+    check('the write target is the default entry, not the first entry that mounts a root',
+          t['entry'] == 'macos' and t['root_partition'] == 'linux_rootfs' and t['store_first_lba'] == 117735999
+          and t['data_persist'] == 2 and t['esp_sha256'] == hashlib.sha256(good).hexdigest())
+    check('an entry with no args (an action) is not a kernel line', 'reset' in t['entries']
+          and t['entries']['reset']['root_partition'] is None)
+
+    for what, blob, why in (
+            ('an ESP whose default is an action is refused', esp_image(
+                [{'id': 'macos', 'args': root_args % ('linux_rootfs', 'linux_data', 100)},
+                 {'id': 'reset', 'type': 'action', 'action': 'reset'}], default='reset'), 'does not mount a UFS root'),
+            ('an ESP mounting a root without naming its partition is refused', esp_image(
+                [{'id': 'macos', 'args': 'native-ufs-root=1 data-store-part=linux_data'}]), 'without native-ufs-root-part'),
+            ('an ESP whose entries disagree about the root partition is refused', esp_image(
+                [{'id': 'macos', 'args': root_args % ('linux_rootfs', 'linux_data', 100)},
+                 {'id': 'macos-273', 'args': root_args % ('linux_data', 'linux_data', 100)}]), 'another partition'),
+            ('an ESP whose default mounts no UFS root is refused', esp_image([{'id': 'fastboot', 'args': fastboot_args}], default='fastboot'),
+             'does not mount a UFS root'),
+            ('an ESP whose [boot] default names no entry is refused',
+             esp_image([{'id': 'macos', 'args': root_args % ('linux_rootfs', 'linux_data', 100)}], default='nothing-here'),
+             'no entry is named by'),
+            ('an ESP with no menu is refused', b'\0' * 4096, 'no [[entry]] block'),
+    ):
+        try:
+            unit_profile.esp_write_target(write(tmp, f'esp-{abs(hash(what))}.img', blob))
+            check(what, False)
+        except SystemExit as ex:
+            check(what, why in str(ex), str(ex)[:70])
+
+    q = unit_profile.build(unit_profile.parse_head(write(tmp, 'ours-esp.bin', head(OURS))), ROOT_IMG,
+                           boot_esp=unit_profile.esp_write_target(esp_ok))
+    plan = q['root_write_plan']
+    check('with the ESP given, the plan lands on the partition its default entry mounts the root from',
+          (plan['partition'], plan['first_lba'], plan['last_lba'], plan['blocks']) ==
+          ('linux_rootfs', 102269696, 107381247, 5111552), f"{plan['partition']} {plan['first_lba']}..{plan['last_lba']}")
+    check('a root image crossing its partition tail reserve says so (the store is elsewhere, so it is allowed)',
+          plan['crosses_partition_reserve'] and plan['reserve_blocks_consumed'] == 130816
+          and plan['free_after_root_blocks'] == 131328, f"{plan.get('reserve_blocks_consumed')} reserve blocks consumed")
+    check('the ESP is recorded with the plan (a write binds to the menu that asked for it)',
+          q['boot_esp']['esp_sha256'] == hashlib.sha256(good).hexdigest() and q['boot_esp']['entry'] == 'macos')
+    check('without an ESP the plan stays the reference unit partition choice (linux_data)',
+          unit_profile.build(unit_profile.parse_head(write(tmp, 'ours-noesp.bin', head(OURS))),
+                             ROOT_IMG)['root_write_plan']['partition'] == 'linux_data')
+
+    esp_same = write(tmp, 'esp-same.img', esp_image([{'id': 'macos', 'args': root_args % ('linux_data', 'linux_data', 107600000)}]))
+    try:
+        unit_profile.build(unit_profile.parse_head(write(tmp, 'ours-same.bin', head(OURS))), ROOT_IMG,
+                           boot_esp=unit_profile.esp_write_target(esp_same))
+        check('a root image reaching the store on its own partition is refused', False)
+    except SystemExit as ex:
+        check('a root image reaching the store on its own partition is refused', 'Data store at 107600000' in str(ex), str(ex)[:70])
+    try:
+        unit_profile.build(unit_profile.parse_head(write(tmp, 'ours-big.bin', head(OURS))), 5242881 * LBA,
+                           boot_esp=unit_profile.esp_write_target(esp_ok))
+        check('a root image larger than the ESP root partition is refused', False)
+    except SystemExit as ex:
+        check('a root image larger than the ESP root partition is refused', 'linux_rootfs holds 5242880' in str(ex), str(ex)[:70])
+
+    # The CLI takes the ESP too, and the plan it writes agrees with the library.
+    esp_cli = tmp / 'cli-esp.json'
+    r = subprocess.run([sys.executable, str(D / 'tooling/persist/unit_profile.py'), '--lun0', str(ours),
+                        '--image-bytes', str(ROOT_IMG), '--esp', str(esp_ok), '--json', str(esp_cli)],
+                       capture_output=True, text=True)
+    w = json.loads(esp_cli.read_text())['root_write_plan']
+    check('the CLI with --esp writes the plan the ESP asks for', r.returncode == 2 and w['partition'] == 'linux_rootfs'
+          and w['first_lba'] == 102269696 and json.loads(esp_cli.read_text())['boot_esp']['entry'] == 'macos', f'rc={r.returncode}')
 print(f'\n{"FAILURES: " + ", ".join(FAILS) if FAILS else "all checks passed"} ({0 if not FAILS else len(FAILS)})')
 sys.exit(1 if FAILS else 0)

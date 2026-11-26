@@ -1,3 +1,16 @@
+## 2026-11-26 - 装机 ESP 自己说清了根该落在哪：`linux_rootfs`，不是 `linux_data`（写计划改成按 ESP 生成）
+
+**根因**：ESP 里 UniXNU 的 TOML 菜单才是布局的权威。读 `out/persistent/esp-device.img`（1 GiB，sha `68c28df15bcf55a5...`，与 `installed.json` 一致）：`[boot] default = "macos"`，该条目 `native-ufs-root=1 native-ufs-root-part=linux_rootfs data-store-part=linux_data data-store-lba=117735999 data-persist=2`。而 `make-root-image.sh` 头部写的"从 `linux_data` 首块写"是**参考机第一轮 27.3 的布局**。这就把上一轮 RAM 启动毫无反应解释干净了：ESP 要挂载根的那个分区，我们这台盘上从来没写过东西。`data-store-lba=117735999` 本身就是按我们几何算的（`linux_data` last+1 - 262144 reserve - 6291649 store），所以 ESP 构建时几何没错，错的只是根目标。
+
+**代码**：`unit_profile.py` 新增 `esp_entries()` / `esp_write_target()`（解析每个 `[[entry]]`，含动作型条目，以及 `[boot] default`；拒绝：无菜单、default 不挂 UFS 根、挂根却不写 `native-ufs-root-part`、条目之间根分区不一致），`build(boot_esp=...)` 按 **ESP 选的分区**出计划并按已知量设界：根与 store 同分区时不得越 `data-store-lba`；ESP 说 store 在别处时越本分区尾部 reserve 允许但**必须记录**（`crosses_partition_reserve`/`reserve_blocks_consumed`）；没给 ESP 时工具原本的保守规则生效（越界仍然拒绝）。CLI 加 `--esp`，ESP 的 sha256 写进 profile 的 `boot_esp`（写入与"要它的这份菜单"绑定）。条目读取限制在 16 KiB 内到下一个 NUL —— 真实镜像用 NUL 填满 1 GiB，初稿切到块尾会去 split 一 GiB 填充（fixture 把两端都钉住）。`test-unit-profile.py` **39 项全绿**，其中两项在写的时候抓到真 bug：局部变量把新参数遮蔽（计划悄悄还落在 `linux_data`），以及新分支一度**丢掉**了"没给 ESP 时越 reserve 要拒绝"这条既有守卫 —— 现在都有断言，不靠记忆。
+
+**可写的两份根镜像**：`out/piano-stock-root-26C5035r.img` 17,547,919,360 B sha `db3629e5da012ce76e64c0f42739ada9541ed8cca5adaab32256fc9b64b34ef7`（SHNGROOT **v2**、4 个窗口、manifest 自声明大小等于文件长度；11-21 已逐块对过公开锚：OS 3,538,432 块、SystemOS 712,192 块，改一字节即拒）→ 本机计划 first `102269696`、4,284,160 块、末 `106553855`、余 `958,720` 块、**reserve 不动、store 不动**；`root.img`（27.3 线）19.5 GiB 也放得下但会吃掉尾部 reserve 的 130,816 块。计划已生成到 `out/unit-profile/piano-7ccdd855-root-on-rootfs.json`，哈希记入 `artifacts/ARTIFACTS.md`。
+
+**仍未闭合的配对风险（写清以免误报）**：装机集合里的内核**不是本机构建** —— `piano-ufs264.kc`（147,095,552 B `529265c7839c...`）内嵌 `Darwin Kernel Version 25.5.0: ... root:ios-obj/DEVELOPMENT_ARM64_BCM2837`（11-15 留存），本机内核串是 `27.0.0 ... zhangqi:k27-native-obj`（`12d3088a...`）。文档里那份 27.3 内核集合（`3fd3ed71...`）两台机器都没有，自建集合要原生 kext 对象（即 `storage-abi` 缺口）。所以"在这份 ESP 下写 27.3 根"是把 27.3 系统配到留存 25.5.0 内核上的一次**合法实验**，控制台会给出答案（`native-ufs-diagnostics=1` 开着）；但无论成不成都不能报成"我们自建产物启动了"。
+
+**下一步顺序**：(1) 设备回总线后维护 RAM 镜像只读：`linux_rootfs` 首块（先确认没有陈旧 SHNGROOT manifest）、`linux_data` 首块与 117735999 处 store（必须是 seed `48dbc08d...` 那份）；(2) 按 profile 写 stock-root 镜像、整区读回哈希、装机 ESP 从盘启动并抓控制台；(3) 若内核拒绝这个配对，则说明 ESP 必须换成我们自己的集合，`storage-abi` 就重新成为"自建产物启动"的阻塞点，切换/持久化验收按实际启动的东西如实标注。本轮设备不可达（需现场供电），未做任何写入。
+
+详见 `docs/results-2026-11-26-root-image-and-esp-line.md`。
 ## 2026-11-26 - v5 的 RAM 启动后平板从 USB 总线消失（需现场供电）；顺带结掉两件事
 
 跑的是 `fastboot boot out/persistent/boot-piano-macos-persistent-v5-ufs.img`（100,663,296 B，sha `5de858b8157e9572...`），同时用 `tooling/native/usbcap.py` 抓 PianoDwc3 的 CDC-ACM（`1209:0001`）210 秒。`Sending/Booting OKAY`，控制台 **0 字节**；设备回到 ABL fastboot，`fastboot oem log` 无响应，随后**完全从 USB 总线消失**（无 fastboot、无 adb、无串口，轮询约 9 分钟无变化）。主机侧没有任何命令能从这个状态恢复，**需要现场给电（长按电源到重启，或充一会儿再开机）**。这是本目标里第一次出现"RAM-only 启动之后需要物理操作"，按风险记录，不当成正常步骤。

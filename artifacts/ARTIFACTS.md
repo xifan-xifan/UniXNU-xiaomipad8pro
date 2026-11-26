@@ -403,3 +403,17 @@ kernel: **BUILT_ON_SECOND_HOST, NOT YET BOOTED ON THE TABLET**. It is an input t
 
 `K27_TREE_TOP=0066` is the configured baseline series; 0067-0075 are applied to the 27.3 clone by
 `tooling/k273/prepare-k27-tree.sh`, so `out/k27/kernel-k27-0066-native.macho` is the name that tool measures.
+
+
+## 2026-11-26 - the root images this unit can be written with, and the ESP each one fits
+
+| File | Bytes | SHA-256 | What |
+|---|---|---|---|
+| `out/inputs/k273/root/root.img` (the desk Mac) | 20936916992 | e682bd1f9b9c24744b535743cb7f1278be41c310640e744288057826f5e2165b | the 27.3 line's root image (SHNGROOT manifest + the unchanged 26C5035r OS container + our SystemOS window). Its recorded `root.json` write plan is the **reference unit's** (`linux_data` at 71789568) and must not be followed here |
+| `out/piano-stock-root-26C5035r.img` (this machine, 2026-11-22) | 17547919360 | db3629e5da012ce76e64c0f42739ada9541ed8cca5adaab32256fc9b64b34ef7 | the stock-window SHNGROOT v2 root (4 windows, self-declared size equal to the file), verified block by block against the archived public anchors on 2026-11-21; the one that fits this unit's `linux_rootfs` without eating its tail reserve |
+| `out/persistent/esp-device.img` (installed 2026-11-24 23:23) | 1073741824 | 68c28df15bcf55a589441df37e9c5fd94614e2771c437e955f190e3eb0aab898 | the installed ESP. Its menu is now the authority on the layout: default entry `macos`, `native-ufs-root-part=linux_rootfs`, `data-store-part=linux_data`, `data-store-lba=117735999`, `data-persist=2`. Its collection carries a retained kernel (`Darwin Kernel Version 25.5.0 ... root:ios-obj`), **not** one built here |
+
+The write plan for this unit is generated, not copied: `tooling/persist/unit_profile.py --lun0 HEAD --lun4 HEAD --image-bytes
+17547919360 --esp out/persistent/esp-device.img --json out/unit-profile/piano-7ccdd855-root-on-rootfs.json` -> root at
+`linux_rootfs` first block 102269696, 4284160 blocks, last 106553855, 958720 blocks free, tail reserve untouched, Data store on
+`linux_data` untouched. See [results-2026-11-26-root-image-and-esp-line.md](../docs/results-2026-11-26-root-image-and-esp-line.md).
