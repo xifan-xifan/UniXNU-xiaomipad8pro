@@ -119,6 +119,30 @@ netsh advfirewall firewall add rule name="piano-maint-usb-link" dir=in action=al
 Ports 8000 (the tablet's `wget`) and 9000 (the export/restore streams) are the session's own, and the scope is the USB link's
 subnet only. The same command with `delete rule` instead of `add rule ... enable=yes` undoes it.
 
+## The session to run, once inbound on the link is allowed
+
+Nothing else about it is special: the tablet is driven from ABL, and the session boots the maintenance image itself.
+
+```
+set PIANO_SERIAL=7ccdd855
+set PIANO_MAINT_HOST=192.168.88.2
+set PIANO_V110=E:\project\UniXNU-xiaomipad8pro\out\inputs\maintenance-ubuntu
+set PIANO_UNIT_PROFILE=E:\project\UniXNU-xiaomipad8pro\out\unit-profile\piano-7ccdd855.json
+set PIANO_BACKUP_DIR=E:\piano-backups
+set PATH=E:\project\UniXNU-xiaomipad8pro\out\pt33\platform-tools;%PATH%
+python tooling\persist\maint-session.py --session out\persistent\session-shim-root-20261127c `
+  maint-boot map linux-data-root check maint-exit `
+  --root-part linux_rootfs --root-image out\root-shim\piano-shim-root-26C5035r.img `
+  --root-sha256 9e4ef50579b3ee5d443431d76434360ee9b0b02e8dbe443d3422e98532a78356 `
+  --root-overwrite-holds out\piano-stock-root-26C5035r.img
+```
+
+Before any write it must print, from the medium: the 4,284,160 blocks of `db3629e5…` it replaces and the 867,328 further blocks
+reading zero. After the write it re-reads all 5,151,488 blocks and compares them to `9e4ef505…`. The `check` step afterwards may
+still complain that the store on the tablet is of seed `8e1a87e1` while the installed ESP resumes `7e9bd39b`; that is the known
+deferred item (the ESP has to be rebuilt with this root's SystemOS UUID and this seed), and it does not affect the write.
+`PIANO_MAINT_HOST` is what the tablet offers; re-discover it if the link redials (`tooling/native/probe-usb-net.py 192.168.88.10`).
+
 ## Not established
 
 No device boot of this root, no `NativeUfs: published SystemOS`, nothing about `mount-phase-1`, a desktop, GPU, input, network,
