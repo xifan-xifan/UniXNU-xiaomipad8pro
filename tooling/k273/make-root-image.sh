@@ -42,7 +42,7 @@ python3 - "$O/manifest/layout.json" "$O/root.img" <<'EOF'
 import json, sys
 layout, image = json.load(open(sys.argv[1])), sys.argv[2]
 with open(image, 'r+b') as target:
-    for w in layout['windows']:
+    for w in layout['entries']:
         target.seek(w['offset'])
         with open(w['image'], 'rb') as source:
             while chunk := source.read(64 << 20):
@@ -70,6 +70,7 @@ record = {
     'os_volume_uuid': '84581E99-85BE-4957-AC53-2947E887B3E4', 'systemos_volume_uuid': sysos['volume_uuid'],
     'image_bytes': size, 'image_sha256': sha, 'manifest_sha256': hashlib.sha256((o / 'manifest/manifest.bin').read_bytes()).hexdigest(),
     'windows': [{k: w[k] for k in ('name', 'offset', 'size', 'sha256')} for w in layout['windows']],
+    'objects': [{k: w[k] for k in ('name', 'offset', 'size', 'sha256')} for w in layout['objects']],
     'write': {'partition': 'linux_data', 'lun': 0, 'lba_bytes': 4096, 'partition_first_lba': first, 'partition_blocks': blocks,
               'first_lba': first, 'last_lba': first + need - 1, 'blocks': need,
               'untouched': f'linux_data blocks {need}..{blocks - 1} (the rest of the partition, the later Data store window at its end)'},
