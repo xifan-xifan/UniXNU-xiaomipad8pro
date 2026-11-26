@@ -1,3 +1,26 @@
+## 2026-11-26 - 读回通道真相（冷会话可读、热会话必坏）与"载荷已带中断路径"
+
+**读回**：`oem dump` 与 11-25 记的恰好相反 —— **热会话必坏、冷会话可读**（Android→ABL→reader 后第一条命令就 dump：
+`8c0004000` 256 B 全零、`8c5912880` 8192 B 有 4811 个非零；探针刚跑完的热会话同一地址一律 `Too many links`）。
+两个坑：成功的 dump 之后主机第一次 `fastboot devices` 会永久挂死（本轮两次），`adb reboot bootloader` 间歇不枚举（重试一次即可）。
+冷读到的那份 8192 B **不是**探针表（u32 对、单调递增，`decode-slots.py --scan` 无命中），所以下一步先做对照实验：
+探针 → 回 Android → 冷 reader 读同一页比对，判断中间启动是否覆盖 DRAM，再决定窗口扫描是否可用。详见
+`docs/results-2026-11-26-dump-channel-cold-only-and-payload-has-interrupts.md`。
+
+**载荷**：把 `boot-piano-ufs266-smprobe.img` 的 ramdisk FAT 真解开（`build-boot.py` 分区 + `common.fat32_read`），
+`EFI/UniXNU/Payloads/kernel.macho` 147,095,552 B `9f276dff…` 明文含 `piano_gicv3_init`×10 等符号，即**它就是那份带
+GICv3/架构定时器的集合**，不需要"从 kernelcache 提内核"；发布镜像里确实没有（分区无压缩成员）。装机 ESP 用的
+`piano-ufs264.kc` 同族，"基座内核缺中断路径"只对 `blendfix.macho` 那条链成立。
+
+**无人值守地基**：装机 ESP 是 daily，带 `piano-boot-guard=180`；180 s 内没 `launchd` 就 PSCI 复位**进 ABL fastboot**，
+而 `fastboot reboot` 从 ABL 会启动装机系统 —— 不成功的 macOS 启动可由主机一条命令送回 Android，不需要按键；
+已知反例只有 11-26 早上 v5 RAM 启动后整机掉总线。
+
+**更正前文**：本文件 11-26 早些时候"这台盘上从来没往 `linux_rootfs` 写过东西"不成立（11-24 的 `map` 已读到 `SHNGROOT`
+manifest，哈希与本机 `piano-stock-root-26C5035r.img` 第 0 块逐字节相同），以
+`docs/results-2026-11-26-record-check-root-store-and-header-tree.md` 为准；那份写根镜像的 profile 只作校验用。
+
+本轮设备侧只读：探针 RAM 启动 1 次（37.3 s 自动回 ABL）、reader RAM 启动 3 次，全程 `slot-retry-count:a` 6，无任何写入。
 ## 2026-11-26 - 装机 ESP 自己说清了根该落在哪：`linux_rootfs`，不是 `linux_data`（写计划改成按 ESP 生成）
 
 **根因**：ESP 里 UniXNU 的 TOML 菜单才是布局的权威。读 `out/persistent/esp-device.img`（1 GiB，sha `68c28df15bcf55a5...`，与 `installed.json` 一致）：`[boot] default = "macos"`，该条目 `native-ufs-root=1 native-ufs-root-part=linux_rootfs data-store-part=linux_data data-store-lba=117735999 data-persist=2`。而 `make-root-image.sh` 头部写的"从 `linux_data` 首块写"是**参考机第一轮 27.3 的布局**。这就把上一轮 RAM 启动毫无反应解释干净了：ESP 要挂载根的那个分区，我们这台盘上从来没写过东西。`data-store-lba=117735999` 本身就是按我们几何算的（`linux_data` last+1 - 262144 reserve - 6291649 store），所以 ESP 构建时几何没错，错的只是根目标。
