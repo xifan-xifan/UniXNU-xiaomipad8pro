@@ -453,7 +453,7 @@ class Session:
         self.log(f'  tablet# {command}')
         if not self.execute:
             return None
-        r = subprocess.run(['python3', str(MAINT_SHELL), command, str(timeout)], capture_output=True, text=True, timeout=timeout + 30)
+        r = subprocess.run([sys.executable, str(MAINT_SHELL), command, str(timeout)], capture_output=True, text=True, timeout=timeout + 30)
         out = r.stdout.replace('\r', '')
         for line in out.strip().splitlines()[-40:]:
             self.log('        | ' + line)
@@ -1922,7 +1922,7 @@ def maint_exit(s):
     """piano-maint fastboot: the maintenance image reboots into ABL fastboot."""
     s.log('  tablet# sync; piano-maint fastboot')
     if s.execute:
-        subprocess.run(['python3', str(MAINT_SHELL), 'sync; piano-maint fastboot', '20'], capture_output=True, text=True, timeout=60)
+        subprocess.run([sys.executable, str(MAINT_SHELL), 'sync; piano-maint fastboot', '20'], capture_output=True, text=True, timeout=60)
     if not s.wait(s.serial, True, 120):
         raise Stop('not back in ABL fastboot')
 
@@ -1957,7 +1957,7 @@ def ram_test(s, image, expect_uefi, reset_after):
     s.log(f'  host$ python3 tooling/native/xnu-log.py decode {name}-xnu.bin > {name}-xnu.txt')
     s.log(f'  check the Data store opens at LBA {store_new(s)} (the new partition end): "NativeRamBlock: Data store state ... first LBA"')
     if s.execute:
-        r = subprocess.run(['python3', str(XNU_LOG), 'decode', str(s.dir / f'{name}-xnu.bin')], capture_output=True, text=True)
+        r = subprocess.run([sys.executable, str(XNU_LOG), 'decode', str(s.dir / f'{name}-xnu.bin')], capture_output=True, text=True)
         (s.dir / f'{name}-xnu.txt').write_text(r.stdout)
         for line in r.stdout.splitlines():
             if re.search(r'NativeRamBlock: Data store|NativeUfs:.*(root|window|store)|panic\(|launchd\[1\]', line):
