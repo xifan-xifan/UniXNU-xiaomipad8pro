@@ -1249,7 +1249,7 @@ static uint64_t hostDmaAddress (const void *va)
 // native-ufs-direct: clean and invalidate physical pages to the point of coherency (the kernel's own routine for incoherent I/O, by the
 // physical aperture or a CPU window per page). `remaining` 0 always: a larger one would let it flush the whole cache by set/way.
 extern "C" void dcache_incoherent_io_flush64 (addr64_t pa, unsigned int count, unsigned int remaining, unsigned int *res);
-static void hostFlushPhys (const UfsPrd *prd, unsigned prds)
+static void __attribute__((unused)) hostFlushPhys (const UfsPrd *prd, unsigned prds)
 {
   const uint64_t start = hostPerfNow ();
   uint64_t bytes = 0;

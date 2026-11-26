@@ -599,7 +599,7 @@ static unsigned hostPrdsFromSegments (Segments &segments, uint64_t offset, uint6
 // hostRead4k. The caller cleans the pages before and invalidates them after (dataSynced); nothing is copied.
 // *live (when given): set when the read's own command was rung and did not complete (hostAwait): its pages may still be the
 // controller's (review H1, 2026-11-14: only then may a caller hold them).
-static IOReturn hostReadPrd (uint8_t lun, uint64_t lba, uint32_t blocks, const UfsPrd *prd, unsigned prds, bool *live = nullptr)
+static IOReturn __attribute__((unused)) hostReadPrd (uint8_t lun, uint64_t lba, uint32_t blocks, const UfsPrd *prd, unsigned prds, bool *live = nullptr)
 {
   if (live) *live = false;
   if (!gHost.ready || !prd || !prds || prds > kMaxPrds || !blocks || blocks > kXferMax / 4096 || lba > 0xffffffffULL - (blocks - 1))
