@@ -39,7 +39,6 @@ checked); commands go through tooling/native/maint-shell.py (PIANO_MAINT_HOST). 
 """
 import argparse
 import errno
-import fcntl
 import hashlib
 import http.server
 import json
@@ -54,6 +53,13 @@ import threading
 import time
 import zlib
 from pathlib import Path
+
+try:
+    import fcntl
+except ModuleNotFoundError:
+    # Windows has no fcntl, so the two host read-backs go through the file cache and the session says so in its log.
+    # What a write step proves about the medium is read back by the tablet itself, and that path does not change.
+    fcntl = None
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common  # noqa: E402
@@ -170,7 +176,8 @@ def read_nocache(path, digest=None):
     DIGEST (a hashlib object) is fed them."""
     fd = os.open(path, os.O_RDONLY)
     try:
-        fcntl.fcntl(fd, fcntl.F_NOCACHE, 1)
+        if fcntl:
+            fcntl.fcntl(fd, fcntl.F_NOCACHE, 1)
         while chunk := os.read(fd, 4 * MiB):
             if digest is not None:
                 digest.update(chunk)
@@ -613,7 +620,8 @@ class Session:
         h = hashlib.sha256()
         fd = os.open(path, os.O_RDONLY)
         try:
-            fcntl.fcntl(fd, fcntl.F_NOCACHE, 1)
+            if fcntl:
+                fcntl.fcntl(fd, fcntl.F_NOCACHE, 1)
             while chunk := os.read(fd, 4 * MiB):
                 h.update(chunk)
         finally:
@@ -2674,6 +2682,10 @@ def main():
     s = Session(a)
     s.log(f'== {time.strftime("%Y-%m-%d %H:%M:%S")} {"RUN" if s.execute else "DRY RUN"}: {" ".join(a.steps)}')
     localnet_preflight(s)
+    if fcntl is None:
+        s.log('  info  this host has no fcntl, so the host-side read-backs (a stored backup, the written image) go through'
+              'the file cache; every read-back of the medium is done by the tablet itself with its caches dropped, and'
+              'that is the check a write step stops on')
     todo = [('rollback', n) for n in a.steps[1:]] if a.steps[0] == 'rollback' else [('step', n) for n in a.steps]
     try:
         for kind, name in todo:
