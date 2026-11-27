@@ -515,8 +515,10 @@ mode = "0644"
 
 [[unit]]
 name = "gop-shot"
-about = "the internal panel's scanout as a PNG (docs/drivers/native-gop-display.md 9): reads machdep.native_gop_display_shot, so the boot line needs native-gop-display-shot=1 and the caller needs root. Off by default: a daily image has no reason to carry it, and a flip-mode boot is otherwise judged by what the CPU sampler guesses rather than by the bytes the DPU is scanning. --on gop-shot for an acceptance boot whose picture has to be read."
-default_on = false
+about = "the internal panel's scanout as a PNG (docs/drivers/native-gop-display.md 9): reads machdep.native_gop_display_shot, so the boot line needs native-gop-display-shot=1 and the caller needs root. It exists because a flip-mode boot cannot be judged from the console: while the DPU scans, NativeGopDisplay copies nothing and its non-black line refers to an older frame, so the bytes the DPU is scanning are the only honest reading of the panel."
+default_on = true
+
+
 
 [[unit.file]]
 source = "tooling/native/gop-shot/gop-shot.c"
