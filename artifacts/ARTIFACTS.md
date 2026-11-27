@@ -508,3 +508,16 @@ Inputs and their verification:
 frontend patches, which are what `build-turnip-a830.sh` adds; `frontend/0002` is retired on this frontend and the other ten apply. Built,
 to be run: never on the tablet. Read
 [results-2026-11-27-frontend-patches-on-fb063de.md](../docs/results-2026-11-27-frontend-patches-on-fb063de.md).
+
+
+## 2026-11-27 (night) - the first RAM image whose Metal device is the real Adreno 830
+
+`out/ram-verified-8748-a830/boot-piano-macos-ram-A-bundled.img` on the Mac build host (203,726,848 bytes,
+`da9bb4595cfc8f903e58b52f81d5f6114a5e16205ba266fd0d1f1bf575c2dff8`; UEFI wrapper `eb570025859ee90f3b3fb96d3b41414ceda5bf34747a9e94a1ad6dca57e1d128`),
+built by `out/build-a830-8748.sh`: the verified 27.3 assembly (kernel `d921655f…`, KC `03e6501e…`) with PianoA830 linked, the gen80000
+firmware embedded from `PIANO_GPU_FW` (four pins), and `NativeAdrenoMetal.bundle` - the plugin built here from our bridge, our Turnip and the ten
+frontend patches (`e749f767d1a8c3ef81289887c258f66c4dead025`, 23,337,264 bytes, staged at `/Library/GPUBundles/` with its dylib's CDHash in the
+trust cache). Its command line is 882 bytes with `piano-gpu=2 piano-gpu-delay=20` on it and needs no ADT split; the GPU arguments pushed the
+line past the under-1000 budget with `-v`, so the recipe runs `PIANO_FAST_BOOT=1` (docs/boot-time.md: no `-v`, no `droidvm-disable-jobs`, which
+nothing in the native KC reads; the console still mirrors into the pstore mailbox). `verify-ram-images.py` passes every container check; its
+payload listing needs `mdir` (mtools), which neither host has, so that one check is not run. First boot: `logs/native-runs/ram-k273-a830-20261127-193736`.
