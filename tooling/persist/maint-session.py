@@ -503,9 +503,19 @@ class Session:
 
     def require_backup(self, key, sha=None):
         entry = self.state.get('backups', {}).get(key)
+        record = key          # the key the entry is filed under, once a search below can change it
         if not self.execute:
             self.log(f'  check verified NAS backup of {key} exists (step backup)')
             return entry
+        if sha is not None and (not entry or entry.get('verified') is not True or entry.get('sha256') != sha):
+            # What a step is about to replace can be the bytes this install wrote, and step backup keeps those under
+            # their own key because the stock boot_a backup has to stay the Android rollback: a verified backup that
+            # holds exactly these bytes is the recovery source this gate asks for, whichever key it sits under.
+            for other, candidate in sorted(self.state.get('backups', {}).items()):
+                if other != key and candidate.get('verified') is True and candidate.get('sha256') == sha:
+                    self.log(f'  info  {key}: the verified backup of {sha[:16]} is recorded as {other}')
+                    entry, record = candidate, other
+                    break
         if not entry or entry.get('verified') is not True or (sha is not None and entry.get('sha256') != sha):
             raise Stop(f'no verified NAS backup of {key}{" with sha256 " + sha[:16] if sha else ""}: run step backup first')
         name, file, digest = self.state.get('backup_name'), entry.get('file'), entry.get('sha256')
@@ -525,7 +535,7 @@ class Session:
                 manifest = json.loads(path.with_name('manifest.json').read_text())
                 checksums = path.with_name('SHA256SUMS').read_text()
                 matches = [line for line in checksums.splitlines() if line[66:] == file]
-                complete = checksums.endswith('\n') and manifest['backups'][key] == entry and matches == [f'{digest}  {file}']
+                complete = checksums.endswith('\n') and manifest['backups'][record] == entry and matches == [f'{digest}  {file}']
             except (OSError, ValueError, KeyError, TypeError):
                 complete = False
             label = 'ESP' if key == ESP_BACKUP else key
@@ -1698,6 +1708,13 @@ def backup_step(s):
                s.state['backups']['lun0-gpt-backup']['sha256'] == common.GPT_BACKUP_SHA256, 'the GPT backups equal CRITICAL-BACKUP new-primary/new-backup.bin')
     for key in ('boot_a', 'boot_b', 'vendor_boot_a', 'init_boot_a'):
         s.backup(key, s.nodes[key], 0, s.sizes[key] // MiB, MiB, f'partition {key} (whole)')
+    # What is on boot_a now is usually not the stock image, and the stock backup stays the Android rollback, so the
+    # bytes a later boot_a write would overwrite get their own verified entry (2026-11-28: slot-success-crc stopped
+    # asking for a backup of the sealed boot_a, and step backup had no way to record one).
+    live = s.region_sha(s.nodes['boot_a'], 0, s.sizes['boot_a'] // MiB, MiB, name='sha-boot_a-live')
+    if live is not None and live != s.state.get('backups', {}).get('boot_a', {}).get('sha256'):
+        s.backup(f'boot_a-live-{live[:12]}', s.nodes['boot_a'], 0, s.sizes['boot_a'] // MiB, MiB,
+                 f'boot_a as it stands ({live[:16]}), not the stock backup: the bytes a later boot_a write replaces')
     s.backup('linux_rootfs-tail-esp', lun0, common.ESP_FIRST, common.ESP_BLOCKS, B,
              f'LUN 0 LBA {common.ESP_FIRST}-{common.ESP_FIRST + common.ESP_BLOCKS - 1}: the end of linux_rootfs that becomes partition 37')
     plan = store_plan(s)
