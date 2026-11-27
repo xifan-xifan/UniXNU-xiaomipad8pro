@@ -42,6 +42,7 @@ export PIANO_BOOT_FD_RAM_WINDOW=1
 # (common.store_args_of), which for this root has no 24 GiB window at all - the first boot would look for the store header elsewhere,
 # find a blank window and initialise it over the installed root. linux_data at 117735999 is where the store resumed across three
 # reboots tonight, and it is what the ESP now on the medium says (out/unit-profile/piano-7ccdd855-shim.json boot_esp).
+# The clock stays the base's droidvm-utc: putting date +%s here would make the image differ on every rebuild, and the ESP has to be byte-reproducible for the pair to be re-flashed later. The calendar on a real boot comes from the PMIC RTC (kc has the RTC calendar), and settime.sh only acts while the clock still reads near 1970.
 STORE_PART=$(python3 -c "import json,os;print(json.load(open(os.environ['PIANO_UNIT_PROFILE']))['boot_esp']['store_partition'])")
 STORE_LBA=$(python3 -c "import json,os;print(json.load(open(os.environ['PIANO_UNIT_PROFILE']))['boot_esp']['store_first_lba'])")
 # The seed whose store is on the medium, so the build record states same_seed instead of guessing (NativeRamBlock: seed bb6dd1c3).
@@ -52,7 +53,7 @@ python3 tooling/persist/build-boot.py --series 5 --fd out/fd/piano-uefi-A-bundle
 python3 tooling/k273/build-k273-esp.py --base out/persistent/esp-device.json --entry macos --name esp-7ccdd855-k273 --out out/persistent \
   --kc out/k27/kc-k27-native.bin --adt out/adt/piano-k27.adt \
   --trust out/a830-shot-stage/kernel.macho.trustcache --seed out/a830-shot-stage/scratch-data.img \
-  --arg piano-usb-shell=1 --drop-arg piano-usb-hid --arg droidvm-utc=$(date +%s) \
+  --arg piano-usb-shell=1 --drop-arg piano-usb-hid \
   --arg piano-reset-after=$DIAG_AFTER --arg piano-reset-to=bootloader \
   --root-part linux_rootfs --expect-seed $EXPECT_SEED --expect-store-part $STORE_PART --expect-store-lba $STORE_LBA \
   --diag-reset-after $DIAG_AFTER --firmware-dir "${PIANO_ESP_FIRMWARE_DIR:-/Users/zhangqi/Codex/k273-esp/inputs/firmware}"
