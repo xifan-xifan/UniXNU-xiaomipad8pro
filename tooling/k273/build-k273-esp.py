@@ -41,6 +41,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -224,8 +225,14 @@ def build(a, base_json, base, base_img, image):
             raise SystemExit(f'{a.entry}\'s collection links {vm_era}: the native kext rule allows only this repository\'s kexts')
         window = common.adt_ram_window(adt)
         recorded_window = (base.get('k273') or {}).get('ram_window') or base.get('ram_window')
+        if recorded_window and window != recorded_window and os.environ.get('PIANO_BOOT_FD_RAM_WINDOW') != '1':
+            raise SystemExit(f"{a.entry} ADT asks for {window} bytes of RAM window, its base record {recorded_window}: an ADT of "
+                             "another era on this base (PIANO_BOOT_FD_RAM_WINDOW=1 says the installed boot_a FD takes this window)")
         if recorded_window and window != recorded_window:
-            raise SystemExit(f'{a.entry}\'s ADT asks for {window} bytes of RAM window, its record {recorded_window}')
+            build_esp.loud(f"{a.entry} ADT asks for {window >> 20} MiB of RAM window where {base_json.name} recorded "
+                           f"{recorded_window >> 20} MiB: this ESP goes on a boot_a whose FD takes it (the darwinboot window "
+                           "patch, PIANO_BOOT_FD_RAM_WINDOW=1), and maint-session.py still checks that pair against the tablet's "
+                           "own boot_a before it writes")
         if common.adt_addon_slot(adt):
             raise SystemExit(f'{a.entry}\'s ADT has the GpuAddon slot of a RAM test image')
         seed = common.seed_info(seed_file)
