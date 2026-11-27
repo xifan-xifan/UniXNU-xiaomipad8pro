@@ -1717,3 +1717,22 @@ Mesa `Droid-VM/mesa cecc0e9`、`Shad0w23333/Adreno830 1a13210`、`steelbrain/met
 `/Users/zhangqi/Codex/turnip-mesa-check/.cache/mesa-work`（12842 个文件），顺序记在 `/tmp/mesa-order.log`。
 下一步是 `tooling/metal/build-turnip-a830.sh` 还缺的两件：`drivers/AdrenoMetal`（公开 `UniXNU/AdrenoMetal`，按 NativeMetal fb063de 那条 pin）
 和桥 `out/metal/bridge/libnative_metal_bridge.a`（用 k27 树公开的 `scripts/build-metal-bridge-macos.py` 现编）。
+## 2026-11-27（续）- A830 的 Turnip 已经在本机编出来了（公开输入），只差 Metal 桥；桥的输入也逐个查过是公开的
+
+顺序：Mesa 树按“谁能解锁最多”排出来（23 个补丁 0 fuzz，剩 `turnip-gmem-mutable-swap`、`turnip-render-mode-for-attachment-memory`
+怎么都不合，用掉的 21 正好等于 UPSTREAM 记的 21）；我们自己的 15 个 `tooling/metal/turnip-a830/mesa/*.patch` 在其上全部干净套用
+—— 这等于证明重建出来的就是 VM 那份工作树。补两件宿主缺的东西：`DroidVMVirtgpuABI.h` 用公开的 `Droid-VM/NativeAdreno` main +
+k27 树那 6 个 `patches/droidvm-gpu/NativeAdreno` 补丁生成；`glslangValidator` 用 Khronos macOS universal 16.6.0 放到
+`/Users/zhangqi/bin`（启动构建时 PATH 要带上这个目录，否则 meson 找不到）。产物：
+`out/turnip-a830/build/src/freedreno/vulkan/libvulkan_freedreno.dylib`（17,770,312 B，`6eeb3d2d…`，arm64e，
+`PASS: 5633 weak flat-namespace imports of 5907`）。脚本停在
+`no bridge at out/metal/bridge/libnative_metal_bridge.a`。
+桥的输入全查过：`Droid-VM/NativeMetal` main（`bridge/NativeMetalBridge.rs`、`bridge/patches` 7 个、`shaders/scanout_convert.ll`）、
+`Droid-VM/UniXNU@wip/droidvm` 的 `patches/metal2vulkan` 28 个、`steelbrain/metal2vulkan@963f0e64`、k27 树的
+`configs/arm64e-apple-darwin.json` 与 `patches/metal2vulkan-macos` 都在本机。要动的地方：那份脚本是按 Linux 写的（LLVM 21 的
+`clang` 编 C/asm、`llvm-as` 造三个 `.ll` fixture），在 macOS 上要用 Xcode clang，并把 `llvm-as` 换成 `clang -x ir`；
+nightly Rust + `rust-src` 正在从网络快的机器下载再拷过去（Mac 直连 static.rust-lang.org 很慢、raw.githubusercontent 直接不通）。
+细节与证据见 [results-2026-11-27-turnip-a830-built-on-this-mac.md](docs/results-2026-11-27-turnip-a830-built-on-this-mac.md)。
+顺带记一句历史资产：WSL 发行版 `UbuntuPiano` 里有上一轮深度任务的树（`/root/piano-native`：`k27-tree`、`UniXNU`、`device` 等）
+和 2026-11-14 的 `NativeAdrenoMetal*.bundle`，但那些 `gpu-build.json` 全是 `target=ios chip=a740 mesa=85fda3b364`，
+是 iPadOS/Adreno740 那条，不能当 native A830 的插件用。

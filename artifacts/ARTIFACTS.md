@@ -471,3 +471,12 @@ Accessibility preference written into the seed as `root:wheel` in five domains (
 `logs/native-runs/ram-k273-rt-20261127-163542/`: the backdrop assertion is unchanged, the first swap lands at 147.5 s, every frame
 is black. Read
 [results-2026-11-27-reduce-transparency-files-still-asserts.md](../docs/results-2026-11-27-reduce-transparency-files-still-asserts.md).
+
+## 2026-11-27 (later) - the A830 Vulkan driver, built here
+
+`out/turnip-a830/build/src/freedreno/vulkan/libvulkan_freedreno.dylib` on the Mac build host
+(17,770,312 bytes, `6eeb3d2dffa4f7f709cc976235f2f71d3459b89c2bcc0527fa296b762cd069ac`, Mach-O arm64e) is Turnip for the native
+A830 kernel ABI, built by `tooling/metal/build-turnip-a830.sh` against a work tree reconstructed from public inputs
+(`Droid-VM/mesa cecc0e96` + `Droid-VM/UniXNU 527b8b7a3119`'s `patches/mesa` + the k27 tree's `patches/mesa-macos`, ordered by
+unblock-count, then this repository's own 15 patches). Built, to be run: never on the tablet. Read
+[results-2026-11-27-turnip-a830-built-on-this-mac.md](../docs/results-2026-11-27-turnip-a830-built-on-this-mac.md).
