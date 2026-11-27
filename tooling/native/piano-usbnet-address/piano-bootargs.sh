@@ -14,7 +14,10 @@ piano_bootargs() {
 # Select the last exact key. Split on PE's separators and keep patterns in the line literal.
 piano_bootarg() (
   local args word value=
+  export LC_ALL=C
   args=$(piano_bootargs) || return 1
+  # The merged kernel string occupies at most 4096 bytes including its NUL.
+  [ "${#args}" -le 4095 ] || return 1
   IFS=' 	'
   set -f
   for word in $args; do

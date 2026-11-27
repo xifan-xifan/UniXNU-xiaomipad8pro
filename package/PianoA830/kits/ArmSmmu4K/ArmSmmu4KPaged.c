@@ -516,10 +516,12 @@ ArmSmmu4KStatus ArmSmmu4KPagedLinkShared(Space *s,unsigned index,uint64_t table_
     if(!s || !s->prepared || s->poisoned || index>=s->root_entries || bit(s->pinned,index) || bit(s->foreign,index) ||
         (table_physical&(PAGE-1)))return ArmSmmu4KArgument;
     if(s->root[index])return ArmSmmu4KOverlap;
-    if(!s->pages.cpu(s->pages.cookie,table_physical))return ArmSmmu4KBadRange;
+    if(table_physical>=(UINT64_C(1)<<s->config.output_bits) || !s->pages.cpu(s->pages.cookie,table_physical))
+        return ArmSmmu4KBadRange;
+    /* Teardown must skip the borrowed table even if publishing its descriptor fails. */
+    set_bit(s->foreign,index);
     s->root[index]=table_physical|3u;++s->counters.descriptor_writes;++s->generation;
     if(publish(s,s->root))return ArmSmmu4KIoError;
-    set_bit(s->foreign,index);
     return ArmSmmu4KSuccess;
 }
 ArmSmmu4KStatus ArmSmmu4KPagedLookup(const Space *s,uint64_t iova,uint64_t *descriptor)

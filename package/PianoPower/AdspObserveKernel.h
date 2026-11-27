@@ -92,6 +92,6 @@ int sysctlObserve(struct sysctl_oid *, void *, int selector, struct sysctl_req *
 void registerObserve() {
     static struct sysctl_oid oid[4];
     static const char *const names[]={"piano_glink_fifo","piano_smem_state","piano_smem_crash","piano_glink_owner"};
-    for(unsigned i=0;i<4;++i)pianoobserve::registerReadOnly(oid[i],names[i],i,sysctlObserve);
+    for(unsigned i=0;i<4;++i)pianoobserve::registerReadOnly(oid[i],names[i],int(i),sysctlObserve);
     say("[sens-trace2] root-only passive exports v1 (no extra RECV_ID/SEND/ACK)");
 }

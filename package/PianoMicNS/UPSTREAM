@@ -10,7 +10,7 @@ UniXNU-sheng (unixnu-research/UniXNU-sheng, main 00ba90984e831e4c6ce30ec3d8a56e6
     (../PianoAudio/AudioTap.h), the IO replaced (MicNsCore.c, the output ring by sample time). Not taken: the output path, the
     VirtualAudio import rebinding, the iOS host-clock patch, the diagnostics page.
 
-RNNoise (third_party/rnnoise), BSD-3-Clause, unmodified: github.com/xiph/rnnoise v0.1.1, 6cbfd53eb348a8d394e0757b4025c6ded34eb2b6
+RNNoise (third_party/rnnoise), BSD-3-Clause: github.com/xiph/rnnoise v0.1.1, 6cbfd53eb348a8d394e0757b4025c6ded34eb2b6
   (third_party/rnnoise/UPSTREAM lists the files and their sha256; COPYING is its licence).
 
 New here: MicNsCore.{h,c} (the tap reader, the slip controller, the RNNoise blocks, the FIFO), tests/micns_host.c, Info.plist, and the

@@ -424,7 +424,8 @@ class Pool {
     if (!in) return refused(RefOutside);
     s.span = in->name;
     if (r.use != in->use) return refused(RefUse);
-    if (cfg.xnuSize && overlaps(r.base, end, cfg.xnuBase, cfg.xnuBase + cfg.xnuSize)) return refused(RefWindow);
+    if (cfg.xnuSize > UINT64_MAX - cfg.xnuBase ||
+        (cfg.xnuSize && overlaps(r.base, end, cfg.xnuBase, cfg.xnuBase + cfg.xnuSize))) return refused(RefWindow);
     for (uint32_t j = 0; j < index; ++j)
       if (overlaps(r.base, end, runs[j].run.base, runs[j].run.base + runs[j].run.size)) return refused(RefOverlap);
     if (in->stage > cfg.stage) return refused(RefStage);

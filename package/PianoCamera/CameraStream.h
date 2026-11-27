@@ -19,8 +19,7 @@
 //   303 CAMCC PLL0: Linux's configuration when not running (a PLL0 found running must be at L 0x3e), RUN, LOCK_DET <= 1.5 ms,
 //       its outputs, OUTCTRL                                 304 the clock sources (cphy_rx, the PHY's timer, ife_lite and its CSID
 //       at 400 MHz, camnoc_rt_axi at 200 MHz; each switched with its root forced on) and the eleven branches
-//   305 CSID-lite0's and TFE-lite0's HW_VERSION              306 the SMMU route of stream 0x1c00 (CameraSmmu.h: bypass as the boot
-//       chain left it, else our window; refused otherwise)
+//   305 CSID-lite0's and TFE-lite0's HW_VERSION              306 the SMMU route of stream 0x1c00 (CameraSmmu.h: our bounded window)
 //   307 the frame buffer: the mode's stride x height + a guard of at least 256 KiB (a canary), 2 MiB aligned; the window applied
 //   308 CSID-lite0 reset (RST_DONE <= 500 ms)                309 write master 0: frame mode, the frame increment, the address
 //   310 CSID-lite0: RX (4 lanes, the PHY, the lane map), RDI0 (RAW10, payload only, MIPI packing), the interrupt masks, the
@@ -32,8 +31,7 @@
 //       stream-on or after the previous frame is counted as stale, not as a frame; the write master re-armed with the same buffer
 //       after each frame; per frame the times of SOF, EOF and BUF_DONE; the first CSI2 RX and RDI error words with their times; the
 //       CSIPHY's status words at the first frame and at the end
-//   330 stop: write master off, RDI0 stopped, the PHY's lanes off, the sensor's off table; late frames counted for 100 ms (three
-//       frame times: the write master and the CSID are idle after it)
+//   330 stop: write master off, RDI0 stopped, the sensor's off table, PHY lanes off and reset, late frames counted, CSID reset
 //   331 the statistics (min/max/mean and an 8-bin histogram per Bayer position, eight vertical bands, the written extent, the guard,
 //       the first rows' bytes); everything level 3 found is logged here, before the power-down (c3rp/c3r, 2026-11-12: an abort in
 //       the old power-down lost every line of the report, the chip ID's included)
@@ -107,20 +105,24 @@ inline AeVerdict aeRule(const AeStep &s, const AeStep *prev, uint64_t ev, uint64
 {
   const uint32_t m = s.above, sat = s.satPermille;
   next = ev;
-  if (m + target / 4 >= target && m <= target + target / 4 && sat < 50) return AeVerdict::converged;
+  if (m >= target - target / 4 && m <= uint64_t(target) + target / 4 && sat < 50) return AeVerdict::converged;
   if (prev && prev->above >= 8 && m >= 8 && sat < 900 && prev->satPermille < 900) {
-    const bool moved = ev * 10 >= prevEv * 14 || prevEv * 10 >= ev * 14;
+    const uint64_t low = ev < prevEv ? ev : prevEv, high = ev < prevEv ? prevEv : ev;
+    const bool moved = high > low && (unsigned __int128)high * 5 >= (unsigned __int128)low * 7;
     const bool still = uint64_t(m) * 10 < uint64_t(prev->above) * 11 && uint64_t(prev->above) * 10 < uint64_t(m) * 11;
     if (moved && still) return AeVerdict::noResponse;
   }
+  const uint64_t up = ev > UINT64_MAX / 8 ? UINT64_MAX : ev * 8;
   uint64_t n;
   if (sat > 250) {
     n = ev / 4;
   } else if (m < 4) {
-    n = ev * 8;
+    n = up;
   } else {
-    n = ev * target / m;
-    if (n > ev * 8) n = ev * 8;
+    // Split the quotient so only 64-bit division is needed in the kext.
+    const uint64_t whole = ev / m, tail = ev % m * target / m;
+    n = target && whole > (UINT64_MAX - tail) / target ? UINT64_MAX : whole * target + tail;
+    if (n > up) n = up;
     if (n < ev / 8) n = ev / 8;
   }
   if (n < evMin) n = evMin;
@@ -134,16 +136,18 @@ inline AeVerdict aeRule(const AeStep &s, const AeStep *prev, uint64_t ev, uint64
   return AeVerdict::none;
 }
 // Exposure x gain as the two controls: the exposure first (as long as the frame allows, at the lowest gain), then the gain.
-inline void aeSplit(const ExposureFacts &f, uint32_t eMax, uint64_t ev, uint32_t &e, uint32_t &g)
+inline bool aeSplit(const ExposureFacts &f, uint32_t eMax, uint64_t ev, uint32_t &e, uint32_t &g)
 {
+  if (!f.gMin || f.gMax < f.gMin || !f.eMin || eMax < f.eMin) return false;
   uint64_t x = ev / f.gMin;
   if (x > eMax) x = eMax;
   if (x < f.eMin) x = f.eMin;
-  uint64_t y = (ev + x / 2) / x;
+  uint64_t y = ev / x + (ev % x >= (x + 1) / 2);
   if (y < f.gMin) y = f.gMin;
   if (y > f.gMax) y = f.gMax;
   e = uint32_t(x);
   g = uint32_t(y);
+  return true;
 }
 
 enum : int {
@@ -292,16 +296,35 @@ struct StreamUndo {
   bool route = false, dma = false, wm = false, csid = false, phy = false, streaming = false;
 };
 
+struct FrameLayout {
+  uint32_t packed = 0, stride = 0, payload = 0, arena = 0;
+};
+
+inline bool frameLayout(uint32_t width, uint32_t height, FrameLayout &layout)
+{
+  layout = {};
+  if (!width || (width & 3u) || !height) return false;
+  constexpr uint32_t limit = iova::kWindowEnd - kIovaWindowBase, guard = 256u << 10;
+  const uint64_t packed = uint64_t(width / 4) * 5, stride = (packed + 15) & ~15ull;
+  if (stride > (limit - guard) / height) return false;
+  const uint32_t payload = uint32_t(stride * height);
+  const uint32_t arena = (payload + guard + kIovaBlockBytes - 1) & ~(kIovaBlockBytes - 1);
+  layout = {uint32_t(packed), uint32_t(stride), payload, arena};
+  return true;
+}
+
 // One frame's statistics: RAW10 MIPI-packed (4 pixels in 5 bytes: the 8 high bits of each, then a byte of their 2 low bits, pixel 0
 // in bits 1:0); the line stride is the packed line rounded up to 16 bytes when the written extent says so (frame mode's padding is
 // what the first dump settles), else the packed line.
 inline void frameStats(const uint8_t *buf, uint64_t bytes, uint32_t frameBytes, unsigned width, unsigned height, FrameStats &s)
 {
   renew(s);
+  FrameLayout layout;
+  if (!buf || !frameLayout(width, height, layout) || frameBytes < uint64_t(layout.packed) * height ||
+      frameBytes > layout.payload || bytes < frameBytes || bytes > layout.arena) return;
   s.width = width;
   s.height = height;
-  s.bpl = raw10Bytes(width);
-  const uint32_t padded = (s.bpl + 15u) & ~15u;
+  s.bpl = layout.packed;
   uint64_t last = 0;
   for (uint64_t i = frameBytes; i-- > 0;)
     if (buf[i]) {
@@ -309,7 +332,8 @@ inline void frameStats(const uint8_t *buf, uint64_t bytes, uint32_t frameBytes, 
       break;
     }
   s.written = (last + 15u) & ~uint64_t(15);   // in 16-byte units (a pixel group may end in a zero byte)
-  s.stride = last > uint64_t(s.bpl) * height ? padded : s.bpl;
+  s.stride = last > uint64_t(s.bpl) * height ? layout.stride : s.bpl;
+  if (uint64_t(height) * s.stride > frameBytes) return;
   s.guardIntact = true;
   for (uint64_t i = frameBytes; i < bytes; ++i)
     if (buf[i] != 0xa5) {
@@ -317,10 +341,11 @@ inline void frameStats(const uint8_t *buf, uint64_t bytes, uint32_t frameBytes, 
       s.guardFirstBad = uint32_t(i - frameBytes);
       break;
     }
-  memcpy(s.head, buf, sizeof s.head);
+  memcpy(s.head, buf, frameBytes < sizeof s.head ? frameBytes : sizeof s.head);
   for (unsigned k = 0; k < 5; ++k) {
     const unsigned y = k < 4 ? k : (height ? height - 1 : 0);
     s.rowIndex[k] = y;
+    if (y >= height) continue;
     const uint64_t at = uint64_t(y) * s.stride;
     if (at + s.bpl > frameBytes) continue;
     memcpy(s.rowHead[k], buf + at, s.bpl < 16 ? s.bpl : 16);
@@ -455,6 +480,7 @@ class Stream {
   // The result is the stream's own (valid while it lives; a StreamResult is 1.5 KiB, never copied onto the camera thread's stack).
   const StreamResult &run(Sensor which, const Loader &loader, const Pmic &pmic, const SurveyOptions &so, Survey &survey)
   {
+    if (u_.dma || quarantined_) return r_;   // an unsafe previous stop still owns this DMA
     renew(r_);
     renew(u_);
     renew(d_);
@@ -469,18 +495,28 @@ class Stream {
     guardBadValue_ = 0xa5;
     r_.attempted = true;
     r_.which = which;
+    if (which != Sensor::rear && which != Sensor::front) {
+      fail(kStepL3Sensor, StreamFailure::refused, "unknown sensor");
+      r_.cleanOff = true;
+      return r_;
+    }
     rear_ = which == Sensor::rear;
     f_ = &kSensors[rear_ ? 0 : 1];
     r_.width = rear_ ? kRearL3Width : kFrontL3Width;
     r_.height = rear_ ? kRearL3Height : kFrontL3Height;
+    mode_ = tableMode(rear_ ? "s5kjn1" : "ov32d40", r_.width, r_.height);
+    if (!mode_) {
+      fail(kStepL3Sensor2, StreamFailure::table, "the mode's parameters are missing");
+      r_.cleanOff = true;
+      return r_;
+    }
     if (up(which, loader, pmic, so, survey)) {
       stream();
       if (!quarantined_) stop();
       if (opt.live) {
         if (!quarantined_ && r_.wmStopped) checkLiveDma(kStepL3Stats);
-      } else {
+      } else if (!quarantined_) {
         statistics();
-        if (r_.stats.done) ops.frameReady(d_.cpu, r_);
       }
     } else if (u_.streaming || u_.wm) {
       stop();
@@ -496,6 +532,8 @@ class Stream {
       }
     }
     if (!quarantined_) {
+      if (r_.stats.done && r_.stats.guardIntact && !r_.failedStep && !(r_.fault.fsr & iova::kFsrFaults))
+        ops.frameReady(d_.cpu, r_);
       reportStream(ops, r_, opt.pattern, opt.gain);
       down();
     } else {
@@ -576,6 +614,7 @@ class Stream {
   bool stopHere(int step)
   {
     checkpoint(step);
+    if (opt.live && ops.liveCancelled()) return true;
     return opt.stopAt && step >= opt.stopAt ? !fail(step, StreamFailure::stopped) : false;
   }
 
@@ -726,25 +765,31 @@ class Stream {
       ops.note("smmu: route %s (%s): group %u smr %08x s2cr %08x", routeName(plan_.route), plan_.why ? plan_.why : "-", plan_.slot,
                plan_.smr, plan_.s2cr);
     }
-    if (plan_.route == Route::refused) return fail(kStepL3Smmu, StreamFailure::refused, plan_.why);
-    if (opt.live && plan_.route != Route::window)
-      return fail(kStepL3Smmu, StreamFailure::refused, "live DMA requires a bounded translating window");
+    if (plan_.route != Route::window)
+      return fail(kStepL3Smmu, StreamFailure::refused,
+                  plan_.route == Route::bypass ? "RAW DMA requires a bounded translating window" : plan_.why);
     if (stopHere(kStepL3Smmu)) return false;
 
     ops.step(kStepL3Memory, "the frame buffer (stride x height + a guard, 2 MiB aligned), filled, cleaned to the PoC; the window applied");
-    const uint32_t stride = (raw10Bytes(r_.width) + 15u) & ~15u;
-    r_.frameBytes = stride * r_.height;
-    const uint64_t guard = 256u << 10, block = kIovaBlockBytes;
-    r_.bytes = (uint64_t(r_.frameBytes) + guard + block - 1) & ~(block - 1);
-    if (!ops.dmaAlloc(r_.bytes, plan_.route == Route::window, d_) || !d_.cpu || (d_.pa & (block - 1)) || d_.bytes < r_.bytes ||
-        d_.pa + d_.bytes > kWmAddressLimit || (plan_.route == Route::window && (!d_.tables || !d_.tablePa || (d_.tablePa & 0xfff))))
-      return fail(kStepL3Memory, StreamFailure::memory);
+    FrameLayout layout;
+    if (!frameLayout(r_.width, r_.height, layout))
+      return fail(kStepL3Memory, StreamFailure::memory, "the mode does not fit the guarded RAW10 window");
+    r_.frameBytes = layout.payload;
+    r_.bytes = layout.arena;
+    if (!ops.dmaAlloc(r_.bytes, true, d_)) return fail(kStepL3Memory, StreamFailure::memory);
     u_.dma = true;
+    if (!d_.cpu || !d_.pa || (d_.pa & (kIovaBlockBytes - 1)) || d_.bytes < r_.bytes ||
+        !iova::fitsPhysical(d_.pa, d_.bytes, kWmAddressLimit) ||
+        !d_.tables || !d_.tablePa || (d_.tablePa & 0xfffu))
+      return fail(kStepL3Memory, StreamFailure::memory, "invalid DMA allocation");
+    const uint64_t paLimit = 1ull << iova::kPaBits[plan_.window.pasize];
+    if (!iova::fitsPhysical(d_.pa, r_.bytes, paLimit) || !iova::fitsPhysical(d_.tablePa, iova::kTableBytes, paLimit))
+      return fail(kStepL3Memory, StreamFailure::memory, "DMA allocation outside the SMMU output size");
     r_.pa = d_.pa;
     memset(d_.cpu, 0, r_.frameBytes);
     memset(d_.cpu + r_.frameBytes, 0xa5, size_t(r_.bytes - r_.frameBytes));
     ops.cacheClean(d_.cpu, r_.bytes);
-    if (plan_.route == Route::window) {
+    {
       iova::Window w;
       if (!iova::buildWindow(w, d_.tables, d_.tables + 512, d_.tablePa, d_.pa, uint32_t(r_.bytes), kIovaWindowBase) ||
           iova::translate(w, kIovaWindowBase) != d_.pa || iova::translate(w, kIovaWindowBase + r_.bytes - 1) != d_.pa + r_.bytes - 1 ||
@@ -764,29 +809,12 @@ class Stream {
                  livePhase(), plan_.bank, ops.rd(kSmmu + plan_.window.cb + iova::kCbSctlr), !e);
       if (e) return fail(kStepL3Memory, StreamFailure::smmu, e);
       r_.busAddr = kIovaWindowBase;
-    } else {
-      r_.busAddr = d_.pa;
     }
     if (stopHere(kStepL3Memory)) return false;
 
     ops.step(kStepL3CsidReset, "CSID-lite0 reset (RST_DONE within 500 ms)");
     const uint64_t c = kCsidLite0;
-    u_.csid = true;
-    put(c + kCsidTopClear, kCsidRstDone | kCsidTopBufDone, "CSID TOP_IRQ_CLEAR: RST_DONE, BUF_DONE");
-    put(c + kCsidTopMask, kCsidRstDone | kCsidTopBufDone, "CSID TOP_IRQ_MASK: RST_DONE, BUF_DONE");
-    put(c + kCsidBufClear, kCsidBufRdi0, "CSID BUF_DONE_IRQ_CLEAR: RDI0");
-    put(c + kCsidBufMask, kCsidBufRdi0, "CSID BUF_DONE_IRQ_MASK: RDI0");
-    put(c + kCsidIrqCmd, 1, "CSID IRQ_CMD: clear");
-    put(c + kCsidRstCfg, kCsidRstValue, "CSID RST_CFG: mode, location");
-    put(c + kCsidRstCmd, kCsidRstCmdValue, "CSID RST_CMD: hardware and IRQ reset");
-    bool reset = false;
-    for (unsigned ms = 0; ms <= kCsidResetMs && !reset; ++ms) {
-      reset = (ops.rd(c + kCsidTopStatus) & kCsidRstDone) != 0;
-      if (!reset) ops.msleep(1);
-    }
-    if (!reset) return fail(kStepL3CsidReset, StreamFailure::csidReset);
-    put(c + kCsidTopClear, kCsidRstDone, "CSID TOP_IRQ_CLEAR: RST_DONE");
-    put(c + kCsidIrqCmd, 1, "CSID IRQ_CMD: clear");
+    if (!resetCsid()) return fail(kStepL3CsidReset, StreamFailure::csidReset);
     if (stopHere(kStepL3CsidReset)) return false;
 
     ops.step(kStepL3Wm, "TFE-lite0 write master 0: frame mode, the frame increment, the buffer's address");
@@ -807,6 +835,7 @@ class Stream {
     put(wm + kWmImageAddr, uint32_t(r_.busAddr >> 8), "WM0 IMAGE_ADDR: the buffer >> 8");
     if (stopHere(kStepL3Wm)) return false;
 
+    u_.csid = true;
     ops.step(kStepL3Csid, "CSID-lite0: RX (4 lanes, the PHY, lane map 3210), RDI0 RAW10 payload-only MIPI-packed, masks, AUP/RUP x2, start");
     put(c + kCsidRxCfg0, csidRxCfg0(f_->lanes, f_->csiphy), "CSID RX_CFG0: lanes - 1, lane map, PHY + 1");
     put(c + kCsidRxCfg1, 1, "CSID RX_CFG1: ECC correction");
@@ -909,21 +938,23 @@ class Stream {
     u_.pll = false;
   }
 
-  // One table section over the sensor's bus: writes (1..3 bytes) and delays. `soft`: a failure is only counted (the off table).
+  // The off table attempts every write, including stream-off itself, after a bus error.
   bool section(const char *kind, const char *name, bool soft = false)
   {
     const CameraTableSection *t = tableSection(rear_ ? "s5kjn1" : "ov32d40", kind, name);
     if (!t) return soft ? false : fail(kStepL3Sensor2, StreamFailure::table, "a table section is missing");
+    bool ok = true;
     for (uint32_t k = t->first; k < t->first + t->words; k += 2) {
       const uint32_t a = kCameraTableWords[k], v = kCameraTableWords[k + 1];
       if ((a >> 16) == 0xffffu) {
         ops.udelay(v);
         continue;
       }
-      if (!s.sensorWrite(uint16_t(a & 0xffffu), a >> 30, v)) return soft ? false : fail(kStepL3Sensor2, StreamFailure::table, kind);
-      ++r_.tableWrites;
+      if (s.sensorWrite(uint16_t(a & 0xffffu), a >> 30, v)) ++r_.tableWrites;
+      else if (!soft) return fail(kStepL3Sensor2, StreamFailure::table, kind);
+      else ok = false;
     }
-    return true;
+    return ok;
   }
   bool control(uint16_t reg, unsigned bytes, uint32_t value)
   {
@@ -931,26 +962,10 @@ class Stream {
     ++r_.controlWrites;
     return true;
   }
-  static unsigned decimal(char *out, unsigned v)
-  {
-    char d[10];
-    unsigned k = 0, n = 0;
-    do d[k++] = char('0' + v % 10);
-    while ((v /= 10) && k < sizeof d);
-    while (k) out[n++] = d[--k];
-    return n;
-  }
   bool sensorTables()
   {
-    char mode[24];
-    unsigned n = decimal(mode, r_.width);
-    mode[n++] = 'x';
-    n += decimal(mode + n, r_.height);
-    mode[n] = 0;
-    const CameraTableMode *m = tableMode(rear_ ? "s5kjn1" : "ov32d40", r_.width, r_.height);
-    if (!m) return fail(kStepL3Sensor2, StreamFailure::table, "the mode's parameters are missing");
-    mode_ = m;
-    if (!section("start", nullptr) || !section("init", nullptr) || !section("mode", mode)) return false;
+    const CameraTableMode *m = mode_;
+    if (!section("start", nullptr) || !section("init", nullptr) || !section("mode", m->name)) return false;
     // The controls (CameraHw.h ExposureFacts): the rear's exposure (the mode's default lines), analogue gain (its colour bars: the
     // option's; the scene: the driver's default, where the exposure loop starts), frame length, native orientation, the test pattern;
     // the front's exposure and gain at its driver's defaults and its test pattern off, as its driver's control setup writes them.
@@ -1069,12 +1084,13 @@ class Stream {
     putQuiet(kTfeLite0 + kWm0 + kWmCfg, 0);
     r_.wmStopped = !(ops.rd(kTfeLite0 + kWm0 + kWmCfg) & kWmEnable);
     u_.wm = !r_.wmStopped;
+    quarantined_ = true;
+    if (!u_.route) return;
     putQuiet(kSmmu + iova::s2crOffset(plan_.slot), kS2crFault);
     if (!(r_.fault.fsr & iova::kFsrFaults)) readDmaFault();
     ops.note("dma fault sensor=%u fsr=%08x far=%08x%08x fsynr=%08x gfsr=%08x phase=%s frame=%u", rear_ ? 1 : 2,
              r_.fault.fsr, r_.fault.farHi, r_.fault.farLo, r_.fault.fsynr0, r_.fault.gfsr, livePhase(), r_.bufDone);
     const uint32_t blocked = ops.rd(kSmmu + iova::s2crOffset(plan_.slot));
-    quarantined_ = true;
     ops.note("dma fence sensor=%u wm-stopped=%u s2cr=%08x pending=%u guard-offset=%u value=%02x", rear_ ? 1 : 2,
              r_.wmStopped, blocked, targetPending_, r_.stats.guardFirstBad, guardBadValue_);
   }
@@ -1139,8 +1155,7 @@ class Stream {
         ++r_.aeCount;
         if (r_.aeVerdict == AeVerdict::none) {
           uint32_t e, g;
-          aeSplit(f, eMax(), next, e, g);
-          if (!aeApply(e, g)) {
+          if (!aeSplit(f, eMax(), next, e, g) || !aeApply(e, g)) {
             fail(kStepL3Stream, StreamFailure::table, "continuous exposure control failed");
             break;
           }
@@ -1370,8 +1385,7 @@ class Stream {
         return true;
       }
       uint32_t e = 0, g = 0;
-      aeSplit(f, eMax(), next, e, g);
-      if (!aeApply(e, g)) {
+      if (!aeSplit(f, eMax(), next, e, g) || !aeApply(e, g)) {
         r_.aeVerdict = AeVerdict::failed;
         ops.note("ae: a control write failed (exposure %u gain %u): the stream goes on with the last controls", e, g);
         return true;
@@ -1385,16 +1399,37 @@ class Stream {
     for (unsigned n = 0; n < 11; ++n) w[n] = ops.rd(status(n));
   }
 
-  // The write master first (nothing more reaches memory), then RDI0, the PHY's lanes, the sensor; late frames counted.
+  bool resetCsid()
+  {
+    const uint64_t c = kCsidLite0;
+    put(c + kCsidTopClear, kCsidRstDone | kCsidTopBufDone, "CSID TOP_IRQ_CLEAR: RST_DONE, BUF_DONE");
+    put(c + kCsidTopMask, kCsidRstDone | kCsidTopBufDone, "CSID TOP_IRQ_MASK: RST_DONE, BUF_DONE");
+    put(c + kCsidBufClear, kCsidBufRdi0, "CSID BUF_DONE_IRQ_CLEAR: RDI0");
+    put(c + kCsidBufMask, kCsidBufRdi0, "CSID BUF_DONE_IRQ_MASK: RDI0");
+    put(c + kCsidIrqCmd, 1, "CSID IRQ_CMD: clear");
+    put(c + kCsidRstCfg, kCsidRstValue, "CSID RST_CFG: mode, location");
+    put(c + kCsidRstCmd, kCsidRstCmdValue, "CSID RST_CMD: hardware and IRQ reset");
+    bool reset = false;
+    for (unsigned ms = 0; ms <= kCsidResetMs && !reset; ++ms) {
+      reset = (ops.rd(c + kCsidTopStatus) & kCsidRstDone) != 0;
+      if (!reset) ops.msleep(1);
+    }
+    if (!reset) return false;
+    put(c + kCsidTopClear, kCsidRstDone, "CSID TOP_IRQ_CLEAR: RST_DONE");
+    put(c + kCsidIrqCmd, 1, "CSID IRQ_CMD: clear");
+    return true;
+  }
+
+  // Stop delivery first, then stop the sensor and reset the receiver while its clocks and mapping are still live.
   void stop()
   {
-    ops.step(kStepL3Stop, "stop: write master off, RDI0 stopped, the PHY's lanes off, the sensor's off table");
+    ops.step(kStepL3Stop, "stop: write master and RDI0 off, sensor off, CSIPHY and CSID reset");
     const uint64_t c = kCsidLite0, wm = kTfeLite0 + kWm0;
     if (u_.wm) {
       put(wm + kWmCfg, 0, "WM0 CFG: off");
       r_.wmStopped = (ops.rd(wm + kWmCfg) & kWmEnable) == 0;
       u_.wm = !r_.wmStopped;
-      if (opt.live && !r_.wmStopped) {
+      if (!r_.wmStopped) {
         quarantineDma();
         fail(kStepL3Stop, StreamFailure::refused, "WM disable unconfirmed; resources quarantined");
         return;
@@ -1407,14 +1442,21 @@ class Stream {
       put(c + kCsidRdiCtrl, 0, "CSID RDI0 CTRL: stop");
       put(c + kCsidRdiCfg0, ops.rd(c + kCsidRdiCfg0) & ~kRdiCfg0Enable, "CSID RDI0 CFG0: disable");
     }
+    if (u_.streaming) {
+      if (!section("off", nullptr, true)) {
+        ++r_.offWarnings;
+        s.assertReset();
+        fail(kStepL3Stop, StreamFailure::table, "sensor stream-off");
+      }
+      u_.streaming = false;
+    }
     if (u_.phy) {
       put(ctrl(5), 0, "CSIPHY CTRL5: 0 (lanes off)");
       put(ctrl(6), 0, "CSIPHY CTRL6: 0 (powered down)");
+      put(ctrl(0), 1, "CSIPHY CTRL0: reset");
+      ops.udelay(kCsiphyResetUs);
+      put(ctrl(0), 0, "CSIPHY CTRL0: out of reset");
       u_.phy = false;
-    }
-    if (u_.streaming) {
-      if (!section("off", nullptr, true)) ++r_.offWarnings;
-      u_.streaming = false;
     }
     if (u_.csid) {
       for (unsigned ms = 0; ms < opt.lateMs; ++ms) {
@@ -1427,7 +1469,13 @@ class Stream {
         }
         ops.msleep(1);
       }
+      if (!resetCsid()) {
+        quarantineDma();
+        fail(kStepL3Stop, StreamFailure::csidReset, "receiver reset unconfirmed; resources quarantined");
+        return;
+      }
       u_.csid = false;
+      targetPending_ = false;
     }
     ops.note("checkpoint step=330 sensor=%u wm=%08x stopped=%u rdi-ctrl=%08x phy-ctrl5=%08x late=%u", rear_ ? 1 : 2,
              ops.rd(wm + kWmCfg), r_.wmStopped, ops.rd(c + kCsidRdiCtrl), ops.rd(ctrl(5)), r_.lateFrames);
@@ -1444,7 +1492,7 @@ class Stream {
   // ---------------------------------------------------------------------------------------------------------------- down
   // Nothing is touched after its clock, power or vote is gone (c3rp/c3r): the SMMU window first, while the camera NoC is still voted
   // (MM1) and clocked (GCC's HF AXI, the CAMNOC branches): its release ends with the TLB invalidate and sync, which reach the camera's
-  // TBU (inferred); the write master and CSID-lite0 were stopped and left idle for opt.lateMs by stop(). Then the clocks in reverse,
+  // TBU (inferred); stop() has stopped the sensor and write master and reset CSIPHY/CSID. Then the clocks in reverse,
   // PLL0, HF AXI, MM1; then level 2's power-down (the sensor's bus, TITAN_TOP collapsed, the MCLK, the rails, GCC, CAMCC's domains).
   void down()
   {

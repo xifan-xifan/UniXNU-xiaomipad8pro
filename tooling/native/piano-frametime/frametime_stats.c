@@ -21,8 +21,9 @@ bool ft_analyze(const double *timestamps, size_t count, double start, double end
                 double nominal_hz, FtStats *stats)
 {
     *stats = (FtStats){0};
-    if (!isfinite(start) || !isfinite(end) || end <= start ||
-        !isfinite(nominal_hz) || nominal_hz <= 0 || count > SIZE_MAX / sizeof(double))
+    const double window = end - start;
+    if (!isfinite(window) || window <= 0 || !isfinite(nominal_hz) || nominal_hz <= 0 ||
+        (count && !timestamps) || count > SIZE_MAX / sizeof(double))
         return false;
     if (!count)
         return true;
@@ -48,7 +49,9 @@ bool ft_analyze(const double *timestamps, size_t count, double start, double end
     }
     stats->unique = unique;
     stats->duplicates = kept - unique;
-    stats->window_hz = unique / (end - start);
+    stats->window_hz = unique / window;
+    if (!isfinite(stats->window_hz))
+        goto invalid;
     if (unique) {
         stats->first_s = ordered[0];
         stats->last_s = ordered[unique - 1];
@@ -61,18 +64,24 @@ bool ft_analyze(const double *timestamps, size_t count, double start, double end
 
     stats->intervals = unique - 1;
     stats->cadence_hz = stats->intervals / stats->span_s;
+    if (!isfinite(stats->cadence_hz))
+        goto invalid;
     for (size_t i = 0; i < stats->intervals; ++i) {
         const double seconds = ordered[i + 1] - ordered[i];
+        const double ms = seconds * 1000;
         const double periods = seconds * nominal_hz;
         const double slots = round(periods);
-        if (slots > 1)
-            stats->missed_vsync += (uint64_t)(slots - 1);
+        if (!isfinite(ms) || slots >= 0x1p64)
+            goto invalid;
+        const uint64_t missed = slots > 1 ? (uint64_t)slots - 1 : 0;
+        if (missed > UINT64_MAX - stats->missed_vsync)
+            goto invalid;
+        stats->missed_vsync += missed;
         if (fabs(periods - 1) > 0.20)
             ++stats->non_single_period;
         if (fabs(periods - fmax(1, slots)) > 0.20)
             ++stats->off_grid;
 
-        const double ms = seconds * 1000;
         size_t bin = 0;
         while (bin < FT_HISTOGRAM_BINS - 1 && ms > ft_histogram_upper_ms[bin])
             ++bin;
@@ -86,4 +95,14 @@ bool ft_analyze(const double *timestamps, size_t count, double start, double end
     stats->max_ms = ordered[stats->intervals - 1];
     free(ordered);
     return true;
+
+invalid:
+    free(ordered);
+    return false;
+}
+
+bool ft_capture_valid(const FtStats *presented, bool window_complete, bool stable_display,
+                      size_t submitted, size_t completed, size_t gpu_errors)
+{
+    return window_complete && stable_display && presented->intervals && !gpu_errors && submitted == completed;
 }

@@ -224,7 +224,7 @@ public:
     IOReturn ibHolding(uint32_t rptr,uint64_t address,uint64_t *iova,uint32_t *dwords) const;
 #endif
     bool attached() const {return attached_;}
-    bool poisoned() const {return poisoned_;}
+    bool poisoned() const {return __atomic_load_n(&poisoned_,__ATOMIC_ACQUIRE);}
     uint32_t outstanding() const {return seqno_-__atomic_load_n(&completed_,__ATOMIC_ACQUIRE);}
     uint32_t lastSubmitted() const {return __atomic_load_n(&seqno_,__ATOMIC_ACQUIRE);}   /* the newest fence handed out */
     uint32_t completedFence() const {return __atomic_load_n(&completed_,__ATOMIC_ACQUIRE);}

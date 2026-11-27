@@ -89,8 +89,15 @@ int ssc_qmi_parse(const uint8_t *data, uint32_t length, SscQmi *m)
     m->transaction = le16(data + 1);
     m->message = le16(data + 3);
     m->length = le16(data + 5);
-    if (m->length > length - SSC_QMI_HEADER) return -1;
+    if (m->length != length - SSC_QMI_HEADER) return -1;
     m->tlvs = data + SSC_QMI_HEADER;
+    for (uint32_t at = 0; at < m->length;) {
+        const uint32_t left = m->length - at;
+        if (left < 3) return -1;
+        const uint32_t size = le16(m->tlvs + at + 1);
+        if (size > left - 3) return -1;
+        at += 3 + size;
+    }
     return 0;
 }
 
@@ -113,13 +120,21 @@ int ssc_qmi_response(const SscQmi *m, SscResponse *r)
     uint32_t n = 0;
     *r = (SscResponse){0, 0, 0, 0, 0, 0};
     const uint8_t *result = ssc_qmi_tlv(m, 0x02, &n);
-    if (!result || n < 4) return -1;
+    if (!result || n != 4) return -1;
     r->result = le16(result);
     r->error = le16(result + 2);
     const uint8_t *client = ssc_qmi_tlv(m, 0x10, &n);
-    if (client && n >= 8) {r->has_client = 1; r->client_id = le64(client);}
+    if (client) {
+        if (n != 8) return -1;
+        r->has_client = 1;
+        r->client_id = le64(client);
+    }
     const uint8_t *status = ssc_qmi_tlv(m, 0x11, &n);
-    if (status && n >= 4) {r->has_status = 1; r->status = le32(status);}
+    if (status) {
+        if (n != 4) return -1;
+        r->has_status = 1;
+        r->status = le32(status);
+    }
     return 0;
 }
 
@@ -132,30 +147,31 @@ int ssc_qmi_report(const SscQmi *m, int *has_client, uint64_t *client_id, const 
 {
     uint32_t n = 0;
     const uint8_t *client = ssc_qmi_tlv(m, 0x01, &n);
-    *has_client = client && n >= 8;
+    if (client && n != 8) return -1;
+    *has_client = client != 0;
     *client_id = *has_client ? le64(client) : 0;
     const uint8_t *events = ssc_qmi_tlv(m, 0x02, &n);
     if (!events || n < 2) return -1;
     const uint32_t count = le16(events);
     const uint32_t limit = m->message == SSC_QMI_JUMBO_REPORT ? SSC_QMI_MAX_JUMBO : SSC_QMI_MAX_PAYLOAD;
-    if (count > n - 2 || count > limit) return -1;
+    if (count != n - 2 || count > limit) return -1;
     *message = events + 2;
     *length = count;
     return 0;
 }
 
 /* ---- events ---- */
-static int read_suid(const uint8_t *p, uint32_t n, SscSuid *suid)
+static int read_suid(const uint8_t *p, uint32_t n, SscSuid *suid, unsigned *parts)
 {
     SpbIn in;
     uint32_t field, wire;
     int r;
-    *suid = (SscSuid){0, 0};
     spb_in(&in, p, n);
     while ((r = spb_next(&in, &field, &wire)) == 1) {
-        if (field == 1 && wire == SPB_I64) {if (spb_fixed64_value(&in, wire, &suid->low)) return -1;}
-        else if (field == 2 && wire == SPB_I64) {if (spb_fixed64_value(&in, wire, &suid->high)) return -1;}
-        else if (spb_skip(&in, wire)) return -1;
+        if ((field == 1 || field == 2) && wire == SPB_I64) {
+            if (spb_fixed64_value(&in, wire, field == 1 ? &suid->low : &suid->high)) return -1;
+            *parts |= 1u << (field - 1);
+        } else if (spb_skip(&in, wire)) return -1;
     }
     return r;
 }
@@ -165,6 +181,7 @@ int ssc_events_open(SscEvents *e, const uint8_t *message, uint32_t length)
     SpbIn in;
     uint32_t field, wire;
     int r;
+    unsigned parts = 0;
     e->has_suid = 0;
     e->suid = (SscSuid){0, 0};
     spb_in(&in, message, length);
@@ -172,13 +189,13 @@ int ssc_events_open(SscEvents *e, const uint8_t *message, uint32_t length)
         if (field == 1 && wire == SPB_LEN) {
             const uint8_t *p = 0;
             uint32_t n = 0;
-            if (spb_bytes_value(&in, wire, &p, &n) || read_suid(p, n, &e->suid)) return -1;
+            if (spb_bytes_value(&in, wire, &p, &n) || read_suid(p, n, &e->suid, &parts)) return -1;
             e->has_suid = 1;
         } else if (spb_skip(&in, wire)) {
             return -1;
         }
     }
-    if (r < 0) return -1;
+    if (r < 0 || (e->has_suid && parts != 3)) return -1;
     spb_in(&e->in, message, length);
     return 0;
 }
@@ -199,13 +216,16 @@ int ssc_events_next(SscEvents *e, SscEvent *ev)
         *ev = (SscEvent){0, 0, 0, 0};
         spb_in(&in, p, n);
         int s;
+        int has_id = 0;
         while ((s = spb_next(&in, &field, &wire)) == 1) {
-            if (field == 1 && wire == SPB_I32) {if (spb_fixed32_value(&in, wire, &ev->msg_id)) return -1;}
-            else if (field == 2 && wire == SPB_I64) {if (spb_fixed64_value(&in, wire, &ev->timestamp)) return -1;}
+            if (field == 1 && wire == SPB_I32) {
+                if (spb_fixed32_value(&in, wire, &ev->msg_id)) return -1;
+                has_id = 1;
+            } else if (field == 2 && wire == SPB_I64) {if (spb_fixed64_value(&in, wire, &ev->timestamp)) return -1;}
             else if (field == 3 && wire == SPB_LEN) {if (spb_bytes_value(&in, wire, &ev->payload, &ev->length)) return -1;}
             else if (spb_skip(&in, wire)) return -1;
         }
-        return s < 0 ? -1 : 1;
+        return s < 0 || !has_id ? -1 : 1;
     }
     return r;
 }
@@ -279,8 +299,9 @@ int ssc_parse_suid_event(const uint8_t *p, uint32_t n, SscSuidEvent *ev)
             if (spb_bytes_value(&in, wire, &bytes, &size)) return -1;
             copy_text(ev->data_type, sizeof ev->data_type, bytes, size);
         } else if (field == 2 && wire == SPB_LEN) {
-            SscSuid suid;
-            if (spb_bytes_value(&in, wire, &bytes, &size) || read_suid(bytes, size, &suid)) return -1;
+            SscSuid suid = {0, 0};
+            unsigned parts = 0;
+            if (spb_bytes_value(&in, wire, &bytes, &size) || read_suid(bytes, size, &suid, &parts) || parts != 3) return -1;
             if (ev->count < SSC_MAX_SUIDS) ev->suid[ev->count++] = suid;
             else ev->more++;
         } else if (spb_skip(&in, wire)) {

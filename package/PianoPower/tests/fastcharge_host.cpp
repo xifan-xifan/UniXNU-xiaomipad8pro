@@ -65,12 +65,14 @@ struct Bench {
   ChargeLink link;
   GaugeReading packs[2]{};
   piano_board_temps board{};
+  piano_skin_temps skin{};
   GaugeAlerts alerts;
   Charger ch;
   Options opt;
   uint64_t now = 1000, control = 0;
   uint32_t rdo = fixedRdo(1, 3000), bus = 5000, icl = 100, fcc = 500, enable = 1, fv = 4400;
-  bool connected = true, fwReady = true;
+  bool connected = true, fwReady = true, ignoreFixed5 = false;
+  unsigned overridePpsMa = 0, overridePpsMv = 0;
   unsigned raises = 0, barrierFails = 0;
   std::set<uint64_t> refuse;            // writes the firmware refuses (retcode -1)
   std::vector<PianoChargeWrite> writes;
@@ -84,12 +86,13 @@ struct Bench {
     lo.hvOrder = o.order; lo.hvCaps = o.caps; lo.qc = o.qc; lo.fvHot = o.fvHot;
     link.configure(m, lo);
     alerts.sampled(0x1e);
+    skin.version = PIANO_SKIN_TEMPS_VERSION; skin.virtual_valid = 1; skin.virtual_milli_c = 30000;
     board.version = PIANO_BOARD_TEMPS_VERSION; board.valid = 15; board.state = PIANO_BOARD_TEMPS_RUNNING;
     for (unsigned i = 0; i < 4; ++i) board.milli_c[i] = 30000;
     for (auto &g : packs) {g.ok = true; g.socPct = 40; g.tempDeciC = 300; g.voltageMv = 3900; g.currentMa = 300;}
   }
   void mcaCycle() {piano_contract_offer_pdos(&contract, ch.fw, fwReady && ch.pd ? ch.n : 0, fwReady && ch.pd);}
-  void fill() {
+  LinkView view() {
     auto put = [&](int field, int32_t value) {m.valid |= 1u << field; m.value[field] = value;};
     put(McaBusVoltage, int32_t(bus * 1000)); put(McaBusCurrent, int32_t(icl * 1000));
     put(McaType, ch.type); put(McaIcl, int32_t(icl)); put(McaChargeEnable, int32_t(enable));
@@ -97,15 +100,16 @@ struct Bench {
     put(McaPdState, fwReady && ch.pd ? 2 : 1); put(McaLpd, 0);
     LinkView v; v.nowMs = now; v.chargerPdUp = true; v.chargerPdUpMs = 1;
     v.contract = &contract; v.safetyFresh = true; v.cpOff = true; v.dtptValid = alerts.complete(); v.dtpt = alerts.active();
-    v.packs = packs; v.packsFresh = true; v.packsMs = now; v.board = &board;
-    ChargeLink::fill(link.in, m, v);
+    v.packs = packs; v.packsFresh = true; v.packsMs = now; v.board = &board; v.skin = &skin;
+    return v;
   }
   bool raise(const PianoChargeWrite &w) const {
-    return (w.property == PIANO_CHG_PD_FIXED && w.value == 9000) || w.property == PIANO_CHG_PPS ||
+    return (w.property == PIANO_CHG_PD_FIXED && w.value == 9000) || (w.property == PIANO_CHG_PPS && bus < 6000) ||
            (w.property == PIANO_CHG_QC_VOLT && w.value == 9000);
   }
   void decide() {
-    fill(); piano_charge_decide(&link.cfg, &link.in, &link.st, &link.plan);
+    ChargeLink::fill(link.in, m, view());
+    piano_charge_decide(&link.cfg, &link.in, &link.st, &link.plan);
     for (unsigned i = 0; i < link.plan.writes; ++i) {
       const auto w = link.plan.write[i];
       CHECK(piano_charge_write_allowed(&link.cfg, w.property, w.value, w.bytes));
@@ -129,11 +133,12 @@ struct Bench {
       case PIANO_CHG_ENABLE: enable = w.value; for (auto &g : packs) g.currentMa = enable ? 300 : 0; break;
       case PIANO_CHG_PD_FIXED:
         if (w.value == 9000 && ch.fixed9Object) {bus = ch.nineVoltBus; rdo = fixedRdo(ch.fixed9Object, ch.fixed9RdoMa);}
-        else if (w.value == 5000) {bus = 5000; rdo = fixedRdo(1, 3000);}
+        else if (w.value == 5000 && !ignoreFixed5) {bus = 5000; rdo = fixedRdo(1, 3000);}
         break;
       case PIANO_CHG_PPS:
         if (ch.ppsObject) {bus = (w.value >> 16) * 20 == 9000 ? ch.nineVoltBus : 5000;
-                           rdo = ppsRdo(ch.ppsObject, (w.value >> 16) * 20, (w.value & 0xffff) * 50);}
+                           rdo = ppsRdo(ch.ppsObject, overridePpsMv ? overridePpsMv : (w.value >> 16) * 20,
+                                        overridePpsMa ? overridePpsMa : (w.value & 0xffff) * 50);}
         break;
       case PIANO_CHG_QC_VOLT: if (!ch.pd) bus = w.value == 9000 ? ch.nineVoltBus : 5000; break;
       default: CHECK(false);
@@ -216,6 +221,9 @@ static void dailyUnchanged() {
   Options two; two.hv = 2;
   Bench f(fixedOnly(), two); f.ticks(16);
   CHECK(!f.raises && f.bus == 5000);
+  Options invalid; invalid.hv = 3;
+  Bench bad(ppsBank(), invalid); bad.ticks(16);
+  CHECK(bad.link.cfg.hv == 0 && !bad.count(PIANO_CHG_PPS) && bad.bus == 5000);
   // a QC charger without piano-power-qc: no 0x2011 at all
   Bench q(qc(PIANO_CHG_T_HVDCP3), o); q.ticks(16);
   CHECK(!q.count(PIANO_CHG_QC_VOLT) && q.bus == 5000 && q.icl <= 1600 && q.fcc <= 1500);
@@ -225,7 +233,7 @@ static void dailyUnchanged() {
 static void order() {
   Options o; o.order = true;
   Bench p(ppsBank(), o);
-  CHECK(p.untilOn() && p.raises == 1 && p.wrote(PIANO_CHG_PPS, piano_charge_pps_word(9000, 3000)));
+  CHECK(p.untilOn() && p.raises == 1 && p.wrote(PIANO_CHG_PPS, piano_charge_pps_word(9000, 1600)));
   CHECK(p.contract.protocol == PIANO_CONTRACT_PPS && p.contract.mv == 9000 && p.path() == PIANO_CHG_PATH_PPS_9V);
   Options two; two.hv = 2; two.order = true;
   Bench f(fixedOnly(), two);
@@ -233,7 +241,7 @@ static void order() {
   Bench x1(xiaomi67(), o);
   CHECK(x1.untilOn() && x1.wrote(PIANO_CHG_PD_FIXED, 9000) && !x1.count(PIANO_CHG_PPS));
   Bench x2(xiaomi67(), two);
-  CHECK(x2.untilOn() && x2.wrote(PIANO_CHG_PPS, piano_charge_pps_word(9000, 3000)) && !x2.wrote(PIANO_CHG_PD_FIXED, 9000));
+  CHECK(x2.untilOn() && x2.wrote(PIANO_CHG_PPS, piano_charge_pps_word(9000, 1600)) && !x2.wrote(PIANO_CHG_PD_FIXED, 9000));
   // the offer changes under the session (the APDO goes): back to 5 V through vSafe5V, never to the other object at 9 V directly
   const auto start = p.writes.size();
   p.ch.n = 1; p.ticks(6);
@@ -272,7 +280,7 @@ static void caps() {
   // the charger thermistor at 85 C: input 500 at most, the charge current at most twice that
   p.board.milli_c[PIANO_BOARD_TEMP_CHARGER] = 86000; p.ticks(2);
   CHECK(p.icl <= 500 && p.fcc <= 1000);
-  p.board.milli_c[PIANO_BOARD_TEMP_CHARGER] = 30000; p.ticks(3);
+  p.board.milli_c[PIANO_BOARD_TEMP_CHARGER] = 30000; p.ticks(7);
   CHECK(p.icl == 2500 && p.fcc == 3500);
   // a pack at 46 C: 5 V again (the 45 C rule), the currents back to stage A
   const auto start = p.writes.size();
@@ -296,6 +304,188 @@ static void caps() {
   Bench r(xiaomi67(), pps); r.refuse.insert(key(PIANO_CHG_FCC, 3500));
   CHECK(r.untilOn()); r.ticks(6);
   CHECK(r.fcc <= 1500 && r.icl == 2500);
+}
+
+static Options ppsOptions() {
+  Options o;
+  o.hv = 2;
+  o.order = o.caps = true;
+  return o;
+}
+
+static void ppsBounds() {
+  for (const auto &range : {Charger{.fw = {{5000, 5000, 3000}, {3300, 9000, 5000}}, .n = 2, .ppsObject = 2},
+                            Charger{.fw = {{5000, 5000, 3000}, {9000, 11000, 2379}}, .n = 2, .ppsObject = 2}}) {
+    Bench b(range, ppsOptions());
+    const uint32_t ma = range.fw[1][2] >= 2500 ? 2500 : 2350;
+    CHECK(b.untilOn() && b.contract.mv == 9000 && b.contract.ma == ma);
+    CHECK(b.wrote(PIANO_CHG_PPS, piano_charge_pps_word(9000, ma)) && b.icl == ma);
+  }
+  for (unsigned lo : {3300u, 9100u}) {
+    Bench b(ppsBank(), ppsOptions());
+    b.ch.fw[1][0] = lo;
+    b.ch.fw[1][1] = lo == 3300 ? 8999 : 11000;
+    b.ticks(12);
+    CHECK(b.bus == 5000 && !b.count(PIANO_CHG_PPS));
+  }
+  Bench multi(ppsBank(), ppsOptions());
+  multi.ch.n = 3; multi.ch.fw[2][0] = 3300; multi.ch.fw[2][1] = 21000; multi.ch.fw[2][2] = 1000;
+  CHECK(multi.untilOn() && multi.contract.object == 2 && multi.contract.ma == 2500);
+  multi.ch.fw[1][2] = 2000;    // old 2.5 A RDO becomes invalid
+  const auto loss = multi.writes.size();
+  multi.ticks(6);
+  CHECK(multi.bus == 5000 && !multi.count(PIANO_CHG_PPS, loss));
+  for (unsigned ma : {2500u, 2550u, 3000u}) {
+    const auto word = piano_charge_pps_word(9000, ma);
+    CHECK(piano_charge_write_allowed(&multi.link.cfg, PIANO_CHG_PPS, word, 4) == (ma == 2500));
+    CHECK(piano_mca_write_allowed_for(&multi.m, PIANO_MCA_PPS, word, 4) == (ma == 2500));
+  }
+  // Test the actual returned current and voltage independently of the MCA acknowledgement.
+  for (bool overCurrent : {false, true}) {
+    Bench b(ppsBank(), ppsOptions());
+    if (overCurrent) b.overridePpsMa = 2550;
+    else b.overridePpsMv = 9020;
+    CHECK(!b.untilOn() && b.bus == 5000 && b.link.st.hv == PIANO_CHG_HV_BLOCKED);
+    CHECK(b.wrote(PIANO_CHG_PD_FIXED, 5000) && b.icl <= 1500);
+  }
+}
+
+static void ppsRefresh() {
+  Bench b(ppsBank(), ppsOptions());
+  CHECK(b.untilOn());
+  const auto word = piano_charge_pps_word(9000, 2500);
+  auto last = b.link.st.hv_asked_ms;
+  auto writes = b.writes.size();
+  b.now = last + 3999; b.decide();
+  CHECK(!b.count(PIANO_CHG_PPS, writes));
+  b.now = last + 4000; b.decide();
+  CHECK(b.wrote(PIANO_CHG_PPS, word, writes) && b.icl == 2500);
+  b.ticks(20);
+  CHECK(b.count(PIANO_CHG_PPS, writes) >= 20 && b.bus == 9000 && b.icl == 2500 && b.raises == 1);
+  // At the worker deadline, queue via ChargeLink even with no new MCA cycle.
+  last = b.link.st.hv_asked_ms;
+  LinkOutcome out;
+  b.now = last + 4000;
+  b.link.step(b.m, b.view(), out);
+  CHECK(out.decided && out.queued == 1 && b.m.queue[0].property == PIANO_MCA_PPS);
+  // A stall across the deadline must revoke the buffered write before it can reach GLINK.
+  b.now = last + 8000;
+  b.link.step(b.m, b.view(), out);
+  uint8_t request[PIANO_MCA_REQUEST_BYTES];
+  const unsigned n = piano_mca_next(&b.m, request);
+  CHECK(!n || piano_contract_u32(request + 12) != PIANO_MCA_PPS);
+  CHECK(b.link.st.hv == PIANO_CHG_HV_BLOCKED && b.link.plan.icl_ma <= 500);
+
+  for (bool late : {false, true}) {
+    Bench r(ppsBank(), ppsOptions());
+    CHECK(r.untilOn());
+    r.now = r.link.st.hv_asked_ms + 4000;
+    if (late) {
+      const auto before = r.link.st.hv_asked_ms;
+      r.link.step(r.m, r.view(), out);
+      CHECK(piano_mca_next(&r.m, request) == PIANO_MCA_REQUEST_BYTES && piano_contract_u32(request + 12) == PIANO_MCA_PPS);
+      r.m.last_property = PIANO_MCA_PPS; r.m.last_value = word; r.m.last_result = 0;
+      r.now = before + 8000;
+      r.link.answered(r.m, r.now);
+      CHECK(r.link.st.hv_asked_ms == before && r.link.st.pps_failed);
+    } else {
+      r.refuse.insert(key(PIANO_CHG_PPS, word));
+      r.decide();
+    }
+    const auto failedAt = r.writes.size();
+    r.ticks(6);
+    CHECK(r.link.st.hv == PIANO_CHG_HV_BLOCKED && r.bus == 5000 && !r.count(PIANO_CHG_PPS, failedAt));
+    CHECK(r.wrote(PIANO_CHG_PD_FIXED, 5000, failedAt));
+  }
+  Bench reject(ppsBank(), ppsOptions());
+  reject.refuse.insert(key(PIANO_CHG_PPS, word));
+  CHECK(!reject.untilOn() && reject.count(PIANO_CHG_PPS) == 1 &&
+        reject.wrote(PIANO_CHG_PD_FIXED, 5000) && reject.link.st.hv == PIANO_CHG_HV_BLOCKED);
+  Bench stalled(ppsBank(), ppsOptions());
+  stalled.ch.nineVoltBus = 5000;
+  CHECK(!stalled.untilOn() && stalled.count(PIANO_CHG_PPS) == 1 &&
+        stalled.wrote(PIANO_CHG_PD_FIXED, 5000) && stalled.link.st.hv == PIANO_CHG_HV_BLOCKED);
+  Bench stuck(ppsBank(), ppsOptions());
+  CHECK(stuck.untilOn());
+  stuck.ignoreFixed5 = true;
+  stuck.refuse.insert(key(PIANO_CHG_PPS, word));
+  stuck.ticks(10);
+  CHECK(stuck.bus == 9000 && stuck.icl <= 500 && stuck.link.st.hv == PIANO_CHG_HV_BLOCKED);
+  CHECK(stuck.count(PIANO_CHG_PD_FIXED) == 3);  // ACK without voltage readback gets bounded retries
+  stuck.ticks(5);
+  CHECK(stuck.count(PIANO_CHG_PD_FIXED) == 3);
+}
+
+static void ppsLifecycle() {
+  Bench b(ppsBank(), ppsOptions());
+  CHECK(b.untilOn());
+  const auto word = piano_charge_pps_word(9000, 2500);
+  CHECK(!piano_mca_write_allowed_for(&b.m, PIANO_MCA_PPS, piano_charge_pps_word(10000, 2500), 4));
+  CHECK(!piano_mca_write_allowed_for(&b.m, PIANO_MCA_PPS, piano_charge_pps_word(9000, 5000), 4));
+  CHECK(piano_mca_queue(&b.m, 0x21002, 1, 4) == -1);   // MiPPS verify needs its separate auxiliary channel
+  auto start = b.writes.size();
+  b.bus = 5000; b.rdo = fixedRdo(1, 3000);    // source reset without a physical detach
+  b.ticks(8);
+  CHECK(b.link.st.hv == PIANO_CHG_HV_BLOCKED && !b.count(PIANO_CHG_PPS, start) && b.bus == 5000);
+  b.ch.type = PIANO_CHG_T_UNKNOWN; b.fwReady = false; b.tick();
+  CHECK(b.link.st.type == PIANO_CHG_T_UNKNOWN);
+  b.ch.type = PIANO_CHG_T_PPS; b.fwReady = true; b.ticks(8);
+  CHECK(b.link.st.hv == PIANO_CHG_HV_BLOCKED && !b.count(PIANO_CHG_PPS, start));
+  b.bus = 0; b.connected = false; b.tick();
+  CHECK(!b.link.st.attached && !b.link.st.volt_want_prop && !b.link.st.ladder_obj && b.icl == 100);
+  b.bus = 5000; b.connected = true;
+  CHECK(b.untilOn());
+  b.ch = qc(PIANO_CHG_T_DCP); b.bus = 0; b.connected = false; b.tick();
+  b.bus = 5000; b.connected = true; start = b.writes.size(); b.ticks(10);
+  CHECK(!b.count(PIANO_CHG_PPS, start) && b.path() == PIANO_CHG_PATH_USB_5V);
+
+  Bench sleep(ppsBank(), ppsOptions());
+  CHECK(sleep.untilOn());
+  sleep.now = sleep.link.st.hv_asked_ms + 4000;
+  LinkOutcome out;
+  sleep.link.step(sleep.m, sleep.view(), out);
+  CHECK(out.queued == 1);
+  LinkView v = sleep.view(); v.willSleep = true;
+  sleep.link.step(sleep.m, v, out);
+  CHECK(!out.handoverReady && sleep.link.st.volt_want_prop == PIANO_CHG_PD_FIXED &&
+        sleep.link.st.volt_want_value == 5000 && !piano_charge_pps_due(&sleep.link.st, sleep.now + 60000));
+  for (unsigned i = 0; i < sleep.m.queued; ++i) CHECK(sleep.m.queue[i].property != PIANO_MCA_PPS);
+  v.willSleep = false; v.wakes = 1;
+  sleep.link.step(sleep.m, v, out);
+  CHECK(out.resync && sleep.link.st.hv != PIANO_CHG_HV_ON && !sleep.link.st.pps_acked &&
+        sleep.link.st.volt_want_prop != PIANO_CHG_PPS);
+
+  Bench noHealth(ppsBank(), ppsOptions());
+  noHealth.link.cfg.limit = 0; noHealth.link.syncPpsOption(noHealth.m);
+  CHECK(!noHealth.untilOn() && !noHealth.count(PIANO_CHG_PPS));
+  CHECK(!piano_mca_write_allowed_for(&noHealth.m, PIANO_MCA_PPS, word, 4));
+  noHealth.link.cfg.limit = 1; noHealth.link.cfg.resume_pct = 76; noHealth.link.syncPpsOption(noHealth.m);
+  CHECK(!noHealth.untilOn() && !noHealth.count(PIANO_CHG_PPS));
+
+  const auto generation = sleep.contract.generation;
+  piano_contract_timeout(&sleep.contract, sleep.now);
+  CHECK(sleep.contract.quarantined && !piano_contract_fresh(&sleep.contract, sleep.now));
+  CHECK(piano_contract_recover_detach(&sleep.contract) && sleep.contract.generation > generation &&
+        !sleep.contract.offer_n && !sleep.contract.rdo);
+  CHECK(!piano_contract_recover_detach(&sleep.contract));
+}
+
+static void ppsThermals() {
+  Bench b(ppsBank(), ppsOptions());
+  CHECK(b.untilOn() && b.icl == 2500);
+  auto start = b.writes.size();
+  b.skin.virtual_milli_c = 42000; b.ticks(10);
+  CHECK(b.wrote(PIANO_CHG_PD_FIXED, 5000, start));
+  CHECK(b.wrote(PIANO_CHG_PPS, piano_charge_pps_word(9000, 1600), start) && b.icl == 1600);
+  b.skin.virtual_milli_c = 44000; start = b.writes.size(); b.ticks(8);
+  CHECK(b.bus == 5000 && b.link.st.pps_skin_hot && b.wrote(PIANO_CHG_PD_FIXED, 5000, start));
+  b.skin.virtual_valid = 0; b.ticks(6);
+  CHECK(b.bus == 5000 && b.link.st.pps_skin_hot);
+  b.skin.virtual_valid = 1; b.skin.virtual_milli_c = 41999;
+  CHECK(b.untilOn() && b.icl == 2500);
+  b.board.milli_c[PIANO_BOARD_TEMP_CHARGER] = 75000; start = b.writes.size(); b.ticks(12);
+  CHECK(b.wrote(PIANO_CHG_PD_FIXED, 5000, start));
+  CHECK(b.wrote(PIANO_CHG_PPS, piano_charge_pps_word(9000, 1600), start) && b.icl == 1600);
 }
 
 // piano-power-qc: QC2/QC3 through 0x2011 behind the barrier, 5 V on any loss.
@@ -425,12 +615,12 @@ static void codec() {
   // the policy's own allowlist follows the options
   PianoChargeConfig c; piano_charge_config_default(&c); c.strict_contract = 1; c.hv = 1;
   CHECK(!piano_charge_write_allowed(&c, PIANO_CHG_FCC, 1600, 4) && !piano_charge_write_allowed(&c, PIANO_CHG_ICL, 2500, 4));
-  CHECK(!piano_charge_write_allowed(&c, PIANO_CHG_PPS, piano_charge_pps_word(9000, 3000), 4));
+  CHECK(!piano_charge_write_allowed(&c, PIANO_CHG_PPS, piano_charge_pps_word(9000, 1600), 4));
   CHECK(!piano_charge_write_allowed(&c, PIANO_CHG_QC_VOLT, 9000, 4) && !piano_charge_write_allowed(&c, PIANO_CHG_FV, 4060, 4));
-  c.hv_caps = c.hv_order = c.qc = c.fv_hot = 1;
+  c.hv_caps = c.hv_order = c.qc = c.fv_hot = c.limit = 1;
   CHECK(piano_charge_write_allowed(&c, PIANO_CHG_FCC, 3500, 4) && !piano_charge_write_allowed(&c, PIANO_CHG_FCC, 3600, 4));
   CHECK(piano_charge_write_allowed(&c, PIANO_CHG_ICL, 2500, 4) && !piano_charge_write_allowed(&c, PIANO_CHG_ICL, 2600, 4));
-  CHECK(piano_charge_write_allowed(&c, PIANO_CHG_PPS, piano_charge_pps_word(9000, 3000), 4));
+  CHECK(piano_charge_write_allowed(&c, PIANO_CHG_PPS, piano_charge_pps_word(9000, 1600), 4));
   CHECK(!piano_charge_write_allowed(&c, PIANO_CHG_PPS, piano_charge_pps_word(11000, 3000), 4));
   CHECK(piano_charge_write_allowed(&c, PIANO_CHG_QC_VOLT, 9000, 4) && piano_charge_write_allowed(&c, PIANO_CHG_FV, 4060, 4));
   CHECK(!piano_charge_write_allowed(&c, PIANO_CHG_FV, 4480, 4));
@@ -442,6 +632,10 @@ int main() {
   dailyUnchanged();
   order();
   caps();
+  ppsBounds();
+  ppsRefresh();
+  ppsLifecycle();
+  ppsThermals();
   qcPath();
   pdFallbacks();
   warmFloat();

@@ -111,7 +111,7 @@ inline Geometry geometry(const LinkLive &l, uint32_t skew = 0)
   }
   if (l.progFetch) {   // msm: (vtotal - lines) * htotal + 1; any other offset within the line kept as found
     const unsigned vtotal = l.period / htotal, at = l.progFetch - 1;
-    if (!l.progFetch || l.period % htotal || at / htotal >= vtotal || at / htotal < kVsync + kVbp + kPanelHeight) {
+    if (l.period % htotal || at / htotal >= vtotal || at / htotal < kVsync + kVbp + kPanelHeight) {
       g.why = "the programmable fetch start is not inside the vertical front porch";
       return g;
     }
@@ -123,28 +123,38 @@ inline Geometry geometry(const LinkLive &l, uint32_t skew = 0)
   return g;
 }
 
-// A mode's words on a link of geometry g. hfp/vfp: the mode table's full-panel porches; the horizontal one halved per link.
+// A mode's words on a link of geometry g. The horizontal porch is halved per link.
+// Return an empty plan if the timing cannot be represented.
 inline LinkWords plan(const Geometry &g, const Mode &m)
 {
+  const uint64_t hactiveEnd = uint64_t(g.hsyncBp) + g.hactive;
+  const uint64_t vsyncBp = uint64_t(g.vsync) + g.vbp;
+  const uint64_t vactiveEnd = vsyncBp + g.vactive;
+  const uint64_t htotal = hactiveEnd + m.hfp / 2;
+  const uint64_t vtotal = vactiveEnd + m.vfp;
+  if (!g.ok || !m.hz || (m.hfp & 1u) || !g.hactive || !g.vactive ||
+      g.hsync > g.hsyncBp || g.dsiHstart != g.hsyncBp || g.dsiHend != hactiveEnd ||
+      htotal > UINT16_MAX || vactiveEnd > UINT16_MAX || vtotal > UINT16_MAX + 1u ||
+      vactiveEnd * htotal + g.skew - 1 > UINT32_MAX ||
+      g.fetchLines > m.vfp || (g.fetchLines && g.fetchOffset >= htotal)) return {};
   LinkWords w;
   w.hz = m.hz;
   w.hfp = m.hfp / 2;
   w.vfp = m.vfp;
-  w.htotal = g.hsyncBp + g.hactive + w.hfp;
-  w.vtotal = g.vsync + g.vbp + g.vactive + w.vfp;
+  w.htotal = unsigned(htotal);
+  w.vtotal = unsigned(vtotal);
   w.hsyncCtl = uint32_t(w.htotal) << 16 | g.hsync;
   w.period = w.htotal * w.vtotal;
   w.vsyncWidth = g.vsync * w.htotal;
-  w.dispVStart = (g.vsync + g.vbp) * w.htotal + g.skew;
-  w.dispVEnd = (w.vtotal - w.vfp) * w.htotal + g.skew - 1;
+  w.dispVStart = uint32_t(vsyncBp * htotal + g.skew);
+  w.dispVEnd = uint32_t(vactiveEnd * htotal + g.skew - 1);
   w.dispHctl = uint32_t(w.htotal - w.hfp - 1) << 16 | g.hsyncBp;
   // The DSI line: its active part where the INTF's is, the same front porch.
-  const unsigned dsiHtotal = g.dsiHend + w.hfp;
-  w.dsiTotal = uint32_t(w.vtotal - 1) << 16 | uint32_t(dsiHtotal - 1);
+  w.dsiTotal = uint32_t(w.vtotal - 1) << 16 | uint32_t(w.htotal - 1);
   w.dsiActiveH = uint32_t(g.dsiHend) << 16 | g.dsiHstart;
-  w.dsiActiveV = uint32_t(g.vsync + g.vbp + g.vactive) << 16 | uint32_t(g.vsync + g.vbp);
-  w.progFetch = g.fetchLines ? (w.vtotal - g.fetchLines) * w.htotal + 1 + (g.fetchOffset < w.htotal ? g.fetchOffset : 0) : 0;
-  w.pixelClockHz = uint64_t(w.htotal) * w.vtotal * m.hz;
+  w.dsiActiveV = uint32_t(vactiveEnd) << 16 | uint32_t(vsyncBp);
+  w.progFetch = g.fetchLines ? (w.vtotal - g.fetchLines) * w.htotal + 1 + g.fetchOffset : 0;
+  w.pixelClockHz = uint64_t(w.period) * m.hz;
   return w;
 }
 
@@ -158,6 +168,7 @@ inline const Mode *modeByHz(unsigned hz)
 // Which word of a plan differs from the live link (nullptr: none).
 inline const char *firstDifference(const LinkWords &w, const LinkLive &l)
 {
+  if (!w.hz) return "the timing cannot be represented";
   if (w.hsyncCtl != l.hsyncCtl) return "HSYNC_CTL";
   if (w.period != l.period) return "VSYNC_PERIOD_F0";
   if (w.vsyncWidth != l.vsyncWidth) return "VSYNC_PULSE_WIDTH_F0";

@@ -61,6 +61,12 @@ int main(void)
     CHECK(a->safetyOffset == 480u && b->safetyOffset == a->safetyOffset);
     CHECK(a->latency == 240u && b->latency == a->latency);
     CHECK(a->periodFrames == 240u && b->periodFrames == 480u);
+    CHECK(piano_audio_frames_to_ns(a->periodFrames) == 5000000u);
+    CHECK(piano_audio_frames_to_ns(b->periodFrames) == 10000000u);
+    const uint64_t five_days = 5ull * 24 * 3600;
+    const uint64_t frames = five_days * PIANO_AUDIO_RATE + a->periodFrames;
+    CHECK(piano_audio_frames_to_ns(frames) == five_days * 1000000000ull + 5000000u);
+    CHECK(piano_audio_frames_to_ns(frames + 1) - piano_audio_frames_to_ns(frames) == 20833u);
     CHECK(a->ioBufferFrames * 3u / 8u >= 1024u); /* HAL's real maximum callback */
     const uint32_t callbacks[] = {64, 128, 256, 512, 1024};
     for (uint32_t mode = 0; mode < 2; ++mode)
@@ -70,6 +76,18 @@ int main(void)
     CHECK(replay(1, 240, 64, 0) == 0);
     /* Restart with the other cadence: a fresh origin and cleared ring. */
     CHECK(replay(0, a->ioBufferFrames, 512, 1) == 0);
+    /* An absolute HAL cursor crosses 2^32 within one batch. The physical
+     * wrap is 7680 frames, which does not divide 2^32. */
+    const uint32_t first = UINT32_MAX - 119u;
+    for (uint32_t i = 0; i < a->periodFrames; ++i) src[i] = (int16_t)(i + 1);
+    memset(ring, 0, sizeof ring);
+    piano_audio_copy_to_ring(ring, a->ringFrames, first, src, a->periodFrames, 1);
+    for (uint32_t i = 0; i < a->periodFrames; ++i)
+        CHECK(ring[((uint64_t)first + i) % a->ringFrames] == src[i]);
+    piano_audio_copy_from_ring(dst, ring, a->ringFrames, first, a->periodFrames, 1);
+    CHECK(!memcmp(dst, src, a->periodFrames * sizeof *src));
+    piano_audio_zero_ring(ring, a->ringFrames, first, a->periodFrames, 1);
+    for (uint32_t i = 0; i < a->ringFrames; ++i) CHECK(!ring[i]);
     puts("PianoAudio HAL-ring contract and restart replay passed");
     return 0;
 }

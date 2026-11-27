@@ -202,8 +202,9 @@ void spk_live_stage(uint8_t slot[SPK_LIVE_SLOT]);
 typedef struct {
     uint32_t re[4], temp[4], w2[4], f0[4], q[4], w5[4];
 } SpkLive;
-/* After the GET's answer: 0 and the four channels, or -1 (the DSP's header names another parameter, another size or an error). */
-int spk_live_parse(const uint8_t slot[SPK_LIVE_SLOT], SpkLive *out);
+enum {SpkLiveInvalid = -1, SpkLiveEmpty = -2};
+/* After the GET's answer: 0 and the four channels, or an error with out unchanged. */
+int spk_live_parse(const uint8_t *slot, uint32_t bytes, SpkLive *out);
 
 /* ---- the plan: the passthrough speaker plan's shape with the protection pair, as one ArSeq (Android's order, round 2):
  *   bit clock (not with +2); map [periods | parameter area]; open speaker (oob); speaker endpoint and MFC; speaker parameters (in

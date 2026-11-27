@@ -2,6 +2,16 @@
   "name": "PianoUsbHostStackA2",
   "bundle": "com.unixnu.driver.PianoUsbHostStackA2",
   "version": "1.0.0",
+  "comment": [
+    "Path A2's stack (docs/drivers/usb-host.md section 5.4): the libraries bring the collection's xHCI, host family, hub, composite,",
+    "HID, mass-storage (+ the SCSI block-commands device: IOSCSIPeripheralDeviceType00, without which a stick stops at its",
+    "IOSCSIPeripheralDeviceNub and no IOMedia appears) and USB-Ethernet drivers. The kernel's IOUSBHostHIDDevice has only a",
+    "boot-keyboard personality (deferred until the IOKit daemon is up) and the generic IOHIDEventDriver personalities live in codeless",
+    "bundles this collection does not carry; stock macOS serves other HID interfaces with driver extensions, untested on this port.",
+    "So the kernel path here: IOUSBHostHIDDevice on any HID interface (class 3, subclass 0 or 1) and IOHIDFamily's IOHIDEventDriver",
+    "(the class our own HID devices use) for a USB keyboard, mouse or consumer control (Transport USB). All three matches require",
+    "an ancestor of class PianoUsbHostNub. That waits for the host handoff and excludes PianoDwc3's USB-transport input devices."
+  ],
   "libraries": {
     "com.apple.driver.usb.AppleUSBXHCI": "1.2",
     "com.apple.iokit.IOUSBHostFamily": "1.2",
@@ -11,9 +21,64 @@
     "com.apple.iokit.IOUSBMassStorageDriver": "283",
     "com.apple.driver.usb.cdc.ncm": "5.0.0",
     "com.apple.driver.usb.cdc.ecm": "5.0.0",
-    "com.apple.driver.usb.ethernet.asix": "5.0.0"
+    "com.apple.driver.usb.ethernet.asix": "5.0.0",
+    "com.apple.iokit.IOSCSIBlockCommandsDevice": "1.0.0",
+    "com.apple.iokit.IOHIDFamily": "2.0.0"
   },
-  "personalities": {},
+  "personalities": {
+    "USB HID interface, subclass 0 (fallback)": {
+      "CFBundleIdentifier": "com.apple.driver.usb.IOUSBHostHIDDevice",
+      "IOClass": "IOUSBHostHIDDevice",
+      "IOProviderClass": "IOUSBHostInterface",
+      "IOParentMatch": {"IOProviderClass": "PianoUsbHostNub"},
+      "bInterfaceClass": 3,
+      "bInterfaceSubClass": 0,
+      "IOProbeScore": 2000,
+      "HIDDefaultBehavior": ""
+    },
+    "USB HID interface, boot subclass (fallback)": {
+      "CFBundleIdentifier": "com.apple.driver.usb.IOUSBHostHIDDevice",
+      "IOClass": "IOUSBHostHIDDevice",
+      "IOProviderClass": "IOUSBHostInterface",
+      "IOParentMatch": {"IOProviderClass": "PianoUsbHostNub"},
+      "bInterfaceClass": 3,
+      "bInterfaceSubClass": 1,
+      "IOProbeScore": 2000,
+      "HIDDefaultBehavior": ""
+    },
+    "USB keyboard, mouse and consumer events (fallback)": {
+      "CFBundleIdentifier": "com.apple.iokit.IOHIDFamily",
+      "IOClass": "IOHIDEventDriver",
+      "IOProviderClass": "IOHIDInterface",
+      "IOParentMatch": {"IOProviderClass": "PianoUsbHostNub"},
+      "IOPropertyMatch": {
+        "Transport": "USB"
+      },
+      "DeviceUsagePairs": [
+        {
+          "DeviceUsagePage": 1,
+          "DeviceUsage": 1
+        },
+        {
+          "DeviceUsagePage": 1,
+          "DeviceUsage": 2
+        },
+        {
+          "DeviceUsagePage": 1,
+          "DeviceUsage": 6
+        },
+        {
+          "DeviceUsagePage": 1,
+          "DeviceUsage": 7
+        },
+        {
+          "DeviceUsagePage": 12,
+          "DeviceUsage": 1
+        }
+      ],
+      "IOProbeScore": 2000
+    }
+  },
   "patch_personalities": {
     "com.apple.iokit.IOUSBHostFamily": {
       "AppleUSBHostResources": {

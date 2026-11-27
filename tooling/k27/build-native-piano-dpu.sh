@@ -23,7 +23,7 @@ mkdir -p "$O/host-tests"
 # The writing slices B1c/B1d/B1e (DpuRefresh.h, DpuPcc.h, DpuPanel.h on the timed register model tests/dpu_model.h).
 # B1 milestone 1 (store-free): the 144/120/90/60 Hz timing planner (DpuModes.h) against installed y12k's survey words, and the
 # run-time snapshot (DpuSnapshot.h, machdep.piano_dpu_snapshot with piano-dpu-snapshot=1) on the register model.
-for t in refresh pcc panel modes mode_switch snapshot clean; do
+for t in refresh pcc panel modes mode_switch snapshot clean clock_read; do
   "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -I "$P" "$P/tests/dpu_${t}_host.cpp" -o "$O/host-tests/dpu_${t}_host"
   "$O/host-tests/dpu_${t}_host" || { echo "Error: PianoDpu $t host tests failed" >&2; exit 1; }
 done
@@ -53,8 +53,9 @@ fi
 python3 "$D/tooling/k27/build-native-kext.py" PianoDpu "$P/PianoDpu.cpp" "$P/DpuFlip.cpp" "$P/DpuSlices.cpp" "$P/DpuSnapshot.cpp" "$D/tooling/k27/NativeKextGlue.cpp" -I "$P" \
   -D "PIANO_DPU_IOSURFACE_CACHE_MODE=$IOSURFACE_CACHE_MODE" --obj "${K27_OBJ:-k27-native-obj}"
 KERNEL=${K27_KERNEL:-$K/out/k27/kernel-k27-0059-native.macho}
-# The AHB lock and 144 Hz RPMh helpers come from PianoA830, a library of PianoDpu.json.
+# The AHB lock and RPMh helpers come from PianoA830, a library of PianoDpu.json.
 [ ! -f "$KERNEL" ] || python3 "$D/tooling/k27/check-kext-imports.py" "$O/objects.json" "$KERNEL" --library-prefix _sm8750_gcc_vote_owner \
   --library-prefix _Sm8750CmdDbCopy --library-prefix _Sm8750CmdDbBcm --library-prefix _Sm8750BcmCommand --library-prefix _Sm8750RpmhWriteActive \
+  --library-prefix _Sm8750CmdDbArc --library-prefix _Sm8750RpmhReadActive \
   --library-prefix __ZNK9IOSurface12getCacheModeEv \
   | cut -c1-160 >&2

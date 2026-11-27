@@ -48,6 +48,11 @@ int main()
   assert(prepare(CleanReason::eligible).action == Action::initialized && epoch.initialized);
   assert((events == std::vector<Event>{fullBacking, check}));
   assert(prepare(CleanReason::eligible).action == Action::skipped && events == std::vector<Event>{dsb});
+  const auto forced = prepare(CleanReason::forced);
+  assert(forced.action == Action::fallback && forced.reason == CleanReason::forced && !epoch.initialized);
+  assert(events == std::vector<Event>{scanout});
+  assert(prepare(CleanReason::eligible).action == Action::initialized && epoch.initialized);
+  assert((events == std::vector<Event>{fullBacking, check}));
   assert(prepare(CleanReason::mode).action == Action::fallback && !epoch.initialized);
   assert(events == std::vector<Event>{scanout});
 

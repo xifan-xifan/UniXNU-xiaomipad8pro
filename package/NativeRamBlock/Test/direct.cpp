@@ -63,6 +63,20 @@ int main() {
     for (uint64_t at = 0; at < seed.bytes; at += 70000) { uint64_t n = seed.bytes - at < 70000 ? seed.bytes - at : 70000; Buffer b{io};
       bool e; r.readOnly = false; assert(directDiskIO(seed, r, m, stage.data(), 8, false, at, n, b, &e) == n && !memcmp(io.data(), &oracle[at], n)); } }
   // Refusals: a failing store write is reported and nothing is counted; a short copy is not a store error; read-only refuses writes.
+  {
+    Buffer b{io};
+    const unsigned reads = m.reads, writes = m.writes;
+    RamSparseDisk longer = seed;
+    longer.bytes += kBlock;
+    auto longerPages = seedPages;
+    longerPages.push_back(nullptr);
+    longer.pages = longerPages.data();
+    for (bool write : {false, true}) {
+      assert(directDiskIO(longer, ov, m, stage.data(), 8, write, seed.bytes - 1, 2, b, &storeError) == 0);
+      assert(directDiskIO(seed, ov, m, stage.data(), 8, write, UINT64_MAX - 1, 4, b, &storeError) == 0);
+    }
+    assert(m.reads == reads && m.writes == writes);
+  }
   { Buffer b{io}; for (uint64_t k = 0; k < 8192; ++k) io[k] = 0x77;
     m.failWriteAt = m.writes; assert(directDiskIO(seed, ov, m, stage.data(), 8, true, 4096, 8192, b, &storeError) == 0 && storeError);
     m.failWriteAt = ~0u; storeError = false;

@@ -88,14 +88,7 @@ def field_of(copy, offset, entries_offset, header_offset):
     return f'{copy} block {offset // B} +{offset % B}'
 
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--backup-dir', type=Path, default=common.BACKUP)
-    p.add_argument('--out', type=Path, default=common.DEVICE / 'out/persistent')
-    p.add_argument('--esp-guid', type=uuid.UUID)
-    a = p.parse_args()
-    head0 = (a.backup_dir / 'new-primary.bin').read_bytes()
-    tail0 = (a.backup_dir / 'new-backup.bin').read_bytes()
+def build_tables(head0, tail0, esp_guid=None):
     if common.hashlib.sha256(head0).hexdigest() != common.GPT_PRIMARY_SHA256 or common.hashlib.sha256(tail0).hexdigest() != common.GPT_BACKUP_SHA256:
         raise SystemExit('new-primary.bin / new-backup.bin are not the tables on the tablet (GPT-HASHES.txt)')
     if len(head0) != 6 * B or len(tail0) != 5 * B:
@@ -107,6 +100,8 @@ def main():
                 h['entry_size']) != (b'EFI PART', 0x10000, 92, my, alt, elba, 64, ENTRY):
             raise SystemExit(f'unexpected GPT header geometry: {h}')
     first_usable, last_usable = h1['first_usable_lba'], h1['last_usable_lba']
+    if any(h1[key] != h2[key] for key in ('disk_guid', 'first_usable_lba', 'last_usable_lba')):
+        raise SystemExit('GPT copies disagree on the disk GUID or usable range')
     entries_blob = head0[2 * B:2 * B + 64 * ENTRY]
     if (tail0[:64 * ENTRY] != entries_blob or zlib.crc32(entries_blob) & 0xffffffff != h1['entries_crc32']
             or h2['entries_crc32'] != h1['entries_crc32']):
@@ -114,6 +109,7 @@ def main():
     if header_crc(head0[B:2 * B], 92) != h1['header_crc32'] or header_crc(tail0[4 * B:], 92) != h2['header_crc32']:
         raise SystemExit('a header CRC of the originals is wrong')
     old = entries_of(entries_blob, 64)
+    check_table(old, first_usable, last_usable)
     by_index = {e['index']: e for e in old}
     rootfs, data = by_index.get(common.ROOTFS_INDEX), by_index.get(common.DATA_INDEX)
     if not rootfs or (rootfs['name'], rootfs['first_lba'], rootfs['last_lba']) != ('linux_rootfs', common.ROOTFS_FIRST, common.ROOTFS_LAST):
@@ -123,7 +119,7 @@ def main():
     if common.ESP_INDEX in by_index:
         raise SystemExit(f'entry index {common.ESP_INDEX} is in use: {by_index[common.ESP_INDEX]}')
     disk_guid = uuid.UUID(bytes_le=h1['disk_guid'])
-    esp_guid = a.esp_guid or uuid.uuid5(disk_guid, 'piano persistent boot: esp (LUN 0 partition 37)')
+    esp_guid = esp_guid or uuid.uuid5(disk_guid, 'piano persistent boot: esp (LUN 0 partition 37)')
     # The new entries.
     blob = bytearray(entries_blob)
     struct.pack_into('<Q', blob, common.ROOTFS_INDEX * ENTRY + 40, common.ROOTFS_NEW_LAST)
@@ -172,13 +168,28 @@ def main():
             raise SystemExit(f'{copy}: does not parse back to the new table')
     if head[:B] != head0[:B]:
         raise SystemExit('the protective MBR changed')
+    return head, tail, old, new, esp_guid, ecrc, lines
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument('--backup-dir', type=Path, default=common.BACKUP)
+    p.add_argument('--out', type=Path, default=common.DEVICE / 'out/persistent')
+    p.add_argument('--esp-guid', type=uuid.UUID)
+    a = p.parse_args()
+    head0 = (a.backup_dir / 'new-primary.bin').read_bytes()
+    tail0 = (a.backup_dir / 'new-backup.bin').read_bytes()
+    head, tail, old, new, esp_guid, ecrc, lines = build_tables(head0, tail0, a.esp_guid)
+    h1, h2 = header(head0[B:2 * B]), header(tail0[4 * B:])
+    disk_guid = uuid.UUID(bytes_le=h1['disk_guid'])
+    tail_first = common.LUN0_BLOCKS - 5
     a.out.mkdir(parents=True, exist_ok=True)
     (a.out / 'gpt-head.bin').write_bytes(head)
     (a.out / 'gpt-tail.bin').write_bytes(tail)
     changed = [e for e in new if e not in old] + [e for e in old if e not in new]
     record = {
         'status': 'OFFLINE_BUILD_NOT_DEVICE_TESTED', 'lun': 0, 'lba_bytes': B, 'disk_blocks': common.LUN0_BLOCKS,
-        'disk_guid': str(disk_guid).upper(), 'first_usable_lba': first_usable, 'last_usable_lba': last_usable,
+        'disk_guid': str(disk_guid).upper(), 'first_usable_lba': h1['first_usable_lba'], 'last_usable_lba': h1['last_usable_lba'],
         'originals': {'new-primary.bin': common.GPT_PRIMARY_SHA256, 'new-backup.bin': common.GPT_BACKUP_SHA256},
         'gpt-head.bin': {'sha256': common.hashlib.sha256(head).hexdigest(), 'bytes': len(head), 'lba': 0, 'blocks': 6,
                          'dd': 'dd if=gpt-head.bin of=/dev/sda bs=4096 seek=0 conv=fsync'},

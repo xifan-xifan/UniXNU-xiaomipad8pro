@@ -67,8 +67,10 @@ typedef struct {
 int micns_init(MicNs *m, const PianoTapHeader *tap, int bypass, uint64_t (*ticks)(void));
 /* Non-real-time, at the device's StartIO: a fresh RNNoise state, an empty pipeline, the statistics zeroed; TAP the mapping now. */
 int micns_start(MicNs *m, const PianoTapHeader *tap);
-/* Real-time: N frames for the HAL (float, -1..1). Returns the frames that carried processed audio (the rest is silence). */
+/* Real-time: N frames for the HAL (float, -1..1). Returns the frames that carried processed audio (the rest is silence).
+ * A null output or a zero-length read leaves the pipeline unchanged. */
 uint32_t micns_read(MicNs *m, float *out, uint32_t n);
+/* Non-real-time: release RNNoise and detach from the tap until the next start. */
 void micns_free(MicNs *m);
 /* The pipeline's fill now (frames), for tests and the log. */
 uint32_t micns_fill(const MicNs *m);

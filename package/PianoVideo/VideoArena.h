@@ -13,7 +13,7 @@ inline bool buildArena(vsmmu::Tables &t, const Layout &layout, const uint64_t *p
   const uint32_t arenaBytes = layout.arenaBytes();
   if (!backingBytes) backingBytes = arenaBytes;
   const unsigned tablePages = vsmmu::sessionTablePages(backingBytes);
-  if (!t.cpu || !pages || (t.pa & 4095) || !tablePages || t.pageCount != tablePages ||
+  if (!vsmmu::validTableStorage(t) || !pages || !tablePages || t.pageCount != tablePages ||
       !arenaBytes || layout.bytes > arenaBytes || arenaBytes > backingBytes)
     return false;
   const unsigned arenaTables = t.pageCount - vsmmu::kTablePages;

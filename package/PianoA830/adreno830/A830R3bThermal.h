@@ -56,18 +56,19 @@ struct A830R3bThermal {
     void useAndroid() {android=true;softDeci=950;coolDeci=900;hardDeci=1000;}
     /* The skin inputs of one round (android only); an absent or stale virtual reading is unknown, never cool. */
     void skinTick(const piano_skin_temps *skin) {
-        const bool usable=skin && skin->version==PIANO_SKIN_TEMPS_VERSION && skin->state==PIANO_BOARD_TEMPS_RUNNING &&
-            skin->virtual_valid && skin->virtual_milli_c>=-40000 && skin->virtual_milli_c<=125000;
-        skinValid=usable;
-        if(usable) {
+        const bool running=skin && skin->version==PIANO_SKIN_TEMPS_VERSION && skin->state==PIANO_BOARD_TEMPS_RUNNING;
+        constexpr uint32_t required=(1u<<PIANO_SKIN_BATTERY)|(1u<<PIANO_SKIN_QUIET)|(1u<<PIANO_SKIN_WIFI)|(1u<<PIANO_SKIN_MSM);
+        const bool usable=running && skin->virtual_valid && skin->virtual_milli_c>=-40000 && skin->virtual_milli_c<=125000;
+        const bool xoValid=running && (skin->valid&(1u<<PIANO_SKIN_XO)) &&
+            skin->milli_c[PIANO_SKIN_XO]>=-40000 && skin->milli_c[PIANO_SKIN_XO]<=125000;
+        skinValid=usable && xoValid && (skin->valid&skin->virtual_used&required)==required;
+        if(skinValid) {
             skinMilli=skin->virtual_milli_c;
             if(skinMilli>=Skin25On)skin25=true;else if(skinMilli<Skin25Off)skin25=false;
             if(skinMilli>=Skin45On)skin45=true;else if(skinMilli<Skin45Off)skin45=false;
             while(band<DockedBands && skinMilli>=Docked[band].on)++band;
             while(band && skinMilli<Docked[band-1].off)--band;
         }
-        const bool xoValid=skin && skin->version==PIANO_SKIN_TEMPS_VERSION && (skin->valid&(1u<<PIANO_SKIN_XO));
-        xoHard=false;
         if(xoValid) {
             xoMilli=skin->milli_c[PIANO_SKIN_XO];
             if(xoMilli>=XoOn)xoHot=true;else if(xoMilli<XoOff)xoHot=false;
@@ -76,8 +77,12 @@ struct A830R3bThermal {
         const uint8_t before=skinCap;
         if(skinTable==1) {
             skinCap=band?Docked[band-1].level:14;
-            if((!usable || xoHot) && skinCap>Skin45Level)skinCap=Skin45Level;
-        } else skinCap=!usable || skin45 || xoHot?Skin45Level:skin25?Skin25Level:14;
+            if(xoHot && skinCap>Skin45Level)skinCap=Skin45Level;
+        } else skinCap=skin45 || xoHot?Skin45Level:skin25?Skin25Level:14;
+        if(!skinValid) {
+            if(skinCap>Skin45Level)skinCap=Skin45Level;
+            if(skinCap>before)skinCap=before;
+        }
         if(skinCap!=before) {++skinChanges;events|=16;}
     }
     void tick(uint64_t now,const Sm8750TsensSample &g,const piano_gpu_temps &b,bool ok,bool running,
@@ -125,7 +130,7 @@ struct A830R3bThermal {
                 trend=delta>32?1:delta<-32?-1:0;trendAt=now;trendRef=filter16;
             }
         }
-        if(!running || !healthy || boardCap || raw>=softDeci || filter16>coolDeci*16)coolSince=0;
+        if(!running || !healthy || boardCap || (android && !skinValid) || raw>=softDeci || filter16>coolDeci*16)coolSince=0;
         else if(!coolSince)coolSince=now;
         else if(now-coolSince>=2000000000ull && step<top) {++step;++ups;events|=1;coolSince=now;}
         if(running && healthy && (raw>=softDeci || filter16>=softDeci*16) && (!downAt || now-downAt>=500000000)) {

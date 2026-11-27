@@ -1,0 +1,221 @@
+From 701891d5cdb3c616aa3ff550ec9c8ce88fe28db1 Mon Sep 17 00:00:00 2001
+From: UniXNU-piano <noreply@unixnu-piano.invalid>
+Date: Thu, 26 Nov 2026 20:00:00 +0800
+Subject: [PATCH] k27: use Normal WC for qualified GPU reservation records
+
+Select the Normal WC PTE attribute for explicit WC mappings of validated
+R1 GPU reservations. The reservation stays outside XNU's managed DRAM.
+Arm only on an explicit piano-gpu-tier=1 or =2 boot.
+
+---
+diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
+index ad6e887..0f5e555 100644
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -80,6 +80,7 @@
+ #include <arm/machine_cpu.h>
+ #include <arm/misc_protos.h>
+ #include <arm/pmap/pmap_internal.h>
++#include <arm/pmap/pmap_piano_gpu_wc.h>
+ #include <arm/trap_internal.h>
+
+ #include <arm64/proc_reg.h>
+@@ -2264,6 +2265,32 @@ pmap_get_arm64_prot(
+ #define UNNEST_IN_PROGRESS_BIT(index) (((index) * 2) + 1)
+
+
++/* Boot-published R1 reservations are outside XNU's managed DRAM. Keep their
++ * exception local to explicit WC mappings, with no change to DRAM ownership.
++ */
++static SECURITY_READ_ONLY_LATE(struct piano_gpu_wc_run) piano_gpu_wc_runs[PIANO_GPU_WC_RUNS];
++static SECURITY_READ_ONLY_LATE(unsigned) piano_gpu_wc_count;
++/* Set when piano-gpu-tier=1/2 and /chosen/piano-extra-ram exist: the marker is printed later, once the console is up
++ * (kprintf is off on DEVELOPMENT kernels without -enable_kprintf_spam), next to k27 0075's line in pmap_create_commpages. */
++static SECURITY_READ_ONLY_LATE(unsigned) piano_gpu_wc_armed;
++
++static void
++pmap_piano_gpu_wc_init(void)
++{
++	unsigned mode = piano_gpu_wc_mode(PE_boot_args());
++	DTEntry chosen;
++	const void *property;
++	unsigned length;
++	if (!mode ||
++	    SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess ||
++	    SecureDTGetProperty(chosen, "piano-extra-ram", &property, &length) != kSuccess) {
++		return;
++	}
++	uint64_t window_base = MIN(gPhysBase, gDramBase);
++	piano_gpu_wc_count = piano_gpu_wc_load(mode, property, length, window_base, piano_gpu_wc_runs);
++	piano_gpu_wc_armed = 1;
++}
++
+ /*
+  *	Bootstrap the system enough to run with virtual memory.
+  *
+@@ -2292,6 +2319,8 @@ pmap_bootstrap(
+ {
+ 	vm_map_offset_t maxoffset;
+
++	pmap_piano_gpu_wc_init();
++
+ 	lck_grp_init(&pmap_lck_grp, "pmap", LCK_GRP_ATTR_NULL);
+ 	lck_attr_setdefault(&pmap_lck_rw_attr);
+ 	pmap_lck_rw_attr.lck_attr_val |= LCK_ATTR_RW_NO_SLEEP;
+@@ -6125,7 +6154,8 @@ wimg_to_pte(unsigned int wimg, pmap_paddr_t pa)
+ 		pte |= ARM_PTE_NX | ARM_PTE_PNX;
+ 		break;
+ 	case VM_WIMG_WCOMB:
+-		if (is_dram_addr(pa)) {
++		if (is_dram_addr(pa) ||
++		    piano_gpu_wc_contains(piano_gpu_wc_runs, piano_gpu_wc_count, pa)) {
+ 			pte = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_WRITECOMB);
+ 		} else {
+ #if HAS_FEAT_XS
+@@ -11524,6 +11554,9 @@ pmap_create_commpages(vm_map_address_t *kernel_data_addr, vm_map_address_t *kern
+ 		printf("piano-uva47: user VA 39 bits (piano-uva47=0), map end 0x%llx\n", (unsigned long long)arm64_pmap_max_offset_default);
+ 	}
+ #endif
++	if (piano_gpu_wc_armed) {
++		printf("piano-gpu-tier-wc: Normal WC reserved runs %u\n", piano_gpu_wc_count);
++	}
+
+ #if XNU_MONITOR
+ 	data_pa = pmap_alloc_page_for_kern(0);
+diff --git a/osfmk/arm/pmap/pmap_piano_gpu_wc.h b/osfmk/arm/pmap/pmap_piano_gpu_wc.h
+new file mode 100644
+index 0000000..771ed33
+--- /dev/null
++++ b/osfmk/arm/pmap/pmap_piano_gpu_wc.h
+@@ -0,0 +1,131 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent */
++#ifndef PMAP_PIANO_GPU_WC_H
++#define PMAP_PIANO_GPU_WC_H
++
++#include <stddef.h>
++#include <stdint.h>
++
++/* DarwinBoot 0002 publishes 16 LE {base, size, bank, use} records.
++ * Keep the bounds in sync with PianoExtraRam.h and DarwinBoot ExtraRam.h.
++ */
++#define PIANO_GPU_WC_RUNS 8
++
++struct piano_gpu_wc_run {
++	uint64_t base;
++	uint64_t end;
++};
++
++/* Keep this in sync with A830GpuTier.h: only literal 1/2, last token wins. */
++static inline unsigned
++piano_gpu_wc_mode(const char *args)
++{
++	static const char key[] = "piano-gpu-tier=";
++	const size_t key_len = sizeof(key) - 1;
++	unsigned mode = 0;
++	if (!args) {
++		return 0;
++	}
++	while (*args) {
++		while (*args == ' ' || *args == '\t') {
++			++args;
++		}
++		const char *end = args;
++		while (*end && *end != ' ' && *end != '\t') {
++			++end;
++		}
++		size_t length = end - args;
++		if (length >= key_len && __builtin_memcmp(args, key, key_len) == 0) {
++			mode = length == key_len + 1 && (args[key_len] == '1' || args[key_len] == '2')
++			    ? args[key_len] - '0' : 0;
++		}
++		args = end;
++	}
++	return mode;
++}
++
++static inline uint64_t
++piano_gpu_wc_le(const uint8_t *bytes, size_t length)
++{
++	uint64_t value = 0;
++	for (size_t i = 0; i < length; ++i) {
++		value |= (uint64_t)bytes[i] << (i * 8);
++	}
++	return value;
++}
++
++static inline unsigned
++piano_gpu_wc_load(unsigned mode, const uint8_t *property, size_t length, uint64_t window_base,
++    struct piano_gpu_wc_run runs[PIANO_GPU_WC_RUNS])
++{
++	static const struct piano_gpu_wc_run allowed[] = {
++		{0x880000000ULL, 0x8af6fd000ULL},
++		{0x8b0000000ULL, 0x8b5500000ULL},
++		{0x8b5700000ULL, 0x8b7500000ULL}
++	};
++	const uint64_t slab_mask = (1ULL << 21) - 1;
++	if ((mode != 1 && mode != 2) || !property || length != 16 * 24) {
++		return 0;
++	}
++	unsigned count = 0;
++	int padding = 0;
++	for (size_t i = 0; i < length; i += 24) {
++		const uint8_t *record = property + i;
++		uint64_t base = piano_gpu_wc_le(record, 8);
++		uint64_t size = piano_gpu_wc_le(record + 8, 8);
++		uint64_t bank = piano_gpu_wc_le(record + 16, 4);
++		uint64_t use = piano_gpu_wc_le(record + 20, 4);
++		if (!(base | size | bank | use)) {
++			padding = 1;
++			continue;
++		}
++		if (!size || size > UINT64_MAX - base) {
++			return 0;
++		}
++		if (padding) {
++			return 0;
++		}
++		if (bank != 1 || use != 1) {
++			continue;
++		}
++		if (((base | size) & slab_mask) || base >= window_base ||
++		    size > window_base - base || count == PIANO_GPU_WC_RUNS) {
++			return 0;
++		}
++		uint64_t end = base + size;
++		size_t range = 0;
++		for (; range < sizeof(allowed) / sizeof(allowed[0]); ++range) {
++			if (base >= allowed[range].base && end <= allowed[range].end) {
++				break;
++			}
++		}
++		if (range == sizeof(allowed) / sizeof(allowed[0])) {
++			return 0;
++		}
++		for (size_t j = 0; j < length; j += 24) {
++			if (j == i) {
++				continue;
++			}
++			uint64_t other = piano_gpu_wc_le(property + j, 8);
++			uint64_t other_size = piano_gpu_wc_le(property + j + 8, 8);
++			if (other_size && other_size <= UINT64_MAX - other &&
++			    base < other + other_size && other < end) {
++				return 0;
++			}
++		}
++		runs[count++] = (struct piano_gpu_wc_run){.base = base, .end = end};
++	}
++	return count;
++}
++
++static inline int
++piano_gpu_wc_contains(const struct piano_gpu_wc_run *runs, unsigned count, uint64_t pa)
++{
++	for (unsigned i = 0; i < count; ++i) {
++		if (pa >= runs[i].base && pa < runs[i].end) {
++			return 1;
++		}
++	}
++	return 0;
++}
++
++#endif

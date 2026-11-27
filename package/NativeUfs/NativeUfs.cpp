@@ -492,7 +492,7 @@ static void smmuBypassStream (uint16_t stream, OSSharedPtr<IOMemoryMap> &keep, u
     gRootDiagnostic.result = static_cast<uint32_t> (kIOReturnNotReady);
     rootDiagnosticFailure (failure);
     panic ("NATIVE_UFS smmu: %s idx=%u bank=%u cba2r=%x", failure, index, bank,
-           gRootDiagnostic.cba2r);
+           gRootDiagnostic.cba2r.load ());
   }
   report[0] = index | (bank << 16);
   report[1] = cbar;
@@ -1142,6 +1142,7 @@ static uint32_t gSpinTicksUs = ~0U;
 static bool gPerf = false, gDirect = false;
 static unsigned gReadWorkers = 0;
 static uint32_t gBounceBytes = kDataMax, gMaxIoBytes = 0, gNapUs = 0, gNapSpinUs = 30;
+static UfsAtomicField<uint32_t> gSpinUs = 200;
 static uint64_t gNapSpinTicks = 0;
 static thread_t gReadThread[16];
 static unsigned gReadThreads = 0;
@@ -1195,7 +1196,7 @@ static void hostPerfDepth (int delta) { perfDepth (gPerfCommands, delta); }
 
 static void hostWaitCompletion (unsigned slot, uint32_t seen, uint64_t started)
 {
-  const uint32_t spinUs = *static_cast<volatile uint32_t *> (&gSpinUs);
+  const uint32_t spinUs = gSpinUs.load ();
   if (spinUs != gSpinTicksUs) { nanoseconds_to_absolutetime (uint64_t (spinUs) * 1000, &gSpinTicks); gSpinTicksUs = spinUs; }
   if (!hostInterruptMode () || mach_absolute_time () - started < gSpinTicks || !ml_get_interrupts_enabled ()) {
     // native-ufs-nap=US: a read worker past its spin budget sleeps between polls (a timed wait without leeway; nothing wakes it
@@ -1775,6 +1776,11 @@ extern "C" int native_ufs_store_ready (void)
   return native_ufs_root_failure ? -1 : 0;
 }
 
+extern "C" unsigned native_ufs_store_data_slots (void)
+{
+  return gSlotCount > 1 ? gSlotCount - 1 : 1;   // exclude the panic slot
+}
+
 // Store window commands, in mach_absolute_time ticks: count and time of reads, writes and cache flushes, and the longest single call.
 extern "C" volatile uint64_t native_ufs_store_rd_ops = 0, native_ufs_store_rd_ticks = 0, native_ufs_store_wr_ops = 0,
                              native_ufs_store_wr_ticks = 0, native_ufs_store_sync_ops = 0, native_ufs_store_sync_ticks = 0,
@@ -1789,7 +1795,7 @@ static void storeAccount (volatile uint64_t *ops, volatile uint64_t *ticks, uint
 }
 
 // Tracked calls let direct Data quarantine exactly those buffers that can still DMA after a timeout.
-extern "C" int native_ufs_store_read_tracked (uint64_t rel, uint32_t blocks, void *dst, bool *live)
+static int storeRead (uint64_t rel, uint32_t blocks, void *dst, bool *live, bool preferRead)
 {
   if (live) *live = false;
   if (!gStoreRegionBlocks || !dst || !blocks || rel >= gStoreRegionBlocks || blocks > gStoreRegionBlocks - rel) return 0;
@@ -1797,13 +1803,23 @@ extern "C" int native_ufs_store_read_tracked (uint64_t rel, uint32_t blocks, voi
   int ok = 1;
   while (blocks) {
     uint32_t chunk = blocks > kXferMax / 4096 ? static_cast<uint32_t> (kXferMax / 4096) : blocks;
-    if (hostRead4k (0, gStoreRegionFirst + rel, chunk, dst, live) != kIOReturnSuccess) { ok = 0; break; }
+    if (hostRead4k (0, gStoreRegionFirst + rel, chunk, dst, live, preferRead) != kIOReturnSuccess) { ok = 0; break; }
     dst = static_cast<uint8_t *> (dst) + chunk * 4096ULL;
     rel += chunk;
     blocks -= chunk;
   }
   storeAccount (&native_ufs_store_rd_ops, &native_ufs_store_rd_ticks, t0);
   return ok;
+}
+
+extern "C" int native_ufs_store_read_tracked (uint64_t rel, uint32_t blocks, void *dst, bool *live)
+{
+  return storeRead (rel, blocks, dst, live, false);
+}
+
+extern "C" int native_ufs_store_read_queued (uint64_t rel, uint32_t blocks, void *dst, bool *live)
+{
+  return storeRead (rel, blocks, dst, live, true);
 }
 
 extern "C" int native_ufs_store_read (uint64_t rel, uint32_t blocks, void *dst)
@@ -1840,11 +1856,10 @@ extern "C" int native_ufs_store_write_tracked (uint64_t rel, uint32_t blocks, co
   return storeWrite (rel, blocks, src, true, live);
 }
 
-// No forced unit access: the device may keep the blocks in its volatile write cache until native_ufs_store_sync. For a
-// write-back overlay, which makes its pages durable with a sync before it writes the bitmap blocks that name them.
-extern "C" int native_ufs_store_write_cached (uint64_t rel, uint32_t blocks, const void *src)
+// Data uses this for already-present pages. Track caller DMA just as for FUA writes.
+extern "C" int native_ufs_store_write_cached_tracked (uint64_t rel, uint32_t blocks, const void *src, bool *live)
 {
-  return storeWrite (rel, blocks, src, false);
+  return storeWrite (rel, blocks, src, false, live);
 }
 
 extern "C" int native_ufs_store_sync (void)
@@ -2067,7 +2082,10 @@ extern "C" int native_ufs_dme_get (uint32_t attribute, uint32_t selector, uint32
 // Command slots: in use, the most taken at once, takes that waited for a free slot (RootCommands.h), for the log.
 extern "C" void native_ufs_slot_stats (uint32_t *slots, uint32_t *peak, uint64_t *waits)
 {
+  auto *lock = gSlotLock;
+  if (lock) IOLockLock (lock);
   *slots = gSlotCount; *peak = gSlotsPeak; *waits = gSlotWaits;
+  if (lock) IOLockUnlock (lock);
 }
 
 extern "C" int native_ufs_log_sync (void)
@@ -2115,7 +2133,8 @@ class NativeUfsBlock : public IOBlockStorageDevice {
   uint32_t bounceBytes[kBounces] = {};
   IOBufferMemoryDescriptor *bounceMd[kBounces] = {};
   uint32_t bounceFree = 0;
-  IOLock *windowLock = nullptr;   // guards bounceFree
+  uint32_t bounceQuarantined = 0;
+  IOLock *windowLock = nullptr;   // guards both bounce masks
   bool online = false;
   bool writable = false;      // development build only (NATIVE_UFS_UNVERIFIED_ROOT)
   IOReturn writeWindow (IOMemoryDescriptor *buffer, UInt64 block, UInt64 count, uint64_t *done);
@@ -2125,9 +2144,13 @@ class NativeUfsBlock : public IOBlockStorageDevice {
     const uint64_t waitStart = hostPerfNow ();
     bool waited = false;
     IOLockLock (windowLock);
-    while (!bounceFree) {
+    while (!bounceFree && gHost.ready) {
       waited = true;
       IOLockSleep (windowLock, &bounceFree, THREAD_UNINT);
+    }
+    if (!gHost.ready) {
+      IOLockUnlock (windowLock);
+      return kBounces;
     }
     const unsigned k = static_cast<unsigned> (__builtin_ctz (bounceFree));
     bounceFree &= ~(1U << k);
@@ -2135,11 +2158,12 @@ class NativeUfsBlock : public IOBlockStorageDevice {
     if (waited) hostPerfSpan (kUfsPerfBounceWait, waitStart, 0);
     return k;
   }
-  void giveBounce (unsigned k)
+  void giveBounce (unsigned k, bool live)
   {
     IOLockLock (windowLock);
-    bounceFree |= 1U << k;
-    IOLockWakeup (windowLock, &bounceFree, true);
+    if (live) bounceQuarantined |= 1U << k;
+    else bounceFree |= 1U << k;
+    IOLockWakeup (windowLock, &bounceFree, gHost.ready);
     IOLockUnlock (windowLock);
   }
 #if defined(NATIVE_VERIFIED_BLOCK) && NATIVE_VERIFIED_BLOCK
@@ -2223,7 +2247,8 @@ static void rootDiagnosticFailure (const char *reason)
 {
   // Kept even when the panic diagnostic is off, so the boot page can say why nothing was published.
   native_ufs_root_failure = reason;
-  IOLog ("NativeUfs: FAILED at %s: %s\n", gRootDiagnostic.stage ? gRootDiagnostic.stage : "?", reason ? reason : "?");
+  const char *stage = gRootDiagnostic.stage.load ();
+  IOLog ("NativeUfs: FAILED at %s: %s\n", stage ? stage : "?", reason ? reason : "?");
   if (!gRootDiagnosticEnabled) return;
   gRootDiagnostic.published = native_ufs_blocks_published;
   gRootDiagnostic.reads = native_ufs_block_reads;
@@ -2625,11 +2650,12 @@ void NativeUfsBlock::serveRead (IOMemoryDescriptor *buffer, UInt64 block, UInt64
 #if defined(NATIVE_VERIFIED_BLOCK) && NATIVE_VERIFIED_BLOCK
     const vr_view *view;
 #endif
+    bool live = false;
     void lock () {}     // the request's own bounce buffer holds its snapshot
     void unlock () {}
     IOReturn read (uint64_t lba, uint32_t blocks, void *out) {
       uint64_t t0 = timerTicks ();
-      IOReturn r = hostRead4k (0, lba, blocks, out);
+      IOReturn r = hostRead4k (0, lba, blocks, out, &live);
       __atomic_fetch_add (&native_ufs_read_ticks, timerTicks () - t0, __ATOMIC_RELAXED);
       return r;
     }
@@ -2674,8 +2700,11 @@ void NativeUfsBlock::serveRead (IOMemoryDescriptor *buffer, UInt64 block, UInt64
   bool held = false;
   if (!gDirect || !readDirect (buffer, block, count, &outcome, &held)) {
     const unsigned bounceIndex = takeBounce ();
-    outcome = ufsReadWindow (operations, absolute, bytes, block, count, bounces[bounceIndex], bounceBytes[bounceIndex]);
-    giveBounce (bounceIndex);
+    if (bounceIndex == kBounces) outcome = {kIOReturnNotReady, 0};
+    else {
+      outcome = ufsReadWindow (operations, absolute, bytes, block, count, bounces[bounceIndex], bounceBytes[bounceIndex]);
+      giveBounce (bounceIndex, operations.live);
+    }
   }
   IOReturn result = outcome.status;
   uint64_t done = outcome.done;
@@ -2775,12 +2804,14 @@ bool NativeUfsBlock::readDirect (IOMemoryDescriptor *buffer, UInt64 block, UInt6
 // Development build: 512-byte sectors written onto 4 KiB UFS blocks; partial blocks at the edges are read first.
 IOReturn NativeUfsBlock::writeWindow (IOMemoryDescriptor *buffer, UInt64 block, UInt64 count, uint64_t *done)
 {
+  *done = 0;
   const unsigned bounceIndex = takeBounce ();
+  if (bounceIndex == kBounces) return kIOReturnNotReady;
   uint8_t *bounce = bounces[bounceIndex];   // every bounce has at least kDataMax; writes use that much, as before
   const uint64_t start = absolute + block * 512;
   uint64_t remaining = count * 512;
   IOReturn status = kIOReturnSuccess;
-  *done = 0;
+  bool live = false;
   while (remaining) {
     const uint64_t pos = start + *done, lba = pos / 4096, skip = pos % 4096;
     uint64_t blocks = (skip + remaining + 4095) / 4096;
@@ -2788,16 +2819,16 @@ IOReturn NativeUfsBlock::writeWindow (IOMemoryDescriptor *buffer, UInt64 block, 
     uint64_t usable = blocks * 4096 - skip;
     if (usable > remaining) usable = remaining;
     if (skip || (skip + usable) % 4096) {
-      status = hostRead4k (0, lba, static_cast<uint32_t> (blocks), bounce);
+      status = hostRead4k (0, lba, static_cast<uint32_t> (blocks), bounce, &live);
       if (status != kIOReturnSuccess) break;
     }
     if (buffer->readBytes (*done, bounce + skip, usable) != usable) { status = kIOReturnIOError; break; }
-    status = hostWrite4k (0, lba, static_cast<uint32_t> (blocks), bounce);
+    status = hostWrite4k (0, lba, static_cast<uint32_t> (blocks), bounce, false, &live);
     if (status != kIOReturnSuccess) break;
     *done += usable;
     remaining -= usable;
   }
-  giveBounce (bounceIndex);
+  giveBounce (bounceIndex, live);
   return status;
 }
 
@@ -2810,6 +2841,7 @@ void NativeUfsBlock::free ()
   }
 #endif
   for (unsigned k = 0; k < kBounces; ++k) {
+    if (bounceQuarantined & (1U << k)) continue;  // the controller may still own this allocation
     if (bounceMd[k]) bounceMd[k]->release ();
     else if (bounces[k]) IOFree (bounces[k], kDataMax);
     bounceMd[k] = nullptr;
@@ -2958,7 +2990,7 @@ static void publishThread (void *, wait_result_t)
   } operations;
   UfsRootPublicationResult result = ufsPublishRootWindows (operations, gPublicationPlan);
   if (result.phase != UfsRootPhase::Complete) {
-    gRootDiagnostic.result = result.phase == UfsRootPhase::Start ? kIOReturnIOError : kIOReturnTimeout;
+    gRootDiagnostic.result = static_cast<uint32_t> (result.phase == UfsRootPhase::Start ? kIOReturnIOError : kIOReturnTimeout);
     const char *reason = result.phase == UfsRootPhase::Start ? "root window service start failed" :
       (!strcmp (gPendingDevice[result.index]->windowLabel (), "SystemOS") ?
        "SystemOS signed volume not found" : "signed root window volume not found");
@@ -3637,8 +3669,8 @@ bool NativeUfs::startRoot (IOService *provider)
   IOFree (layout, sizeof (RootLayout));
   if (result.phase != UfsRootPhase::Complete) {
     gPending = 0;
-    gRootDiagnostic.result = result.phase == UfsRootPhase::Identity ? kIOReturnNotPrivileged :
-      result.phase == UfsRootPhase::Schedule ? kIOReturnNoResources : kIOReturnError;
+    gRootDiagnostic.result = static_cast<uint32_t> (result.phase == UfsRootPhase::Identity ? kIOReturnNotPrivileged :
+      result.phase == UfsRootPhase::Schedule ? kIOReturnNoResources : kIOReturnError);
     IOLog ("NativeUfs: root preparation failed phase=%u window=%u; nothing published\n",
            static_cast<unsigned> (result.phase), result.index);
     IOService::stop (provider);

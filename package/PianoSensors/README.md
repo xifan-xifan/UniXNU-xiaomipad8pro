@@ -41,3 +41,18 @@ Build: `tooling/k27/build-native-piano-sensors.sh` (host tests, copy checks, obj
 build it only from the owner's own tablet, under the ignored `out/` or `private/`; it is never committed. A RAM test image may carry
 it (`PIANO_SENSOR_PACK`, `tooling/k27/build-sensor-test-images.sh`); such an image is as private as the pack. Sources and licences: `UPSTREAM`,
 `LICENSE` (BSD-2-Clause-Patent).
+
+## B3 offline sensor model
+
+Run `python3 scripts/ci/self-tests.py --only package/PianoSensors/tests/` from the repository root. The ASan/UBSan suite feeds
+synthetic SSC reports through the production decoders, axis map, orientation and desktop rotation policies. It exercises all four
+display angles, flat poses, dwell, cover and bench acquisition, and carries the Android-reference ALS target through the
+backlight's nominal millinit conversion. [Host suite](tests/sensor_fusion_host.cpp)
+
+The SSC wire IDs, 19.2 MHz clock and Android SDR anchors in `SensorsPolicy.c` are pinned references. The test SUIDs, stream
+ranges, generation tags, strict timestamp ordering and two-reading ALS confirmation belong to the fixture. It simulates
+recoverable SSC service outages and independent errors on gyro, magnetometer and proximity inputs. Live gyro, magnetometer
+and proximity have no streaming consumer, and the live DSP guard strike is boot-latched. [Sensor contracts](../../docs/drivers/sensors.md)
+
+**Fix-image gate: HOLD.** Qualify the real bright-to-dark lux span and verify untethered four-edge rotation and physical cover
+transitions on the tablet. [Attended rotation checks](../../docs/drivers/auto-rotate.md#attended-ram-checks)

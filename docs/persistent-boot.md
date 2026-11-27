@@ -1,11 +1,97 @@
 # Persistent native macOS boot on piano (no `fastboot boot`)
 
-Status 2026-11-14: **installed and updated on the tablet**. The installed system is macOS 27.3 only on the §13.8 whole-disk
-layout: root on `linux_rootfs`, the owner's 200 GiB Data store over `linux_data` (LBA 71859642, seed `9bd6f902`), `boot_a` v5,
-and `esp-k273-v2` with the v3 delta ([results-2026-11-14.md](results-2026-11-14.md)). The original 2026-11-11 procedure below
-was prepared and tested offline first; persistent boot was then installed on 2026-11-11/13 and updated on 2026-11-14. The owner
-approved making native macOS boot by itself from power-on, replacing Ubuntu, with plan option A1 (local notes,
-`persistent-boot-plan.md`, not published). On 06:42 the owner set the rules for the install session, which this procedure follows:
+## Partition safety
+
+- Never write Android `userdata`, `super`, `metadata`, any `_b` partition, or firmware partitions such as `xbl`, `abl`,
+  `tz`, `hyp`, `vbmeta`, `dtbo` and `persist`. `boot_b` is backed up only. Confirm the target against the live partition map.
+- Before each authorized write, verify the backup of the affected region against the pre-write SHA-256 and independently
+  read back the saved bytes. After the write, read back the target from the medium and compare its SHA-256 with the expected
+  result. Stop on any mismatch and keep the verified rollback set.
+- Use `data-persist=0` for routine RAM tests and check the effective arguments after the ADT merge. The M5 durability and
+  throughput tests have a separately confirmed, disposable scratch window. The owner's Data store stays protected.
+  M5 `data-store-write-back=1` remains opt-in. Both write-back and queue mode default to `0`.
+
+[Project hard rules](PROJECT-MAP.md#6-hard-rules) · [Data store and scratch tooling](data-store.md#6-tooling)
+
+## Installed daily profile (2026-11-27)
+
+**v13.1y12q** reached the login window at **+32 s** on four consecutive November 27 disk boots, with the owner's Data store
+resumed and verified each time. `boot_a` holds the v5 BootShim and FD. The 27.3-only ESP defaults to `macos-27.3` and boots
+macOS 27.3 (26C5035r) as Mac17,11 at EL1, with Gunyah at EL2. The root is on `linux_rootfs` and the 200 GiB Data store is
+on `linux_data`. The v5 FD and ADT pair provides the 13 GiB XNU memory window.
+[November 27 installed results](results-2026-11-27.md#installed-boot) · [Project map](PROJECT-MAP.md) · [27.3 line](k273-line.md#current-line-2026-11-27)
+
+| Setting | Installed default |
+| --- | --- |
+| Kernel | Native k27 patches 0053–0076 and the 27.3 patches. Patch 0075 supplies a 47-bit user address space, verified by `machdep.virtual_address_size = 47`. Patch 0076 exports the full merged boot line, about 3.8 KB, through `kern.piano_bootargs` for the USB root shell and updated helpers. The daily boot uses `cs-native4k-skip=1`, confirmed by the code-signature pre-hash skip counters. |
+| Data | `data-store-concurrent=2` lets Data mount in single-gate mode. `piano-data-concurrent` enables M4 concurrent admission after confirming the mounted store has resumed (`store_state=2`). M5 write-back and queue modes stay off. |
+| USB debug | Console, root shell and SSH over USB. `piano-usb-net-txflow=1` enables TX flow control, confirmed active on the second recorded disk boot. |
+| Display | 60 Hz with neutral colours. Night Shift routing, native panel sleep and refresh switching stay off. Fixed 120 Hz and 144 Hz remain RAM-only. |
+| Network and audio | Built-in Wi-Fi on `en0`, speakers, and the raw and RNNoise microphone inputs. Bluetooth preflight passed on v13.1y12q. Pairing remains an attended check. |
+| Power and input | High Power Energy Mode, 5 V and 9 V PD buck charging, native touch, keyboard cover and trackpad. The cover and power-key sleep policy is armed. Physical checks remain pending. |
+
+[Support status](STATUS.md) · [November 26 results](results-2026-11-26.md) ·
+[Concurrent Data mode](data-store.md#concurrent-mode-at-boot-piano-data-concurrent-2026-11-26)
+
+For a daily update, qualify the exact payload on RAM, back up affected regions, write only changed parts and verify them by
+read-back. A disk-boot check confirms the expected profile and resumed Data. See the ESP guide for the rollback order when
+an update also changes the Data-side layer. The second-unit guide records the remaining reproduction gaps.
+[Daily updates and rollback](install-esp-v3.md#daily-update-and-rollback) · [Second-unit install guide](../skills/install-piano-macos/SKILL.md) ·
+[Troubleshooting](troubleshooting.md)
+
+## Current maintenance and verification gates
+
+- **Verified backup and restore.** `maint-session.py` matches the region hash to the backup receipt where the operation
+  requires the original bytes. It also reopens the NAS file and verifies its size and uncached SHA-256 before trusting it.
+  Restore checks the saved offset and length against the destination geometry, verifies the local copy if used, and hashes
+  the restored bytes from the medium. A verified pre-install copy remains the rollback source after an authorized write.
+  [Maintenance session](../tooling/persist/maint-session.py)
+- **LUN 0 GPT.** `build-gpt.py` validates the pinned original copies, their geometry and CRCs, and the resulting non-overlapping
+  entries. The only permitted changes are the `linux_rootfs` end LBA, the new ESP entry, and the entry-array and header CRCs.
+  This preserves the protective MBR and the Android partition entries byte for byte. Before writing, `maint-session.py`
+  reads both live hashes and derives the candidate tables from the revalidated backups. It recognizes an interrupted update
+  with the original primary and new backup copy. The backup GPT is written and verified by SHA-256 before the primary is
+  written. After primary read-back, the session rereads the partition table, checks `sgdisk -v` and validates the remapped
+  `linux_rootfs` and ESP geometry. [GPT builder](../tooling/persist/build-gpt.py) · [Partition safety fixtures](../tooling/persist/test-partition-safety.py)
+- **ESP and installed identity.** The ESP builder checks the seed, store size and kernel store guard. For the current layout,
+  `map`, the ESP write gate and `check` validate the bound store described by the ESP record (see §13.3 and §13.8).
+  `installed_boot_identity.py` checks required arguments against the recorded command line and selected ADT tail, rejecting
+  conflicting values. A live probe brackets `kern.bootargs` and the `/chosen` plist with the same boot UUID. It checks the
+  exact tail, including NUL termination and zero padding, and compares the legacy line to the ESP text or its expected clip.
+  Console evidence must show state `2` and the recorded LBA and seed in both seed fields. Archived console replay needs
+  positive driver evidence for requested keys missing from the intact command-line segment. [ESP builder](../tooling/persist/build-esp.py) ·
+  [Installed boot identity](../tooling/persist/installed_boot_identity.py) · [Partition and identity fixtures](../tooling/persist/test-partition-safety.py)
+- **RAM image preflight.** Run `python3 tooling/bootimg/verify-ram-images.py BUILD_JSON` on the exact image before booting.
+  It checks the Android v2 container, BootShim, FD and DTB, the FAT payload and hashes, and the effective macOS arguments
+  and store settings. `test-verify-ram-images.py` exercises the verifier offline with fixtures. The separately approved M5
+  scratch plan requires a fresh confirmed map, a pinned disposable seed, a window past the root image and its 1024-block guard
+  and below the log reserve, and no overlap with protected extents. Its exact binding is checked again after the ADT split.
+  [Image verifier](../tooling/bootimg/verify-ram-images.py) · [Verifier fixtures](../tooling/bootimg/test-verify-ram-images.py) ·
+  [Scratch-plan fixtures](../tooling/persist/test-scratch-plan.py)
+
+## A2 storage pool tooling
+
+The installed daily still uses the raw root windows in §13.8. A2 provides a gated migration path that copies the System (OS)
+and SystemOS volumes into the Data APFS container. `pool-capture.sh` captures the unmounted source windows in maintenance RAM,
+verifies the per-piece hashes, then verifies the installed base after reboot. `pool-capture-check.sh` validates the saved
+windows on the host, including sizes, SHA-256, APFS superblocks and the expected volume UUIDs from read-only attachments.
+[Pool capture](../tooling/pool/pool-capture.sh) · [Host capture checks](../tooling/pool/pool-capture-check.sh)
+
+`pool-install.sh` first checks that the archive source hashes match the capture and that the archived manifests match the
+live source volumes within the documented tolerances. Both copies must verify before an ESP write. The pool ESP adds
+`macos-27.3-pool` and keeps the base entry. Its disk-boot gates verify the mounted copies and resumed Data. A failed gate
+with a confirmed rollback restores and verifies the base ESP before deleting the new volumes by UUID. Exit `3` is a recovery
+hold in either wrapper. The tablet lock stays held. Inspect the live ESP, Data and saved session state before clearing the
+lock or retrying. [Pool install and rollback](../tooling/pool/pool-install.sh) · [Pool ESP and mock session fixtures](../tooling/persist/test-pool-session.py)
+
+`bash tooling/pool/test-pool-capture-check.sh --real-apfs` exercises the checker using fresh APFS images attached by
+`hdiutil` and inspected by `diskutil` on the Mac. The default test uses simulated disk commands. Both cover valid captures
+and reject changed data, an unexpected volume UUID, wrong sizes and a missing APFS superblock. [Capture test](../tooling/pool/test-pool-capture-check.sh)
+
+## Historical install record (2026-11-11 to 2026-11-14)
+
+Sections 1–12 record the original install and the early FD revisions. Section 13 records the 27.3 migration and §13.8
+describes the layout still in use. The original session followed these rules:
 
 - no question before each write step (the script has `--dry-run` to see everything first);
 - before any write, a **verified NAS backup** of every affected region;
@@ -13,18 +99,17 @@ approved making native macOS boot by itself from power-on, replacing Ubuntu, wit
 - a RAM-boot rollback that keeps working, and restores of `boot_a` and the GPT from the verified backups;
 - never written: `xbl`, `abl`, `tz`, `hyp`, `vbmeta`, `dtbo`, `persist` or any `_b` partition (`boot_b` is backed up only).
 
-This is the one exception to the RAM-boot-only rule of `docs/PROJECT-MAP.md` §6 and `docs/bringup-debugging.md`: it writes exactly
-the regions in §1, by `dd` from the Ubuntu release's maintenance RAM image. It never uses `fastboot flash`, `erase`, `set_active`,
-or any `oem` command to ABL.
+The original persistent-install session wrote the regions in §1 by `dd` from the Ubuntu release's maintenance RAM image.
+The project map records the approved persistent-install exception to routine RAM-only testing. [Project rules](PROJECT-MAP.md#6-hard-rules)
 
-## 1. What is written where (the initial 2026-11-11 layout; current layout: §13.8)
+### 1. What is written where (the initial 2026-11-11 layout; current layout: §13.8)
 
 LUN 0 has 4096-byte LBAs (124552192 blocks). The partition numbers are the GPT's (1-based).
 
 | What | Where | Size | Image | Before |
 |---|---|---|---|---|
-| LUN 0 primary GPT | LBA 0-5 | 24 KiB | `gpt-head.bin` | `CRITICAL-BACKUP/new-primary.bin` (`90a9d3bb…`) |
-| LUN 0 backup GPT | LBA 124552187-124552191 | 20 KiB | `gpt-tail.bin` | `CRITICAL-BACKUP/new-backup.bin` (`21b04d67…`) |
+| LUN 0 primary GPT | LBA 0-5 | 24 KiB | `gpt-head.bin` | `new-primary.bin` (`90a9d3bb…`) |
+| LUN 0 backup GPT | LBA 124552187-124552191 | 20 KiB | `gpt-tail.bin` | `new-backup.bin` (`21b04d67…`) |
 | #35 `linux_rootfs` | 56060928-**71527423** (was …71789567) | 59 GiB | (GPT field only) | 60 GiB |
 | #37 `esp` (new) | **71527424-71789567**, type `C12A7328-…` (EFI system), attributes 0 | 1 GiB | `esp-<profile>-diag.img`, later `esp-<profile>-macos.img` | NativeUfs's unused log reserve |
 | Data store (only with `--store move`) | [68381599, +3145825) moved to **[68119455, +3145825)** | 12.9 GB | (copied in place) | — |
@@ -46,7 +131,7 @@ is moved whatever its seed) nothing is copied and the first boot starts a new st
 the whole store region replaces it, and the move is one forward `dd` within `linux_rootfs` (the destination lies below the source,
 so every block is read before it is overwritten).
 
-## 2. Boot chain after the install
+### 2. Boot chain after the install
 
 ```
 power-on -> XBL -> ABL (slot A, orange-state notice) -> boot_a: BootShim + FD (Mu-Silicium UEFI) -> UniXNU menu (3 s)
@@ -68,7 +153,7 @@ power-on -> XBL -> ABL (slot A, orange-state notice) -> boot_a: BootShim + FD (M
   daily use: default `macos`. Menu keys may not move the selection yet (build-ram-images.py note of 2026-11-10 22:37), so only the
   default is reliably reachable.
 
-### The firmware change (firmware/patches/unixnu/0001)
+#### The firmware change (firmware/patches/unixnu/0001)
 
 UniXNULib took the first FAT volume with `\EFI\UniXNU\unixnu.toml` in `LocateHandleBuffer` order. The UFS LUNs are published
 (UFSDxe is APRIORI) before UniXNURamDiskDxe's RAM disk, so once partition 37 exists, every `fastboot boot` image would boot the
@@ -82,7 +167,7 @@ UniXNU checkout (reverse-check idiom); `tooling/persist/build-all.sh` (FD=1) reb
 **Consequence for the dev loop:** once the ESP exists, every RAM image (`out/ram`, and above all the loop's dump image
 `out/ram-dump`) must be built with the patched FD. An older one boots the ESP's `macos-diag` instead of its own payload.
 
-## 3. Build (Mac, offline)
+### 3. Build (Mac, offline)
 
 ```sh
 FD=1 tooling/persist/build-all.sh          # FD A with the patch, boot_a candidates, ESP images (ESP_PROFILE), GPT, SHA256SUMS
@@ -134,10 +219,10 @@ independent reader (`common.fat32_read`: EDK2 FatPkg's BPB rules, every file thr
 The FD build itself is not bit-reproducible (two clean builds differ), so the FD and everything containing it are identified by
 their hashes.
 
-## 4. Backups (before any write)
+### 4. Backups (before any write)
 
 Step `backup` exports from the tablet, over one TCP connection per region, into `PIANO_BACKUP_DIR/persistent-boot-<time>/` on the
-NAS (`PIANO_BACKUP_DIR` comes from `~/.config/piano/env` at run time; it is never printed or stored in a tracked file). Each copy:
+configured backup destination. Each copy:
 received byte count and SHA-256 equal to the tablet's own SHA-256 of the region (page cache dropped), then the NAS file read back
 without the page cache (`F_NOCACHE`) and hashed again. `SHA256SUMS` and `manifest.json` sit next to the files; regions up to
 128 MiB are also kept in `out/persistent/session/`.
@@ -156,7 +241,7 @@ backup is never replaced: when this install has written a region since, the back
 that changed without this install writing it stops the session (`--new-backup` starts a new set). Expect about 30 MB/s to the
 NAS: the store region takes about 8 minutes to export and as long to read back; `--store fresh` skips it.
 
-## 5. The session (main session, with the tablet)
+### 5. The session (main session, with the tablet)
 
 `tooling/persist/maint-session.py` runs the steps (`--list` describes each; `--dry-run` prints every command and sends nothing).
 Commands reach the maintenance image's root shell through `tooling/native/maint-shell.py` (`PIANO_MAINT_HOST`); the tablet side is
@@ -211,7 +296,7 @@ If ABL refuses the v4 image for `fastboot boot` (`ram-v4-signed`: our UEFI never
 bootloader`, and either treat the v4 container as tested by its Ubuntu twin or write the signed v2 test image instead:
 `python3 $P maint-boot map backup boot-a check maint-exit --boot-image boot-piano-esp-test-v2-signed.img`.
 
-## 6. Verify
+### 6. Verify
 
 - UEFI DEBUG log (`ram-*` steps save it: `session/<image>-uefi.bin`): `UNIXNU: config: loaded \EFI\UniXNU\unixnu.toml`, then
   `UNIXNU: config: volume VenHw(860845C1-BE09-4355-8BC1-30D64FF8E63A)/HD(37,GPT,3F8B0988-D851-5539-AE47-6E53C621D288,…)`.
@@ -220,7 +305,10 @@ bootloader`, and either treat the v4 container as tested by its Ubuntu twin or w
 - After `reboot`: the orange-state notice, 3 s of the UniXNU menu, then macOS; with the `macos-diag` ESP it resets into ABL
   fastboot after 240 s, where `tooling/native/native-loop.sh`'s dump image (patched FD) reads its log.
 
-## 7. Roll back (least invasive first)
+### 7. Roll back (least invasive first)
+
+For a current daily update, start with the ESP and layer rollback order. The partition recovery record below describes the
+original layout. [Daily updates and rollback](install-esp-v3.md#daily-update-and-rollback)
 
 **Always available:** power + volume-down (15-20 s from a hung or panicked kernel) reaches ABL fastboot; ABL is never written.
 From there every `fastboot boot` RAM image works as before: with the patched FD its own payload wins over the ESP
@@ -230,11 +318,11 @@ installed. The `fastboot` menu entry also resets into ABL fastboot.
 | Goal | How |
 |---|---|
 | Undo one step | `python3 tooling/persist/maint-session.py rollback boot-a` / `esp` / `store` / `gpt` (in the maintenance image; each streams its verified backup back and reads it back). Order for a full undo: `boot-a`, `esp`, `store`, `gpt`. |
-| Ubuntu | Ubuntu's root is gone, so: maintenance image, `rollback esp store gpt boot-a` (old tables, old `boot_a` = Ubuntu `389d4271…`); then restore `linux_rootfs` from the 2026-11-10 partition backup (the local restore notes of 2026-11-10, `RESTORE-20261110.md`, not published, scenario B: stream `35-linux_rootfs.img.zst` decompressed onto the partition, check its sha256). `vendor_boot_a`/`init_boot_a` are Ubuntu's already; `linux_data` (`/home`) is never touched. Keep the macOS root image (OS/SystemOS windows) for a later reinstall. |
-| Android (charges) | ABL fastboot: `python3 $REPO/tools/piano-switch.py --serial $PIANO_SERIAL --images ~/Downloads/XiaomiPad8Pro-Ubuntu/CRITICAL-BACKUP/android-set --rollback out/persistent/macos-set-v5`, then `fastboot -s $PIANO_SERIAL reboot` (`$REPO` = the Ubuntu release tree). `userdata`, `super` and `metadata` are untouched; Android marks the slot itself. Back to macOS, from the checkout and in an attached terminal (a detached python loses the USB network to Local Network privacy): `piano-switch.py --serial $PIANO_SERIAL --images out/persistent/macos-set-v5 --rollback ~/Downloads/XiaomiPad8Pro-Ubuntu/CRITICAL-BACKUP/android-set` (all three, since `vendor_boot_a`/`init_boot_a` are Android's then), then `PIANO_V110=$PWD/private/v1.1.0 python3 tooling/persist/maint-session.py --new-backup abl-check maint-boot map backup slot-success-crc check maint-exit` (a flash clears bit 54 and macOS does not set it; `abl-check` records the slot state `slot-success-crc` acts on). `maint-boot` takes the first maintenance image that hashes to its pin (`54001a50…`): `$PIANO_V110`'s, each `PIANO_V110` of `~/.config/piano/env`, then `private/v1.1.0`; naming it in the command keeps the run independent of the shell. |
-| Factory | `CRITICAL-BACKUP/NAS-README.zh-CN.md` (original GPT `backup-meta/gpt/sda-*.bin`, the OS3.0.303 package; never `flash_all_lock`). |
+| Ubuntu | Ubuntu's root is gone, so: maintenance image, `rollback esp store gpt boot-a` (old tables, old `boot_a` = Ubuntu `389d4271…`); then restore `linux_rootfs` from the 2026-11-10 partition backup (stream the decompressed partition backup onto the partition and check its SHA-256). `vendor_boot_a`/`init_boot_a` are Ubuntu's already; This described the original layout, before §13.8 put the 200 GiB Data store on `linux_data`. Keep the macOS root image (OS/SystemOS windows) for a later reinstall. |
+| Android (charges) | ABL fastboot: `python3 $REPO/tools/piano-switch.py --serial $PIANO_SERIAL --images "$ANDROID_SET" --rollback out/persistent/macos-set-v5`, then `fastboot -s $PIANO_SERIAL reboot` (`$REPO` is the Ubuntu release tree and `$ANDROID_SET` is this unit's backed-up Android set). `userdata`, `super` and `metadata` are untouched; Android marks the slot itself. Back to macOS, from the checkout and in an attached terminal (a detached python loses the USB network to Local Network privacy): `piano-switch.py --serial $PIANO_SERIAL --images out/persistent/macos-set-v5 --rollback "$ANDROID_SET"` (all three, since `vendor_boot_a`/`init_boot_a` are Android's then), then `PIANO_V110="$MAINT_RELEASE_DIR" python3 tooling/persist/maint-session.py --new-backup abl-check maint-boot map backup slot-success-crc check maint-exit` (a flash clears bit 54 and macOS does not set it; `abl-check` records the slot state `slot-success-crc` acts on). `$MAINT_RELEASE_DIR` holds the maintenance release with the pinned image (`54001a50…`). |
+| Factory | Use the unit's factory recovery backup, including the original GPT and the OS3.0.303 package. Never run `flash_all_lock`. |
 
-## 8. Charging caveat
+### 8. Charging caveat
 
 Native macOS charges only with **PianoPower level 2 and the DSP** (`docs/drivers/charging.md`): the charger PMIC's registers
 belong to the DSP's execution environment, so charging control needs the DSP started from XNU, which is owner-attended work and
@@ -246,7 +334,7 @@ partly discharged pack charges without the DSP is unmeasured. Note also:
 - check the pack from ABL with `fastboot getvar battery-voltage`; Android (§7) remains the charging path until level 2 is done;
 - `--arg piano-power=1` in an ESP build logs the gauges (voltage, %, current) without writing anything.
 
-## 9. Open items and risks
+### 9. Open items and risks
 
 - The v4 container with our kernel field has never booted (session 2, `ram-v4-signed`, tests it; fallback v2, §5).
 - The 4096-byte-sector FAT32 ESP on UFS in EDK2: `logfs` is the evidence; `ram-esp-test` proves it before `boot_a` is written.
@@ -265,14 +353,14 @@ partly discharged pack charges without the DSP is unmeasured. Note also:
   [boot-guard.md](boot-guard.md)): a hang or panic in the first 180 s lands in ABL fastboot, a later one restarts macOS. Older ESPs
   arm no watchdog (panics restart into macOS, a hang stays); the escape is power + volume-down.
 
-## 10. The Data store after the install
+### 10. The Data store after the install
 
 The store's format, the store guard (another seed's store is kept and Data runs volatile; `data-store-replace` starts it over), flatten
 (`data-store-flatten=1`: a self-contained store that every later seed resumes), the plugin staging plan, the tooling
 (`PIANO_INSTALLED_SEED`, `build-esp.py --replace-data/--flatten-data`, `store-test-images.py`) and the RAM test procedure that proves
 the guard without risking the installed store: [data-store.md](data-store.md).
 
-## 11. ESP v3: the daily system with the owner's Data (**retired 27.0.1 plan; built 2026-11-12, never installed**)
+### 11. ESP v3: the daily system with the owner's Data (**retired 27.0.1 plan; built 2026-11-12, never installed**)
 
 **Do not run this section's 27.0.1 build or install commands.** The installed system is now 27.3-only on §13.8's layout. This
 section remains as the dated v3 design and verification record.
@@ -283,7 +371,7 @@ C6c), touch's announced-frame rule, Turnip 0007/0008 with frontend 0003, audio l
 installed and not run.** It replaces the installed `esp-daily2-macos` (`e0acb375…`), keeps the store through the store's base
 ([data-store.md](data-store.md) §9), and writes only partition 37. The owner's checklist and decisions: [install-esp-v3.md](install-esp-v3.md).
 
-### 11.1 Contents
+#### 11.1 Contents
 
 | Payload file | Then-installed (`esp-daily2-macos`, retired) | v3 (`esp-daily3-macos`, never installed) |
 |---|---|---|
@@ -303,7 +391,7 @@ and none can: the kernel's bytes depend on the tree's path (`__FILE__`). Checked
   (`01d4ef0c…`) have `0x80e00003`;
 - it has six `sxtw` in `piano_pm_probe`; `0064pre` has none.
 
-### 11.2 The daily profile (`build-esp.py --profile daily`, the driver choices)
+#### 11.2 The daily profile (`build-esp.py --profile daily`, the driver choices)
 
 The profile now carries the desk images' input drivers (`build-desktop-images.sh`, the levels that ran on the tablet) and no `-v`.
 It refuses a collection without the fixes those drivers need (`kc_markers`): touch's announced-frame rule, PianoDwc3's role rule,
@@ -337,7 +425,7 @@ piano-backlight=2 piano-backlight-keys=1 piano-touch=2 piano-power=1 piano-rtc=1
 data-persist=2 droidvm-utc=<build time> sheng-smp=1
 ```
 
-### 11.3 The system layer
+#### 11.3 The system layer
 
 `out/layer-v3` (`stage.py --live ... --gpu-bundle out/turnip-a830/NativeAdrenoMetal.bundle --installed-trust <the base's>`):
 `userland-update.tar` `69010daffa42b036e943bda93eb8cca509e485cd04d48ff1da838dba29e0af9c` (17 files, 7 units), `apply-update.sh`
@@ -354,14 +442,13 @@ v3 trusts all five, so the layer can go in on v3's first boot. Until it does, Da
 the boxes behind the login window's clock, no video wallpaper). The kernel side of the map fix is in v3 already. The undo is
 `out/layer-none` (`configs/userland-none.toml`, archive `50737a17…`): every unit out, the base's plugin files back.
 
-### 11.4 Build (Mac, offline, no device) — historical 27.0.1 recipe, do not run
+#### 11.4 Build (Mac, offline, no device) — historical 27.0.1 recipe, do not run
 
 Current images use `tooling/k273/build-k273-image.sh` with `K273_KERNEL`; the current root-layout caveat is in
 [k273-line.md](k273-line.md) §4. The commands below are the retired v3 build record.
 
 ```sh
-K=$(sed -n 's/^PIANO_K27_TREE=//p' ~/.config/piano/env)
-K27_KERNEL=$K/out/k27/kernel-k27-0064-native.macho PIANO_GPU=2 PIANO_VMM_PRESENT=0 tooling/k27/build-native-image.sh   # KC, ADT, Turnip
+K27_KERNEL=$PIANO_K27_TREE/out/k27/kernel-k27-0064-native.macho PIANO_GPU=2 PIANO_VMM_PRESENT=0 tooling/k27/build-native-image.sh   # KC, ADT, Turnip
 python3 tooling/persist/base-seed.py pin --esp <persist checkout>/out/persistent/esp-daily2-macos.img     # once; then: show
 python3 tooling/userland/stage.py --live out/layer-v3 --gpu-bundle out/turnip-a830/NativeAdrenoMetal.bundle \
         --installed-trust "$(python3 tooling/persist/base-seed.py path trust)"
@@ -374,7 +461,7 @@ Built 2026-11-12 (`--utc 1794473979`): **`esp-daily3-macos.img` sha256 `fa5c0485
 seed identity `8f3331104e03c970`. With the RTC in the profile the build time is only the fallback clock. A rebuild just before
 the install changes only `unixnu.toml` and the image hash.
 
-### 11.5 Verify (offline; all done for the image above)
+#### 11.5 Verify (offline; all done for the image above)
 
 1. The record `esp-daily3-macos.json`: `seed.identity_sha256` `8f3331104e03c970…`, `inputs.seed.sha256` `23a5ec59…`;
    `data_store.same_seed` true, `kc_has_store_guard` true, `trust.missing_cdhashes` 0, `base.source.sha256` `e0acb375…`;
@@ -392,7 +479,7 @@ the install changes only `unixnu.toml` and the image hash.
    `maint-boot map backup store-backup esp-final check maint-exit --esp esp-daily3-macos.img --esp-final esp-daily3-macos.img
    --new-backup`; `abl-final reboot`; `rollback esp-final store-backup`; and the write-back of daily2.
 
-### 11.6 RAM tests of the exact payload (nothing written; unattended)
+#### 11.6 RAM tests of the exact payload (nothing written; unattended)
 
 Both images are the ESP's KC, ADT, trust cache and seed, built by `build-ram-images.py` with the `macos` line's arguments,
 `PIANO_FAST_BOOT=1`, `PIANO_DATA_PERSIST=1` (the read-only probe: the store is reported, not applied, Data is the base and volatile)
@@ -441,7 +528,7 @@ the console port working beside it. It is the transport's first hardware run, wh
 Not for the queue: `out/ram-v3-layer` (`c3e77fb713d171c8…`) is the layer's session image: the same payload with `piano-usb-net=1`,
 `PIANO_DATA_PERSIST=2` (the owner's own Data, resumed and written) and no reset at all. It is booted only with the owner present.
 
-### 11.7 Install (retired cable session; do not run)
+#### 11.7 Install (retired cable session; do not run)
 
 The install state is the persist worktree's (`out/persistent/session/state.json`, the checkout that installed daily2), whose tooling
 is older than this tree's: it lacks the installed-store check and `store-backup`. So this checkout's `maint-session.py` runs on that
@@ -478,7 +565,7 @@ First boot (`python3 tooling/native/usb-console.py --capture 600`; the cold star
 
 **Stop** on `state 3`, `state 7`, `kept` or `started over`.
 
-### 11.8 The system layer onto the owner's Data (owner present, once)
+#### 11.8 The system layer onto the owner's Data (owner present, once)
 
 After v3 is installed (its trust cache must trust the layer before the files exist: ESP first, files after). The base's Data has no
 root shell and no network job, so the first time needs the owner at the keyboard and the USB network (after `v3-net` passed):
@@ -510,7 +597,7 @@ root shell and no network job, so the first time needs the owner at the keyboard
 
 The layer's own rollback: `out/layer-none` the same way (its two files, `sudo sh apply-update.sh`), then a restart.
 
-### 11.9 Roll back, least invasive first
+#### 11.9 Roll back, least invasive first
 
 1. A boot that hangs or panics: the boot guard lands in ABL fastboot within 180 s (later: macOS restarts); always: power +
    volume-down for 15-20 s. RAM images still win over the ESP (`ram-precedence`).
@@ -523,14 +610,14 @@ The layer's own rollback: `out/layer-none` the same way (its two files, `sudo sh
    `rollback esp-final store-backup`, `maint-exit`, which puts the ESP and the owner's Data back to the moment of the backup
    together.
 
-## 12. boot_a v5: the FD with DarwinBoot's 13 GiB window (built 2026-11-12; **signed and installed 2026-11-13**)
+### 12. boot_a v5: the FD with DarwinBoot's 13 GiB window (built 2026-11-12; **signed and installed 2026-11-13**)
 
 The RAM images carry FD A built with `firmware/patches/darwinboot/0001` since 2026-11-12 18:40 (`tooling/firmware/build-fd.sh`), so
 XNU gets 13310 MiB there. The previous `boot_a` (v4, `1b212281…`) carried the FD of 2026-11-11 (`6d15f0f8…`), whose DarwinBoot
 refused an ADT asking for more than 8192 MiB. The installed system has the 13 GiB window with `boot_a` **v5** (FD `ce719ffb…`)
 and a matching ESP ([results-2026-11-12.md](results-2026-11-12.md) "Midnight"). `boot_b` and every other partition stay untouched.
 
-### 12.1 The image
+#### 12.1 The image
 
 ```sh
 python3 tooling/persist/build-boot.py --series 5 --fd out/fd/piano-uefi-A-bundled.fd \
@@ -552,12 +639,10 @@ The record `boot-v5.json` keeps the FD's bound (`fd.ram_window` = 13312 MiB); `m
 `boot-v*.json` of its directory. `build-boot.py --verify` now records an image as signed only when every check passed (before, an
 image that failed a check was still listed under `signed`, which step `boot-a` writes).
 
-### 12.2 Signing: which key, where
+#### 12.2 Signing: which key, where
 
 - The AVB key is the RSA-4096 key that signed Ubuntu's `boot_a` (backup `13-boot_a`) and v4: public key sha1
-  `f5151930dc69791637b2a48505cb175f5f78a522`. Its **private half exists only on the signing host** (named by `PIANO_SIGN_HOST` in
-  `~/.config/piano/env`, never committed; the key's path there is `sign-on-remote.sh`'s default or `SIGN_KEY`). It is not on the
-  Mac and not in `private/`, and it never leaves that host.
+  `f5151930dc69791637b2a48505cb175f5f78a522`. The signing host retained the private half. The signing helper selected its host through `PIANO_SIGN_HOST`.
 - `tooling/persist/sign.sh OUT 5` runs `tooling/bootimg/sign-on-remote.sh` (ssh/scp in BatchMode: key-based login, no password):
   it copies the pinned avbtool 1.3.0 and the unsigned image to a temporary directory there, extracts the public halves
   (`out/keys/piano-boot-signing.{avbpubkey,pub.pem}`, which come back), runs `add_hash_footer` (partition `boot`, 100663296 bytes,
@@ -569,7 +654,7 @@ image that failed a check was still listed under `signed`, which step `boot-a` w
 - Rehearsed offline: the same `add_hash_footer` with a throwaway key on a copy of v5 gives the expected footer and passes every check
   but the two key checks, which fail; `boot-v5.json` then lists nothing as signed.
 
-### 12.3 The pair rule (the order)
+#### 12.3 The pair rule (the order)
 
 DarwinBoot is in `boot_a`'s FD; the RAM window it is asked for is in the ESP's ADT. Of the four pairs, one never boots:
 
@@ -587,7 +672,7 @@ does not take its window; `rollback esp-final` checks the backed-up ESP against 
 counts a wrong order as a stop. The ESP's window comes from its record (`ram_window`, `build-esp.py` from now on), else its ADT
 input, else the ADT read out of the image. `test-persist.py` runs both orders and both rollbacks on the fake tablet.
 
-### 12.4 The ESP that goes with it
+#### 12.4 The ESP that goes with it
 
 The 2026-11-12 daily-ESP recipe below used the retired 27.0.1 `tooling/k27/build-native-image.sh` path; **do not run it now**.
 The installed v5 + 13 GiB pair already exists. Current 27.3 images use `tooling/k273/build-k273-image.sh` with `K273_KERNEL`
@@ -605,7 +690,7 @@ contiguous limit (`bringup-debugging.md` §6). For the dry runs here: `esp-daily
 `a350e35944255d28c2e1d8ae9116aa265d8a555a66788db4ba705a2eb8e943ea`, the v3.1 ESP with only the ADT changed (its record differs from
 v3.1's in the ADT's hash and paths alone: KC `ad1c5c45…` with k27 0065, trust `a83bbee6…`, seed `23a5ec59…`, identical `unixnu.toml`).
 
-### 12.5 The session
+#### 12.5 The session
 
 Run this checkout's `maint-session.py` (the persist checkout's older one knows only `boot.json`) on the install state, as §11.7:
 
@@ -637,7 +722,7 @@ python3 $P abl-final reboot
 - `ram-boot-a` boots the installed system's normal path (its own Data) with the new FD; it is optional, but it is the one run of
   v5's ESP path (UniXNU finding partition 37) before `boot_a` holds it: every 13 GiB boot so far had its payload in RAM.
 
-### 12.6 First boot
+#### 12.6 First boot
 
 `python3 tooling/native/usb-console.py --capture 600` from `reboot`:
 - `NativeRamBlock: RAM window 0x8c0004000..0xbffe04000 (13310 MiB) in DRAM 0x8c0000000..0xc00000000; max_mem 13310 MiB`
@@ -650,7 +735,7 @@ python3 $P abl-final reboot
 **Stop** on `state 3`, `state 7`, `kept` or `started over` (§11.7). No console at all and the panel back at the UniXNU menu after a
 `DARWINBOOT` line: the pair is wrong (cannot happen through the session; power + volume-down, then §12.7).
 
-### 12.7 Roll back, least invasive first
+#### 12.7 Roll back, least invasive first
 
 1. A hang or panic in the first 180 s: the guard lands in ABL fastboot; always: power + volume-down 15-20 s. RAM images still win.
 2. Both back, from ABL fastboot: `python3 $P maint-boot map`, then `python3 $P rollback esp-final boot-a` (a rollback is its own
@@ -663,7 +748,7 @@ python3 $P abl-final reboot
    esp-final boot-a check maint-exit --esp-final <8 GiB ESP> --boot-image boot-piano-macos-persistent-v4-signed.img --new-backup`
    (ESP first, as the rule demands).
 
-### 12.8 Risks
+#### 12.8 Risks
 
 - Signing and installation are done: v5 was signed and installed 2026-11-13; the installed 27.3 system boots under it
   ([results-2026-11-12.md](results-2026-11-12.md) "Midnight").
@@ -674,7 +759,7 @@ python3 $P abl-final reboot
 - The FD build is not bit-reproducible: v5 is identified by hashes (`out/fd/piano-uefi-A-bundled.fd` = `ce719ffb…`; its `.prev` is
   v4's FD).
 
-## 13. macOS 27.3 only: retiring 27.0.1 (installed 2026-11-14; the whole-disk layout of 13.8 installed the same day)
+### 13. macOS 27.3 only: retiring 27.0.1 (installed 2026-11-14; the whole-disk layout of 13.8 installed the same day)
 
 Owner decision 2026-11-14: (1) replace the installed dual ESP with a 27.3-only ESP; (2) only after that passes, back up and clear
 `linux_rootfs`, which held the 27.0.1 system volume and its Data store. `boot_a` (v5, DarwinBoot's 13 GiB window) stayed unchanged.
@@ -682,7 +767,7 @@ The first step left `linux_data` with the 27.3 root at block 0 and a 24 GiB stor
 **Later the same day §13.8 superseded that layout:** the root moved to `linux_rootfs`, and the owner's store grew to 200 GiB over
 `linux_data` (LBA 71859642, seed `9bd6f902`). The 27.3 line itself: [k273-line.md](k273-line.md) §7.
 
-### 13.1 The image
+#### 13.1 The image
 
 ```sh
 # Historical step-1 build (esp-k273-only rollback target), not the current v2/v3 layout:
@@ -690,7 +775,7 @@ python3 tooling/k273/build-k273-esp.py --base out/persistent/esp-dual33d-k273d.j
         --expect-seed 89860516 --expect-store-lba 117998394 --expect-store-part linux_data
 ```
 
-For the current installation use §13.8's `--root-part linux_rootfs` build, seed `9bd6f902` and store LBA 71859642.
+Section 13.8 records the later move to `linux_rootfs`, with seed `9bd6f902` and store LBA 71859642.
 
 `esp-k273-only.img`, 1073741824 bytes, sha256 **`9fe17e65015f8c16743bd1faf3c64e060003784a934c409261a021134a4dff3b`** (the same
 bytes on every build from the same base), record `esp-k273-only.json` beside it:
@@ -700,7 +785,7 @@ bytes on every build from the same base), record `esp-k273-only.json` beside it:
 | base | `esp-dual33d-k273d.img` (`93baea7a…`, installed since 2026-11-13 09:45), read by the independent FAT reader and by mtools, both checked against its record and against each other |
 | payload, byte for byte | `Payloads/k273/kernel.macho` `3fd3ed71…`, `.adt` `7e1ce73d…` (13310 MiB window), `.trustcache` `72ebcaf8…`, `scratch-data.img` `848c8252…` (seed 89860516, 24 GiB) |
 | firmware | what the 27.3 collection pins, the base's files: `PianoAudio/fs19xx.fsm` `ab060b84…`, `PianoVideo/vpu35_4v.mbn` `95c5882f…` |
-| `macos-27.3` (default, timeout 3 s) | the base's entry, every key byte for byte; the step-1/rollback line 989 bytes with `native-ufs-root-part=linux_data data-store-lba=117998394 data-persist=2` (current v2/v3: root `linux_rootfs`, store LBA 71859642) |
+| `macos-27.3` (default, timeout 3 s) | the base's entry, every key byte for byte; the step-1/rollback line 989 bytes with `native-ufs-root-part=linux_data data-store-lba=117998394 data-persist=2` (whole-disk layout: root `linux_rootfs`, store LBA 71859642) |
 | `fastboot` | the 27.3 payload with the line minus the UFS root, the store, the console mirror and every `piano-*` driver, plus `data-persist=0 piano-reset-after=1 piano-reset-to=bootloader` (490 bytes) |
 | `reset`, `shutdown`, `tools` | the standard actions |
 | not there | the 27.0.1 payload (`Payloads/kernel.macho` and its three files), the `macos`, `macos-diag` entries; `macos-27.3-diag` (1037 bytes with the reset: over DarwinBoot's 1000) |
@@ -713,7 +798,7 @@ every 27.3 file and the line must be the base's. The step-1 record's `seed` and 
 `first_lba 117998394`, `blocks 6291649`, `bound`), which is what `maint-session.py` gated on then (§13.3). The installed v2/v3
 record instead gates on LBA 71859642, 52430401 blocks and seed `9bd6f902` (§13.8 step 4).
 
-### 13.2 Its RAM test: `out/ram-k273-entry2` counts
+#### 13.2 Its RAM test: `out/ram-k273-entry2` counts
 
 No new RAM boot. `ram-k273-entry2` (`3fb5519b…`) carries exactly this entry: its collection, ADT, trust cache and seed hash to the
 four payload files above, its 8-CPU line is the entry's line byte for byte (989 bytes), its firmware files are the same, and its FD
@@ -723,13 +808,13 @@ reads from partition 37 alone. Those are covered by the host read-backs (two rea
 the first boot, with `rollback esp-final` behind it. Running entry2 again would add nothing and would open the owner's 27.3 store
 read-write (`data-persist=2`): leave it.
 
-### 13.3 What maint-session.py checks for a 27.3-only record
+#### 13.3 What maint-session.py checks for a 27.3-only record
 
 A record whose `store` names its partition and first LBA (`esp_store`) is gated on that store, not on linux_rootfs's:
 - For the step-1 `esp-k273-only` record, `map` checked linux_data's block 0 for the SHNGROOT manifest and its old 24 GiB window;
   the line a script gated on was:
   `ok    the store at LBA 117998394 on linux_data (seed 89860516f973e537, generation G, bound to LBA 117998394) IS the one this ESP resumes (seed 89860516f973e537)`.
-  **Current v2/v3:** the root manifest is on `linux_rootfs`; `linux_data` starts the grown store at LBA 71859642, with 52430401
+  **Installed whole-disk layout (§13.8):** the root manifest is on `linux_rootfs`; `linux_data` starts the grown store at LBA 71859642, with 52430401
   blocks and seed `9bd6f902`. The current gate is `ok ... LBA 71859642 ... seed 9bd6f902 ... IS the one this ESP resumes` (§13.8).
   Before §13.8, linux_rootfs was only reported (`no entry of esp-k273-only.img uses it`; its block 0 as the 27.0.1 manifest or
   `zero (cleared)`); it now holds the 27.3 root manifest.
@@ -740,7 +825,7 @@ A record whose `store` names its partition and first LBA (`esp_store`) is gated 
   whose default entry boots from linux_rootfs while linux_rootfs holds no root image (after `rootfs-clear`: `rollback rootfs-clear`
   first).
 
-### 13.4 Step 1: install the ESP (session A)
+#### 13.4 Step 1: install the ESP (session A)
 
 The install state was the main checkout's `out/persistent` (`installed.json` then named `esp-dual33d-k273d.img`; after this step
 it names what `esp-final` last wrote: `esp-k273-v2`, then the v3 delta). For another checkout, set
@@ -766,7 +851,7 @@ python3 $P abl-final reboot
   (or the installed `esp-k273-v3` record)** so image builders compare against the grown 200 GiB store, not a retired identity.
 
 First boot (`python3 tooling/native/usb-console.py --capture 600`, started before `reboot`); the owner need not be there:
-- Step 1 expected `NativeUfs: ... root-part=linux_data`; **current v2/v3 boots log `root-part=linux_rootfs`**, with the windows
+- Step 1 expected `NativeUfs: ... root-part=linux_data`; **whole-disk boots log `root-part=linux_rootfs`**, with the windows
   published and the root mounted;
 - Step 1 expected `NativeRamBlock: Data store state 2 (...), ... first LBA 117998394, 6291456 pages, ... seed 89860516, store seed
   89860516, ...`; **current boots resume LBA 71859642, 52430401 blocks, seed/store seed `9bd6f902`**;
@@ -778,7 +863,7 @@ First boot (`python3 tooling/native/usb-console.py --capture 600`, started befor
 
 Attended only, optional: picking `Reset into fastboot (ABL)` in the menu (3 s) lands in ABL fastboot within a few seconds.
 
-### 13.5 Step 2: retire linux_rootfs (session B, after step 1 passed)
+#### 13.5 Step 2: retire linux_rootfs (session B, after step 1 passed)
 
 ```sh
 python3 $P --dry-run maint-boot map rootfs-backup rootfs-clear check maint-exit --esp $E
@@ -819,7 +904,10 @@ and the 27.3 store's header are hashed before and after: unchanged. Expected lin
 `ok    GPT head unchanged ...`; `check` then reads the cleared block 0 and the 27.3 store as expected. The next boot is the normal
 27.3 boot of §13.4 (nothing it reads was touched).
 
-### 13.6 Roll back, least invasive first
+#### 13.6 Roll back, least invasive first
+
+For a current daily update, use the previous verified ESP and check its layer compatibility before booting. The steps below
+document the 2026-11-14 migration back to its dual-ESP layout. [Daily updates and rollback](install-esp-v3.md#daily-update-and-rollback)
 
 1. A hang or panic: the boot guard lands in ABL fastboot within 180 s; always: power + volume-down 15-20 s. RAM images still win.
 2. Step 1, from ABL fastboot: `python3 $P maint-boot map`, then `python3 $P rollback esp-final` (the dual ESP from session A's set,
@@ -832,7 +920,7 @@ and the 27.3 store's header are hashed before and after: unchanged. Expected lin
 4. Both: `rollback rootfs-clear` first, then `rollback esp-final` (which refuses an ESP whose default boots from linux_rootfs while
    it is cleared). The dual ESP's 27.0.1 entries boot only once linux_rootfs is back.
 
-### 13.7 Afterwards
+#### 13.7 Afterwards
 
 After the initial rootfs-clear step, linux_rootfs (LUN 0 LBA 56060928-71527423, 59 GiB) was free. **§13.8 then used it the same
 day:** it now holds the 20.9 GB 27.3 root image used by the installed entry. `linux_data` holds the grown 200 GiB Data store;
@@ -845,7 +933,7 @@ fixtures) covers the builder on a base whose entry line is already split (k27 00
 boot_args_split or the base ADT, edited, split again, and every refusal that keeps a selector from pointing at a tail that is
 not there.
 
-### 13.8 The whole-disk layout: the root on linux_rootfs, the owner's Data grown over linux_data (2026-11-14)
+#### 13.8 The whole-disk layout: the root on linux_rootfs, the owner's Data grown over linux_data (2026-11-14)
 
 The ESP `esp-k273-v2.img` (`build-k273-esp.py --base esp-k273-only.json --kc/--adt out/k273-v2/kernel.macho* --trust <layer trust>
 --seed seed-200.img --root-part linux_rootfs --arg piano-power-ps=1 --split`) mounts the 27.3 root from linux_rootfs and puts the
@@ -880,7 +968,7 @@ over the ADT tail (the first esp-k273-v2, 573187af..., had the new line over the
 hold the given files and the tail. `test-k273-only.py` covers the whole session on the fake tablet (refusals, the copy, the
 rollback).
 
-## Done 2026-11-11 (sessions 1-3)
+### Done 2026-11-11 (sessions 1-3)
 
 - Session 1 (07:5x): NAS backups with read-back (boot_a 389d4271, boot_b 17e89056, vendor_boot_a 50f70e36, init_boot_a bbebc3d1,
   both LUN 0 GPT copies, the 1 GiB linux_rootfs tail, the store header); new GPT written and read back (linux_rootfs ends at
@@ -888,11 +976,10 @@ rollback).
 - Session 2 (RAM only): ram-esp-test (UniXNU's config from HD(37) on LUN 0, XNU to its reset, Data store at LBA 68119455),
   ram-precedence (a dev RAM image still boots its own payload; judged by its 45 s reset), ram-v4-signed (ABL accepts the signed v4
   boot_a image, which loads the ESP).
-- Signing host: the signing helper runs on the host named by PIANO_SIGN_HOST in ~/.config/piano/env (never committed); the key
-  there is the one boot_a was signed with (public key sha1 f5151930...).
+- The signing helper used `PIANO_SIGN_HOST` and the key with public SHA-1 `f5151930…` for `boot_a`.
 - Session 3 (09:0x): boot_a = boot-piano-macos-persistent-v4-signed (1b212281...) written by dd and read back; ESP = esp-gpu-macos
   (1120f7d8..., PianoA830 + Turnip, vmm-present 0) read back; vendor_boot_a, init_boot_a, boot_b, root manifest, GPT unchanged.
 - `fastboot reboot` (09:05): the tablet boots by itself into native macOS: the login screen on the A830 at about 2.5 min.
 
-The installed configuration has no piano-reset-after and no USB console: to get back to ABL fastboot for RAM boots, hold
+The 2026-11-11 configuration had no `piano-reset-after` and no USB console. To get back to ABL fastboot for RAM boots, hold
 power + volume-down. Rollback: `maint-session.py rollback boot-a|esp-final|gpt` from the verified backups, or RAM-boot any image.

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Copyright (c) 2026, Leo Zhang. All rights reserved.
+// c++ -std=c++20 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -x c++ -I.. -I../../PianoSensors -I../../include -I../../PianoBacklight ambient_host.cpp ../AutoStream.c ../AutoLight.c ../../PianoSensors/SensorsPolicy.c ../../PianoSensors/SensorsOrient.c ../../PianoSensors/SensorsFixed.c -o /tmp/piano-ambient-host && /tmp/piano-ambient-host
 // Host tests of AmbientBacklight.h (PianoBacklight's automatic mode, docs/drivers/sensors.md section 5a), synthetic inputs only:
 //   ladder   its shift is PianoBacklight's own step ladder (Ktz8866.h's Steps, included read only from package/PianoBacklight): linear and
 //            exponential mapping, the floor
@@ -204,6 +205,16 @@ static void test_trim()
   Ambient off;
   off.configure(false, 128, false, 12);
   CHECK(!off.adjust(500) && off.pendingLevel() == 0 && off.trim() == 0);
+  // A new session applies a pending slider level before deferred key presses. Both stop at the configured ceiling.
+  Ambient resumed;
+  resumed.configure(true, 100, true, 3, 900);
+  CHECK(!resumed.adjust(750));
+  resumed.deferSteps(INT32_MAX);
+  CHECK(resumed.target(300, 40) && resumed.code() == 900 && resumed.offset() == 3 && !resumed.pendingLevel());
+  CHECK(resumed.target(250, 20) && resumed.code() == 798);
+  resumed.invalidate(true);
+  resumed.deferSteps(INT32_MIN);
+  CHECK(!resumed.adjust(200) && !resumed.target(400, 80) && resumed.offset() == 3);
   std::printf("PASS trim: the user's level keeps automatic mode as the curve's trim (exponential codes, linear ratio, bounds, keys, "
               "kept across invalidation and re-entry, pending before a target, none while manual, faulted or off)\n");
 }

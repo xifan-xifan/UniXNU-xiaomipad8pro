@@ -39,7 +39,8 @@
 //             board file's kind from its own magic, bd_p81.elf for 0xff; every answer reaches the owner with its codes;
 //   the window: the plan's choice of group and bank, the table's descriptors and the translation of every block, the apply order
 //             with its read-backs, and each refusal (no free bank, a masked group, a 32-bit output size).
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. qmi_host.cpp ../WifiQrtr.c -o /tmp/qmi_host && /tmp/qmi_host
+// Keep the object path based on the executable path so self-tests.py relocates both into its temporary directory.
+//   cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -c ../WifiQrtr.c -o /tmp/qmi_host.o && c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I.. qmi_host.cpp /tmp/qmi_host.o -o /tmp/qmi_host && /tmp/qmi_host
 #include "WifiChannels.h"
 #include "WifiQmi.h"
 #include "WifiRddm.h"

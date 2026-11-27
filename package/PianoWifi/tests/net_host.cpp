@@ -3,7 +3,7 @@
 // them (each field read, every malformed one refused), the kext's messages read back field by field, an EAPOL PDU wrapped into
 // the frame the access point gets, the handshakes' messages told apart, the frame queue's limits, and the keys' order (a
 // group key that comes first waits for the pairwise key's completion; the copies wiped once sent).
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. net_host.cpp -o /tmp/net_host && /tmp/net_host
+//   c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I.. net_host.cpp -o /tmp/net_host && /tmp/net_host
 #include "WifiNet.h"
 #include <cstdio>
 #include <cstring>

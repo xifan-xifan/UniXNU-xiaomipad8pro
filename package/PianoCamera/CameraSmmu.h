@@ -101,7 +101,7 @@ inline RoutePlan planRoute(uint64_t smmuBytes, Read rd)
         p.why = "the group names a bank the SMMU does not have";
         return p;
       }
-      p.sctlr = rd(uint64_t(pages + p.bank) * 4096);
+      p.sctlr = rd((pages + p.bank) * 4096u);
       p.cba2r = rd(0x1800 + 4 * p.bank);
       if (p.sctlr & 1u) {
         p.why = "the group translates through a bank with translation on (someone's tables)";

@@ -68,10 +68,17 @@ struct WifiUserControl {
 
   uint32_t read() const { return __atomic_load_n(&word, __ATOMIC_ACQUIRE); }
   static bool power(uint32_t w) { return (w & kPower) != 0; }
+  // GET19 stays ON until the worker confirms physical OFF.
+  static bool reportedPower(uint32_t w) { return (w & (kPower | kCycle)) != 0; }
   static uint32_t serial(uint32_t w) { return w >> 3; }
+  static bool joinRequested(uint32_t w) { return (w & (kPower | kJoin | kCycle)) == (kPower | kJoin); }
   bool pending(uint32_t w) const { return serial(w) != __atomic_load_n(&applied, __ATOMIC_ACQUIRE); }
-  bool allowed(uint32_t w) const { return (w & (kPower | kJoin | kCycle)) == (kPower | kJoin) && !pending(w); }
-  bool radioStop() const { const uint32_t w = read(); return !power(w) || (w & kCycle); }
+  bool allowed(uint32_t w) const { return joinRequested(w) && !pending(w); }
+  static bool radioStop(uint32_t w) { return !power(w) || (w & kCycle); }
+  bool radioStop() const { return radioStop(read()); }
+  static bool canReportJoinReceipt(uint32_t w, bool radioUsable, bool stopRequested) {
+    return joinRequested(w) && radioUsable && !stopRequested;
+  }
   bool radioOffConfirmed(uint32_t request) const {
     const uint32_t current = read();
     return serial(current) == serial(request) && !(current & kCycle) && !pending(request);
@@ -91,7 +98,9 @@ struct WifiUserControl {
     uint32_t old = read(), next;
     do {
       if (!(old & kJoin)) return old;
-      next = (old + kSerial) & ~kJoin;
+      // A pending physical cycle already tears down the station. Keep its
+      // serial so a sleep-preparation leave cannot invalidate its OFF ack.
+      next = ((old & kCycle) ? old : old + kSerial) & ~kJoin;
     } while (!__atomic_compare_exchange_n(&word, &old, next, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
     return next;
   }
@@ -104,10 +113,13 @@ struct WifiUserControl {
   }
   void stopped(uint32_t w) { __atomic_store_n(&applied, serial(w), __ATOMIC_RELEASE); }
   // Called after WLAN_EN is low and DMA is disabled. A concurrent new off
-  // remains pending if it arrived after this snapshot.
+  // remains pending. ON can change the flags of the same cycle.
   void radioOff(uint32_t w) {
-    uint32_t old = w;
-    (void)__atomic_compare_exchange_n(&word, &old, w & ~kCycle, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    uint32_t current = read();
+    do {
+      if (serial(current) != serial(w)) return;
+    } while (!__atomic_compare_exchange_n(&word, &current, current & ~kCycle, false,
+                                          __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
     stopped(w);
   }
 };

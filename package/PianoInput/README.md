@@ -33,3 +33,18 @@ presses accepted). The simulated keys are OR'ed into the decoded PMIC sample, so
 `testKeySim`). A real press adds only the PON / GPIO6 read and, while suspended, the kernel's power key wake. Lines: `sim N: power
 down for M ms (machdep.piano_input_sim) ...`, the key edges with `, simulated (machdep.piano_input_sim)`; refusals `sim: value ...
 refused: ...` (EPERM without the argument, EBUSY while one runs, EINVAL otherwise). Without the argument the sysctl does not exist.
+
+## Goals 6 and 9 offline button safety suite
+
+Run `python3 scripts/ci/self-tests.py --only package/PianoInput/tests/` from the repository root. The ASan/UBSan suite in
+[`tests/input_buttons_safety_host.cpp`](tests/input_buttons_safety_host.cpp) feeds GPIO6 and PON samples through the live
+headers' debounce, power-key policy and one-byte Consumer Control reports. It checks bounce, rapid presses, both chord release
+orders, stuck-key release on resume, and a `piano_input_sim` value of `150` waking the display without interrupting physical
+volume input. The suspended path uses the kernel's portable wake policy to check physical Power and RESIN edges.
+
+PianoInput emits a report when its state changes. The host-only consumer models volume repeat with a one-entry queue,
+coalesces missed ticks, and cancels pending repeats on volume changes. Opposing volume keys pause repeat until one releases.
+Power bits leave the volume repeat schedule alone.
+
+**Physical button verification remains HOLD.** On-device GPIO/PMIC behavior, firmware chord handling and macOS repeat still
+require hands-on verification. The daily profile stays at `piano-input=2`.

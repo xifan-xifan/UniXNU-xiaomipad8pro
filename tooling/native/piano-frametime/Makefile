@@ -5,6 +5,9 @@ MACOS_SDK ?= $(shell xcrun --sdk $(SDK) --show-sdk-path)
 OUT = ../../../out/piano-frametime
 CFLAGS = -O2 -Wall -Wextra -Werror
 FRAMEWORKS = -framework AppKit -framework CoreGraphics -framework IOKit -framework Metal -framework QuartzCore
+HOST_CC ?= cc
+PYTHON ?= python3
+HOST_TEST_FLAGS = -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all
 
 .PHONY: all test
 all:
@@ -15,6 +18,12 @@ all:
 
 test:
 	mkdir -p "$(OUT)"
-	$(CC) $(CFLAGS) -std=c11 -fsanitize=address,undefined -fno-sanitize-recover=all \
-		tests.c frametime_stats.c -o "$(OUT)/stats_host"
+	$(HOST_CC) $(HOST_TEST_FLAGS) tests.c frametime_stats.c -lm -o "$(OUT)/stats_host"
 	"$(OUT)/stats_host"
+ifeq ($(shell uname -s),Darwin)
+	$(CC) $(HOST_TEST_FLAGS) -fobjc-arc display_evidence_host.m display_evidence.m \
+		-framework Foundation -framework IOKit -o "$(OUT)/display_evidence_host"
+	$(PYTHON) display_evidence_cases.py "$(OUT)/display_evidence_host"
+else
+	@echo "SKIP display evidence tests (requires macOS Foundation and IOKit)"
+endif

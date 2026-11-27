@@ -6,10 +6,11 @@
 // PPM: a reset clears the notification enable and latches RESET_COMPLETE, every command completes in CCI (with the MESSAGE_IN length),
 // ACK_CC_CI clears the command completion and, with the connector-change bit, the connector's pending change; a change is shown in the
 // CCI's connector field until it is acknowledged; notifications go out only for enabled events.
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. ucsi_host.cpp -o /tmp/ucsi_host && /tmp/ucsi_host
+//   c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I.. -I../../PianoDwc3 ucsi_host.cpp -o /tmp/ucsi_host && /tmp/ucsi_host
 #include "UcsiClient.h"
 #include "PortRole.h"
 #include "ControllerLoan.h"
+#include "../../PianoPower/UsbcObservation.h"
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -41,6 +42,7 @@ struct Ppm {
   bool refuseWrites = false;    // answer writes with return code 1
   bool uorRejected = false;     // SET_UOR ends with ERROR, GET_ERROR_STATUS: swap rejected
   bool uorUnsupported = false;
+  unsigned statusLength = 0;   // override CCI length while leaving the mailbox contents intact
   // the connector
   struct Con {
     bool connected = false, provider = false;
@@ -181,7 +183,7 @@ struct Ppm {
           return;
         }
         statusBytes();
-        complete(kCciCommandComplete, version >= kV2_0 ? 19 : 9);
+        complete(kCciCommandComplete, statusLength ? statusLength : version >= kV2_0 ? 19 : 9);
         return;
       case kAckCcCi: {
         if (control & kAckConnectorChange) {
@@ -727,8 +729,184 @@ static void sharedConnector() {
     CHECK(!v.known && v.role.role!=Role::host && !w.ucsi.valid);
   }
 }
+// The real path's host gate (U1, the first real-device session) on PianoPower's shared snapshot: the Mac (DFP, we sink) stays device; a UFP while we source
+// is host either way; a UFP while we sink (a PD hub after its swap) only with sinkHost; nothing, a stale or an invalid snapshot never.
+// Then the loan the kext runs on it: the debounce, BEGIN, and each way back (unplug, role, relay, deadline), and no re-entry after.
+static void hostGateCases()
+{
+  PianoUsbcObservation s = {};
+  s.version = PIANO_USBC_OBSERVATION_VERSION; s.owned = s.ready = s.valid = 1;
+  s.connector = 1; s.seq = 1; s.ucsi_version = 0x110; s.status_bytes = 9;
+  s.updated_ms = 100; s.expires_ms = 15100;
+  struct Case { uint32_t status; bool fresh, def, sink; const char *what; };
+  const Case cases[] = {
+    {0x202d5804, true, false, false, "the Mac: DFP, we sink"},
+    {1u << 19 | 1u << 20 | 2u << 29, true, true, true, "OTG: UFP, we source"},
+    {1u << 19 | 1u << 20 | 4u << 29, true, true, true, "a powered cable + UFP, we source"},
+    {1u << 19 | 2u << 29, true, false, true, "a PD hub after its swap: UFP, we sink"},
+    {1u << 19 | 4u << 29, true, false, true, "a powered cable + UFP, we sink"},
+    {1u << 19 | 1u << 20 | 1u << 29, true, false, false, "a DFP while we source (a host on an OTG cable)"},
+    {1u << 19 | 6u << 29, true, false, false, "an audio accessory"},
+    {1u << 19 | 5u << 29, true, false, false, "a debug accessory"},
+    {1u << 20 | 2u << 29, true, false, false, "not connected (stale partner bits)"},
+    {0, true, false, false, "nothing"},
+  };
+  for (const Case &k : cases) {
+    put32(s.status, k.status);
+    PortWitnesses w;
+    const bool fresh = pianousbhost::observePort(w, s, 200);
+    const PortView v = pianousbhost::portView(w);
+    if (fresh != k.fresh || pianousbhost::hostGate(fresh, v, false) != k.def || pianousbhost::hostGate(fresh, v, true) != k.sink) {
+      std::printf("hostGate: %s: fresh %d default %d sinkhost %d\n", k.what, fresh, pianousbhost::hostGate(fresh, v, false),
+                  pianousbhost::hostGate(fresh, v, true));
+      ++failures;
+    }
+  }
+  // A stale or invalid snapshot never opens the gate, whatever its bits say.
+  put32(s.status, 1u << 19 | 2u << 29);
+  for (unsigned bad = 0; bad < 3; ++bad) {
+    auto b = s;
+    if (bad == 0) b.expires_ms = 199;
+    if (bad == 1) b.valid = 0;
+    if (bad == 2) b.ready = 0;
+    PortWitnesses w;
+    const bool fresh = pianousbhost::observePort(w, b, 200);
+    CHECK(!fresh && !pianousbhost::hostGate(fresh, pianousbhost::portView(w), true));
+  }
+  CHECK(!strcmp(pianousbhost::powerName(0), "we sink (the partner powers the bus)") && !strcmp(pianousbhost::powerName(1), "we source VBUS"));
+  CHECK(pianousbhost::loanDomainReady(true, false, false, false));
+  CHECK(!pianousbhost::loanDomainReady(false, false, true, true));
+  CHECK(!pianousbhost::loanDomainReady(true, true, false, false));
+  CHECK(!pianousbhost::loanDomainReady(true, true, true, false));
+  CHECK(pianousbhost::loanDomainReady(true, true, true, true));
+  // The kext's sequence on a PD hub (sinkHost): DFP first, the swap, host after the debounce; each end returns to device mode.
+  for (int end = 0; end < 4; ++end) {
+    RoleSwitch rs;
+    rs.enabled = true;
+    pianousbhost::ControllerLoan loan;
+    uint64_t now = 1000;
+    auto gate = [&](uint32_t status, bool valid) {
+      auto b = s;
+      put32(b.status, status);
+      b.updated_ms = now; b.expires_ms = now + 15000; b.valid = valid;
+      PortWitnesses w;
+      const bool fresh = pianousbhost::observePort(w, b, now);
+      const PortView v = pianousbhost::portView(w);
+      return std::pair<bool, PortView>(pianousbhost::hostGate(fresh, v, true), v);
+    };
+    auto [g0, v0] = gate(1u << 19 | 1u << 29, true);   // the hub before its swap: a DFP
+    CHECK(!g0 && rs.step(Role::device, v0.connected, now) == SwitchAction::none);
+    now += 300;
+    auto [g1, v1] = gate(1u << 19 | 2u << 29, true);   // after the swap: a UFP, we sink
+    CHECK(g1 && rs.step(Role::host, v1.connected, now) == SwitchAction::none);
+    now += 1000;
+    CHECK(rs.step(Role::host, v1.connected, now) == SwitchAction::toHost);
+    CHECK(loan.begin(now, 240000, false));
+    loan.started();
+    rs.done(SwitchAction::toHost, true);
+    using pianousbhost::LoanEnd;
+    CHECK(loan.end(now + 1000, true, true, true, true) == LoanEnd::none);
+    uint64_t t = now + 5000;
+    LoanEnd want = LoanEnd::none;
+    bool connected = true, host = true, relay = true;
+    if (end == 0) { connected = false; host = false; want = LoanEnd::unplug; }
+    if (end == 1) { host = false; want = LoanEnd::role; }       // the partner became a DFP (a swap back)
+    if (end == 2) { relay = false; want = LoanEnd::relay; }     // the owner's snapshot went stale
+    if (end == 3) { t = now + 240000; want = LoanEnd::timeout; } // the deadline
+    CHECK(loan.end(t, relay, connected, host, end != 0) == want);
+    CHECK(rs.step(host ? Role::host : Role::device, connected, t) == (host ? SwitchAction::none : SwitchAction::toDevice));
+    CHECK(loan.returning());
+    loan.returned(true, true, true);
+    rs.done(SwitchAction::toDevice, true);
+    rs.failedThisConnection = true;   // as the kext: no re-entry on the same cable
+    CHECK(loan.phase == pianousbhost::LoanPhase::device && rs.current == Role::device);
+    // the same cable: no second loan; a replug (disconnected, then a UFP again) may begin one
+    CHECK(rs.step(Role::host, true, t + 5000) == SwitchAction::none && !loan.begin(t + 5000, 240000, false));
+    rs.step(Role::device, false, t + 6000);
+    loan.disconnected();
+    rs.step(Role::host, true, t + 7000);
+    CHECK(rs.step(Role::host, true, t + 8000) == SwitchAction::toHost && loan.begin(t + 8000, 240000, false));
+  }
+}
+
+static void testIncompleteWitnesses()
+{
+  Rig r;
+  r.c.start(1, r.now);
+  r.run(2000);
+  CHECK(r.c.phase == Phase::ready);
+  r.take();
+  r.ppm.notify();
+  const auto notification = r.ppm.out.front();
+  r.ppm.out.clear();
+  const auto reads = r.ppm.reads;
+  for (uint32_t length = kHeader; length < notification.size(); ++length) {
+    r.c.receive(notification.data(), length, r.now);
+    r.run(0);
+  }
+  CHECK(r.ppm.reads == reads && !(r.take() & kEvNotify));
+  auto otherReceiver = notification;
+  put32(otherReceiver.data() + 16, 1);
+  r.c.receive(otherReceiver.data(), uint32_t(otherReceiver.size()), r.now);
+  r.run(0);
+  CHECK(r.ppm.reads == reads && !(r.take() & kEvNotify));
+
+  r.ppm.plug(kPartnerUfp, true, kModeDefault);
+  r.run(100);
+  CHECK(r.c.status.valid && r.c.status.connected && r.c.status.provider);
+  r.ppm.statusLength = 3;
+  r.ppm.event(kChangePowerDirection);
+  r.run(100);
+  CHECK(!r.c.status.valid && (r.take() & kEvFailed));
+
+  RoleSwitch rs;
+  rs.enabled = true;
+  rs.debounceMs = 0;
+  CHECK(rs.step(Role::host, false, 1000) == SwitchAction::none && rs.deadline() == 0);
+  CHECK(rs.step(Role::host, true, 1001) == SwitchAction::toHost);
+  rs.done(SwitchAction::toHost, true);
+  CHECK(rs.step(Role::host, false, 1002) == SwitchAction::toDevice);
+}
+
+static void testSharedVbusHandoff()
+{
+  const uint64_t now = 1000;
+  PianoChargeContract contract = {};
+  contract.linked = contract.initialized = contract.status_valid = contract.connected = 1;
+  contract.updated_ms = now;
+  contract.version = kV1_1;
+  contract.connector = kConnector;
+  contract.status_bytes = 9;
+  const uint32_t ufp = 1u << 19 | uint32_t(kPartnerUfp) << 29;
+  PortWitnesses w;
+  auto gate = [&](uint64_t at, bool allowSinkHost) {
+    const auto snapshot = piano_usbc_observe(&contract, 1, 1, at);
+    const bool fresh = pianousbhost::observePort(w, snapshot, at);
+    return pianousbhost::hostGate(fresh, pianousbhost::portView(w), allowSinkHost);
+  };
+  // The owner publishes provider status while sourcing VBUS for the UFP.
+  put32(contract.status_raw, ufp | 1u << 20);
+  CHECK(gate(now, false));
+  // A pending power-role change withdraws that witness even with an attached port notification.
+  w.panSeen = true;
+  w.pan.mux = kMuxUsb3;
+  contract.notify_pending = 1;
+  CHECK(!gate(now, true) && pianousbhost::portView(w).connected && !w.ucsi.valid);
+  contract.notify_pending = 0;
+  contract.sink = 1;
+  put32(contract.status_raw, ufp);
+  CHECK(!gate(now, false) && gate(now, true));
+  const auto snapshot = piano_usbc_observe(&contract, 1, 1, now);
+  CHECK(pianousbhost::observePort(w, snapshot, snapshot.expires_ms));
+  CHECK(!pianousbhost::observePort(w, snapshot, snapshot.expires_ms + 1));
+  CHECK(!pianousbhost::hostGate(w.ucsiReady, pianousbhost::portView(w), true));
+}
+
 int main()
 {
+  testSharedVbusHandoff();
+  testIncompleteWitnesses();
+  hostGateCases();
   sharedConnector();
   testCodec();
   testInit();

@@ -27,6 +27,16 @@ import subprocess
 import sys
 from pathlib import Path
 
+try:
+    import tomllib
+except ModuleNotFoundError:
+    try:
+        import tomli as tomllib
+    except ModuleNotFoundError:
+        from pip._vendor import tomli as tomllib
+    # UniXNU's generator imports tomllib from its config module.
+    sys.modules['tomllib'] = tomllib
+
 DEVICE = Path(__file__).resolve().parents[2]
 RESEARCH = Path(os.environ.get('UNIXNU_RESEARCH', Path.home() / 'Downloads/XiaomiPad8Pro-Ubuntu/unixnu-research'))
 sys.path.insert(0, str(RESEARCH / 'UniXNU/scripts'))

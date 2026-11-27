@@ -151,7 +151,7 @@ struct TickInput {
 
 // The cluster's temperature against its trips (Cluster.h computes it from a poll).
 struct ThermalInput {
-  bool valid;                // at least one of the cluster's sensors has a usable reading
+  bool valid;                // every cooling-zone sensor for the cluster has a fresh reading
   int32_t hotExcessDeci;     // max over the sensors of reading - passive trip: >= 0 is at or over the trip
   int32_t releaseExcessDeci; // max over the sensors of reading - (passive trip - hysteresis): < 0 is under the release point
   bool cut;                  // a sensor at the critical threshold, or PianoThermal's critical state

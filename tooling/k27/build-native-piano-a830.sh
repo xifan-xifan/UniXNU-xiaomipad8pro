@@ -26,7 +26,8 @@ python3 "$D/tooling/k27/stage-piano-gpu-firmware.py" ${PIANO_GPU_NO_FIRMWARE:+--
 # PIANO_A830_HOST_TESTS: 1 always, 0 never, auto (default) when the driver sources, the kits or the test runner changed since the last
 # pass (out/native-kexts/PianoA830/host-tests/stamp): the image build links PianoA830 every time.
 HT=${PIANO_A830_HOST_TESTS:-auto}
-STAMP=$( { find "$A" "$K" -type f | sort | xargs shasum -a 256; shasum -a 256 "$D/tooling/k27/run-a830-host-tests.py" "$B/piano-gpu-firmware.json"; } \
+STAMP=$( { find "$A" "$K" "$B/tests" -type f | sort | xargs shasum -a 256
+           shasum -a 256 "$D/tooling/k27/run-a830-host-tests.py" "$D/scripts/ci/self-tests.py" "$B/piano-gpu-firmware.json"; } \
          | shasum -a 256 | cut -c1-16)
 if [ "$HT" = 1 ] || { [ "$HT" = auto ] && [ "$(cat "$O/host-tests/stamp" 2>/dev/null)" != "$STAMP" ]; }; then
   python3 "$D/tooling/k27/run-a830-host-tests.py" ${PIANO_GPU_NO_FIRMWARE:+--no-firmware} --out "$O/host-tests" \

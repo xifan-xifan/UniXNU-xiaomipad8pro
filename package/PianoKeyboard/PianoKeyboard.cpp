@@ -278,7 +278,7 @@ void registerHallSim()
   // Filled in at run time rather than by SYSCTL_OID's static initializer: its parent and handler are signed pointers on arm64e.
   gOidHallSim.oid_parent = &sysctl__machdep_children;
   gOidHallSim.oid_number = OID_AUTO;
-  gOidHallSim.oid_kind = CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_OID2;
+  gOidHallSim.oid_kind = int(CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_OID2);
   gOidHallSim.oid_arg1 = nullptr;
   gOidHallSim.oid_arg2 = 0;
   gOidHallSim.oid_name = "piano_keyboard_hall_sim";
@@ -594,8 +594,9 @@ class PianoKeyboard : public IOService {
   uint32_t fConsecutiveErrors = 0, fRawLogged = 0, fEmptyLogged = 0, fLevelReads = 0, fIrqHigh = 0, fPolls = 0;
   uint32_t fAcks = 0, fStates = 0, fPointerSent = 0, fSumBad = 0;
   bool fIrqWasLow = false;   // gpio97 low at the last wakeup
-  // the hall sensor (gpio80): the accepted level (1 open, 0 closed; -1 not read), the last sample, changes, edge latches, next sample
-  int fHall = -1, fHallSample = -1;
+  // The hall sensor (gpio80): accepted level (1 open, 0 closed; -1 not read) and pending confirmation.
+  int fHall = -1;
+  HallDebounce fHallDebounce;
   uint32_t fHallChanges = 0, fHallEdges = 0;
   uint64_t fHallNextMs = 0;
   bool fHallEdge = false;
@@ -841,7 +842,8 @@ void PianoKeyboard::surveyHall()
       note("hall: gpio80 pull override %u: CTL %08x -> %08x (DT pull was %u)", gArgs.hallPull, before, p.ctl, before & 3);
     }
   }
-  fHall = fHallSample = int(hallOpenFromRaw(p.io & 1u, gArgs.hallActiveLow));
+  fHall = int(hallOpenFromRaw(p.io & 1u, gArgs.hallActiveLow));
+  fHallDebounce.reset(fHall);
   note("hall: gpio80 CTL %08x (function %u, pull %u, %s) IO %08x INTR_CFG %08x: raw %u, cover %s at start (level %u; Ubuntu DT switch-lid "
        "is GPIO_ACTIVE_LOW: low = closed; edge latch pending)%s",
        p.ctl, (p.ctl >> 2) & 15, p.ctl & 3, p.ctl & kOe ? "output" : "input", p.io, p.intrCfg, p.io & 1,
@@ -865,8 +867,7 @@ void PianoKeyboard::armHallEdge()
        found, rd32(gHall.page.va + kIntrCfg), gHall.ctl & 3);
 }
 
-// Every 500 ms (the poll plan's hallMs), or immediately when the raw edge latch is set, accept the gpio80 level. The edge path
-// removes the old sampling blind spot while retaining a level read as the authoritative open/closed state.
+// Sample gpio80 at the poll interval or on a latched edge. An edge schedules a short confirmation before publishing the level.
 void PianoKeyboard::pollHall(uint64_t now)
 {
   bool edge = false;
@@ -878,22 +879,15 @@ void PianoKeyboard::pollHall(uint64_t now)
     }
   }
   if (fHall >= 0 && gHallSimLock && simHall(now, edge)) return;
-  if (fHall < 0 || (!edge && now < fHallNextMs)) return;
+  if (fHall < 0 || (!edge && now < fHallNextMs && fHallDebounce.waitMs(now, 1))) return;
   fHallNextMs = now + fPoll.config().hallMs;
   const uint32_t raw = rd32(gHall.page.va + kIo) & 1u;
   const int sample = int(hallOpenFromRaw(raw, gArgs.hallActiveLow));
   if (edge || gArgs.hallTrace)
     note("hall: gpio80 poll raw %u -> %s (edge %u, accepted %s, sample %s)", raw, sample ? "open" : "closed", edge ? 1 : 0,
          fHall ? "open" : "closed", sample ? "open" : "closed");
-  if (edge && sample != fHall) {
-    acceptHall(sample, now, " (gpio80 edge)");
-    fHallSample = sample;
-    return;
-  }
-  const bool agreed = sample == fHallSample;
-  fHallSample = sample;
-  if (!agreed || sample == fHall) return;
-  acceptHall(sample, now, "");
+  const bool confirmingEdge = fHallDebounce.pending();
+  if (fHallDebounce.sample(fHall, sample, edge, now)) acceptHall(sample, now, confirmingEdge ? " (gpio80 edge confirmed)" : "");
 }
 
 // piano-keyboard-hall-sim=1 (HallSim.h): a requested simulated level accepted, or the sensor read again when one ends. True while a
@@ -908,7 +902,7 @@ bool PianoKeyboard::simHall(uint64_t now, bool edge)
   } else if (st.readReal) {
     const uint32_t raw = rd32(gHall.page.va + kIo) & 1u;
     const int sample = int(hallOpenFromRaw(raw, gArgs.hallActiveLow));
-    fHallSample = sample;
+    fHallDebounce.reset(sample);
     fHallNextMs = now + fPoll.config().hallMs;
     note("hall sim: ended: the sensor again (gpio80 raw %u -> %s; accepted %s)", raw, coverName(sample), coverName(fHall));
     if (sample != fHall) acceptHall(sample, now, " (the sensor again after a simulation)");
@@ -966,7 +960,7 @@ void PianoKeyboard::hallOnly()
   lidNotify(!fHall);
   for (;;) {
     pollHall(nowMs());
-    IOSleep(fPoll.config().hallMs);
+    IOSleep(fHallDebounce.waitMs(nowMs(), fPoll.config().hallMs));
   }
 }
 
@@ -1228,6 +1222,7 @@ void PianoKeyboard::releaseAll()
   send(Kind::touchpad, pointer, sizeof pointer);
   fPointer.reset();
   fKeyFilter.reset();
+  fBrightness = pianobacklight::KeyWatch();
   memset(fLastKeys + 1, 0, kKeyboardBytes - 1);
 }
 
@@ -1287,15 +1282,14 @@ void PianoKeyboard::backlight(int value, const char *why)
 
 void PianoKeyboard::coverAttached(bool on, const char *why)
 {
+  if (fGate.attach(on)) releaseAll();
   if (on == fAttached) return;
   fAttached = on;
   note("cover %s (%s)", on ? "ATTACHED" : "detached", why);
   setProperty("piano-keyboard-attached", uint64_t(on ? 1 : 0), 32);
   published("piano-keyboard-attached");
   if (!on) {
-    releaseAll();   // every key, consumer key and button up; the pointer and key state forgotten
     fBacklight.detach();
-    fBrightness = pianobacklight::KeyWatch();
     return;
   }
   ++fAttaches;
@@ -1379,14 +1373,15 @@ void PianoKeyboard::dispatch(const Report &r)
     ++fKeys;
     if (!fGate.pass()) return;   // the cover closed (piano-keyboard-lid-drop=1)
     uint8_t out[kKeyboardBytes];
-    const uint32_t rollovers = fKeyFilter.rollovers();
     const uint64_t now = nowMs();
-    if (Keys::newKey(fLastKeys, r.bytes)) fPointer.keyTyped(now);   // the typing guard
-    if (pianobacklight::keysEnabled()) pianobacklight::step(fBrightness.keyboard(r.bytes), "the cover");   // before the Fn row
-    memcpy(fLastKeys, r.bytes, kKeyboardBytes);
+    const bool rollover = fKeyFilter.filter(r.bytes, out);
+    if (!rollover) {
+      if (Keys::newKey(fLastKeys, r.bytes)) fPointer.keyTyped(now);   // the typing guard
+      if (pianobacklight::keysEnabled()) pianobacklight::step(fBrightness.keyboard(r.bytes), "the cover");   // raw usages
+      memcpy(fLastKeys, r.bytes, kKeyboardBytes);
+    }
     backlight(fBacklight.input(now), "backlight (a key after idle)");
-    fKeyFilter.filter(r.bytes, out);
-    const bool rollover = fKeyFilter.rollovers() != rollovers, changed = memcmp(out, r.bytes, kKeyboardBytes) != 0;
+    const bool changed = memcmp(out, r.bytes, kKeyboardBytes) != 0;
     const IOReturn rc = send(Kind::keyboard, out, kKeyboardBytes);
     if (show)
       note("key %u: %s -> %s%s%s", fKeys, hex(r.bytes, r.length, line, sizeof line), keyList(out, decoded, sizeof decoded),
@@ -1407,10 +1402,10 @@ void PianoKeyboard::dispatch(const Report &r)
     return;
   }
   case kIdTouchpad: {
-    if (!fTouchSeen) note("touchpad detected (first report 0x19): a cover with a touchpad");
-    fTouchSeen = true;
     ++fTouch;
     if (!fGate.pass()) return;
+    if (!fTouchSeen) note("touchpad detected (first report 0x19): a cover with a touchpad");
+    fTouchSeen = true;
     if (show && (fTouch <= 120 || fTouch % 25 == 0)) note("touch %u: %s", fTouch, hex(r.bytes, r.length, line, sizeof line));
     uint8_t out[2][kPointerBytes];
     const uint64_t now = nowMs();
@@ -1466,7 +1461,7 @@ void PianoKeyboard::dispatch(const Report &r)
          hex(r.bytes, r.length < 16 ? r.length : 16, line, sizeof line));
     coverAttached(connected, "MCU connected bit (a2)");
   } else if (v == Vendor::accel) {
-    if (++fAccel <= 3 || fAccel % 500 == 0) note("accelerometer %u: %s", fAccel, hex(r.bytes, 16, line, sizeof line));
+    if (++fAccel <= 3 || fAccel % 500 == 0) note("accelerometer %u: %s", fAccel, hex(r.bytes, r.length < 16 ? r.length : 16, line, sizeof line));
   } else if (v == Vendor::authRequest || v == Vendor::authInit || v == Vendor::authChallenge) {
     // A request's bytes are logged; an init reply's or a challenge's only up to the payload (the UID / challenge is not).
     if (++fAuth <= 20 || gArgs.auth)
@@ -1605,7 +1600,7 @@ void PianoKeyboard::serve()
       fKeepaliveMs = now + 12000;
     }
     backlight(fBacklight.tick(now), "backlight (idle: off)");
-    pollHall(now);
+    pollHall(nowMs());
     const uint64_t elapsed = now - fStartMs;
     if (elapsed >= nextDescribe) {
       describe(elapsed / 1000);
@@ -1622,7 +1617,8 @@ void PianoKeyboard::serve()
            fIrqLive ? "; the interrupt is live: waits up to 500 ms" : "", pollModeName(mode), fReads, fFrames,
            gArgs.irq && !fIrqLive ? "; interrupt off (polled)" : "");
     if (minute.wakes) fIrqWakesAtMinute = fIrqWakes;
-    edge = waitForEdge(fPoll.waitMs(mode, fIrqLive && fPin.live(), fReadAgain, fConsecutiveErrors >= 50));
+    const uint32_t waitMs = fPoll.waitMs(mode, fIrqLive && fPin.live(), fReadAgain, fConsecutiveErrors >= 50);
+    edge = waitForEdge(fHallDebounce.waitMs(nowMs(), waitMs));
   }
 }
 
@@ -1696,6 +1692,7 @@ void PianoKeyboard::readDisplay(uint64_t now)
 
 void PianoKeyboard::applyCover(CoverPower::Step step, const char *why)
 {
+  if (CoverPower::releasesInput(step)) releaseAll();
   if (step == CoverPower::Step::blank) blank(why);
   else if (step == CoverPower::Step::unblank) unblank(why);
 }
@@ -1771,7 +1768,7 @@ void PianoKeyboard::sleepPark()
     }
     // (the level through the polarity, as pollHall: the raw bit equalled "open" only with piano-keyboard-hall-active-low=1)
     const int level = int(hallOpenFromRaw(rd32(gHall.page.va + kIo) & 1u, gArgs.hallActiveLow));
-    fHallSample = level;
+    fHallDebounce.reset(level);
     fHallNextMs = now + fPoll.config().hallMs;
     if (level != fHall) acceptHall(level, now, " after the wake");
   }

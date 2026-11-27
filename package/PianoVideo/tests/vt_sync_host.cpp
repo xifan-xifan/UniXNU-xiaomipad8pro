@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Leo Zhang.
 // Protocol/ownership test, not firmware evidence. The actual worker uses these
 // ledger, completion and guest-request primitives under its session lock.
+// c++ -std=c++20 -Wall -Wextra -Werror vt_sync_host.cpp -o /tmp/vt_sync_host && /tmp/vt_sync_host
 #include "../VideoStreamState.h"
 #include "../vt/PianoVideoVTContract.h"
 #include <cassert>

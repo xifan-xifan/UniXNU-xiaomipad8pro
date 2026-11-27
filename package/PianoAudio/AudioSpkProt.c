@@ -532,10 +532,14 @@ void spk_live_stage(uint8_t slot[SPK_LIVE_SLOT])
     pad_to(&w, SPK_LIVE_SLOT);
 }
 
-int spk_live_parse(const uint8_t slot[SPK_LIVE_SLOT], SpkLive *out)
+int spk_live_parse(const uint8_t *slot, uint32_t bytes, SpkLive *out)
 {
-    if (le32(slot) != SPK_IID_SP_RX || le32(slot + 4) != SPK_PID_LIVE || le32(slot + 8) != SPK_LIVE_BYTES || le32(slot + 12)) return -1;
+    if (bytes < SPK_LIVE_SLOT || le32(slot) != SPK_IID_SP_RX || le32(slot + 4) != SPK_PID_LIVE ||
+        le32(slot + 8) != SPK_LIVE_BYTES || le32(slot + 12)) return SpkLiveInvalid;
     const uint8_t *d = slot + PARAM_HEADER;
+    uint8_t any = 0;
+    for (unsigned i = 0; i < SPK_LIVE_BYTES; ++i) any |= d[i];
+    if (!any) return SpkLiveEmpty;   /* the request is staged with this header and a zero payload */
     for (unsigned c = 0; c < 4; ++c, d += 24) {
         out->re[c] = le32(d); out->temp[c] = le32(d + 4); out->w2[c] = le32(d + 8);
         out->f0[c] = le32(d + 12); out->q[c] = le32(d + 16); out->w5[c] = le32(d + 20);

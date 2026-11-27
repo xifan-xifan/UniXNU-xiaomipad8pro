@@ -10,7 +10,7 @@ void sno_init(SnoState *s)
 {
     s->state = SNO_UNKNOWN;
     s->candidate = SNO_UNKNOWN;
-    s->since_ms = 0;
+    s->since = 0;
 }
 
 static int64_t absolute(int64_t v) {return v < 0 ? -v : v;}
@@ -31,19 +31,24 @@ static int classify(const SnoState *s, int64_t x, int64_t y, int64_t z)
     return s->state;
 }
 
-int sno_update(SnoState *s, int32_t x, int32_t y, int32_t z, uint64_t now_ms)
+int sno_update_at(SnoState *s, int32_t x, int32_t y, int32_t z, uint64_t now, uint64_t hold)
 {
     const int shown = classify(s, x, y, z);
     if (shown == s->state) {
         s->candidate = shown;
         return -1;
     }
-    if (shown != s->candidate) {
+    if (shown != s->candidate || now < s->since) {
         s->candidate = shown;
-        s->since_ms = now_ms;
+        s->since = now;
         return -1;
     }
-    if (now_ms - s->since_ms < SNO_HOLD_MS) return -1;
+    if (now - s->since < hold) return -1;
     s->state = shown;
     return shown;
+}
+
+int sno_update(SnoState *s, int32_t x, int32_t y, int32_t z, uint64_t now_ms)
+{
+    return sno_update_at(s, x, y, z, now_ms, SNO_HOLD_MS);
 }

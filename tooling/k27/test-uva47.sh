@@ -9,8 +9,8 @@
 # The built kernel is checked by tooling/k27/check-uva47-kc.py.
 set -euo pipefail
 D=$(cd "$(dirname "$0")/../.." && pwd)
-T=$D/out/test/piano-uva47
-mkdir -p "$T"
+T=$(mktemp -d "${TMPDIR:-/tmp}/piano-uva47.XXXXXX")
+trap 'rm -rf -- "$T"' EXIT
 S=$D/tooling/k27/piano-uva47
 for t in geometry walk; do
   "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -O2 -I "$S" "$S/test_uva47_$t.c" -o "$T/test_uva47_$t"
@@ -20,30 +20,13 @@ for t in geometry walk; do
   "$T/test_uva47_${t}_san" > /dev/null
   echo "test-uva47-$t: ASan/UBSan pass"
 done
-PATCH=$(ls "$D"/patches/k27/0075-*.patch)
-python3 - "$PATCH" "$S/pmap_uva47_policy.h" <<'EOF'
-import sys, re
-patch, header = sys.argv[1], sys.argv[2]
-text = open(patch).read()
-lines, inside, out = text.split('\n'), False, []
-for line in lines:
-    if line.startswith('+++ '):
-        inside = line == '+++ b/osfmk/arm/pmap/pmap_uva47_policy.h'
-        continue
-    if inside:
-        if line.startswith('diff --git') or line.startswith('-- '):
-            break
-        if line.startswith('+'):
-            out.append(line[1:])
-        elif line.startswith('@@') or line == '' or line.startswith('new file') or line.startswith('index '):
-            continue
-        else:
-            raise SystemExit('test-uva47: unexpected line in the header hunk: ' + line[:60])
-want = open(header).read()
-got = '\n'.join(out) + '\n'
-if got != want:
-    raise SystemExit('test-uva47: %s does not add %s byte for byte' % (patch.split('/')[-1], header.split('/')[-1]))
-print('test-uva47: the 0075 patch carries pmap_uva47_policy.h unchanged (%d lines)' % len(out))
+PATCHES=("$D"/patches/k27/0075-*.patch)
+python3 "$D/tooling/k27/check-policy-header.py" osfmk/arm/pmap/pmap_uva47_policy.h "$S/pmap_uva47_policy.h" "${PATCHES[@]}"
+python3 - "${PATCHES[0]}" <<'EOF'
+import sys
+from pathlib import Path
+
+lines = Path(sys.argv[1]).read_text(encoding='utf-8').splitlines()
 removed = [l[1:] for l in lines if l.startswith('-') and not l.startswith('---')]
 added = [l[1:] for l in lines if l.startswith('+') and not l.startswith('+++')]
 bad = [l for l in removed if 'kernel_pmap->pmap_pt_attr = native_pt_attr' in l or '.pta_root_level = (T0SZ_BOOT - 16) / 9' in l

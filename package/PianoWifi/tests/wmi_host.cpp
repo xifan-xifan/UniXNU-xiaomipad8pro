@@ -19,7 +19,7 @@
 //   the faults: a firmware that refuses the service, one that asks for memory this level does not hand out, a scan that never
 //             starts (the step times out), a scan that starts and never ends (the results stand and the teardown runs), an
 //             event in the wrong step, and the teardown of a ladder that is given up on.
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. wmi_host.cpp -o /tmp/wmi_host && /tmp/wmi_host
+//   c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I.. wmi_host.cpp -o /tmp/wmi_host && /tmp/wmi_host
 #include "WifiLink.h"
 #include <algorithm>
 #include <cstdio>
@@ -1747,6 +1747,35 @@ static void testExpire()
   full.roundFrames = 1;
   full.entries[3].heardRound = 2;
   CHECK(scanExpire(full, 2, nullptr, nullptr) == kScanEntriesMax - 1 && full.count == 1 && full.entries[0].heardRound == 2);
+
+  // An interrupted round can refresh an entry but cannot give it credit for
+  // the next completed round, or age entries that it never heard.
+  ScanList interrupted;
+  interrupted.count = 2;
+  scanRoundBegin(interrupted);
+  interrupted.entries[0].heardRound = interrupted.round;
+  interrupted.entries[1].heardRound = interrupted.round;
+  scanRoundBegin(interrupted);
+  interrupted.entries[0].heardRound = interrupted.round;
+  interrupted.roundFrames = 1;
+  scanRoundCancel(interrupted);
+  CHECK(interrupted.round == 1 && interrupted.roundFrames == 0);
+  scanRoundBegin(interrupted);
+  interrupted.roundFrames = 1;
+  CHECK(scanExpire(interrupted, 1, nullptr, nullptr) == 2 && interrupted.count == 0);
+
+  for (uint32_t reason : {kWmiScanReasonCompleted, kWmiScanReasonCancelled, kWmiScanReasonPreempted, kWmiScanReasonTimedOut,
+                          kWmiScanReasonInternalFailure}) {
+    WmiScanEvent event;
+    event.type = kWmiScanEvCompleted;
+    event.reason = reason;
+    CHECK(wmiScanCompleted(event) == (reason == kWmiScanReasonCompleted));
+  }
+  WmiScanEvent event;
+  event.type = kWmiScanEvDequeued;
+  CHECK(!wmiScanCompleted(event));
+  event.type = kWmiScanEvStartFailed | kWmiScanEvCompleted;
+  CHECK(!wmiScanCompleted(event));
 }
 
 // T-18 (office, many access points of one network): the signal follows the round; a full list gives up its stalest entry

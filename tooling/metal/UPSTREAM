@@ -33,9 +33,13 @@ Mesa (MIT): https://github.com/Droid-VM/mesa cecc0e96d7193c72356a31abb0cc589e4fc
   another thread had just taken from the cache: WindowServer's handle-0 Submit); piano-tu-bo-clear=early|late (boot line, else
   /private/var/ngpu/debug/tu-bo-clear) keeps the old order for an A/B; a submit entry with a cleared BO is refused in user space
   by name; finish/init race lines, inert until they fire.
+  0014-turnip-darwin-cs-reserve.patch: keeps a bounded reserve of mapped command-stream BOs for the render server.
+  0015-turnip-darwin-private-tier.patch: requests private backing only for GPU-only blit scratch when the kernel advertises
+  support. The optional request uses BoAlloc's existing contiguous field and keeps the ABI v2 layout.
   Build options: UniXNU-turnip build-turnip-macos-piano.py's, with -Dtu-darwin-abi-dir pointing at the ABI below.
 Kernel ABI (MIT): https://github.com/Shad0w23333/Adreno830 1a1321056ffc5428ae925f4680093718b46ca7c2, NativeAdrenoABI.h
-  (sha256 20ac9298bb390d86788c1fc58155e1f9581ffa942e222752efc95c67cb5670d2), or package/PianoA830/NativeAdrenoABI.h when present.
+  (sha256 20ac9298bb390d86788c1fc58155e1f9581ffa942e222752efc95c67cb5670d2), superseded by the in-tree
+  package/PianoA830/adreno830/NativeAdrenoABI.h when present. The Turnip build includes this header directly.
   tooling/metal/turnip-a830/NativeAdrenoABICompat.h (ours, MIT): NativeAdrenoParamsOwnedCoherent = 2, the value of
   https://github.com/UniXNU/Adreno740 NativeAdrenoABI.h v2.
   DroidVMVirtgpuABI.h (MIT): macOS-DroidVM out/x12377/src-gpu/drivers/NativeAdreno (only compiled, unused natively).
@@ -43,6 +47,8 @@ Plugin (BSD-2-Clause-Patent): https://github.com/Droid-VM/macOS-DroidVM 11ac316b
   overlay/metal/NativeAdrenoMetalPlugin.mm, overlay/metal/frameworks (IOGPU.tbd), scripts/piano-frontend-patch.py, recipe
   build-metal-plugin-piano.sh; the linked executable out/metal/plugin/NativeAdrenoMetal.bundle/Contents/MacOS/NativeAdrenoMetal
   (taken when the objects rebuild byte-identical: ld does not link it reproducibly).
+  tooling/metal/turnip-a830/plugin/0012-plugin-open-without-disk-cache.patch: fall back to the in-memory shader cache when the
+  client cannot write to any cache directory.
 Frontend (MIT): UniXNU-turnip drivers/AdrenoMetal (NativeMetal fb063de per the VM's recipe; upstream https://github.com/UniXNU/AdrenoMetal).
   Our change on top, after macOS-DroidVM's scripts/piano-frontend-patch.py: tooling/metal/turnip-a830/frontend/
   0001-frontend-console-rate-limit-serial-concurrent-compute.patch (2026-11-11, MIT as the file: NBLOG's stderr copy rate-limited per
@@ -70,6 +76,8 @@ Frontend (MIT): UniXNU-turnip drivers/AdrenoMetal (NativeMetal fb063de per the V
   0010-frontend-function-reflection.patch (2026-11-22, MIT, ours: NBFunction returnType/arguments for visible functions from the
   function's own AIR, read by tooling/metal/turnip-a830/frontend/AirSignature.h, ours, MIT; nil and one log line when the AIR states
   none or a type outside the set qualified against Apple's Metal). Context: the same UniXNU-turnip revision.
+  0011-frontend-browser-gpu-mac2.patch (ours, MIT): Mac2 for caller images with an allowlisted ANGLE or Dawn library basename
+  or Chromium framework directory.
 Abort reporter (ours, BSD-2-Clause-Patent): tooling/metal/turnip-a830/abort_reporter.mm, linked into the plugin as a third object; it is
   this repository's package/NativeSoftMetal/NativeSoftMetalPlugin.mm reporter (2026-11-11) with chaining to the process's own handlers.
 Bridge (GPL-2.0-or-later OR LGPL-3.0-or-later): macOS-DroidVM out/metal/bridge/libnative_metal_bridge.a

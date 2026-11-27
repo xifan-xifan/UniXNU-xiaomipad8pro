@@ -3,6 +3,7 @@
 // the decision under each piano-wifi-rxba value, the ADDBA response read back field by field, the queue descriptor of an
 // agreement's window and the firmware's command for it, and the queue memory pool that never hands an address out twice
 // before it starts again.
+//   c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I.. ba_host.cpp -o /tmp/ba_host && /tmp/ba_host
 #include <cstdio>
 #include <cstring>
 #include "WifiAssoc.h"

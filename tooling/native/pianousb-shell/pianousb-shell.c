@@ -19,6 +19,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,34 +32,109 @@
 
 #include "../../../package/include/PianoBootArgs.h"
 
-// piano-usb-shell=N in the boot arguments with N not 0 (PianoDwc3 creates /dev/pianousb for any nonzero number). The whole merged
-// line (kern.piano_bootargs, k27 0076): piano-usb-shell itself is one of the arguments that live past kern.bootargs' 1023-byte clip.
+// PianoDwc3 reads piano-usb-shell as a 32-bit number. The merged line can carry it past kern.bootargs' 1023-byte clip.
 static int shellArgument(void)
 {
   char args[PIANO_BOOT_ARGS_MAX];
   pianoBootArgs(args);
   size_t length;
   const char *value = pianoBootArgValue(args, "piano-usb-shell", &length);
-  if (!value || !length) return 0;
+  if (!value || !length || *value < '0' || *value > '9') return 0;
   char *end;
+  errno = 0;
   const unsigned long number = strtoul(value, &end, 0);
-  return end == value + length && number != 0;
+  return !errno && end == value + length && number > 0 && number <= UINT32_MAX;
 }
 
+static volatile sig_atomic_t stopping;
+static volatile sig_atomic_t deviceFd = -1, shellFd = -1;
+static sigset_t stopSignals;
+
+static void closeFd(volatile sig_atomic_t *slot)
+{
+  const int fd = *slot;
+  *slot = -1;
+  if (fd >= 0) close(fd);
+}
+
+static void stop(int sig)
+{
+  (void)sig;
+  const int saved = errno;
+  stopping = 1;
+  // Closing the descriptors also covers a signal arriving just before a blocking syscall.
+  closeFd(&deviceFd);
+  closeFd(&shellFd);
+  errno = saved;
+}
+
+static void closeRelayFd(volatile sig_atomic_t *slot)
+{
+  sigset_t old;
+  sigprocmask(SIG_BLOCK, &stopSignals, &old);
+  closeFd(slot);
+  sigprocmask(SIG_SETMASK, &old, NULL);
+}
+
+static int writeAll(int fd, const char *buf, size_t length)
+{
+  while (length && !stopping) {
+    const ssize_t n = write(fd, buf, length);
+    if (n > 0) {
+      buf += n;
+      length -= (size_t)n;
+    } else if (n < 0 && errno == EAGAIN) {
+      usleep(1000);
+    } else if (n == 0 || errno != EINTR) {
+      return -1;
+    }
+  }
+  return length ? -1 : 0;
+}
+
+// Return the descriptor that closed or failed, or -1 when the relay can continue.
 static int copy(int from, int to)
 {
   char buf[4096];
   const ssize_t n = read(from, buf, sizeof buf);
-  if (n <= 0) return n == 0 || (errno != EINTR && errno != EAGAIN) ? -1 : 0;
-  for (ssize_t done = 0; done < n;) {
-    const ssize_t w = write(to, buf + done, (size_t)(n - done));
-    if (w < 0) {
-      if (errno == EINTR || errno == EAGAIN) { usleep(1000); continue; }
-      return -1;
+  if (n == 0) return from;
+  if (n < 0) return errno == EINTR || errno == EAGAIN ? -1 : from;
+  return writeAll(to, buf, (size_t)n) ? to : -1;
+}
+
+static int relay(int fd, int master)
+{
+  static const char banner[] = "\r\npianousb-shell: a new shell on the tablet (exit starts another)\r\n";
+  if (writeAll(fd, banner, sizeof banner - 1)) return fd;
+  while (!stopping) {
+    fd_set r;
+    FD_ZERO(&r);
+    FD_SET(fd, &r);
+    FD_SET(master, &r);
+    const int n = select((fd > master ? fd : master) + 1, &r, NULL, NULL, NULL);
+    if (n < 0) {
+      if (errno == EINTR) continue;
+      if (!stopping) fprintf(stderr, "pianousb-shell: select: %s\n", strerror(errno));
+      return fd;
     }
-    done += w;
+    int failed = -1;
+    if (FD_ISSET(fd, &r)) failed = copy(fd, master);
+    if (failed < 0 && FD_ISSET(master, &r)) failed = copy(master, fd);
+    if (failed >= 0) return failed;
   }
-  return 1;
+  return fd;
+}
+
+static void reapShell(pid_t pid)
+{
+  kill(pid, SIGHUP);
+  for (int i = 0; i < 25; ++i) {
+    const pid_t result = waitpid(pid, NULL, WNOHANG);
+    if (result == pid || (result < 0 && errno != EINTR)) return;
+    usleep(10000);
+  }
+  kill(pid, SIGKILL);
+  while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
 }
 
 int main(int argc, char **argv)
@@ -69,19 +145,35 @@ int main(int argc, char **argv)
     return 0;
   }
   signal(SIGPIPE, SIG_IGN);
-  for (;;) {
-    const int fd = open(device, O_RDWR | O_NOCTTY);
+  sigemptyset(&stopSignals);
+  sigaddset(&stopSignals, SIGTERM);
+  sigaddset(&stopSignals, SIGINT);
+  struct sigaction sa = {.sa_handler = stop, .sa_mask = stopSignals};
+  if (sigaction(SIGTERM, &sa, NULL) || sigaction(SIGINT, &sa, NULL)) return 1;
+  while (!stopping) {
+    const int fd = open(device, O_RDWR | O_NOCTTY | O_CLOEXEC);
     if (fd < 0) {
-      sleep(2);
+      if (!stopping) sleep(2);
       continue;
     }
+    deviceFd = fd;
     fprintf(stderr, "pianousb-shell: %s open\n", device);
-    for (;;) {
+    while (!stopping && fd < FD_SETSIZE) {
+      sigset_t old;
+      sigprocmask(SIG_BLOCK, &stopSignals, &old);
+      if (stopping) {
+        sigprocmask(SIG_SETMASK, &old, NULL);
+        break;
+      }
       struct winsize ws = {.ws_row = 50, .ws_col = 160};
       int master = -1;
       const pid_t pid = forkpty(&master, NULL, NULL, &ws);
-      if (pid < 0) { sleep(1); break; }
       if (pid == 0) {
+        if (fd > STDERR_FILENO) close(fd);   // forkpty has already installed the shell's standard descriptors
+        signal(SIGPIPE, SIG_DFL);
+        signal(SIGTERM, SIG_DFL);
+        signal(SIGINT, SIG_DFL);
+        sigprocmask(SIG_SETMASK, &old, NULL);
         setenv("TERM", "xterm-256color", 1);
         setenv("HOME", "/var/root", 0);
         chdir("/var/root");
@@ -89,31 +181,16 @@ int main(int argc, char **argv)
         execl("/bin/sh", "sh", "-l", (char *)NULL);
         _exit(127);
       }
-      static const char banner[] = "\r\npianousb-shell: a new shell on the tablet (exit starts another)\r\n";
-      (void)write(fd, banner, sizeof banner - 1);
-      int deviceGone = 0;
-      if (fd >= FD_SETSIZE || master >= FD_SETSIZE) deviceGone = 1;   // never with launchd's few descriptors
-      while (!deviceGone) {
-        fd_set r;
-        FD_ZERO(&r);
-        FD_SET(fd, &r);
-        FD_SET(master, &r);
-        const int n = select((fd > master ? fd : master) + 1, &r, NULL, NULL, NULL);
-        if (n < 0) {
-          if (errno == EINTR) continue;
-          fprintf(stderr, "pianousb-shell: select: %s: %s reopened\n", strerror(errno), device);
-          deviceGone = 1;   // a descriptor went bad: start again from the open
-          break;
-        }
-        if (FD_ISSET(fd, &r) && copy(fd, master) < 0) { deviceGone = 1; break; }
-        if (FD_ISSET(master, &r) && copy(master, fd) < 0) break;   // the shell exited
-      }
-      close(master);
-      kill(pid, SIGHUP);
-      waitpid(pid, NULL, 0);
-      if (deviceGone) break;
+      if (pid > 0) shellFd = master;
+      sigprocmask(SIG_SETMASK, &old, NULL);
+      if (pid < 0) break;
+      const int failed = !stopping && master >= 0 && master < FD_SETSIZE ? relay(fd, master) : fd;
+      closeRelayFd(&shellFd);
+      reapShell(pid);
+      if (failed == fd) break;
     }
-    close(fd);
-    sleep(1);
+    closeRelayFd(&deviceFd);
+    if (!stopping) sleep(1);
   }
+  return 0;
 }

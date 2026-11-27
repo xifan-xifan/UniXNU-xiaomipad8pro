@@ -37,16 +37,18 @@ struct NativeAdrenoAbiParams {
     uint32_t abi_version;
     uint32_t input_bits;          /* GPU VA bits below 2^input_bits */
     uint32_t output_bits;         /* physical address bits */
-    uint32_t flags;               /* NativeAdrenoParamsHostImport or zero */
+    uint32_t flags;               /* NativeAdrenoParams* */
     uint64_t max_bo_bytes;
 };
 enum {
-    NativeAdrenoParamsHostImport = 1  /* BoImport pins the caller's own pages (an IOSurface's) as a BO */
+    NativeAdrenoParamsHostImport = 1, /* BoImport pins the caller's own pages (an IOSurface's) as a BO */
+    NativeAdrenoParamsGpuPrivate = 4  /* a qualified R1 tier accepts GPU-private BoAlloc requests */
 };
+enum { NativeAdrenoBoAllocGpuPrivate = 4 };
 struct NativeAdrenoAbiBoAlloc {
     uint64_t bytes;               /* 4KiB multiple, <= max_bo_bytes */
     uint32_t align_log2;          /* 12..24 */
-    uint32_t contiguous;          /* 1 requires one raw physical span */
+    uint32_t contiguous;          /* 0 ordinary, 1 contiguous, or NativeAdrenoBoAllocGpuPrivate (no CPU access, import or sharing) */
 };
 struct NativeAdrenoAbiBoAllocReply {
     uint64_t handle;              /* opaque to userspace, nonzero */

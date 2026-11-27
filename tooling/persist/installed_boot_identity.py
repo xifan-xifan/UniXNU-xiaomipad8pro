@@ -36,18 +36,26 @@ class MissingBootEvidence(ValueError):
     """The capture or transport cannot establish the live identity."""
 
 
-def effective(line):
-    return {word.partition("=")[0]: word for word in shlex.split(line)}
+def effective(line, keys):
+    settings = {}
+    for word in shlex.split(line):
+        key = word.partition("=")[0]
+        if key in keys and settings.setdefault(key, word) != word:
+            raise ValueError(f"conflicting installed boot arguments for {key}")
+    return settings
 
 
 def need_args(line, needed):
-    settings = effective(line)
-    if any(settings.get(word.partition("=")[0]) != word for word in needed.split()):
+    required = effective(needed, {word.partition("=")[0] for word in needed.split()})
+    settings = effective(line, required)
+    if settings != required:
         raise ValueError("NEED_ARGS do not match the effective boot arguments")
 
 
 def argument_profile(cmdline, split):
-    selector = effective(cmdline).get("piano-boot-args")
+    if not isinstance(cmdline, str) or not isinstance(split, dict) or not isinstance(split.get("tail", ""), str):
+        raise ValueError("invalid installed boot-argument record")
+    selector = effective(cmdline, {"piano-boot-args"}).get("piano-boot-args")
     if selector is None:
         tail_property = "piano-boot-args"
     elif selector == "piano-boot-args=0":
@@ -86,10 +94,13 @@ def chosen_observation(reported, tail_property):
         chosen, = [node for node in roots if node.get("IORegistryEntryName") == "chosen"]
     except (AttributeError, ValueError, TypeError, plistlib.InvalidFileException, ExpatError) as exc:
         raise MissingBootEvidence("missing or malformed same-boot /chosen read") from exc
-    raw = chosen.get(tail_property, b"")
-    if not isinstance(raw, bytes) or (raw and not raw.endswith(b"\0")):
+    raw = chosen.get(tail_property, b"") if tail_property else b""
+    if not isinstance(raw, bytes):
         raise MissingBootEvidence("malformed /chosen boot-args property")
-    tail = raw.partition(b"\0")[0].decode("ascii", errors="replace").strip(" ")
+    text, nul, padding = raw.partition(b"\0")
+    if raw and (not nul or any(padding) or any(not 0x20 <= byte <= 0x7e for byte in text)):
+        raise MissingBootEvidence("malformed /chosen boot-args property")
+    tail = text.decode("ascii").strip(" ")
     return cmdline, tail
 
 
@@ -131,7 +142,7 @@ def live_identity(profile, needed, console, source, reported):
         # segment and requires positive driver evidence for every requested argument beyond it.
         cmdline = reported.rstrip("\r\n")
         check_legacy(profile, cmdline)
-        observed = effective(cmdline)
+        observed = effective(cmdline, {word.partition("=")[0] for word in needed.split()})
         must_show = {word.partition("=")[0] for word in needed.split()
                      if observed.get(word.partition("=")[0]) != word}
         proof = "archived cmdline and requested driver values (replay)"

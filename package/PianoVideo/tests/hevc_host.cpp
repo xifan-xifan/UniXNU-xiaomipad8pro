@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Copyright (c) 2026 Leo Zhang.
 // Host admission only: synthetic syntax is not a firmware decode fixture.
+// c++ -std=c++20 -O2 -Wall -Wextra -Werror hevc_host.cpp -o /tmp/hevc_host && /tmp/hevc_host
 #include "../vt/PianoVideoCodec.h"
 #include <assert.h>
 #include <fstream>

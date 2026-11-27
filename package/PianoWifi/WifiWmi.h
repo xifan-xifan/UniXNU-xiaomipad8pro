@@ -422,6 +422,12 @@ inline bool wmiParseScanEvent(WmiScanEvent &out, const uint8_t *payload, uint32_
   return true;
 }
 
+inline bool wmiScanCompleted(const WmiScanEvent &event)
+{
+  return (event.type & kWmiScanEvCompleted) && !(event.type & (kWmiScanEvDequeued | kWmiScanEvStartFailed)) &&
+         event.reason == kWmiScanReasonCompleted;
+}
+
 inline const char *wmiScanReasonName(uint32_t reason)
 {
   switch (reason) {
@@ -535,12 +541,24 @@ inline uint32_t dot11ChannelFreq(uint32_t channel, uint32_t heard)
   return 0;
 }
 
+inline uint32_t dot11ChannelOfFreq(uint32_t mhz)
+{
+  if (mhz == 2484) return 14;
+  if (mhz >= 2412 && mhz <= 2472 && (mhz - 2407) % 5 == 0) return (mhz - 2407) / 5;
+  if (mhz >= 5160 && mhz <= 5885 && mhz % 5 == 0) return (mhz - 5000) / 5;
+  return 0;
+}
+
 // The RSN element's body (version, group suite, pairwise suites, key-management suites, capabilities), from the air: every
 // count is checked against what is left, and a field cut short ends the read with `truncated` (what came before stands).
 inline void wmiParseRsn(ScanSecurity &out, const uint8_t *body, uint32_t bytes)
 {
   out.rsn = true;
   uint32_t at = 2;   // the version
+  if (!body || bytes < at || body[0] != 1 || body[1] != 0) {
+    out.truncated = true;
+    return;
+  }
   auto suite = [&](uint32_t from, uint8_t &type) {
     const bool ours = body[from] == 0x00 && body[from + 1] == 0x0f && body[from + 2] == 0xac;
     type = ours ? body[from + 3] : 0;
@@ -551,7 +569,7 @@ inline void wmiParseRsn(ScanSecurity &out, const uint8_t *body, uint32_t bytes)
     out.groupCipher = kRsnCipherCcmp;
     out.pairwise = 1u << kRsnCipherCcmp;
     out.akm = 1u << kRsnAkmPsk;
-    out.truncated = bytes < at;
+    out.truncated = bytes != at;
     return;
   }
   uint8_t type = 0;
@@ -575,7 +593,22 @@ inline void wmiParseRsn(ScanSecurity &out, const uint8_t *body, uint32_t bytes)
       else bits |= 1u << 31;
     }
   }
-  if (bytes >= at + 2) out.rsnCaps = uint16_t(body[at] | body[at + 1] << 8);
+  if (bytes == at) return;
+  if (bytes - at == 1) {
+    out.truncated = true;
+    return;
+  }
+  out.rsnCaps = uint16_t(body[at] | body[at + 1] << 8);
+  at += 2;
+  if (bytes == at) return;
+  if (bytes - at < 2) {
+    out.truncated = true;
+    return;
+  }
+  const uint32_t pmkids = uint32_t(body[at] | body[at + 1] << 8);
+  at += 2;
+  const uint32_t pmkidBytes = pmkids * 16;
+  out.truncated = bytes - at < pmkidBytes || (bytes - at != pmkidBytes && bytes - at != pmkidBytes + 4);
 }
 
 inline bool wmiParseBeacon(ScanEntry &out, const uint8_t *frame, uint32_t length, bool &isProbe)
@@ -777,6 +810,16 @@ inline ScanEntry *scanAdd(ScanList &list, const WmiMgmtRx &rx)
 inline void scanRoundBegin(ScanList &list)
 {
   ++list.round;
+  list.roundFrames = 0;
+}
+
+inline void scanRoundCancel(ScanList &list)
+{
+  if (list.round) {
+    for (uint32_t i = 0; i < list.count; ++i)
+      if (list.entries[i].heardRound == list.round) --list.entries[i].heardRound;
+    --list.round;
+  }
   list.roundFrames = 0;
 }
 

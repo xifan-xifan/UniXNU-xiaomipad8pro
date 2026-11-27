@@ -1,0 +1,7 @@
+op = BOOTREPLY
+yiaddr = 192.0.2.10
+options:
+Options count is 3
+dhcp_message_type (uint8): ACK 0x5
+server_identifier (ip): 192.0.2.1
+lease_time (uint32): 0x15180

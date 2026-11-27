@@ -79,8 +79,8 @@ struct piano_skin_temps {
   int32_t milli_c[PIANO_SKIN_COUNT];
   uint32_t age_ms[PIANO_SKIN_COUNT];
   uint64_t sample_us[PIANO_SKIN_COUNT];
-  // The virtual skin temperature from the first five (PianoThermal Perf.h virtualSkin, the CPU policy's own number): valid only with
-  // the battery and quiet or cpu_therm; used: bit i = input i was in the sum.
+  // Virtual skin needs all five fresh inputs, with an exception when the DSP drives the charger pin. Bit i of virtual_used
+  // records each input included in the sum.
   int32_t virtual_milli_c;
   uint32_t virtual_valid, virtual_used;
 };

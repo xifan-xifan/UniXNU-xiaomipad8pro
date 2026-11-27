@@ -8,7 +8,7 @@ English | [简体中文](SKILL.zh-CN.md)
 # Install native macOS 27.3 on a Xiaomi Pad 8 Pro (piano)
 
 You are the operator. The tablet owner sits next to the tablet and presses its buttons. You run commands on a Mac. Follow the
-sections in order. Every step names its command, what it writes, and the line that tells you it passed. **Stop at the first
+sections in order and record the result of each check. **Stop at the first
 failure and report it to the owner.** Do not retry a write. Do not work around a refusal.
 
 All paths are relative to this repository's checkout. `tooling/repro/` is the kit this skill calls. Nothing from Apple's IPSW is
@@ -16,15 +16,21 @@ ever committed or shipped: every user fetches it from Apple and rebuilds the der
 
 ## 0. Status: what a second unit can do today (2026-11-26)
 
-The reference tablet runs **v13.1y12o** with kernel patch **0076**. See the [installed results](../../docs/results-2026-11-26.md#v131y12o-installed).
+The reference tablet runs **v13.1y12q** with the k27 native patch series **0053–0076**, a **13 GiB** XNU window (13310 MiB),
+Data concurrent mode after mount, and USB debug network TX flow control. The installed display runs at 60 Hz with Night Shift
+routing and native panel sleep off. [Installed results](../../docs/results-2026-11-26.md#evening)
+
+The reference daily layout puts the root image on `linux_rootfs` and the direct Data store on `linux_data`. The second-unit
+qualification in sections 3–4 targets a root image on `linux_data` to preserve Ubuntu's root and uses volatile Data. A complete
+daily ESP build and disk install on a second unit still depend on G6–G8. [Reference disk layout (§13.8)](../../docs/persistent-boot.md)
 
 | Section | State for a second unit |
 |---|---|
 | 1 Requirements | ready: `tooling/repro/check-host.sh` |
-| 2 Inputs from Apple | ready: `tooling/repro/fetch-ipsw.py` (every member pinned, AEA keys from Apple) and `boot-dtb.py` |
+| 2 Public build inputs | ready: `scripts/fetch-pins.py` for source, `fetch-ipsw.py` for pinned Apple inputs, and `boot-dtb.py` for the Ubuntu boot DTB |
 | 2 Per-device data | partly ready: extracted from the unit through the Ubuntu install's tools (G5) |
-| 3 Root image rebuild | ready if you have the k27 tree's two boot shims (G1b): `make-systemos.sh`, `verify-root.py`, a pinned file manifest |
-| 3 Kernel, KC, RAM images | **blocked without the k27 tree (G1), the base trust bundle (G2), a Data seed (G3), the Turnip tree (G4)** |
+| 3 Root image rebuild | needs the two SystemOS boot shims (G1b), the base trust bundle (G2) and a Data seed (G3) |
+| 3 Kernel, KC, RAM images | k27 source fetch is available. Needs a built k27 tree (G1), the root inputs above, and Turnip for the A830 build (G4) |
 | 4 RAM boot | ready once 3 builds (the `fastboot boot` path takes nothing per unit) |
 | 5 Install | **blocked: the write tooling is pinned to the reference unit (G6)**. `maint-session.py` refuses another unit at `map`. Never force it. |
 | 6 Post-install checks | ready (the same checks as the reference unit) |
@@ -36,7 +42,7 @@ If a row says blocked, finish the sections before it, then report the gap to the
 ### 1.1 Host: a Mac with Apple silicon
 
 Run `bash tooling/repro/check-host.sh`. It reads only. It prints one line per requirement: `ok`, `WARN` (untested), `FAIL` (cannot
-build here) or `GAP` (a local-only input, see Known gaps). Continue only with `summary: 0 FAIL`.
+build here) or `GAP` (an input to supply, see Known gaps). Continue only with `summary: 0 FAIL`.
 
 **Verdict: an Apple silicon Mac (M1 or later) is required. Intel Macs are not supported.** Evidence, taken on the reference build
 host (macOS 27.2.1 26B131, Xcode 27.2 27B52):
@@ -59,8 +65,8 @@ translated shell).
 
 - **Xcode 27** (the app, not only the Command Line Tools): the macOS SDK with `Kernel.framework` and the iphoneos SDK (the k27
   kernel builds with `SDKROOT=iphoneos`). Run `sudo xcode-select -s /Applications/Xcode.app`.
-- **Homebrew** at `/opt/homebrew`. Install: `python@3.15 llvm gnu-sed bison mtools dtc zstd`, `blacktop/tap/ipsw` (the AEA key
-  fetch) and the cask `android-platform-tools` (`fastboot`).
+- **Homebrew** at `/opt/homebrew`. Install `python@3.15 llvm gnu-sed bison mtools dtc zstd`, `blacktop/tap/ipsw` (the AEA key
+  fetch), and `nasm mtoc acpica` for the FD. The tablet steps also use the cask `android-platform-tools` (`fastboot`).
 - **python3 3.11 or later**. Only the standard library is needed: the Turnip build makes its own venv with pinned meson,
   mako, PyYAML and packaging.
 - **Disk:** about 90 GiB free. The IPSW inputs take up to 32 GB, the root image 21 GB, the SystemOS window 6 GB, and the
@@ -78,11 +84,12 @@ translated shell).
 - **Ubuntu installed first**, with the Ubuntu project's own installer:
   [xiaomipad-8pro-mainline](https://github.com/yzddmr6/xiaomipad-8pro-mainline), `docs/INSTALL.en.md`. That installer:
   - backs up every partition and GPT of the unit (keep this backup; it is your factory way back);
-  - creates `linux_rootfs` (60 GiB) and `linux_data` (about 201 GiB), the only space macOS uses;
+  - creates `linux_rootfs` (60 GiB) and `linux_data` (about 201 GiB), the space used for the macOS root and Data;
   - collects the unit's own files: `boot-profile.json`, your own AVB key `boot-signing.pem`, the touch calibration and the sensor
     registry;
   - leaves Android bootable (`userdata` 200 GiB), with `tools/piano-switch.py` and the slot-A Android set to switch back.
-  This repository never repartitions and never touches Android's partitions.
+  The macOS install can carve an ESP from `linux_rootfs` and replace `boot_a` after the checks in section 5. Android's data
+  and firmware partitions stay intact.
 - **Cables:** a USB-C data cable from the tablet to the Mac, directly, not through a hub. The same cable carries fastboot, the
   maintenance image's network and the macOS USB console (`tooling/native/usb-console.py --list`).
 - Battery above 50 % (`fastboot getvar battery-voltage`). Android remains the charging fallback until macOS charging is checked
@@ -95,11 +102,16 @@ translated shell).
 
 ```sh
 git clone https://github.com/lenzhang/UniXNU-xiaomipad8pro.git UniXNU-piano && cd UniXNU-piano
+export UNIXNU_RESEARCH="$PWD/out/unixnu-research"
+python3 scripts/fetch-pins.py --dry-run
+python3 scripts/fetch-pins.py
+export PIANO_K27_TREE="$UNIXNU_RESEARCH/k27-tree"
 ```
 
-`unixnu.lock` pins every other checkout (UniXNU, Mu-Silicium and its submodules, piano-uefi, DarwinBoot, the SoC layer) by URL
-and commit. Clone each `[pin."NAME"]` at its `commit` into one directory and set `UNIXNU_RESEARCH` to it. `tooling/unixnu.sh` and
-`tooling/firmware/build-fd.sh` read them there. They are public; the k27 tree is not (G1).
+Run the fetch into a fresh directory. It checks out the commits and submodule pins in `unixnu.lock` under the names the build
+expects, including `Mu-Silicium-piano` and `piano-uefi-UniXNU-piano`. For `k27` it calls `fetch-k27-tree.sh`, which applies
+`patches/k27-tree` to the pinned macOS-DroidVM source and verifies the resulting Git tree ID. A successful fetch gives you the
+source. Build the local k27 inputs in section 3.2. [Fetch script](../../scripts/fetch-pins.py) · [Source lock](../../unixnu.lock) · [k27 provenance](../../patches/k27-tree/README.md)
 
 ### 2.2 The pinned IPSW from Apple, with AEA keys from Apple
 
@@ -135,6 +147,9 @@ section is the boot DTB every image carries:
 python3 -I tooling/repro/boot-dtb.py "$PIANO_V110/release/boot/boot-ram-maintenance.img"    # -> out/inputs/piano-boot.dtb, 50636eff...
 ```
 
+Keep the pinned maintenance image for the RAM verifier in 3.2. The RAM build also needs the patched `mkbootimg.py` from the
+Ubuntu host tools. Set `PIANO_MKBOOTIMG` if it is outside the release's `host-tools` directory.
+
 ### 2.4 Per-device data: only from THIS unit, never from another
 
 None of these files ever goes into a repository, an issue or a chat. Keep them under `private/` (ignored by git) or
@@ -155,8 +170,10 @@ Never mount `persist` writable. Never use another unit's calibration.
 
 ### 2.5 Is this unit's layout the one the tooling knows?
 
+Set `LUN0_GPT` and `LUN4_GPT` to the MBR plus primary GPT files from those LUNs in the unit's Ubuntu backup.
+
 ```sh
-python3 -I tooling/repro/unit-profile.py --lun0 <LUN 0 MBR+primary GPT from the Ubuntu backup> --lun4 <LUN 4 likewise>
+python3 -I tooling/repro/unit-profile.py --lun0 "$LUN0_GPT" --lun4 "$LUN4_GPT"
 ```
 
 It reads two files and compares `linux_rootfs`, `linux_data`, LUN 0 size and `boot_a` with `tooling/persist/common.py`.
@@ -165,13 +182,13 @@ install remains blocked by G6. `DIFFERENT` (exit 2) means the unit cannot use th
 
 ## 3. Build the images (Mac only; nothing touches the tablet)
 
-One entry runs the steps in order. Use `--dry-run` first, then the real run, then `--check`:
+Use the entry script to review the full plan and build the root inputs. Prepare the kernel explicitly in section 3.2 so the
+relink uses the same baseline tag as the bootstrap.
 
 ```sh
-bash tooling/repro/fetch-and-build.sh --dry-run                 # every command it would run; nothing fetched, built or written
-bash tooling/repro/fetch-and-build.sh                           # host inputs systemos root kernel fd image
-bash tooling/repro/fetch-and-build.sh --check                   # each step's outputs against the pins (no network)
-bash tooling/repro/fetch-and-build.sh root                      # or any single step
+bash tooling/repro/fetch-and-build.sh --dry-run
+bash tooling/repro/fetch-and-build.sh host inputs systemos root
+bash tooling/repro/fetch-and-build.sh --check inputs systemos root
 ```
 
 ### 3.1 The root image, rebuilt locally (never shipped)
@@ -181,7 +198,7 @@ The 20.9 GB root image is the SHNGROOT manifest plus two windows (`docs/k273-lin
 | Piece | Made by | Check | Reproducible? |
 |---|---|---|---|
 | OS window (14493417472 B) | the IPSW's `141-22233-021.dmg`, decrypted, unchanged | sha256 `40d8282e...` (pinned) | yes, byte for byte |
-| SystemOS window (6442450944 B) | `tooling/k273/make-systemos.sh OS.dmg 141-22145-021.dmg 141-22106-021.dmg out/inputs/k273/root/systemos.img` (sudo): the SystemOS and App cryptexes, the Data template's read-only parts, the boot shims (G1b) | `sudo python3 -I tooling/repro/volume-manifest.py --image out/inputs/k273/root/systemos.img --compare tooling/repro/pins.json`. The file-level manifest digest must be `070934ff...` (27352 entries) | **bytes: no; tree: yes** |
+| SystemOS window (6442450944 B) | `tooling/k273/make-systemos.sh` (invoked by the `systemos` step): the SystemOS and App cryptexes, the Data template's read-only parts, the boot shims (G1b) | The `systemos` step writes `out/inputs/k273/root/systemos.manifest.json` and checks it against `pins.json` with `volume-manifest.py`. The file-level digest must be `070934ff...` (27352 entries) | **bytes: no; tree: yes** |
 | Manifest (block 0) | `tooling/native/make-root-manifest.py`, inside `make-root-image.sh` | `verify-root.py` recomputes it from the two windows | yes, given the windows |
 | `root.img`, `root.json` | `tooling/k273/make-root-image.sh out/inputs/k273/root` | `python3 -I tooling/repro/verify-root.py out/inputs/k273/root --manifest-json out/inputs/k273/root/systemos.manifest.json` | follows the SystemOS window |
 
@@ -201,18 +218,28 @@ caches, pinned) and copies the Data seed (`K273_SEED`, G3). The entry script ref
 
 ### 3.2 Kernel, firmware, kernel collection and RAM images
 
+For a freshly fetched tree, export `KDK_DMG` with the path to your Apple KDK download and provide `ld-classic` (G1). The bootstrap
+builds the native 0066 baseline and its local build inputs. The k27 source pin already includes 0053–0054. The bootstrap adds
+0055–0066, then the 27.3 relink applies `patches/k273` and the remaining checked-in k27 patches through 0076 to its own clone.
+The checked-in series skips 0072. [Kernel bootstrap](../../docs/ci.md#buildyml) · [k27 series](../../patches/k27/README.md) · [27.3 series](../../patches/k273/README.md)
+
 ```sh
-bash tooling/k273/prepare-k27-tree.sh                     # needs PIANO_K27_TREE (G1); prints the relinked kernel's path
-bash tooling/firmware/build-fd.sh                          # the UEFI FD from the unixnu.lock checkouts; stamps ram-payload-first
-K273_ROOT=k273 K273_ROOT_PART=linux_data PIANO_GPU=2 PIANO_DATA_PERSIST=0 PIANO_RESET_AFTER=900 \
-  bash tooling/k273/build-k273-image.sh                    # KC (only this repository's kexts), ADT, out/ram and out/ram-dump
-python3 tooling/bootimg/verify-ram-images.py out/ram/build-A-bundled.json
+K27_DIR="$PIANO_K27_TREE" K27_TREE_TOP=0066 bash tooling/ci/k27-kernel.sh xnu ld kdk fakeroot platform kernel
+K27_TREE_TOP=0066 bash tooling/k273/prepare-k27-tree.sh 0066
+K273_KERNEL=out/k273/k27-tree/out/k27/kernel-k273-0076-s0001-native.macho \
+  K273_ROOT_PART=linux_data PIANO_GPU=2 PIANO_RESET_AFTER=900 bash tooling/repro/fetch-and-build.sh fd image
+python3 tooling/k27/check-piano-bootargs-kc.py --kc out/k27/kc-k27-native.bin
+python3 tooling/adt/check-ram-window.py --adt out/adt/piano-k27.adt --kc out/k27/kc-k27-native.bin \
+  --fd out/fd/piano-uefi-A-bundled.fd
+python3 tooling/bootimg/verify-ram-images.py out/ram/build-A-bundled.json \
+  --reference "$PIANO_V110/release/boot/boot-ram-maintenance.img"
 ```
 
-Pass lines: the KC log's `native kext rule: ... all this repository's`; `verify-ram-images.py` exits 0; the image is at most
-250000000 bytes (ABL's 256 MiB kernel region). `PIANO_DATA_PERSIST=0` makes Data volatile, so a test image never opens a Data
-store. `PIANO_RESET_AFTER=900` returns the tablet to ABL fastboot after 900 s. `K273_ROOT_PART=linux_data` is the first root
-place on a second unit (Ubuntu's root on `linux_rootfs` stays).
+Use the relink's printed kernel path if `K273_TREE` points elsewhere. The FD builder stamps both `ram-payload-first` and
+`ram-window`. The 27.3 ADT asks for `0x33fe00000` bytes (13 GiB less 2 MiB) and needs a DarwinBoot FD with the 13 GiB bound.
+Require all three checks above to exit 0, the RAM window check to report 13310 MiB, and the image to fit the 250000000-byte
+limit. The entry script sets `PIANO_DATA_PERSIST=0` so the RAM image uses volatile Data, and `PIANO_RESET_AFTER=900` returns
+the tablet to ABL fastboot after 900 s. [FD stamps](../../tooling/firmware/build-fd.sh) · [RAM window (§12)](../../docs/persistent-boot.md)
 
 ## 4. RAM-boot validation first (`fastboot boot` only; nothing is written)
 
@@ -223,7 +250,7 @@ A RAM boot loads the image into memory and writes no partition. Run the RAM step
 2. Start the console capture: `python3 tooling/native/usb-console.py --capture 960`. Only one capture may own the port.
 3. `fastboot boot out/ram/boot-piano-uefi-ram-A-bundled.img`, then wait. With no root on the disk yet, the boot must reach:
    - UEFI: `UNIXNU: config: volume VenHw(A9C6827C-...)`: the image's own payload, not an ESP;
-   - DarwinBoot -> XNU: the `NativeRamBlock: RAM window ...` line;
+   - DarwinBoot -> XNU: `NativeRamBlock: RAM window ... (13310 MiB)`;
    - `NativeUfs: start ... root-part=linux_data` and the partition scan, then the wait for the root (no SHNGROOT on
      `linux_data` yet: expected);
    - the USB console answering (`usb-console.py` shows the kernel log);
@@ -235,14 +262,14 @@ A RAM boot loads the image into memory and writes no partition. Run the RAM step
    proves the guard works. Record its output.
 
 **Before any write, all of these must pass:** sections 1-3 (`check-host.sh` 0 FAIL, `fetch-ipsw.py --check` PASS,
-`verify-root.py` PASS with the manifest, `verify-ram-images.py` 0), the RAM boot above, the unit's own full backup (Ubuntu INSTALL
-§2) present and its hashes checked, G6 resolved, and the owner present.
+`verify-root.py` PASS with the manifest, and all three image checks in 3.2), the RAM boot above, the unit's own full backup
+(Ubuntu INSTALL §2) present and its hashes checked, the applicable gaps G6–G8 resolved, and the owner present.
 
 The full-desktop qualification needs the root on the disk. It follows the first write (5.2): the same image boots the desktop
 from `linux_data` with Data volatile. Check the login window, touch, keyboard cover, USB network/ssh, Wi-Fi scan and battery
 readout before writing anything else.
 
-## 5. Install (only through `tooling/persist/maint-session.py`, only after G6)
+## 5. Install (through `tooling/persist/maint-session.py` after G6–G8)
 
 ### 5.1 Rules: never broken, no exceptions
 
@@ -261,35 +288,31 @@ readout before writing anything else.
   `linux_rootfs`/`linux_data` contents; back up anything you want to keep from them yourself first (`linux-data-root` keeps no
   copy of `linux_data`'s old contents).
 
-### 5.2 The sessions (the reference unit's order, `docs/persistent-boot.md` §5, §12, §13.8)
+### 5.2 Reference workflow and second-unit prerequisites
 
-`P=tooling/persist/maint-session.py`. Add `--dry-run` first each time:
+These are the stages a second-unit workflow must cover once G6–G8 are resolved. Use `--dry-run` before each session.
 
-0. Build the ESP first, offline: `tooling/k273/build-k273-esp.py --root-part linux_data ...` (`docs/persistent-boot.md` §13.8;
-   its record names the root partition, the Data store's partition and LBA, and the seed). Every session below passes it as
-   `--esp`, because `map` checks the disk against that record. `--dry-run` lists anything else a step needs.
-1. Root image onto `linux_data` (Ubuntu's root stays): `python3 $P maint-boot map linux-data-root check maint-exit --esp <esp>.img
-   --root-part linux_data --root-image out/inputs/k273/root/root.img --root-sha256 <root.json image_sha256>`. The step checks the
-   image's hash on the host, writes it, and reads `linux_data` back over the image's length. Then run the full-desktop RAM
-   qualification (section 4, last paragraph).
-2. ESP and GPT: `python3 $P maint-boot map backup gpt esp check maint-exit --esp <esp>-diag.img`, then the RAM tests of the flashed
-   path with nothing written: `ram-esp-test`, `ram-v4-signed`, `ram-precedence` (§5). A test-phase ESP's default entry resets into
-   ABL fastboot by itself (`-diag`); the daily one comes with `esp-final`.
-3. `boot_a`: sign the boot image with your own AVB key (G7; `tooling/persist/build-boot.py`, `sign.sh`), then `python3 $P
-   maint-boot map backup boot-a esp-final check maint-exit --esp <esp>-diag.img --esp-final <esp>.img`, then `abl-final reboot`. Slot A then boots macOS. Last test: power
-   off, unplug, power on.
-4. If `abl-check` shows `slot-successful:a: no`, run `slot-success-crc`. It writes only bit 54 of `boot_a`'s LUN 4 entry and the
-   two CRCs, after backups of both copies. Never `set_active`.
+1. Build an ESP for the unit's layout, with matching KC, ADT, trust cache and seed. `build-k273-esp.py` updates a verified base ESP
+   and its JSON record. `map` checks the root partition and the Data store's partition, LBA and seed against that record (G8).
+2. Back up the region and write the root image using `linux-data-root` with the unit's `--root-part` and the local
+   `--root-sha256` from `root.json`. For the Ubuntu-preserving `linux_data` qualification, run the full-desktop RAM checks
+   from section 4 after the read-back passes.
+3. Back up and verify the GPT, diagnostic ESP and Data store region as applicable. The reference workflow uses `gpt` and `esp`
+   for provisioning, then checks RAM-payload precedence and tests the final boot image from RAM. For the 13 GiB ESP use a
+   v5-capable FD (`build-boot.py --series 5`), a unit-signed `--boot-image` (G7), and the `ram-boot-a` test path.
+4. After those gates, the guarded workflow writes `boot_a` and `esp-final` with backups and read-back checks, then verifies a
+   cold boot. If `abl-check` shows `slot-successful:a: no`, the reference `slot-success-crc` step updates bit 54 of the `boot_a`
+   entry and the CRCs in both LUN 4 GPT copies after backing them up.
 
-The ESP and the root image must agree: the ESP's arguments name the root partition (`native-ufs-root-part`) and the Data store's
-partition and LBA, and `map`/`esp-final` refuse an ESP whose store is not the one on the disk (`docs/data-store.md`).
+Sections 12 and 13.8 document the reference v5 boot path, ESP and Data migration, including the required order for changing
+the boot image and ESP together. [Persistent boot](../../docs/persistent-boot.md) · [Data store](../../docs/data-store.md)
 
 ### 5.3 Rollback, least invasive first (`docs/persistent-boot.md` §7, `docs/install-esp-v3.md` §5 for the pattern)
 
 1. **A hang or panic:** the boot guard (`piano-boot-guard=180`, `docs/boot-guard.md`) lands in ABL fastboot. Otherwise hold power
    + volume-down 15-20 s. From ABL every RAM image boots as before. A RAM image's own payload wins over the ESP (`ram-precedence`).
-2. **Undo a step:** `python3 $P maint-boot`, then `python3 $P rollback STEP`, then `maint-exit`. Each rollback streams that step's
-   verified backup back and reads it back. Full undo order: `boot-a`, `esp`, `store`, `gpt`.
+2. **Undo a step:** use `maint-session.py` to enter maintenance, map the disk, roll back the step from its verified backup,
+   then map, check and exit. To return to an 8 GiB FD from a 13 GiB pair, roll back `esp-final` before `boot-a` (§12.7).
 3. **Android (the charging fallback):** from ABL, `piano-switch.py` of the Ubuntu release with the unit's own `android-set` writes
    slot A's Android set back. `userdata`, `super` and `metadata` were never touched. Back to macOS the same way with the macOS set,
    then `slot-success-crc` (`docs/persistent-boot.md` §7, the Android row).
@@ -300,33 +323,41 @@ partition and LBA, and `map`/`esp-final` refuse an ESP whose store is not the on
 On the first boots from the disk (not a RAM image), record each with its console or shell line:
 
 - `piano-boot-guard: healthy after 180 s`, restart reason normal (`docs/boot-guard.md` §5);
-- the Data store's state line (`NativeRamBlock: Data store state 3` for a fresh store, later `state 2`). **Stop and roll back**
-  on `state 7`, `kept` or `started over` (`docs/data-store.md` §3);
+- `NativeRamBlock: RAM window ... (13310 MiB)` and `max_mem 13310 MiB` with the 13 GiB FD/ADT pair;
+- the Data store's state line (`NativeRamBlock: Data store state 3` for a deliberately fresh store, `state 2` for a resumed
+  store). **Stop and roll back** on an unexpected `state 3`, `state 7`, `kept` or `started over`;
+- for the y12q Data profile on a resumed direct store (`data-persist=2`), look for `data-store-concurrent=2` in the boot arguments.
+  Data mounts in single-gate mode. With `PIANO_DATA_CONCURRENT_AT_BOOT=1` in its staged plist, the `piano-data-concurrent`
+  daemon switches only after mount and live `store_state=2`. Confirm `sysctl -n machdep.piano_data_concurrent` returns `1`
+  and `sysctl -n machdep.piano_data_io` reports `mode=concurrent`. Write-back and queue modes stay off. [Data concurrent mode](../../docs/data-store.md#concurrent-mode-at-boot-piano-data-concurrent-2026-11-26)
 - the root from the expected partition (`NativeUfs ... root-part=...`, the windows published, the root mounted);
 - over the USB shell or ssh: `sw_vers` gives 27.3 26C5035r, `sysctl hw.model` gives Mac17,11;
 - with 0076, `sysctl -n kern.piano_bootargs` shows the full merged boot line. Check the expected profile arguments, including
-  any past the 1024-byte limit of legacy `kern.bootargs`. The updated helpers read the full line. If the profile enables the
-  USB debug shell, verify that it starts.
+  any past the 1024-byte limit of legacy `kern.bootargs`. If the profile enables the USB debug shell, verify that it starts.
+- the y12q USB debug network profile sets `piano-usb-net=1` and `piano-usb-net-txflow=1`. Confirm
+  `PianoDwc3: net: piano-usb-net-txflow=1` in the console and check exact data and zero TX drops in the transfer matrix.
+  The reference test passed 66 of 66 transfers. The driver defaults to `0` for TX flow control when the profile omits it.
+  [USB transfer matrix](../../tooling/native/usb-net-transfer-test.md)
 - the login window, then the desktop: touch, keyboard cover, Wi-Fi join, sound, brightness;
 - battery percentage, and charging on a USB-PD charger (Android stays the fallback until this is seen);
 - `fastboot getvar battery-voltage` from ABL before and after;
 - a cold power cycle (power off, unplug, power on) boots macOS again; Android still switches back and forth (5.3 step 3).
 
-## Known gaps (local-only inputs) and the options for the owner
+## Known gaps and options for the owner
 
-Nothing below may be published. Each item is a decision for the owner of the original setup. The skill never works around one.
+Keep unit-specific inputs, keys and seeds private. Resolve each applicable gap before continuing.
 
-| # | Gap | Why it is local | Options |
+| # | Gap | Why it matters | Options |
 |---|---|---|---|
-| G1 | **The k27 tree** (`PIANO_K27_TREE`, `unixnu.lock` pin `k27` 11ac316b): xnu-12377.121.6 + the baseline series 0001-0052, the DroidVM bootstrap (fakeroot headers, firehose, ArmDTPlatform/ArmCpu objects), the KC builder `k27/kc-build273-piano.py`, the 27.0.1 KC base, `ld-classic` (ld64-957 of an older Command Line Tools) and its libraries | DroidVM content is not public (project rule), and parts come from Apple's KDK and toolchain downloads | (a) a script that rebuilds the tree from public sources: Apple's xnu-12377.121.6 tag + the series as patches + the user's own KDK and Command Line Tools downloads from Apple's developer site, verified by file hashes; needs the owner's decision on publishing 0001-0052 and the bootstrap pieces; (b) a hash manifest of the tree so a holder can verify a copy; (c) the owner gives the tree privately to named builders |
-| G1b | The SystemOS boot shims (`overlay/systemos-shims/sbin/fsck`, `mount`: two shell scripts of 17 and 358 bytes) | part of the k27 tree | own rewritten shims in this repository with a `SYSTEMOS_SHIMS` switch in `make-systemos.sh`; that changes the pinned manifest's `sbin` group, so it needs a new pin and a tablet check (the installed line keeps its window) |
+| G1 | **Built k27 inputs** in `PIANO_K27_TREE` | The public source fetch leaves the native kernel, generated headers, fakeroot and platform objects to build locally. The bootstrap needs Apple KDK headers and `ld-classic` (the reference uses ld64-957). | Fetch the pinned source in 2.1 and use the bootstrap in 3.2 with your own Apple KDK and `ld-classic` via `LD_CLASSIC` if needed. See the open items in the [CI notes](../../docs/ci.md#open-items). |
+| G1b | The SystemOS boot shims (`overlay/systemos-shims/sbin/fsck` and `mount` under `PIANO_K27_TREE`) | `make-systemos.sh` requires these files and the resulting tree must match the existing manifest pin. | Check that both are present before running `systemos`. If either shim is missing or the manifest differs, stop and resolve the input with the owner. |
 | G2 | The base trust bundle `out/inputs/kernel.macho.trustcache` (`2b87b224...`), whose own modules `make-trust.py` keeps | made by the k27 tree's `scripts/make-trust-bundle.py` from staged code | regenerate it from the k27 tree (with G1); or let `make-trust.py` start from no own modules and let the staging tools add theirs |
-| G3 | The Data seed (`out/inputs/scratch-data.img` `cb50ceac...`; the daily seeds) | contains the owner's account and Data | a fresh seed from the IPSW's Data template (the k27 tree's `make-macos-data-seed.sh`, UniXNU's `seed-data-skip-setup.py`) with the user's own account made at first boot. Needs building and a RAM test |
-| G4 | The Turnip Mesa tree (`TURNIP_TREE`, UniXNU-turnip) and its staged Metal plugin (`out/turnip-a830`) | not public | publish the delta as patches on a pinned upstream Mesa commit (MIT), owner decision. Without it there is no A830 desktop |
-| G5 | Per-device data (2.4) and the MiPPS key file `private/charging/mipps-keys.bin` | per unit, or third-party protocol material | per-unit: extracted on each unit with the Ubuntu tools and ours (2.4). MiPPS: never shipped; `PIANO_POWER_MIPPS=0` builds without it (the charge pump is off by default anyway) |
+| G3 | A clean Data seed (`K273_SEED`) | The reference seeds contain account data. | Build a fresh seed from the IPSW's Data template (the k27 tree's `make-macos-data-seed.sh`, UniXNU's `seed-data-skip-setup.py`) with the user's own account made at first boot. The fresh recipe still needs a build and a RAM test. |
+| G4 | The Turnip Mesa tree (`TURNIP_TREE`, UniXNU-turnip) and its staged Metal plugin (`out/turnip-a830`) | These inputs are required for A830 acceleration. The Mesa delta and metal2vulkan bridge lack public pins. | Publish the Mesa delta on a pinned upstream commit and pin the bridge, subject to the owner's decision. |
+| G5 | Per-device data (2.4) and MiPPS keys | per unit, or third-party protocol material | Extract each unit's data with the tools in 2.4. `PIANO_POWER_MIPPS=0` builds without MiPPS keys. |
 | G6 | **The write tooling is pinned to the reference unit**: `tooling/persist/common.py` (GPT sha256s, LBAs, boot-partition hashes, the `CRITICAL-BACKUP` paths), `build-gpt.py` (from that unit's tables), `make-root-image.sh`'s write plan | it was written for one tablet | a device profile JSON made from the unit's own backups (`tooling/repro/unit-profile.py` is the read-only start), read by `common.py` instead of its constants, with `test-persist.py`'s fake-tablet session run per profile. Until then, no write on a second unit |
-| G7 | `boot_a` signing: `tooling/bootimg/sign-on-remote.sh` signs on a remote host with the reference unit's key | the private key never leaves that host | a local `avbtool` path with the unit's own `boot-signing.pem` (Ubuntu INSTALL §3), the same footer parameters (`boot-profile.json`) |
-| G8 | The daily recipe: the exact-args profile, the layer trust caches, the userland layer and the firmware addons the owner's daily images take | recorded in private notes | a public daily profile in `configs/` (arguments without private values) and the layer build from `tooling/userland/` |
+| G7 | `boot_a` signing and verification | `tooling/persist/sign.sh` delegates to the reference signing host and `build-boot.py --verify` expects the reference key. | Use a local `avbtool` workflow with the unit's own `boot-signing.pem` and `boot-profile.json` (Ubuntu INSTALL §3), with verification against that unit's public key. |
+| G8 | Complete y12q ESP recipe | The public settings, userland staging and Data daemon cover parts of y12q. The updater needs a verified base ESP and its JSON record, plus the matching seed, layer trust caches and firmware inputs. | Assemble a second-unit base ESP and a daily profile with values for that unit. Stage the userland layer from [the public manifest](../../configs/userland.toml) using [the staging guide](../../docs/userland.md). |
 | G9 | `out/fd` from `build-fd.sh` is not bit-reproducible (two clean builds differ) | EDK II build timestamps | identify it by its hash only (as now); optional: pin the EDK II reproducible-build flags |
 | G10 | 256 GB units: `linux_data` about 61 GiB, other LBAs | the tooling knows the 512 GB layout | covered by G6's device profile, plus a smaller Data store |
 | G11 | Other stock builds and regions (Wi-Fi `board.bin` differs per region) | locks pin OS3.0.303.0.WPYCNXM, China | new locks per build/region, as the Ubuntu project does |
@@ -334,6 +365,7 @@ Nothing below may be published. Each item is a decision for the owner of the ori
 ## Files of this kit
 
 - `tooling/repro/pins.json`: every pin (IPSW, members, plain images, KC, root layout, SystemOS manifest, maintenance image, DTB).
+- `scripts/fetch-pins.py`: the pinned source checkouts and k27 source tree (2.1).
 - `tooling/repro/check-host.sh`: the requirements (1).
 - `tooling/repro/fetch-ipsw.py`: the Apple inputs (2.2).
 - `tooling/repro/boot-dtb.py`: the boot DTB (2.3).

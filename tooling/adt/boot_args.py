@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """k27 0066's host side: the kernel arguments beyond DarwinBoot's budget live in the ADT (docs/bringup-debugging.md §5.2).
 
-DarwinBoot passes at most 1023 bytes of command line, and the tools keep the line under LINE_MAX (1000). With k27 0066 in the kernel,
+DarwinBoot passes at most 1023 bytes of command line, and the tools normally keep the line under LINE_MAX (1000). With k27 0066 in the kernel,
 the line's piano-boot-args=NAME makes it append the ADT's /chosen/piano-boot-args-NAME to the boot-args (piano-boot-args=0 none; no
 selector: /chosen/piano-boot-args), and every PE_parse_boot_argn() sees both (tooling/k27/piano-bootargs/piano_bootargs_policy.h).
 
@@ -16,10 +16,13 @@ Library (tooling/bootimg/build-ram-images.py):
   kc_has_boot_args(kc_path)                        the collection's kernel has 0066 (its console line's format)
 
 What moves: every piano-* argument but the ones the boot's safety rests on even under a kernel without 0066 (piano-reset-after,
-piano-reset-to, piano-boot-guard*, and the selector itself); everything else (the k27 arguments, native-ufs-*, data-*, pstore-*,
+piano-reset-to, piano-boot-guard*, piano-extra-ram-stage, and the selector itself); everything else (the k27 arguments, native-ufs-*, data-*, pstore-*,
 droidvm-*, cpus, sheng-smp) stays on the line. static-if keys (validation_disables, serverperfmode, lcks, wdt) must stay on the
 line: static_if_init() reads it before the device tree is up. Order is kept within each part, and the kernel appends the tail after
 the line, so for one name the last value still wins as before.
+
+piano-long-boot-args=1 selects a 1008-byte loader line and keeps early and legacy-reader arguments on it. Display arguments
+with only post-merge PE readers may also move to the ADT. See docs/boot-args-length.md.
 """
 import argparse
 import hashlib
@@ -35,14 +38,16 @@ from pathlib import Path
 DEVICE = Path(__file__).resolve().parents[2]
 HEADER = DEVICE / 'tooling/k27/piano-bootargs/piano_bootargs_policy.h'
 LINE_MAX = 1000        # the tools' budget for DarwinBoot's line (it passes at most 1023 bytes)
+LONG_LINE_MAX = 1008   # inclusive, including the ADT selector and the entry suffix
 LEGACY_MAX = 1023     # BOOT_LINE_LENGTH - 1, k27 0066's kern.bootargs clip
 MERGED_MAX = 4095      # PIANO_BOOT_ARGS_SIZE - 1
 PROP = 'piano-boot-args'
+LONG_ARG = 'piano-long-boot-args'
 SET_MAX = 15           # PIANO_BOOT_ARGS_SET_MAX
 KC_MARKER = b'piano-boot-args: /chosen/%s (%u bytes): %u bytes appended'
 MERGED_SYSCTL_MARKER = b'Piano merged boot arguments (0066 ADT tail)\0'
 READER_ABI = b'kern.piano_bootargs\0PianoBootArgs ABI 1\0'
-KEEP = ('piano-reset-after', 'piano-reset-to', 'piano-boot-guard', PROP)
+KEEP = ('piano-reset-after', 'piano-reset-to', 'piano-boot-guard', 'piano-extra-ram-stage', PROP)
 SET_RE = re.compile(r'[A-Za-z0-9._-]{1,%d}' % SET_MAX)
 
 MERGED_READERS = {
@@ -64,6 +69,9 @@ LEGACY_READERS = {
     'settime.sh': ('droidvm-utc', 'droidvm-tz'),
 }
 SHORT_READERS = {'NativeSoftMetal', 'NativeAdrenoMetal'}  # pass 1023 bytes to sysctl, including the NUL
+LEGACY_KEYS = {key for keys in LEGACY_READERS.values() for key in keys}
+ADT_DISPLAY_KEYS = {'native-gop-display-builtin', 'native-gop-display-flip-lossless',
+                    'native-gop-display-shot', 'native-gop-display-night-shift'}
 
 
 def name_of(arg):
@@ -75,6 +83,19 @@ def movable(arg):
     return n.startswith('piano-') and n not in KEEP and not n.startswith('piano-boot-guard-')
 
 
+def line_max(args):
+    mode = next((word for word in reversed(args) if name_of(word) == LONG_ARG), None)
+    return LONG_LINE_MAX if mode == f'{LONG_ARG}=1' else LINE_MAX - 1
+
+
+def movable_long(arg):
+    name = name_of(arg)
+    if name in ADT_DISPLAY_KEYS:
+        return True
+    return (movable(arg) and name not in LEGACY_KEYS and name != LONG_ARG
+            and not name.startswith(('piano-metal-', 'piano-tu-')))
+
+
 def prop_name(set_name):
     if set_name is None:
         return PROP
@@ -83,24 +104,40 @@ def prop_name(set_name):
     return f'{PROP}-{set_name}'
 
 
-def fit(args, set_name, reserve=0, force=False):
-    """(line args, tail args) for ARGS: unchanged with an empty tail when ' '.join(ARGS) + RESERVE bytes stays under LINE_MAX (and
-    not FORCE); else the movable arguments go to the tail and the line gets piano-boot-args=SET_NAME. SystemExit when the line still
-    does not fit, or the merged boot-args would not fit the kernel's buffer."""
+def fit(args, set_name, reserve=0, force=False, *, extra_tail_keys=()):
+    """(line args, tail args) for ARGS: unchanged with an empty tail when the line plus RESERVE fits (and
+    not FORCE). Otherwise movable arguments and the caller's extra kernel-only keys go in the tail with
+    piano-boot-args=SET_NAME in the line. SystemExit when either the loader or merged line would exceed its budget."""
     args = list(args)
     if any(name_of(x) == PROP for x in args):
         raise SystemExit(f'the arguments already have {PROP}=: give the whole (merged) arguments, the tools make the selector')
     line = ' '.join(args)
-    if not force and len(line.encode()) + reserve < LINE_MAX:
-        return args, []
-    tail = [x for x in args if movable(x)]
-    if not tail:
-        return args, []
-    kept = [x for x in args if not movable(x)] + [f'{PROP}={set_name}']
-    prop_name(set_name)
-    line = ' '.join(kept)
+    if '\0' in line:
+        raise SystemExit('bootloader arguments contain an embedded NUL')
     line_bytes = len(line.encode()) + reserve
-    if line_bytes >= LINE_MAX:
+    limit = line_max(args)
+    long_layout = limit == LONG_LINE_MAX
+    if long_layout and any(not 0x20 <= ord(c) <= 0x7e or c in '"\\' for c in line):
+        raise SystemExit(f'{LONG_ARG}=1 needs printable ASCII arguments without quotes or backslashes')
+    if not force and line_bytes <= limit:
+        return args, []
+    moves = movable_long if long_layout else movable
+    kept, tail = [], []
+    for word in args:
+        (tail if moves(word) or name_of(word) in extra_tail_keys else kept).append(word)
+    if not tail:
+        if line_bytes > limit:
+            if long_layout:
+                raise SystemExit(f'required bootloader prefix is {line_bytes} bytes; {LONG_ARG}=1 allows {limit}')
+            raise SystemExit(f'kernel command line is {line_bytes} bytes; the builder allows {limit}')
+        return args, []
+    prop_name(set_name)
+    kept.append(f'{PROP}={set_name}')
+    line_bytes = len(' '.join(kept).encode()) + reserve
+    if line_bytes > limit:
+        if long_layout:
+            raise SystemExit(f'required bootloader prefix, selector and entry suffix are {line_bytes} bytes; '
+                             f'{LONG_ARG}=1 allows {limit}')
         raise SystemExit(f'kernel command line is {line_bytes} bytes even with every piano-* argument in the ADT '
                          f'({len(" ".join(tail))} bytes); DarwinBoot passes at most 1023 (the tools keep it under {LINE_MAX})')
     text = ' '.join(tail)
@@ -113,19 +150,26 @@ def fit(args, set_name, reserve=0, force=False):
 
 # --- the ADT (the format of tooling/adt/set-identity.py: nodes of props [name, size word, value, raw name] and children) ---
 
-def parse(data, at=0):
+def parse(data, at=0, depth=0):
+    if depth > 64 or not 0 <= at <= len(data) - 8:
+        raise ValueError('invalid ADT node header or nesting depth')
     nprops, nchildren = struct.unpack_from('<II', data, at)
     at += 8
     props = []
     for _ in range(nprops):
+        if len(data) - at < 36:
+            raise ValueError('truncated ADT property header')
         name = data[at:at + 32].split(b'\0', 1)[0].decode()
         word = struct.unpack_from('<I', data, at + 32)[0]
         size = word & 0x7fffffff
+        end = at + 36 + ((size + 3) & ~3)
+        if end > len(data):
+            raise ValueError('truncated ADT property value or padding')
         props.append([name, word, data[at + 36:at + 36 + size], data[at:at + 32]])
-        at += 36 + ((size + 3) & ~3)
+        at = end
     children = []
     for _ in range(nchildren):
-        child, at = parse(data, at)
+        child, at = parse(data, at, depth + 1)
         children.append(child)
     return [props, children], at
 
@@ -144,24 +188,39 @@ def serialize(node):
 
 def load(adt):
     data = bytes(adt)
-    root, end = parse(data)
+    try:
+        root, end = parse(data)
+    except ValueError as error:
+        raise SystemExit(f'invalid ADT: {error}') from None
     if end != len(data) or serialize(root) != data:
         raise SystemExit('the ADT does not parse and write back byte for byte; not an ADT this tool can edit')
     return root
 
 
 def chosen(root):
-    for c in root[1]:
-        for p in c[0]:
-            if p[0] == 'name' and p[2].rstrip(b'\0') == b'chosen':
-                return c
-    raise SystemExit('the ADT has no /chosen')
+    nodes = [c for c in root[1] if any(p[0] == 'name' and p[2].rstrip(b'\0') == b'chosen' for p in c[0])]
+    if not nodes:
+        raise SystemExit('the ADT has no /chosen')
+    if len(nodes) != 1:
+        raise SystemExit('the ADT has duplicate /chosen nodes')
+    return nodes[0]
+
+
+def tail_props(node):
+    props = {}
+    for p in node[0]:
+        name = p[0]
+        if name == PROP or name.startswith(PROP + '-'):
+            if name in props:
+                raise SystemExit(f'/chosen has duplicate {name} properties')
+            props[name] = p
+    return props
 
 
 def sets(adt):
     """{property: text} of the ADT's /chosen/piano-boot-args*."""
-    return {p[0]: p[2].split(b'\0', 1)[0].decode('ascii', 'replace') for p in chosen(load(adt))[0]
-            if p[0] == PROP or p[0].startswith(PROP + '-')}
+    return {name: p[2].split(b'\0', 1)[0].decode('ascii', 'replace')
+            for name, p in tail_props(chosen(load(adt))).items()}
 
 
 def with_set(adt, set_name, tail):
@@ -176,7 +235,7 @@ def with_set(adt, set_name, tail):
     node = chosen(root)
     name = prop_name(set_name)
     value = text.encode('ascii') + b'\0'
-    p = next((p for p in node[0] if p[0] == name), None)
+    p = tail_props(node).get(name)
     if p:
         if p[1] & 0x80000000:
             raise SystemExit(f'/chosen/{name}: a placeholder property (DarwinBoot fills it)')
@@ -201,14 +260,15 @@ def selector(args):
 def merged(line, adt):
     """(boot-args, status) as k27 0066 makes them of LINE with this ADT: status appended, none, off, bad-set, missing, empty,
     bad-char or too-long (the merged text is LINE then)."""
-    line = line.encode()[:LEGACY_MAX].decode(errors='ignore')
-    sel = selector(line.split())
+    line_bytes = line.encode().partition(b'\0')[0][:LEGACY_MAX]
+    line = line_bytes.decode(errors='ignore')
+    sel = selector(line_bytes.decode(errors='replace').split())
     if sel == '0':
         return line, 'off'
     if sel is not None and not SET_RE.fullmatch(sel):
         return line, 'bad-set'
     name = PROP if sel is None else f'{PROP}-{sel}'
-    p = next((p for p in chosen(load(adt))[0] if p[0] == name), None)
+    p = tail_props(chosen(load(adt))).get(name)
     if p is None:
         return line, 'none' if sel is None else 'missing'
     raw = p[2].split(b'\0', 1)[0]
@@ -217,10 +277,9 @@ def merged(line, adt):
     text = raw.decode('ascii').strip(' ')
     if not text:
         return line, 'empty'
-    out = f'{line} {text}' if line else text
-    if len(out.encode()) > MERGED_MAX:
+    if len(line_bytes) + bool(line_bytes) + len(text) > MERGED_MAX:
         return line, 'too-long'
-    return out, 'appended'
+    return (f'{line} {text}' if line_bytes else text), 'appended'
 
 
 def kc_has_boot_args(kc):
@@ -244,9 +303,12 @@ def recorded_readers(artifact, record_path, seed=False):
     try:
         record = json.loads(record_path.read_text())
         expected = record['outputs']['seed']['file_sha256'] if seed else record['archive_sha256']
+        digest = hashlib.sha256()
         with artifact.open('rb') as stream:
-            if hashlib.file_digest(stream, 'sha256').hexdigest() != expected:
-                raise ValueError(f'{artifact.name} differs from {record_path.name}')
+            while chunk := stream.read(8 << 20):
+                digest.update(chunk)
+        if digest.hexdigest() != expected:
+            raise ValueError(f'{artifact.name} differs from {record_path.name}')
         return {Path(f['dest']).name for f in record['files'] if f.get('merged_bootargs') is True}
     except (OSError, ValueError, KeyError, TypeError) as error:
         raise SystemExit(f'{record_path}: cannot verify the staged boot-argument readers ({error})') from error
@@ -282,8 +344,9 @@ def check_userland(entries, adt, kc, *, seed=None, live=False, layer=None):
     readers = None
     for entry, line in entries.items():
         raw = line.encode()
-        if len(raw) >= LINE_MAX or b'\0' in raw:
-            raise SystemExit(f'{entry}: bootloader argument line must stay under {LINE_MAX} bytes without embedded NUL')
+        limit = line_max(line.split())
+        if len(raw) > limit or b'\0' in raw:
+            raise SystemExit(f'{entry}: bootloader argument line must have at most {limit} bytes without embedded NUL')
         full, status = merged(line, adt)
         if status not in ('appended', 'none', 'off'):
             raise SystemExit(f'{entry}: kernel rejects the ADT boot-argument tail ({status})')

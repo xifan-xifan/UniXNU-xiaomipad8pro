@@ -1,0 +1,63 @@
+turnip: reserve the native GPU tier for GPU-only blit scratch
+
+Advertise the BO allocation contract in the existing Query flags. Keep
+the legacy request and cache path when talking to a kernel without it.
+
+--- a/src/freedreno/vulkan/tu_knl.h
++++ b/src/freedreno/vulkan/tu_knl.h
+@@ -29,6 +29,7 @@
+    TU_BO_ALLOC_DMABUF = 1 << 4,
+    TU_BO_ALLOC_SHAREABLE = 1 << 5,
+    TU_BO_ALLOC_IMPLICIT_SYNC = 1 << 6,
++   TU_BO_ALLOC_GPU_PRIVATE = 1 << 7, /* no CPU map, external sharing, or dump */
+ };
+
+ enum tu_mem_sync_op {
+--- a/src/freedreno/vulkan/tu_device.cc
++++ b/src/freedreno/vulkan/tu_device.cc
+@@ -3524,8 +3524,13 @@
+    }
+
+    unsigned bo_size = 1ull << size_log2;
+-   VkResult result = tu_bo_init_new(dev, NULL, &dev->scratch_bos[index].bo, bo_size,
+-                                    TU_BO_ALLOC_INTERNAL_RESOURCE, "scratch");
++   /* The staging blit addresses this scratch only through its GPU IOVA.
++    * The RD dump path can read BO contents on the CPU. */
++   enum tu_bo_alloc_flags flags = TU_BO_ALLOC_INTERNAL_RESOURCE;
++   if (!FD_RD_DUMP(ENABLE))
++      flags = (enum tu_bo_alloc_flags)(flags | TU_BO_ALLOC_GPU_PRIVATE);
++   VkResult result = tu_bo_init_new(dev, NULL, &dev->scratch_bos[index].bo,
++                                    bo_size, flags, "scratch");
+    if (result != VK_SUCCESS) {
+       mtx_unlock(&dev->scratch_bos[index].construct_mtx);
+       return result;
+--- a/src/freedreno/vulkan/tu_knl_darwin.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin.cc
+@@ -1652,7 +1652,14 @@
+    struct darwin_retire_state *retire = (struct darwin_retire_state *)dev->darwin_retire;
+    /* TU_DARWIN_BO_CACHE=0 turns the cache off (the host checks of the release paths need every free to reach the kernel). */
+    static const bool cache_enabled = debug_get_bool_option("TU_DARWIN_BO_CACHE", true);
+-   const bool cacheable = cache_enabled && !(flags & TU_BO_ALLOC_REPLAYABLE) && !lazy_vma;
++   const bool gpu_private = (flags & TU_BO_ALLOC_GPU_PRIVATE) &&
++                            (flags & TU_BO_ALLOC_INTERNAL_RESOURCE) &&
++                            !(flags & (TU_BO_ALLOC_DMABUF | TU_BO_ALLOC_SHAREABLE |
++                                       TU_BO_ALLOC_ALLOW_DUMP | TU_BO_ALLOC_REPLAYABLE)) &&
++                            !lazy_vma && !dw.virtgpu && (dw.params.flags & NativeAdrenoParamsGpuPrivate);
++   /* General cache entries can be recycled into CPU-mappable allocations. */
++   const bool cacheable = cache_enabled && !gpu_private &&
++                          !(flags & TU_BO_ALLOC_REPLAYABLE) && !lazy_vma;
+    const bool read_only = !!(flags & TU_BO_ALLOC_GPU_READ_ONLY);
+    /* A BO larger than its cache budget is released when it is freed (darwin_cache_put): it keeps its own size instead of its size class,
+     * which held up to a quarter more for nothing (a 16384x16384 texture, 1 GiB and its UBWC metadata, asked 1.25 GiB of the kernel). */
+@@ -1726,7 +1733,10 @@
+          return tu_darwin_capacity_result(dev, result);
+       }
+
+-      NativeAdrenoAbiBoAlloc alloc = {.bytes = alloc_size, .align_log2 = 12, .contiguous = 0};
++      NativeAdrenoAbiBoAlloc alloc = {
++         .bytes = alloc_size, .align_log2 = 12,
++         .contiguous = gpu_private ? uint32_t(NativeAdrenoBoAllocGpuPrivate) : 0,
++      };
+       NativeAdrenoAbiBoAllocReply reply = {};
+       kern_return_t kr = dw_call(NativeAdrenoMethodBoAlloc, &alloc, sizeof(alloc), &reply, sizeof(reply));
+       if (kr != KERN_SUCCESS) {

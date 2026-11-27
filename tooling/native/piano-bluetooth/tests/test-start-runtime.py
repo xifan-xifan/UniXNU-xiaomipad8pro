@@ -4,11 +4,12 @@
 """Run the real startup shell with host-only replacements for tablet commands."""
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import tempfile
 
 source = Path(__file__).resolve().parents[1] / 'start-runtime.sh'
-with tempfile.TemporaryDirectory(prefix='bt-runtime-host-') as tmp:
+with tempfile.TemporaryDirectory(prefix='bt runtime host ') as tmp:
     tmp = Path(tmp)
     for name in ('sysctl', 'launchctl', 'sleep', 'mount'):
         stub = tmp / name
@@ -29,7 +30,8 @@ esac
     script = source.read_text()
     for a, b in (('/usr/sbin/sysctl', 'sysctl'), ('/bin/launchctl', 'launchctl'),
                  ('/usr/local/libexec/piano-bt-runtime-mount', 'mount'), ('/bin/sleep', 'sleep')):
-        script = script.replace(a, str(tmp / b))
+        assert a in script
+        script = script.replace(a, shlex.quote(str(tmp / b)))
     runner = tmp / 'start-runtime.sh'
     runner.write_text(script)
     calls = tmp / 'calls'
@@ -51,6 +53,9 @@ esac
     assert log.index('mount ') > log.index('launchctl bootout system/com.apple.bluetoothd')
     assert log.index('mount ') < log.index('sysctl -n machdep.piano_bt_boot')
     assert log.index('sysctl -n machdep.piano_bt_boot') < log.index('launchctl bootstrap system /System/Library/LaunchDaemons/com.apple.BlueTool.plist')
+    assert log.count('mount ') == log.count('sysctl -n machdep.piano_bt_boot') == 1
+    assert log.count('launchctl kickstart -k system/com.apple.BlueTool') == 1
+    assert log.count('launchctl kickstart -k system/com.apple.bluetoothd') == 1
     # A registered but failed/pending controller never causes service restart.
     for value in ('5', '-1'):
         r, log = run(boot=value)

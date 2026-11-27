@@ -50,15 +50,18 @@ static const struct E kStock[] = {
     {0x4046, 0x11111611, 4, kOne}, {0x418e, 0x0800103c, 60, 0}, {0x418e, 0x080014fc, 12, 0},
 };
 static uint8_t g_file[65536];
-static uint32_t build(uint8_t *out, const struct E *e, unsigned n, uint32_t magic, uint32_t version)
+static uint32_t build(uint8_t *out, uint32_t capacity, const struct E *e, unsigned n, uint32_t magic, uint32_t version)
 {
     uint32_t at = 16;
+    CHECK(capacity >= at);
     put32(out, magic); put32(out + 4, version); put32(out + 8, n); put32(out + 12, 0);
     for (unsigned i = 0; i < n; ++i) {
+        CHECK(e[i].size <= UINT32_MAX - 3u);
+        const uint32_t padded = (e[i].size + 3u) & ~3u;
+        CHECK(capacity - at >= 12 && padded <= capacity - at - 12);
         put32(out + at, e[i].iid); put32(out + at + 4, e[i].pid); put32(out + at + 8, e[i].size);
         at += 12;
         for (uint32_t b = 0; b < e[i].size; ++b) out[at + b] = e[i].fixed ? e[i].fixed[b] : (uint8_t)(0xa5 ^ (b * 7 + i));
-        const uint32_t padded = (e[i].size + 3u) & ~3u;
         for (uint32_t b = e[i].size; b < padded; ++b) out[at + b] = 0;
         at += padded;
     }
@@ -72,7 +75,7 @@ static void testFiles(void)
 {
     SpkProt p;
     const char *why = 0;
-    uint32_t n = build(g_file, kStock, N(kStock), SPK_PARAMS_MAGIC, 1);
+    uint32_t n = build(g_file, sizeof g_file, kStock, N(kStock), SPK_PARAMS_MAGIC, 1);
     CHECK(spk_params_parse(&p, g_file, n, &why) == 0 && p.have_params && p.count == N(kStock));
     CHECK(p.e[22].iid == 0x4046 && p.e[22].pid == 0x10001fb0 && p.e[22].size == 6180 && p.e[22].data[0] == (uint8_t)(0xa5 ^ 22));
     build_re25();
@@ -80,42 +83,42 @@ static void testFiles(void)
     // the header and the walk
     CHECK(spk_params_parse(&p, 0, 0, &why) && strstr(why, "missing"));
     CHECK(spk_params_parse(&p, g_file, 15, &why) && !p.have_params);
-    n = build(g_file, kStock, N(kStock), 0x4b505351u, 1); CHECK(spk_params_parse(&p, g_file, n, &why) && strstr(why, "PSPK"));
-    n = build(g_file, kStock, N(kStock), SPK_PARAMS_MAGIC, 2); CHECK(spk_params_parse(&p, g_file, n, &why) && strstr(why, "version"));
-    n = build(g_file, kStock, 0, SPK_PARAMS_MAGIC, 1); CHECK(spk_params_parse(&p, g_file, n, &why) && strstr(why, "count"));
-    n = build(g_file, kStock, N(kStock), SPK_PARAMS_MAGIC, 1);
+    n = build(g_file, sizeof g_file, kStock, N(kStock), 0x4b505351u, 1); CHECK(spk_params_parse(&p, g_file, n, &why) && strstr(why, "PSPK"));
+    n = build(g_file, sizeof g_file, kStock, N(kStock), SPK_PARAMS_MAGIC, 2); CHECK(spk_params_parse(&p, g_file, n, &why) && strstr(why, "version"));
+    n = build(g_file, sizeof g_file, kStock, 0, SPK_PARAMS_MAGIC, 1); CHECK(spk_params_parse(&p, g_file, n, &why) && strstr(why, "count"));
+    n = build(g_file, sizeof g_file, kStock, N(kStock), SPK_PARAMS_MAGIC, 1);
     CHECK(spk_params_parse(&p, g_file, n - 4, &why) && strstr(why, "size"));
     CHECK(spk_params_parse(&p, g_file, n + 4, &why) && strstr(why, "after the last"));
     put32(g_file + 8, N(kStock) + 1); CHECK(spk_params_parse(&p, g_file, n, &why) && strstr(why, "truncated"));
     put32(g_file + 8, 65); CHECK(spk_params_parse(&p, g_file, n, &why) && strstr(why, "count"));
-    n = build(g_file, kStock, N(kStock), SPK_PARAMS_MAGIC, 1); put32(g_file + 12, 1);
+    n = build(g_file, sizeof g_file, kStock, N(kStock), SPK_PARAMS_MAGIC, 1); put32(g_file + 12, 1);
     CHECK(spk_params_parse(&p, g_file, n, &why) && strstr(why, "count"));
     // the entries
     struct E e[N(kStock) + 1];
     memcpy(e, kStock, sizeof kStock);
     e[3].iid = 0x4012;   // SAL: not in our graphs
-    n = build(g_file, e, N(kStock), SPK_PARAMS_MAGIC, 1); CHECK(spk_params_parse(&p, g_file, n, &why) && strstr(why, "not in the protection"));
+    n = build(g_file, sizeof g_file, e, N(kStock), SPK_PARAMS_MAGIC, 1); CHECK(spk_params_parse(&p, g_file, n, &why) && strstr(why, "not in the protection"));
     memcpy(e, kStock, sizeof kStock); e[4] = e[3];
-    n = build(g_file, e, N(kStock), SPK_PARAMS_MAGIC, 1); CHECK(spk_params_parse(&p, g_file, n, &why) && strstr(why, "twice"));
+    n = build(g_file, sizeof g_file, e, N(kStock), SPK_PARAMS_MAGIC, 1); CHECK(spk_params_parse(&p, g_file, n, &why) && strstr(why, "twice"));
     memcpy(e, kStock, sizeof kStock); e[9].pid = 0x0800101b;
-    n = build(g_file, e, N(kStock), SPK_PARAMS_MAGIC, 1); CHECK(spk_params_parse(&p, g_file, n, &why) && strstr(why, "TDM interface"));
+    n = build(g_file, sizeof g_file, e, N(kStock), SPK_PARAMS_MAGIC, 1); CHECK(spk_params_parse(&p, g_file, n, &why) && strstr(why, "TDM interface"));
     memcpy(e, kStock, sizeof kStock); e[7].fixed = kLaneRx;   // the V/I source on lane 1
-    n = build(g_file, e, N(kStock), SPK_PARAMS_MAGIC, 1); CHECK(spk_params_parse(&p, g_file, n, &why) && strstr(why, "lane"));
+    n = build(g_file, sizeof g_file, e, N(kStock), SPK_PARAMS_MAGIC, 1); CHECK(spk_params_parse(&p, g_file, n, &why) && strstr(why, "lane"));
     memcpy(e, kStock, sizeof kStock); e[17].fixed = kLaneVi;  // the sink on lane 0
-    n = build(g_file, e, N(kStock), SPK_PARAMS_MAGIC, 1); CHECK(spk_params_parse(&p, g_file, n, &why) && strstr(why, "lane"));
+    n = build(g_file, sizeof g_file, e, N(kStock), SPK_PARAMS_MAGIC, 1); CHECK(spk_params_parse(&p, g_file, n, &why) && strstr(why, "lane"));
     memcpy(e, kStock, sizeof kStock); e[15].fixed = 0;        // the sink's format
-    n = build(g_file, e, N(kStock), SPK_PARAMS_MAGIC, 1); CHECK(spk_params_parse(&p, g_file, n, &why) && strstr(why, "format"));
+    n = build(g_file, sizeof g_file, e, N(kStock), SPK_PARAMS_MAGIC, 1); CHECK(spk_params_parse(&p, g_file, n, &why) && strstr(why, "format"));
     memcpy(e, kStock, sizeof kStock); e[20].size = 12;        // the MFC's map cut
-    n = build(g_file, e, N(kStock), SPK_PARAMS_MAGIC, 1); CHECK(spk_params_parse(&p, g_file, n, &why) && strstr(why, "size"));
+    n = build(g_file, sizeof g_file, e, N(kStock), SPK_PARAMS_MAGIC, 1); CHECK(spk_params_parse(&p, g_file, n, &why) && strstr(why, "size"));
     memcpy(e, kStock, sizeof kStock); e[8].fixed = 0;         // the V/I channel map
-    n = build(g_file, e, N(kStock), SPK_PARAMS_MAGIC, 1); CHECK(spk_params_parse(&p, g_file, n, &why));
+    n = build(g_file, sizeof g_file, e, N(kStock), SPK_PARAMS_MAGIC, 1); CHECK(spk_params_parse(&p, g_file, n, &why));
     memcpy(e, kStock, sizeof kStock); e[22].size = SPK_MAX_PARAM + 1;
-    n = build(g_file, e, N(kStock), SPK_PARAMS_MAGIC, 1); CHECK(spk_params_parse(&p, g_file, n, &why) && strstr(why, "size"));
+    n = build(g_file, sizeof g_file, e, N(kStock), SPK_PARAMS_MAGIC, 1); CHECK(spk_params_parse(&p, g_file, n, &why) && strstr(why, "size"));
     memcpy(e, kStock, sizeof kStock); e[22].size = 0;
-    n = build(g_file, e, N(kStock), SPK_PARAMS_MAGIC, 1); CHECK(spk_params_parse(&p, g_file, n, &why) && strstr(why, "size"));
-    n = build(g_file, kStock + 2, N(kStock) - 2, SPK_PARAMS_MAGIC, 1);   // no SP_TX
+    n = build(g_file, sizeof g_file, e, N(kStock), SPK_PARAMS_MAGIC, 1); CHECK(spk_params_parse(&p, g_file, n, &why) && strstr(why, "size"));
+    n = build(g_file, sizeof g_file, kStock + 2, N(kStock) - 2, SPK_PARAMS_MAGIC, 1);   // no SP_TX
     CHECK(spk_params_parse(&p, g_file, n, &why) && strstr(why, "SP_TX"));
-    n = build(g_file, kStock, 12, SPK_PARAMS_MAGIC, 1);                  // the V/I graph's alone: no SP_RX
+    n = build(g_file, sizeof g_file, kStock, 12, SPK_PARAMS_MAGIC, 1);                  // the V/I graph's alone: no SP_RX
     CHECK(spk_params_parse(&p, g_file, n, &why) && strstr(why, "SP_RX"));
     // Re25
     CHECK(spk_re25_parse(&p, g_re25, 15, &why) && !p.have_re25);
@@ -290,13 +293,22 @@ static void testPackets(void)
     spk_live_stage(slot);
     CHECK(le32(slot) == 0x4046 && le32(slot + 4) == 0x10001fab && le32(slot + 8) == 96 && le32(slot + 12) == 0);
     for (unsigned i = 16; i < SPK_LIVE_SLOT; ++i) CHECK(!slot[i]);
+    SpkLive live = {.re = {123}};
+    CHECK(spk_live_parse(slot, sizeof slot, &live) == SpkLiveEmpty && live.re[0] == 123);
+    for (uint32_t bytes = 0; bytes < sizeof slot; ++bytes) {
+        uint8_t *short_slot = malloc(bytes + 1u);
+        CHECK(short_slot);
+        memcpy(short_slot, slot, bytes);
+        CHECK(spk_live_parse(short_slot, bytes, &live) == SpkLiveInvalid && live.re[0] == 123);
+        free(short_slot);
+    }
     for (unsigned c = 0; c < 4; ++c) for (unsigned k = 0; k < 6; ++k) put32(slot + 16 + 24 * c + 4 * k, 100 * c + k + 1);
-    SpkLive live;
-    CHECK(spk_live_parse(slot, &live) == 0 && live.re[0] == 1 && live.temp[1] == 102 && live.w2[2] == 203 && live.f0[3] == 304);
+    CHECK(spk_live_parse(slot, sizeof slot, &live) == 0 && live.re[0] == 1 && live.temp[1] == 102 && live.w2[2] == 203 && live.f0[3] == 304);
     CHECK(live.q[0] == 5 && live.w5[3] == 306);
-    put32(slot + 12, 0x12); CHECK(spk_live_parse(slot, &live) == -1);   // the DSP's per-parameter error
-    put32(slot + 12, 0); put32(slot + 8, 48); CHECK(spk_live_parse(slot, &live) == -1);
-    put32(slot + 8, 96); put32(slot + 4, 0x10001fb6); CHECK(spk_live_parse(slot, &live) == -1);
+    put32(slot + 12, 0x12); CHECK(spk_live_parse(slot, sizeof slot, &live) == SpkLiveInvalid);
+    put32(slot + 12, 0); put32(slot + 8, 48); CHECK(spk_live_parse(slot, sizeof slot, &live) == SpkLiveInvalid);
+    put32(slot + 8, UINT32_MAX); CHECK(spk_live_parse(slot, sizeof slot, &live) == SpkLiveInvalid);
+    put32(slot + 8, 96); put32(slot + 4, 0x10001fb6); CHECK(spk_live_parse(slot, sizeof slot, &live) == SpkLiveInvalid);
     // the stream's link to the MFC
     n = ar_open_playback_stream_to(pkt, sizeof pkt, AR_PORT_APM, 3, SPK_IID_MFC);
     CHECK(n && gpr_decode(pkt, n, &p) == GprOk && p.opcode == AR_OP_GRAPH_OPEN);
@@ -453,7 +465,7 @@ static struct Owner owner;
 static void make_plan(const struct E *e, unsigned n)
 {
     const char *why = 0;
-    const uint32_t bytes = build(g_file, e, n, SPK_PARAMS_MAGIC, 1);
+    const uint32_t bytes = build(g_file, sizeof g_file, e, n, SPK_PARAMS_MAGIC, 1);
     CHECK(spk_params_parse(&g_prot, g_file, bytes, &why) == 0);
     build_re25();
     CHECK(spk_re25_parse(&g_prot, g_re25, 16, &why) == 0);
@@ -600,7 +612,7 @@ static void testPacking(void)
     small.base = g_plan.base;
     static uint8_t big[64 * 1024];
     struct E huge[3] = {{0x40ee, 0x11111601, 4, kOne}, {0x4046, 0x10005000, 16384, 0}, {0x4046, 0x10005001, 16384, 0}};
-    const uint32_t bytes = build(big, huge, 3, SPK_PARAMS_MAGIC, 1);
+    const uint32_t bytes = build(big, sizeof big, huge, 3, SPK_PARAMS_MAGIC, 1);
     SpkProt hp;
     CHECK(spk_params_parse(&hp, big, bytes, &why) == 0 && spk_re25_parse(&hp, g_re25, 16, &why) == 0);
     CHECK(spk_plan_init(&small, &hp, g_area, sizeof g_area, &why) == -1 && strstr(why, "do not fit"));
@@ -709,7 +721,8 @@ static void testVariants(void)
 #define SYN_PREG 0x00030001u
 static struct E g_me[80];
 static unsigned g_nme;
-static uint8_t g_mfile[16384];
+// The bad-size case includes a SPK_MAX_PARAM + 1 byte payload alongside the other entries.
+static uint8_t g_mfile[64 * 1024];
 static uint32_t g_mbytes;
 static void me(uint32_t iid, uint32_t pid, uint32_t size) {g_me[g_nme++] = (struct E){iid, pid, size, 0};}
 static void make_mip_entries(void)
@@ -725,7 +738,7 @@ static void make_mip_entries(void)
 }
 static uint32_t build_mip(const struct E *e, unsigned n, uint32_t magic, uint32_t version, uint32_t preg)
 {
-    const uint32_t bytes = build(g_mfile, e, n, magic, version);
+    const uint32_t bytes = build(g_mfile, sizeof g_mfile, e, n, magic, version);
     put32(g_mfile + 12, preg);
     return bytes;
 }

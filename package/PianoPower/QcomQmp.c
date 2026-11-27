@@ -36,7 +36,8 @@ int qcom_qmp_step(QcomQmp *q)
     volatile uint32_t *r = q->ram;
     switch (q->state) {
     case QcomQmpIdle: {
-        if (r[D_MAGIC] != MAGIC || r[D_VERSION] != 1) return q->state = QcomQmpBadDescriptor;
+        if (!r || q->ram_bytes < (D_MCORE_OFFSET + 1) * sizeof *r || r[D_MAGIC] != MAGIC || r[D_VERSION] != 1)
+            return q->state = QcomQmpBadDescriptor;
         const uint32_t box = r[D_MCORE_OFFSET], size = r[D_MCORE_SIZE];
         if ((box & 3) || size < QCOM_QMP_MESSAGE + 4 || box < 0x3c || box > q->ram_bytes || size > q->ram_bytes - box)
             return q->state = QcomQmpBadDescriptor;

@@ -54,7 +54,12 @@ template <class Hal> void wr64(Hal &h, uint64_t pa, uint64_t v)
   h.wr(pa + 4, uint32_t(v >> 32));
   h.wr(pa, uint32_t(v));
 }
-template <class Hal> uint64_t rd64(Hal &h, uint64_t pa) { return uint64_t(h.rd(pa)) | uint64_t(h.rd(pa + 4)) << 32; }
+template <class Hal> uint64_t rd64(Hal &h, uint64_t pa)
+{
+  const uint32_t low = h.rd(pa);
+  const uint32_t high = h.rd(pa + 4);
+  return uint64_t(low) | uint64_t(high) << 32;
+}
 inline bool utmiAsPipeBits(uint32_t general)
 {
   return (general & pianohw::kQsPipeUtmiClkSel) && (general & pianohw::kQsPipe3PhystatusSw);
@@ -104,8 +109,8 @@ struct SwitchResult {
   const char *why = "";
   uint32_t gsnpsid = 0, gversion = 0;
   CoreWords found, now;
-  bool wasRunning = false, devHalted = false, csftrst = false, gctlReset = false, overrideCleared = false, utmiSelected = false,
-       hostMode = false;
+  bool wasRunning = false, devHalted = false, csftrst = false, gctlReset = false, hostMode = false;
+  bool ssOverrideCleared = false, hsOverrideCleared = false, utmiSelected = false, utmiPartial = false;
   uint32_t haltUs = 0, csftrstUs = 0, curmodUs = 0;
   unsigned stores = 0, glueStores = 0;
 };
@@ -173,17 +178,21 @@ template <class Hal> SwitchResult hostSwitch(Hal &h, const HostPolicy &policy)
     r.now = readCoreWords(h);
     return r;
   }
-  if ((r.found.qsHs & kOverrideHs) || (r.found.qsSs & kOverrideSs)) {
-    if (!glueStore(h, kQsSsPhyCtrl, h.rd(kQscratch + kQsSsPhyCtrl) & ~kOverrideSs, r.stores, r.glueStores) ||
-        !glueStore(h, kQsHsPhyCtrl, h.rd(kQscratch + kQsHsPhyCtrl) & ~kOverrideHs, r.stores, r.glueStores)) {
-      r.why = "the glue clocks read off before a QSCRATCH store: not written (K:7dffd78b342d)";
-      r.now = readCoreWords(h);
-      return r;
-    }
-    r.overrideCleared = true;
+  auto clearOverride = [&](uint32_t reg, uint32_t mask, uint32_t found, bool &cleared) {
+    if (!(found & mask)) return true;
+    cleared = glueStore(h, reg, h.rd(kQscratch + reg) & ~mask, r.stores, r.glueStores);
+    return cleared;
+  };
+  if (!clearOverride(kQsSsPhyCtrl, kOverrideSs, r.found.qsSs, r.ssOverrideCleared) ||
+      !clearOverride(kQsHsPhyCtrl, kOverrideHs, r.found.qsHs, r.hsOverrideCleared)) {
+    r.why = "the glue clocks read off before a QSCRATCH store: not written (K:7dffd78b342d)";
+    r.now = readCoreWords(h);
+    return r;
   }
-  if (policy.utmiAsPipe && !utmiAsPipeBits(r.found.qsGeneral)) {
+  if (policy.utmiAsPipe && (!utmiAsPipeBits(r.found.qsGeneral) || (r.found.qsGeneral & kQsPipeUtmiClkDis))) {
+    const unsigned before = r.glueStores;
     if (!selectUtmiAsPipe(h, r.stores, r.glueStores)) {
+      r.utmiPartial = r.glueStores != before;
       r.why = "the glue clocks read off before a QSCRATCH store: not written (K:7dffd78b342d)";
       r.now = readCoreWords(h);
       return r;
@@ -247,29 +256,48 @@ template <class Hal> BackResult backToDevice(Hal &h, const SwitchResult &sw, con
     b.why = "the core is not powered/clocked: nothing written";
     return b;
   }
+  if (sw.utmiPartial) {
+    constexpr uint32_t mask = kQsPipeUtmiClkDis | kQsPipeUtmiClkSel | kQsPipe3PhystatusSw;
+    const uint32_t cfg = h.rd(kQscratch + kQsGeneralCfg);
+    if (!glueStore(h, kQsGeneralCfg, (cfg & ~mask) | (sw.found.qsGeneral & mask), b.stores, b.glueStores) ||
+        ((h.rd(kQscratch + kQsGeneralCfg) ^ sw.found.qsGeneral) & mask)) {
+      b.why = "the PIPE clock configuration was not restored";
+      return b;
+    }
+  }
   if (policy.coreSoftReset == 1 || (policy.coreSoftReset == 2 && needsGctlSoftReset(sw.gsnpsid, sw.gversion))) {
     wr(kGctl, rd(kGctl) | kGctlCoreSoftReset);
     h.sleepMs(100);
     wr(kGctl, rd(kGctl) & ~kGctlCoreSoftReset);
     b.gctlReset = true;
   }
-  const uint32_t back = prtcap(sw.found.gctl) == kPrtcapHost ? kPrtcapDevice : prtcap(sw.found.gctl);
-  wr(kGctl, (rd(kGctl) & ~kGctlPrtcapMask) | back << kGctlPrtcapShift);
+  wr(kGctl, (rd(kGctl) & ~kGctlPrtcapMask) | kPrtcapDevice << kGctlPrtcapShift);
   wr(kGusb2PhyCfg, sw.found.gusb2);
   wr(kGusb3PipeCtl, sw.found.gusb3);
   wr(kGuctl, sw.found.guctl);
-  if (sw.overrideCleared) {
-    if (!glueStore(h, kQsSsPhyCtrl, h.rd(kQscratch + kQsSsPhyCtrl) | (sw.found.qsSs & kOverrideSs), b.stores, b.glueStores) ||
-        !glueStore(h, kQsHsPhyCtrl, h.rd(kQscratch + kQsHsPhyCtrl) | (sw.found.qsHs & kOverrideHs), b.stores, b.glueStores)) {
-      b.why = "the glue clocks read off before a QSCRATCH store: the override is not restored (K:7dffd78b342d)";
-      b.now = readCoreWords(h);
-      return b;
-    }
-    b.overrideRestored = true;
+  if (prtcap(rd(kGctl)) != kPrtcapDevice || !waitBits(h, kDwc3 + kGsts, kGstsCurmodMask, 0, 10000, 100, nullptr)) {
+    b.why = "GCTL.PRTCAPDIR or GSTS.CURMOD does not read the device role";
+    b.now = readCoreWords(h);
+    return b;
+  }
+  auto restoreOverride = [&](uint32_t reg, uint32_t mask, uint32_t found, bool cleared) {
+    if (!cleared) return true;
+    const uint32_t cfg = h.rd(kQscratch + reg);
+    return glueStore(h, reg, (cfg & ~mask) | (found & mask), b.stores, b.glueStores);
+  };
+  if (!restoreOverride(kQsSsPhyCtrl, kOverrideSs, sw.found.qsSs, sw.ssOverrideCleared) ||
+      !restoreOverride(kQsHsPhyCtrl, kOverrideHs, sw.found.qsHs, sw.hsOverrideCleared)) {
+    b.why = "the glue clocks read off before a QSCRATCH store: the override is not restored (K:7dffd78b342d)";
+    b.now = readCoreWords(h);
+    return b;
   }
   b.now = readCoreWords(h);
-  b.ok = prtcap(b.now.gctl) == back;
-  if (!b.ok) b.why = "GCTL.PRTCAPDIR does not read the device role";
+  if (((b.now.qsSs ^ sw.found.qsSs) & kOverrideSs) || ((b.now.qsHs ^ sw.found.qsHs) & kOverrideHs)) {
+    b.why = "the VBUS/session override did not read back";
+    return b;
+  }
+  b.overrideRestored = sw.ssOverrideCleared || sw.hsOverrideCleared;
+  b.ok = true;
   return b;
 }
 
@@ -654,21 +682,32 @@ template <class Hal> StopResult xhciStop(Hal &h, const Xhci &x)
 {
   StopResult s;
   const XhciAt at = xhciAt(x);
+  if (!h.glueClocked()) {
+    s.why = "the core is not powered/clocked";
+    return s;
+  }
+  if (!waitBits(h, at.op + kOpUsbSts, kUsbStsCnr, 0, 1000000, 1000, nullptr)) {
+    s.why = "USBSTS.CNR stays set before stop";
+    s.usbsts = h.rd(at.op + kOpUsbSts);
+    return s;
+  }
   h.wr(at.op + kOpUsbCmd, h.rd(at.op + kOpUsbCmd) & ~(kUsbCmdRun | kUsbCmdInte));
-  if (!waitBits(h, at.op + kOpUsbSts, kUsbStsHalted, kUsbStsHalted, 100000, 100, nullptr)) {
+  if (!waitBits(h, at.op + kOpUsbSts, kUsbStsHalted | kUsbStsCnr, kUsbStsHalted, 100000, 100, nullptr)) {
     s.why = "the controller does not halt within 100 ms";
     s.usbsts = h.rd(at.op + kOpUsbSts);
     return s;
   }
   h.wr(at.op + kOpUsbCmd, kUsbCmdHcrst);
   h.delayUs(1000);
-  if (!waitBits(h, at.op + kOpUsbCmd, kUsbCmdHcrst, 0, 1000000, 1000, nullptr)) {
-    s.why = "USBCMD.HCRST does not clear within 1 s";
+  if (!waitBits(h, at.op + kOpUsbCmd, kUsbCmdHcrst | kUsbCmdRun, 0, 1000000, 1000, nullptr)) {
+    s.why = "USBCMD.HCRST or RUN does not clear within 1 s";
     s.usbsts = h.rd(at.op + kOpUsbSts);
     return s;
   }
+  const bool halted = waitBits(h, at.op + kOpUsbSts, kUsbStsHalted | kUsbStsCnr, kUsbStsHalted, 1000000, 1000, nullptr);
   s.usbsts = h.rd(at.op + kOpUsbSts);
-  s.ok = true;
+  s.ok = halted && (s.usbsts & (kUsbStsHalted | kUsbStsCnr)) == kUsbStsHalted;
+  if (!s.ok) s.why = "USBSTS does not read halted and ready after HCRST";
   return s;
 }
 

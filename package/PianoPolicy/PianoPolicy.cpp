@@ -201,7 +201,8 @@ int sysctlLpm(struct sysctl_oid *oidp, void *, int, struct sysctl_req *req)
   int v = int(__atomic_load_n(&gLpm, __ATOMIC_ACQUIRE));
   const int err = sysctl_handle_int(oidp, &v, 0, req);
   if (err || !req->newptr) return err;
-  __atomic_store_n(&gLpm, v ? 1u : 0u, __ATOMIC_RELEASE);
+  if (v != 0 && v != 1) return EINVAL;
+  __atomic_store_n(&gLpm, uint32_t(v), __ATOMIC_RELEASE);
   kickFromSysctl();
   return 0;
 }
@@ -211,7 +212,8 @@ int sysctlHpm(struct sysctl_oid *oidp, void *, int, struct sysctl_req *req)
   int v = int(__atomic_load_n(&gHpm, __ATOMIC_ACQUIRE));
   const int err = sysctl_handle_int(oidp, &v, 0, req);
   if (err || !req->newptr) return err;
-  __atomic_store_n(&gHpm, v ? 1u : 0u, __ATOMIC_RELEASE);
+  if (v != 0 && v != 1) return EINVAL;
+  __atomic_store_n(&gHpm, uint32_t(v), __ATOMIC_RELEASE);
   kickFromSysctl();
   return 0;
 }
@@ -250,12 +252,12 @@ struct sysctl_oid gOidStatus, gOidLpm, gOidHpm, gOidLidArm, gOidLidSleepAC;
 SYSCTL_DECL(_machdep);
 
 namespace {
-void fillOid(struct sysctl_oid &o, const char *name, int kind, int (*handler)(struct sysctl_oid *, void *, int, struct sysctl_req *),
-             const char *fmt, const char *descr)
+void fillOid(struct sysctl_oid &o, const char *name, uint32_t kind,
+             int (*handler)(struct sysctl_oid *, void *, int, struct sysctl_req *), const char *fmt, const char *descr)
 {
   o.oid_parent = &sysctl__machdep_children;
   o.oid_number = OID_AUTO;
-  o.oid_kind = kind | CTLFLAG_OID2;
+  o.oid_kind = static_cast<int>(kind | CTLFLAG_OID2);
   o.oid_arg1 = nullptr;
   o.oid_arg2 = 0;
   o.oid_name = name;
@@ -292,7 +294,7 @@ class PianoPolicy : public IOService {
   void run();
   void adoptDisplay(IOService *service);
   IOService *copyDisplay(bool *marked);
-  Inputs gather();
+  Inputs gather(bool readProfiles);
   void perform(const Actions &a, const Inputs &in, bool fromThread);
   Result call(const char *service, const char *function, uint32_t value);
   Result gpuCall(uint32_t khz, uint32_t *client);
@@ -316,7 +318,6 @@ class PianoPolicy : public IOService {
   uint32_t fStatusRisesSeen = 0;
   bool fSleepOn = false;
   uint32_t fWakeMask = 0;
-  bool fSeenOpenForCalls = false;
   // Counters.
   uint32_t fInputChanges = 0, fRootSent = 0, fUserActive = 0, fProfileCalls = 0, fGpuCalls = 0, fKeys = 0, fKbdWakes = 0, fChanges = 0;
   Inputs fLast;
@@ -565,7 +566,7 @@ IOService *PianoPolicy::copyDisplay(bool *marked)
 }
 
 // Every input, fresh. Cheap: a few registry property reads.
-Inputs PianoPolicy::gather()
+Inputs PianoPolicy::gather(bool readProfiles)
 {
   Inputs in;
   IOService *kb = __atomic_load_n(&fKeyboard, __ATOMIC_ACQUIRE);
@@ -590,6 +591,9 @@ Inputs PianoPolicy::gather()
   OSSafeReleaseNULL(display);
   in.screen = on < 0 ? Screen::unknown : on ? Screen::on : Screen::off;
   in.displayEvents = displayEvents(marked, __atomic_load_n(&fDisplayMessages, __ATOMIC_ACQUIRE));
+  in.sleepOn = fSleepOn;
+  in.wakeMask = fWakeMask;
+  if (!readProfiles) return in;
   in.lpm = __atomic_load_n(&gLpm, __ATOMIC_ACQUIRE) != 0;
   in.hpm = __atomic_load_n(&gHpm, __ATOMIC_ACQUIRE) != 0;
   // PianoThermal's highest profile mode (published before its service is registered: a service found has it, or never will).
@@ -601,8 +605,6 @@ Inputs PianoPolicy::gather()
     }
   }
   in.thermalProfiles = thermalProfiles(numberProperty(th, kThermalProfilesKey));
-  in.sleepOn = fSleepOn;
-  in.wakeMask = fWakeMask;
   // PianoA830's slots (published before its service is: a service found has the property, or never will).
   IOService *gpu = __atomic_load_n(&fGpu, __ATOMIC_ACQUIRE);
   if (!gpu) {
@@ -652,12 +654,12 @@ void PianoPolicy::perform(const Actions &a, const Inputs &in, bool fromThread)
     const pianopolicy::Action &x = a.a[i];
     switch (x.kind) {
       case Kind::root:
-        ++fRootSent;
+        __atomic_add_fetch(&fRootSent, 1u, __ATOMIC_RELAXED);
         if (fConfig.act && root) root->receivePowerNotification(x.value);
         note("root domain: %s%s (%s)", would, rootName(x.value), x.why);
         break;
       case Kind::userActive:
-        ++fUserActive;
+        __atomic_add_fetch(&fUserActive, 1u, __ATOMIC_RELAXED);
         if (fConfig.act && root) root->requestUserActive(this, x.why);
         note("root domain: %s (%s): the display wakes", fConfig.act ? "user active requested" : "would request user active", x.why);
         break;
@@ -718,8 +720,9 @@ void PianoPolicy::describe(const Inputs &in, const View &v)
            thermalName(in.thermal), closeName(v.close), v.closeWhy, profileName(v.profile), v.profileWhy, v.gpuKhz / 1000,
            fEngine.gpuWritten() / 1000,
            fEngine.gpuOwnSlot() ? ", client 1" : fEngine.gpuHeld() ? ", PianoThermal holds the slot" : ", shared slot",
-           v.keyboardWake ? 1u : 0u, v.keyboardLatch ? 1u : 0u, fRootSent,
-           fUserActive, fProfileCalls, fGpuCalls, fKeys, fKbdWakes, fInputChanges, __atomic_load_n(&fDisplayMessages, __ATOMIC_ACQUIRE),
+           v.keyboardWake ? 1u : 0u, v.keyboardLatch ? 1u : 0u, __atomic_load_n(&fRootSent, __ATOMIC_RELAXED),
+           __atomic_load_n(&fUserActive, __ATOMIC_RELAXED), fProfileCalls, fGpuCalls, __atomic_load_n(&fKeys, __ATOMIC_RELAXED),
+           fKbdWakes, fInputChanges, __atomic_load_n(&fDisplayMessages, __ATOMIC_ACQUIRE),
            in.displayEvents ? "events" : "polled", fEngine.tickMs(in));
   IOLockUnlock(gStatusLock);
 }
@@ -778,7 +781,7 @@ void PianoPolicy::run()
     IOLockUnlock(fLock);
 
     const uint64_t now = nowMs();
-    const Inputs in = gather();
+    const Inputs in = gather(true);
     const bool inputsChanged = !fHaveLast || in.lid != fLast.lid || in.attached != fLast.attached || in.power != fLast.power ||
                                in.screen != fLast.screen || in.lpm != fLast.lpm || in.hpm != fLast.hpm ||
                                in.thermalProfiles != fLast.thermalProfiles || in.thermal != fLast.thermal ||
@@ -799,7 +802,6 @@ void PianoPolicy::run()
     }
     const Actions a = fEngine.step(in, now);
     perform(a, in, true);
-    fSeenOpenForCalls = fEngine.seenOpen();
     // gpio95 rising since the last turn: a display wake if the rules allow it.
     const uint32_t rises = __atomic_load_n(&fStatusRises, __ATOMIC_ACQUIRE);
     if (rises != fStatusRisesSeen) {
@@ -845,7 +847,7 @@ IOReturn PianoPolicy::callPlatformFunction(const OSSymbol *functionName, bool wa
                                            void *param3, void *param4)
 {
   if (functionName && functionName->isEqualTo("piano-policy-power-key")) {
-    const Inputs in = gather();
+    const Inputs in = gather(false);
     Actions out;
     const char *why = "";
     const uint32_t held = uint32_t(uintptr_t(param1));
@@ -858,8 +860,8 @@ IOReturn PianoPolicy::callPlatformFunction(const OSSymbol *functionName, bool wa
     return k == Key::passThrough ? kIOReturnUnsupported : kIOReturnSuccess;
   }
   if (functionName && functionName->isEqualTo("piano-policy-keyboard-wake")) {
-    const Inputs in = gather();
-    const View v = view(fConfig, in, fSeenOpenForCalls);
+    const Inputs in = gather(false);
+    const View v = view(fConfig, in, false);
     if (param1) *static_cast<bool *>(param1) = fConfig.act && v.keyboardLatch;
     if (param2) *static_cast<bool *>(param2) = fConfig.act && v.keyboardWake;
     return kIOReturnSuccess;

@@ -34,6 +34,15 @@ public:
 
 OSDefineMetaClassAndStructors(NativeSoftAccelerator, IOAccelerator)
 
+static bool reserveLogSlot(unsigned &logged, unsigned limit)
+{
+    unsigned count = __atomic_load_n(&logged, __ATOMIC_RELAXED);
+    while (count < limit) {
+        if (__atomic_compare_exchange_n(&logged, &count, count + 1, true, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) return true;
+    }
+    return false;
+}
+
 IOService *NativeSoftAccelerator::probe(IOService *provider, SInt32 *score)
 {
     unsigned on = 1;
@@ -47,15 +56,18 @@ IOService *NativeSoftAccelerator::probe(IOService *provider, SInt32 *score)
 
 bool NativeSoftAccelerator::start(IOService *provider)
 {
-    if (!IOAccelerator::start(provider)) {
+    if (!provider || !IOAccelerator::start(provider)) {
         IOLog("NativeSoftGpu: IOAccelerator::start failed\n");
         return false;
     }
-    OSObject *plugin = getProperty("MetalPluginName");
+    const OSSymbol *pluginKey = OSSymbol::withCStringNoCopy("MetalPluginName");
+    OSObject *plugin = pluginKey ? IORegistryEntry::copyProperty(pluginKey) : nullptr;
+    if (pluginKey) pluginKey->release();
     OSString *name = OSDynamicCast(OSString, plugin);
     registerService();
     IOLog("NativeSoftGpu: Metal accelerator registered on %s (MetalPluginName %s, no GPU, no user client)\n", provider->getName(),
         name ? name->getCStringNoCopy() : "missing");
+    if (plugin) plugin->release();
     return true;
 }
 
@@ -64,8 +76,7 @@ IOReturn NativeSoftAccelerator::newUserClient(task_t, void *, UInt32 type, OSDic
 {
     if (handler) *handler = nullptr;
     static unsigned logged;
-    if (logged < 16) {
-        logged++;
+    if (reserveLogSlot(logged, 16)) {
         char name[20] = {};
         proc_selfname(name, sizeof(name));
         IOLog("NativeSoftGpu: %s opens the accelerator, type %#x: refused (no GPU)\n", name, unsigned(type));
@@ -77,8 +88,7 @@ IOReturn NativeSoftAccelerator::newUserClient(task_t, void *, UInt32 type, OSDic
 static void notePropertyRead(const char *key)
 {
     static unsigned logged;
-    if (!key || strcmp(key, "MetalPluginName") || logged >= 24) return;
-    logged++;
+    if (!key || strcmp(key, "MetalPluginName") || !reserveLogSlot(logged, 24)) return;
     char name[20] = {};
     proc_selfname(name, sizeof(name));
     IOLog("NativeSoftGpu: %s reads MetalPluginName\n", name);
@@ -86,18 +96,21 @@ static void notePropertyRead(const char *key)
 
 OSObject *NativeSoftAccelerator::copyProperty(const OSSymbol *key) const
 {
-    notePropertyRead(key ? key->getCStringNoCopy() : nullptr);
+    if (!key) return nullptr;
+    notePropertyRead(key->getCStringNoCopy());
     return IORegistryEntry::copyProperty(key);
 }
 
 OSObject *NativeSoftAccelerator::copyProperty(const OSString *key) const
 {
-    notePropertyRead(key ? key->getCStringNoCopy() : nullptr);
+    if (!key) return nullptr;
+    notePropertyRead(key->getCStringNoCopy());
     return IORegistryEntry::copyProperty(key);
 }
 
 OSObject *NativeSoftAccelerator::copyProperty(const char *key) const
 {
+    if (!key) return nullptr;
     notePropertyRead(key);
     return IORegistryEntry::copyProperty(key);
 }

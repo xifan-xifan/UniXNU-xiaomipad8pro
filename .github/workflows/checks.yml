@@ -58,13 +58,34 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Host tools the tests call (mtools for the FAT images, llvm for the freestanding selector build)
-        run: brew install mtools llvm
+      - uses: actions/setup-python@v7
+        id: python39
+        with:
+          python-version: '3.9'
+          update-environment: false
+      - uses: actions/setup-python@v7
+        id: python315
+        with:
+          python-version: '3.15'
+          update-environment: false
+      - name: Install preflight invariants (Python 3.9 and 3.15)
+        run: |
+          "${{ steps.python39.outputs.python-path }}" tooling/persist/test-install-preflight-invariants.py
+          "${{ steps.python315.outputs.python-path }}" tooling/persist/test-install-preflight-invariants.py
+      - name: Host tools the tests call (mtools for the FAT images, llvm for the freestanding selector build, ffmpeg for video host tests)
+        run: brew install mtools llvm ffmpeg
+      - name: Fetch the pinned DarwinBoot source for the bootloader host tests
+        env:
+          UNIXNU_RESEARCH: ${{ runner.temp }}/self-test-sources
+        run: python3 scripts/fetch-pins.py --only DarwinBoot
       - name: Host tests (including Adreno830 with pinned public kits)
         # the charge integration test takes ~270 s and test-k273-only ~150 s on an M-series Mac; the hosted runner is slower
         env:
+          DARWINBOOT: ${{ runner.temp }}/self-test-sources/DarwinBoot
           SELFTEST_TIMEOUT: "1500"
         run: python3 scripts/ci/self-tests.py --junit "$RUNNER_TEMP/self-tests.xml"
+      - name: Verify pool capture with real APFS image attachments
+        run: bash tooling/pool/test-pool-capture-check.sh --real-apfs
       - uses: actions/upload-artifact@v7
         if: always()
         with:

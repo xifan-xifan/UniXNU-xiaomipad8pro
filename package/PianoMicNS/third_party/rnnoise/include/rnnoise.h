@@ -79,6 +79,9 @@ RNNOISE_EXPORT int rnnoise_init(DenoiseState *st, RNNModel *model);
  */
 RNNOISE_EXPORT DenoiseState *rnnoise_create(RNNModel *model);
 
+/** Clear an initialized state's signal history without reallocating it. */
+RNNOISE_EXPORT void rnnoise_reset(DenoiseState *st);
+
 /**
  * Free a DenoiseState produced by rnnoise_create.
  *

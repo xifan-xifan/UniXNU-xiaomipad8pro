@@ -12,6 +12,8 @@ import struct
 import sys
 import wave
 
+from pcm16_wav import read_pcm16_header, read_samples
+
 RATE = 48000
 CHIP_MS = 100
 CHIPS = (1, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0, 1, 1, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1)
@@ -29,7 +31,13 @@ def write_wav(path, samples):
         out.writeframes(pcm.tobytes())
 
 
+def check_carrier(carrier):
+    if not 0 < carrier < RATE / 2:
+        raise ValueError('carrier must be above DC and below Nyquist')
+
+
 def fixture(path, carrier=997):
+    check_carrier(carrier)
     span = RATE * CHIP_MS // 1000
     ramp = RATE // 500
     previous = 0
@@ -46,7 +54,9 @@ def fixture(path, carrier=997):
 
 
 def extract(path, prefix, expected):
-    data = path.read_bytes()
+    max_size = HEADER.size + 800 * PERIOD.size + 384000 * 4
+    with path.open('rb') as source:
+        data = source.read(max_size + 1)
     if len(data) < HEADER.size:
         raise ValueError('empty or truncated pre-mix window')
     magic, gen, run, route, start, end, frames, periods = HEADER.unpack_from(data)
@@ -87,12 +97,12 @@ def extract(path, prefix, expected):
 def reader_frames(wav, log, seed):
     ready = wav.with_suffix('.ready').read_text().strip()
     done = wav.with_suffix('.done').read_text().strip()
-    report = log.read_text()
+    events = [line for line in log.read_text().splitlines() if line.startswith(('CAPTURE ', 'CONNECTION_CLOSED '))]
     ready_match = re.fullmatch(r'READY seed=(\d+) frames=(\d+) root=1 direct-driver=1', ready)
     done_match = re.fullmatch(r'CAPTURE_DONE frames=(\d+) seed=(\d+)', done)
-    result = re.search(r'^CAPTURE PASS seed=(\d+) frames=(\d+) blocks=(\d+) anchors=(\d+) '
-                       r'stop_rc=0x0 unmap_ring=0x0 unmap_status=0x0$', report, re.M)
-    if not (ready_match and done_match and result and 'CONNECTION_CLOSED rc=0x0 result=0' in report):
+    result = re.fullmatch(r'CAPTURE PASS seed=(\d+) frames=(\d+) blocks=(\d+) anchors=(\d+) '
+                          r'stop_rc=0x0 unmap_ring=0x0 unmap_status=0x0', events[0]) if events else None
+    if not (ready_match and done_match and result and events[1:] == ['CONNECTION_CLOSED rc=0x0 result=0']):
         raise ValueError('incomplete safe-reader lifecycle')
     ready_seed, min_frames = map(int, ready_match.groups())
     done_frames, done_seed = map(int, done_match.groups())
@@ -104,16 +114,16 @@ def reader_frames(wav, log, seed):
 
 
 def score(path, onset, carrier, search, expected_frames=None):
-    with wave.open(str(path), 'rb') as f:
-        if (f.getnchannels(), f.getsampwidth(), f.getframerate()) != (1, 2, RATE):
+    check_carrier(carrier)
+    if not math.isfinite(onset) or not math.isfinite(search) or search < 0:
+        raise ValueError('expected a finite onset and nonnegative search range')
+    with open(path, 'rb') as f:
+        rate, channels, frames = read_pcm16_header(f)
+        if (rate, channels) != (RATE, 1):
             raise ValueError('expected mono S16 48 kHz WAV')
-        pcm = array('h')
-        frames = f.getnframes()
-        pcm.frombytes(f.readframes(frames))
-    if len(pcm) != frames or (expected_frames is not None and frames != expected_frames):
-        raise ValueError('wrong WAV frame count')
-    if sys.byteorder != 'little':
-        pcm.byteswap()
+        if expected_frames is not None and frames != expected_frames:
+            raise ValueError('wrong WAV frame count')
+        pcm = read_samples(f, frames, channels)
     width = RATE // 100
     cos = [math.cos(math.tau * carrier * k / RATE) for k in range(width)]
     sin = [math.sin(math.tau * carrier * k / RATE) for k in range(width)]
@@ -197,7 +207,7 @@ def main():
             result = score(a.wav, a.onset, a.carrier, a.search, frames)
             print(json.dumps(result, sort_keys=True))
             return not result['passed']
-    except (ValueError, OSError, EOFError, wave.Error) as error:
+    except (ValueError, OSError, OverflowError, wave.Error) as error:
         print(f'capture check failed: {error}', file=sys.stderr)
         return 2
     return 0

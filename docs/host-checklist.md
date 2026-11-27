@@ -1,123 +1,101 @@
-# Host-side checklist (no tablet, no boot, no judgment mid-run)
+# Host-side checklist
 
-Simple checks another assistant can run on the build Mac while tablet work is paused (written 2026-11-13 at the owner's pause).
-Each item names the command, where to run it, its inputs, what counts as a pass, and where the result goes. None of them needs
-the tablet, a debug login, or a decision while it runs. Only macOS 27.3 matters: the 27.0.1 line is retired, so nothing here
-builds or checks a 27.0.1 image.
+Use this checklist on the build Mac to check the checkout and existing macOS 27.3 artifacts. Run from the repository
+root in a native arm64 shell. The checks use local files or synthetic fixtures. For preparing inputs and building images,
+see the [build reference](building.md). The [CI reference](ci.md) describes the hosted checks.
 
 ## Ground rules
 
-- **Never run** anything that touches the tablet or the installed system: `fastboot`, `tooling/native/usb-console.py`,
-  `tooling/native/native-loop.sh`, `tooling/persist/maint-session.py`, `tooling/native/desk-ssh.sh`, any `/tmp/run-*.sh` helper.
-- **Never run** a line build or an ESP build: `tooling/k27/build-native-image.sh`, `tooling/k273/build-k273-image.sh`,
-  `tooling/persist/build-esp.py`, `tooling/k273/build-dual-esp.py`, `tooling/bootimg/build-ram-images.py`.
-- **Never publish**: no `private/publish.sh`, no `git push`, no commits. Leave tracked files unchanged; if a check writes into
-  `out/`, that is listed below.
-- Do not run two checks that write `out/native-kexts/` at the same time, and none while someone builds in the same checkout.
-- Working directory for every item: the repository root of the main checkout (`UniXNU-piano/`). Start the shell with
-  `set -a; source ~/.config/piano/env; set +a; export PATH=/opt/homebrew/bin:$PATH; unset SDKROOT` (the env file's
-  variables exported to the scripts; `python3` must be 3.11 or newer for `tomllib`: check `python3 --version`; the kext
-  compiles must not see an `SDKROOT`) and use `bash` for shell snippets.
-- In the tables, `\|` is Markdown's escape of `|`: type a plain `|` in the shell.
-- **Results:** make one directory per session, `R=private/host-checks/$(date +%Y%m%d-%H%M); mkdir -p "$R"` (`private/` is
-  git-ignored). Each item writes `"$R"/NN-name.log` (its full output, `2>&1`). At the end write `"$R"/SUMMARY.md` with one line
-  per item: number, name, PASS / FAIL / KNOWN (a listed known failure) / SKIPPED (with the reason), and for a FAIL the last
-  20 lines of its log. Report only the summary; do not try to fix anything.
-
-## 1. Shared headers and kernel policy (pure host tests)
-
-| # | Command | Pass |
-|---|---|---|
-| 1.1 | `bash package/include/tests/run.sh > "$R"/11-include-tests.log 2>&1` | exit 0; no `FAIL` line. Covers the SPMI lock (`spmi_lock_host`), the MM votes, the SCM lock, the WCN rails. **Known:** `spmi_lock_host.cpp:128` failed once while the Mac was busy; on a failure run it again alone and record both runs |
-| 1.2 | `bash tooling/k27/test-piano-bootargs.sh > "$R"/12-bootargs.log 2>&1` | exit 0 (k27 0066's string handling, also under the sanitizers, and the patch carries its header byte for byte) |
-| 1.3 | `bash tooling/k27/test-piano-guard.sh > "$R"/13-guard.log 2>&1` | exit 0 (k27 0063, the boot guard) |
-| 1.4 | `bash tooling/k27/test-piano-pm.sh > "$R"/14-pm.log 2>&1` | exit 0 (k27 0061/0062/0064, idle and suspend decisions) |
-| 1.5 | `python3 tooling/adt/boot_args.py --self-test > "$R"/15-boot-args-py.log 2>&1` | exit 0 (the Python side of 0066 against the kernel header's numbers) |
-| 1.6 | `python3 tooling/k27/check-native-kexts.py --self-test > "$R"/16-native-kext-rule.log 2>&1` | exit 0 (the native kext rule on synthetic descriptors) |
-| 1.7 | `python3 tooling/metal/check-bundle-paths.py --self-test > "$R"/17-bundle-paths.log 2>&1` | exit 0 |
-
-## 2. Per-driver host tests (each script runs its kext's host tests first, then compiles the kext object)
-
-Inputs: `PIANO_K27_TREE` from the env file. Use the 27.3 kernel for the import checks: `export
-K27_KERNEL=out/ram-k273-bootargs/kernel-k273-0066-s0001-native.macho; export KC_BASE=out/inputs/k273/kc/kc273-mac17j.bin` (the 27.3
-kernel with 27.3's own collection base: PianoDwc3's trial collections link against `KC_BASE`; with the 27.0.1 base they fail
-`__TEXT_EXEC ... lies outside the collection`). If either file is missing, mark the section SKIPPED. Each
-script writes its objects to `out/native-kexts/<NAME>/` (expected; nothing else).
-
-Run them one after the other:
+- Leave the tablet, its live console, and the installed system alone. Use the offline verifiers and fixture tests below.
+  Keep line builds, ESP builds, and publishing outside the check session.
+- Use `bash` for shell snippets. Select Python 3.11 or newer on `PATH` for build-related tooling, and `unset SDKROOT` for
+  the kext wrappers. The Markdown link checker can also run with the macOS system Python. Check the interpreter with
+  `python3 --version`. [Build host preflight](../tooling/repro/check-host.sh) · [Markdown link checker](../scripts/ci/test-doc-links.py)
+- Keep logs in a per-session directory under the ignored `out/`. Capture stdout and stderr and record each check as PASS,
+  FAIL, or SKIPPED. For a skip, record the missing input. Keep raw logs and device-specific values local.
 
 ```sh
-for s in ufs ram-block gop-display software-aes null-ethernet standin piano-a830 piano-power piano-thermal piano-wifi \
-         piano-wifi-ethernet piano-dwc3 piano-keyboard piano-touch piano-backlight piano-audio piano-camera piano-torch \
-         piano-input piano-sensors piano-bluetooth piano-dpu piano-dp piano-video piano-policy piano-usbhost usbhost-standin; do
-  f=tooling/k27/build-native-$s.sh; [ -f "$f" ] || { echo "SKIPPED $s (no script)"; continue; }
-  bash "$f" > "$R/2-$s.log" 2>&1; echo "$s exit $?"
-done > "$R"/20-drivers.log 2>&1
+mkdir -p out
+R=$(mktemp -d "$PWD/out/host-checks.XXXXXX")
 ```
 
-Pass per driver: exit 0, and its log has no line starting with `FAIL` and no `Error:`. A host-test summary such as
-`... all passed` / `PASS` appears in most of them. Record the per-driver exit codes from `20-drivers.log` in the summary.
+Run object builds one at a time and only when the checkout is idle.
 
-## 3. Userland and persistence tooling
+## 1. Checkout and shared policy
 
-| # | Command | Pass |
-|---|---|---|
-| 3.1 | `python3 tooling/userland/test-stage.py > "$R"/31-stage.log 2>&1` | exit 0 (the system layer pipeline in a temp directory; it must list `piano-login-front` among the agents) |
-| 3.2 | `python3 tooling/persist/test-data-store.py > "$R"/32-data-store.log 2>&1` | exit 0 |
-| 3.3 | `python3 tooling/persist/test-persist.py > "$R"/33-persist.log 2>&1` | **KNOWN failure** until the reference images are restored: `FileNotFoundError ... out/persistent/ref/13-boot_a.img`. Record KNOWN if that is the error; any other failure is a FAIL |
+| Check | Command | Pass |
+| --- | --- | --- |
+| Host test inventory | `python3 scripts/ci/self-tests.py --list` | Runner prints the inventory. For the current count and tool requirements, see [CI](ci.md#host-test-inventory-2026-11-27). |
+| Repository manifests | `python3 scripts/ci/test-repo-manifests.py` | Exit 0. Covers manifests, native kext descriptors and wrapper wiring, patch hygiene and shell syntax. |
+| Shared headers | `bash package/include/tests/run.sh --sanitize` | Exit 0. Covers SPMI and SCM locks, multimedia votes, WCN rails and other shared helpers. |
+| Boot arguments and guard | `bash tooling/k27/test-piano-bootargs.sh` and `bash tooling/k27/test-piano-guard.sh` | Both exit 0. |
+| Idle and suspend policy | `bash tooling/k27/test-piano-pm.sh` | Exit 0. |
+| Native kext rule | `python3 tooling/k27/check-native-kexts.py --self-test` | Exit 0 on synthetic accepted and refused descriptors and link logs. |
+| Metal bundle paths | `python3 tooling/metal/check-bundle-paths.py --self-test` | Exit 0. |
 
-## 4. Image and record checks (read only)
+## 2. Native kext host tests and object builds
 
-| # | Command | Pass |
-|---|---|---|
-| 4.1 | `for j in out/ram-k273-*/build-A-bundled.json; do echo "== $j"; python3 tooling/bootimg/verify-ram-images.py "$j" 2>&1 \| tail -1; done > "$R"/41-verify-k273.log` | every 27.3 image set prints `PASS: 0 failure(s)`. The image limit is 250,000,000 bytes: an older oversized set (if one still exists) must FAIL; name it in the summary |
-| 4.2 | `shasum -a 256 out/persistent/esp-dual33d-k273d.img > "$R"/42-esp.log; python3 -c "import json;print(json.load(open('out/persistent/esp-dual33d-k273d.json'))['sha256'])" >> "$R"/42-esp.log` | both lines show `93baea7af730611145f97e51b09b1779dbacd043700aa5f156b044d56a855f59` (the ESP installed on 2026-11-13 09:45) |
-| 4.3 | `python3 tooling/adt/check-ram-window.py --adt out/ram-k273-bootargs/piano-k27.adt --kc out/ram-k273-bootargs/kc-k27-native.bin --fd out/fd/piano-uefi-A-bundled.fd > "$R"/43-ram-window.log 2>&1` | exit 0; the last line names the window `0x8c0004000..0xbffe04000 (13310 MiB)` |
-| 4.4 | `python3 -c "import json;print(json.load(open('out/ram-k273-bootargs/build-A-bundled.json'))['images']['boot-piano-macos-ram-A-bundled.img']['boot_args']['set'])" > "$R"/44-adt-args.log 2>&1` | exit 0 and the output `ram` (the record of the image's ADT set; the ADT file in that folder is the build's input, before the set was added) |
-| 4.5 | `for d in "$PIANO_BACKUP_DIR"/persistent-boot-*/; do echo "== $d"; (cd "$d" && shasum -a 256 -c SHA256SUMS); done > "$R"/45-backups.log 2>&1` | every file `OK`; no `FAILED`. These are the pre-write backups of the tablet's partitions on the external SSD (read only) |
-| 4.6 | `(cd "$(eval echo "$PIANO_BACKUP_NAS")" 2>/dev/null && for d in persistent-boot-2026111[23]-*/; do echo "== $d"; (cd "$d" && shasum -a 256 -c SHA256SUMS); done) > "$R"/46-backups-nas.log 2>&1` | if the NAS is not mounted: SKIPPED. Otherwise every file `OK`, and every set of 4.5 also exists here (the background copy finished) |
+For tests without kernel inputs, use the suite entry points in the [CI inventory](ci.md#host-test-inventory-2026-11-27).
+The object wrappers below also need the prepared 27.3 tree, its matching relinked kernel, and its matching collection
+base. Set `PIANO_K27_TREE` to the prepared clone, `K27_KERNEL` to the kernel printed by `prepare-k27-tree.sh`, and
+`KC_BASE` to the 27.3 `kc273-mac17j.bin`. Set `KC_BUILDER=k27/kc-build273-piano.py` for the trial links in the driver
+wrappers. Skip the object builds if those inputs are missing. [Kernel preparation](../tooling/k273/prepare-k27-tree.sh) · [Build reference](building.md#kernel-collection-and-staged-userland)
 
-## 5. Log checks against the recorded results (read only)
-
-The USB console logs of the 27.3 boots are kept in `logs/usb-console/` (git-ignored). Each check is a `grep -a` and a count;
-write the output to `"$R"/5N-*.log`.
-
-| # | Log (`logs/usb-console/…-port0.txt`) | Command | Pass |
-|---|---|---|---|
-| 5.1 | `20261113-104131` (27.3 Wi-Fi probe) | `grep -a -E "scan round 2 .*18 network\(s\)\|piano-wifi-scan-summary\|piano-boot-args:" logs/usb-console/20261113-104131-port0.txt` | a `scan round 2 (with the receive buffers): completed, ... 29 management frame(s), 18 network(s)` line |
-| 5.2 | `20261113-102514` (0066 test) | `grep -a -E "PianoAudio: start: piano-audio=1\|PianoAudio: survey done" logs/usb-console/20261113-102514-port0.txt` | both lines present |
-| 5.3 | `20261113-015232`, `20261113-015906` (the 27.3 store's first two boots) | `grep -a -h "NativeRamBlock: Data store state" logs/usb-console/20261113-015232-port0.txt logs/usb-console/20261113-015906-port0.txt` | state 3 (fresh) then state 2 (resumed), both `first LBA 117998394` and `seed 89860516` |
-| 5.4 | `20261113-094514` (the installed 27.3's first boot) | `grep -a -E "root-part=linux_data\|SoftwareAES: NativeAES registered\|Data store state 2" logs/usb-console/20261113-094514-port0.txt` | all three present |
-| 5.5 | every 27.3 log of the day | `for f in logs/usb-console/20261113-*-port0.txt; do grep -a -q "root-part=linux_data" "$f" \|\| continue; printf "%s panic=%s\n" "$f" "$(grep -a -c -E 'panic\(\|Unhandled implementation specific' "$f")"; done` | every count is 0 |
-
-## 6. Repository and document consistency (read only)
-
-| # | Command | Pass |
-|---|---|---|
-| 6.1 | Broken relative links in README and docs: the snippet below | last line `broken 0`; otherwise the list (no fixing) |
-| 6.2 | Privacy audit of the tracked tree without publishing: `P=$(sed -n "s/^P='\(.*\)'$/\1/p" private/publish.sh); git grep -I -l -E "$P" HEAD -- . > "$R"/62-privacy.log; wc -l < "$R"/62-privacy.log` | `0` (no tracked file matches the private-inventory pattern). Do not print the pattern itself into any shared place |
-| 6.3 | Working tree clean: `git status --short > "$R"/63-status.log; wc -l < "$R"/63-status.log` | `0` before and after the session (the checks above must not change tracked files) |
-| 6.4 | README states the current system: `grep -n -E "macOS 27\.3 \(26C5035r\)" README.md > "$R"/64-readme.log` | at least one line |
-| 6.5 | The native kext list and its descriptors agree: `python3 tooling/k27/check-native-kexts.py . tooling/k27/kext/*.json > "$R"/65-kext-list.log 2>&1` | exit 0. It needs section 2's objects in `out/native-kexts/`: run it after section 2 passed; if section 2 failed, record SKIPPED |
-
-The snippet for 6.1:
+Run the wrappers in the default manifest's order. PianoDwc3's trial collection needs the PianoA830 objects. The list
+below covers all **27 native kexts**, including `PianoIR`. Objects go to `out/native-kexts/`, and the PianoDwc3 trial
+link uses scratch files under `out/k27/`. [Native kext manifest](../configs/k27-native-kexts.txt) · [Wrapper mapping](../tooling/k27/build-native-image.sh)
 
 ```sh
-python3 - > "$R"/61-links.log <<'EOF'
-import re, pathlib
-root = pathlib.Path('.')
-bad = 0
-for md in [root / 'README.md', *root.glob('docs/**/*.md')]:
-    for t in re.findall(r'\]\(([^)#]+)(?:#[^)]*)?\)', md.read_text(errors='ignore')):
-        if '://' in t or t.startswith('mailto:'):
-            continue
-        if not (md.parent / t).exists():
-            print(md, '->', t)
-            bad += 1
-print('broken', bad)
-EOF
+for driver in standin ufs ram-block gop-display piano-a830 piano-backlight piano-dpu \
+    piano-dwc3 piano-input piano-keyboard null-ethernet piano-power piano-torch piano-ir \
+    piano-camera piano-thermal piano-touch piano-wifi piano-wifi-ethernet piano-audio \
+    piano-usbhost piano-video piano-sensors piano-dp piano-bluetooth piano-policy software-aes; do
+  if bash "tooling/k27/build-native-$driver.sh" > "$R/driver-$driver.log" 2>&1; then
+    printf '%s PASS\n' "$driver"
+  else
+    printf '%s FAIL\n' "$driver"
+  fi
+done > "$R/drivers.log"
 ```
 
-## 7. What to hand back
+Check each wrapper's exit status in `drivers.log` and its own output. In the PianoDwc3 log, confirm the extra vtable
+check ran and reported `0 problem slots`.
 
-`"$R"/SUMMARY.md` and the path of `"$R"`. A FAIL is information for the next session, not something to fix during this run.
+## 3. Userland, provenance tables and persistence
+
+| Check | Command | Pass or skip condition |
+| --- | --- | --- |
+| Userland staging | `python3 tooling/userland/test-stage.py` | Exit 0 on the staging fixtures. The current manifest defines **14 arm64 Mach-Os** across non-planned units, including the script-built `piano-rotated`. [Userland inventory](building.md#kernel-collection-and-staged-userland) |
+| Camera tables | `python3 tooling/camera/sensor-tables.py check data/camera` | Exit 0 on the table format and manifest checks. [Camera provenance](../data/camera/README.md) |
+| DisplayPort PHY tables | `python3 tooling/dp/dp-phy-tables.py check data/dp` | Exit 0 on the table format and manifest checks. [DP provenance](../data/dp/README.md) |
+| Partition safety | `python3 tooling/persist/test-partition-safety.py` | Exit 0 on the GPT and installed-identity fixtures. |
+| Data store | `python3 tooling/persist/test-data-store.py` | Exit 0. Skip if the pinned UniXNU checkout supplying `unixnu.bootimg` is unavailable. |
+| Persistence replay | `python3 tooling/persist/test-persist.py` | Exit 0. Skip if the saved boot and partition-table fixtures are unavailable. [Local-input skips](../scripts/ci/self-tests.skip) |
+
+## 4. Existing images and records
+
+Select files from one recorded 27.3 build. Set the variables in the table to the matching input paths in your shell.
+Skip a check if its inputs are missing. Keep the verifier's full output and exit status in the session log.
+
+| Check | Command | Pass |
+| --- | --- | --- |
+| RAM images | `python3 tooling/bootimg/verify-ram-images.py "$RAM_BUILD" --reference "$REFERENCE" --fd "$FD" --dtb "$DTB"` | Exit 0 and `PASS: 0 failure(s)` for all images recorded in the build JSON. The default cap is 250,000,000 bytes per image. [Verification details](building.md#build-and-verify) |
+| ESP checksum | `shasum -a 256 "$ESP_IMAGE"` | Digest matches the `sha256` in that image's build JSON. |
+| RAM window | `python3 tooling/adt/check-ram-window.py --adt "$ADT" --kc "$KC" --fd "$FD"` | Exit 0 and a window consistent with the selected ADT, collection and FD. |
+| Native collection log | `python3 tooling/k27/check-native-kexts.py . --kc-log "$KC_LOG"` | Exit 0. The default profile reports 27 native kexts linked. |
+| Backup checksums | Run `shasum -a 256 -c SHA256SUMS` from each selected, already accessible backup set. | Every recorded file is `OK`. |
+
+If a console capture already exists for the same build, compare it with the corresponding [qualification record](STATUS.md).
+Review only the subsystems and boot arguments enabled in the selected profile. The [November 27 results](results-2026-11-27.md)
+include RAM display, audio and IR checks alongside installed observations.
+
+## 5. Links, privacy and working tree
+
+| Check | Command | Pass |
+| --- | --- | --- |
+| Relative links and driver index | `/usr/bin/python3 scripts/ci/test-doc-links.py` and `/opt/homebrew/bin/python3 scripts/ci/test-doc-links.py` | Both exit 0 and report `0 error(s)` when both interpreters are available. |
+| Tracked-tree privacy | `python3 scripts/ci/privacy-scan.py` | `0 hits, 0 refused files`. |
+| Committed diff privacy | `python3 scripts/ci/privacy-scan.py --diff "$BASE"` | `0 hits, 0 refused files`, with `BASE` set to the applicable comparison commit. The scanner reads committed additions and commit messages. |
+| Working tree | `git status --short` and `git diff --check` | The checks leave the initial tracked status unchanged and report no new whitespace errors. |
+
+Record outcomes in `"$R/SUMMARY.md"` and include the local session directory when handing the results back.

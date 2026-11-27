@@ -316,7 +316,7 @@ public:
   }
   bool validate(const uint32_t *b, uint32_t bytes)
   {
-    if (bytes < 64 || bytes > kHfiCorePacketBytes || (bytes & 3) || b[0] != bytes || !b[7] || b[7] > (bytes - 32) / 32)
+    if (!b || bytes < 64 || bytes > kHfiCorePacketBytes || (bytes & 3) || b[0] != bytes || !b[7] || b[7] > (bytes - 32) / 32)
       return false;
     uint32_t at = 32;
     for (unsigned i = 0; i < b[7]; ++i) {
@@ -364,7 +364,7 @@ public:
   }
   int receive(const uint32_t *b, uint32_t bytes)
   {
-    if(streaming&&history)history->messages.add(b,bytes,o.hw.nowUs());
+    if(b&&streaming&&history)history->messages.add(b,bytes,o.hw.nowUs());
     const uint32_t before = errorSerial;
     if (!validate(b, bytes))
       return fail(kErrHfi);
@@ -546,8 +546,8 @@ public:
               "picture %08x error %u",
               v[0], v[1], v[2], v[5], v[4], v[6], v[7], v[9], v[8], v[10], picture, unsigned(frameError));
     Buffer *b = layout.find(v[0], v[1]);
-    if (!b || !b->queued || b->port != p[4] || v[2] != b->iova() || v[3] || v[4] || v[5] > b->size || v[6] > b->size ||
-        v[7] > b->size - v[6]) {
+    if (!b || !b->queued || b->port != p[4] || v[2] != b->iova() || v[3] || v[4] || v[5] > b->size || v[6] > v[5] ||
+        v[7] > v[5] - v[6]) {
       fail(kErrHfi, Buffers, p[2], p[4], p[5], header);
       return;
     }
@@ -868,15 +868,19 @@ public:
               (unsigned long long)t,b.index,size,r.etb,ledger.inputReuse);
     return buffer(b,false,size);
   }
+  const OutputFrame *nextOutput() const {
+    return outputCount && !cleanup && !r.error ? &outputs[outputHead] : nullptr;
+  }
   bool popOutput(OutputFrame &f) {
-    if(!outputCount)return false;f=outputs[outputHead];outputHead=(outputHead+1)%stream::Credits;--outputCount;return true;
+    const auto *next=nextOutput();
+    if(!next)return false;f=*next;outputHead=(outputHead+1)%stream::Credits;--outputCount;return true;
   }
   int releaseOutput(unsigned index,uint64_t t) {
     if(!streaming||!ledger.release(index,t)||!ledger.retire(t))return fail(kErrHfi);
     Buffer *b=layout.find(Raw,index);
     if(!b||b->queued||b->readonly||b->pendingRelease)return fail(kErrHfi);
     o.hw.note("V6 RAW recycle session %08x token %llu index %u raw-reuse %u",sessionId,(unsigned long long)t,index,ledger.rawReuse);
-    if(!cleanup && !(r.drainAck&&r.last))return buffer(*b);
+    if(!cleanup && !r.error && !(r.drainAck&&r.last))return buffer(*b);
     return 0;
   }
   int beginDrain() {
@@ -948,6 +952,10 @@ public:
       rc = late;
     r.close = rc;
     const bool released = failClosed && !rc && r.closed;
+    if (released && streaming) {
+      ledger.closed();
+      outputHead = outputCount = 0;
+    }
     unsigned queued = 0, refs = 0, pending = 0;
     for (unsigned i = 0; i < layout.used; ++i) {
       Buffer &b = layout.buf[i];

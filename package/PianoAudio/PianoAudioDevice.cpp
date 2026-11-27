@@ -323,7 +323,7 @@ OSDictionary *makeControl(uint32_t id, uint32_t baseClass, uint32_t cls, uint32_
     setNumber(d, "descriptor", 0);
     return d;
 }
-uint64_t absolute(uint64_t frames) { uint64_t t; nanoseconds_to_absolutetime(frames * 1000000000ULL / Rate, &t); return t; }
+uint64_t absolute(uint64_t frames) { uint64_t t; nanoseconds_to_absolutetime(piano_audio_frames_to_ns(frames), &t); return t; }
 }  // namespace
 
 bool PianoAudioDevice::initRole(bool input, const char *deviceUID) {
@@ -392,7 +392,8 @@ void PianoAudioDevice::publish(IORegistryEntry *e) {
     e->setProperty(piano_audio_mute_key(isInput), masterMute ? kOSBooleanTrue : kOSBooleanFalse);
     if (isInput) {
         e->setProperty("piano-audio-input-contract", "mic-delivery1:inpt/main:mono:db-linear:pre-HAL");
-        setNumber(e, "piano-audio-input-gain-q15", masterMute ? 0 : piano_audio_input_q15(volumePercent));
+        const uint32_t inputGain = masterMute ? 0u : uint32_t(piano_audio_input_q15(int(volumePercent)));
+        setNumber(e, "piano-audio-input-gain-q15", inputGain);
         e->setProperty("piano-audio-input-zero", "raw0=silence;finite-db-floor=-36;raw1-100=db-linear");
     }
 }
@@ -541,17 +542,17 @@ void PianoAudioDevice::run() {
         if (isInput) {
             const uint32_t captured = gTransport->capture(gTransport->context, period, tp.periodFrames);
             if (captured < tp.periodFrames) bzero(period + captured * ch, (tp.periodFrames - captured) * 2 * ch);
-            piano_audio_copy_to_ring(buffer, tp.ringFrames, uint32_t(done % tp.ringFrames), period, tp.periodFrames, ch);
+            piano_audio_copy_to_ring(buffer, tp.ringFrames, done, period, tp.periodFrames, ch);
             inputDelivered += captured;
             if (captured && !firstInput) firstInput = done + 1;
             piano_audio_dev_captured = piano_audio_dev_captured + captured;
         } else {
-            piano_audio_copy_from_ring(period, buffer, tp.ringFrames, uint32_t(done % tp.ringFrames), tp.periodFrames, ch);
+            piano_audio_copy_from_ring(period, buffer, tp.ringFrames, done, tp.periodFrames, ch);
             int any = 0;
             for (uint32_t i = 0; i < tp.periodFrames * ch; ++i) any |= period[i];
             if (any) ++soundPeriods;
             const uint32_t played = gTransport->play(gTransport->context, period, tp.periodFrames);
-            piano_audio_zero_ring(buffer, tp.ringFrames, uint32_t(done % tp.ringFrames), tp.periodFrames, ch);
+            piano_audio_zero_ring(buffer, tp.ringFrames, done, tp.periodFrames, ch);
             piano_audio_dev_played = piano_audio_dev_played + played;
         }
         const uint64_t before = done;

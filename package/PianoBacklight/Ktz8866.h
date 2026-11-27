@@ -66,10 +66,23 @@ inline uint16_t codeForPercent(uint32_t percent, uint16_t floor)
 {
   const uint32_t p = percent > 100 ? 100 : percent;
   const uint32_t code = (p * kFullScale + 50) / 100;
-  return uint16_t(code < floor ? floor : code > kFullScale ? kFullScale : code);
+  return uint16_t(floor >= kFullScale ? kFullScale : code < floor ? floor : code);
 }
 // The off/on ramps of register 0x14 (one nibble) in microseconds.
-inline uint32_t rampUs(uint8_t nibble) { return nibble ? 1000u << ((nibble & 15) - 1) : 512u; }
+inline uint32_t rampUs(uint8_t nibble)
+{
+  nibble &= 15;
+  return nibble ? 1000u << (nibble - 1) : 512u;
+}
+
+// Pending key events use a signed delta and saturate before they reach the worker.
+inline int32_t queuedSteps(int32_t pending, int64_t delta)
+{
+  if (delta < -40) return -20;
+  if (delta > 40) return 20;
+  const int64_t sum = int64_t(pending) + delta;
+  return sum < -20 ? -20 : sum > 20 ? 20 : int32_t(sum);
+}
 
 // ------------------------------------------------------------------------------------------------------------- brightness steps
 // Ascending codes, the floor first. Linear mapping (BL_CFG1 bit 3, the reset value): full scale divided by 2^(k/3), k = 0, 1, ...
@@ -177,7 +190,7 @@ struct Config {
   bool readFlags = false;      // piano-backlight-flags=1: the survey reads FLAG (0x0f), which clears its latched faults
   bool autoAllowed = false;    // piano-backlight-auto=1: ambient targets taken (automatic brightness)
   bool android = false;        // use the bounded SDR range if both ICs support the reference mapping
-  unsigned errorLimit = 8;     // consecutive failed accesses before control stops (the ICs stay as they are)
+  unsigned errorLimit = 8;     // consecutive failed attempts before brightness control stops
 };
 
 struct IcState {
@@ -186,6 +199,7 @@ struct IcState {
   bool have[kRegCount] = {};
   bool lit = false;                   // BL_EN as last read or written
   uint16_t code = 0;                  // the code as last read or written
+  bool enableKnown = false, codeKnown = false;
   uint16_t foundCode = 0;
   bool foundLit = false;
   uint32_t codeReadbacks = 0, enableReadbacks = 0, errors = 0;
@@ -206,6 +220,8 @@ class Controller {
       if (cfg_.readFlags) readSurvey(i, kRegFlag);
       s.foundCode = s.code = codeOf(s.reg[kRegBrtLsb], s.reg[kRegBrtMsb]);
       s.foundLit = s.lit = s.reg[kRegEn] & kEnBacklight;
+      s.codeKnown = s.have[kRegBrtLsb] && s.have[kRegBrtMsb];
+      s.enableKnown = s.have[kRegEn];
     }
     ics_.done();
     for (unsigned i = 0; i < kIcs; ++i) describe(i);
@@ -237,6 +253,7 @@ class Controller {
     steps_.build(cfg_.floor, exponential_, ceiling_);
     ambient_.configure(cfg_.autoAllowed, cfg_.floor, exponential_, int(steps_.count()) - 1, ceiling_);
     code_ = p.foundCode;
+    if (p.foundCode == q.foundCode) matchedCode_ = p.foundCode;
     if (p.foundCode != q.foundCode) note("the ICs hold different codes (%u, %u): both get the primary's", p.foundCode, q.foundCode);
     const uint16_t target = cfg_.bootPercent ? levelCode(cfg_.bootPercent) : 0;
     if (!target)
@@ -253,7 +270,7 @@ class Controller {
     note("control: ON, %s mapping, %u steps from %u to %u, floor %u; display off -> BL_EN cleared, on -> code then BL_EN; lid %s",
          exponential_ ? "exponential" : "linear", steps_.count(), steps_.at(0), steps_.at(steps_.count() - 1), cfg_.floor,
          cfg_.lidWatch ? "closed -> off (piano-backlight-lid=1)" : "not acted on");
-    control_ = true;
+    controlled_ = control_ = true;
     apply();
     return true;
   }
@@ -317,8 +334,11 @@ class Controller {
       return;
     }
     uint16_t next = code_;
-    for (int i = 0; i < delta; ++i) next = steps_.up(next);
-    for (int i = 0; i > delta; --i) next = steps_.down(next);
+    const int count = int(steps_.count());
+    for (int i = 0; i < delta && i < count; ++i) next = steps_.up(next);
+    for (int i = 0; i > delta && i > -count; --i) next = steps_.down(next);
+    if (ambient_.pendingLevel()) ambient_.adjust(next);
+    else ambient_.deferSteps(delta);
     limited("step %+d from %s: code %u -> %u (%u %%)%s", delta, source, code_, next, percentOf(next),
             next == code_ ? (delta > 0 ? " (full scale)" : " (the floor)") : wantLit() ? "" : " (applied when the backlight is on again)");
     code_ = next;
@@ -367,6 +387,16 @@ class Controller {
   {
     if (control_ && pending()) apply();
     if (summary_.targets && ics_.nowMs() - summary_.since >= kSummaryMs) summarize();
+  }
+
+  // Legacy registry snapshots also carry the general sensor sequence, which advances for unrelated streams.
+  bool ambientSnapshot(uint64_t seq, uint32_t session, uint32_t target, uint32_t lux)
+  {
+    if (target > 1000 || (snapshot_.target >= 0 && seq <= snapshot_.seq)) return false;
+    if (!wantLit() && session != snapshot_.session) return false;   // the new session may publish before display-on arrives
+    const bool fresh = snapshot_.session != session || snapshot_.target != int32_t(target) || snapshot_.lux != lux;
+    snapshot_ = {seq, session, lux, int32_t(target)};
+    return fresh && ambient(int32_t(target), lux, "PianoSensors");
   }
 
   // A target of the ambient light policy (PianoBacklightAmbient, or PianoSensors' piano-sensors-light-target): permille of the code
@@ -428,6 +458,8 @@ class Controller {
   bool controlling() const { return control_; }
   bool wantLit() const { return displayOn_ && !asleep_ && !(cfg_.lidWatch && lid_ == 0); }
   bool lit(unsigned i) const { return ic_[i].lit; }
+  bool bothLit() const { return enableIs(0, true) && enableIs(1, true); }
+  bool bothDark() const { return enableIs(0, false) && enableIs(1, false); }
   uint16_t code() const { return code_; }
   uint16_t floor() const { return cfg_.floor; }
   uint16_t ceiling() const { return ceiling_; }
@@ -437,9 +469,7 @@ class Controller {
   const IcState &ic(unsigned i) const { return ic_[i]; }
   bool pending() const
   {
-    for (const IcState &s : ic_)
-      if (wantLit() ? (!s.lit || s.code != code_) : s.lit) return true;
-    return false;
+    return wantLit() ? !bothLit() || !codesMatch(code_) : !bothDark();
   }
   uint32_t errors() const { return errors_; }
   uint32_t writes() const { return writes_; }
@@ -531,8 +561,12 @@ class Controller {
     }
     const uint8_t lsb = uint8_t(code & 7), msb = uint8_t(code >> 3);
     uint8_t rl = 0, rm = 0;
-    const bool wrote = access(i, ics_.write(i, kRegBrtLsb, lsb)) && access(i, ics_.write(i, kRegBrtMsb, msb));
-    writes_ += wrote ? 2 : 1;
+    IcState &s = ic_[i];
+    s.codeKnown = false;
+    ++writes_;
+    const bool lowWritten = access(i, ics_.write(i, kRegBrtLsb, lsb));
+    if (lowWritten) ++writes_;
+    const bool wrote = lowWritten && access(i, ics_.write(i, kRegBrtMsb, msb));
     const bool readBack = wrote && access(i, ics_.read(i, kRegBrtLsb, &rl)) && access(i, ics_.read(i, kRegBrtMsb, &rm));
     const bool good = readBack && codeOf(rl, rm) == code;
     if (!quiet_ || !good) {   // an ambient change that took is in the summary line instead
@@ -540,7 +574,11 @@ class Controller {
               percentOf(code), ic_[i].code, !wrote ? "WRITE FAILED" : !readBack ? "read back failed" : good ? "read back ok" : "READ BACK DIFFERS");
     }
     if (readBack && !good) access(i, false);
-    if (good) ++ic_[i].codeReadbacks;
+    if (good) {
+      s.code = code;
+      s.codeKnown = true;
+      ++s.codeReadbacks;
+    }
     return good;
   }
   // BL_EN's bit 6 in one IC: read, bits 5:0 kept, bit 7 never set, written only when it changes, read back.
@@ -552,54 +590,88 @@ class Controller {
       return false;
     }
     const uint8_t value = enableValue(found, on);
-    if (value == found) { ic_[i].reg[kRegEn] = found; ++ic_[i].enableReadbacks; return true; }
+    if (value == found) {
+      recordEnable(i, found);
+      return true;
+    }
+    ic_[i].enableKnown = false;
     const bool wrote = access(i, ics_.write(i, kRegEn, value));
     ++writes_;
     const bool readBack = wrote && access(i, ics_.read(i, kRegEn, &back));
-    const bool good = readBack && (back & kEnBacklight) == (value & kEnBacklight);
+    const bool good = readBack && back == value;
     limited("write %s: BL_EN 0x08 = 0x%02x (was 0x%02x): backlight %s, sinks 0x%02x kept; %s", kIcName[i], value, found, on ? "ON" : "OFF",
             found & kEnSinks, !wrote ? "WRITE FAILED" : !readBack ? "read back failed" : good ? "read back ok" : "READ BACK DIFFERS");
     if (readBack && !good) access(i, false);
-    if (good) { ic_[i].reg[kRegEn] = back; ++ic_[i].enableReadbacks; }
+    // A mismatched reply can be stale. Rollback must read the chip again before treating it as dark.
+    if (good) recordEnable(i, back);
     return good;
   }
-  // The ICs toward the wanted state: lit -> the code first, then BL_EN; dark -> BL_EN cleared (the code stays for the next on).
-  // An attempt that leaves an IC short of it counts; errorLimit such attempts in a row (retry() makes one a second) end control.
+  void recordEnable(unsigned i, uint8_t value)
+  {
+    IcState &s = ic_[i];
+    s.reg[kRegEn] = value;
+    s.lit = value & kEnBacklight;
+    s.enableKnown = true;
+    ++s.enableReadbacks;
+  }
+  bool enableIs(unsigned i, bool on) const { return ic_[i].enableKnown && ic_[i].lit == on; }
+  bool setEnable(unsigned i, bool on) { return enableIs(i, on) || writeEnable(i, on); }
+  bool blank()
+  {
+    const bool primary = setEnable(0, false);
+    const bool secondary = setEnable(1, false);
+    return primary && secondary;
+  }
+  bool codeIs(unsigned i, uint16_t code) const { return ic_[i].codeKnown && ic_[i].code == code; }
+  bool codesMatch(uint16_t code) const { return codeIs(0, code) && codeIs(1, code); }
+  bool setCode(unsigned i, uint16_t code) { return codeIs(i, code) || writeCode(i, code); }
+  bool applyLit()
+  {
+    const bool wasLit = bothLit();
+    if (!wasLit && !blank()) return false;
+    if (!setCode(0, code_) || !setCode(1, code_)) {
+      if (wasLit) {
+        // Keep a working panel at its last common level. An unverified write may have reached the chip.
+        if (matchedCode_ >= cfg_.floor && matchedCode_ <= ceiling_) {
+          for (unsigned i = 0; i < kIcs; ++i) setCode(i, matchedCode_);
+        } else {
+          blank();
+        }
+      }
+      return false;
+    }
+    matchedCode_ = code_;
+    if (setEnable(0, true) && setEnable(1, true)) return true;
+    blank();   // a failed wake stays dark until both controllers can be enabled
+    return false;
+  }
+  // Verify both codes before enabling either IC. Sleep always attempts to blank both, including after brightness control stops.
   void apply()
   {
-    if (!control_) return;
     const bool want = wantLit();
-    bool short_ = false;
-    for (unsigned i = 0; i < kIcs; ++i) {
-      IcState &s = ic_[i];
-      if (want) {
-        if (s.code != code_) {
-          if (!writeCode(i, code_)) {
-            short_ = true;
-            continue;
-          }
-          s.code = code_;
-        }
-        if (!s.lit) {
-          if (writeEnable(i, true)) s.lit = true;
-          else short_ = true;
-        }
-      } else if (s.lit) {
-        if (writeEnable(i, false)) s.lit = false;
-        else short_ = true;
+    if (!control_) {
+      if (controlled_ && !want && !bothDark()) {
+        blank();
+        ics_.done();
       }
+      return;
     }
+    const bool good = want ? applyLit() : blank();
     if (pwmFull_ && want) {
-      pwmQualified_ = !short_ && checkFullPwm(pwmWakePending_ ? "wake" : "apply");
-      if (!short_) pwmWakePending_ = false;
+      pwmQualified_ = good && checkFullPwm(pwmWakePending_ ? "wake" : "apply");
+      if (good) pwmWakePending_ = false;
     }
-    ics_.done();
-    if (!short_) {
+    if (good) {
       failedAttempts_ = 0;
     } else if (++failedAttempts_ >= cfg_.errorLimit) {
+      // A bus that has gone silent cannot be verified. Preserve the last common code on the reachable half.
+      if (want && !(bothLit() && matchedCode_ <= ceiling_)) blank();
       control_ = false;
-      note("control: OFF after %u failed attempts in a row: the ICs stay as they are", failedAttempts_);
+      note("control: OFF after %u failed attempts in a row: %s", failedAttempts_,
+           bothDark() ? "both ICs blanked" : bothLit() && codesMatch(matchedCode_) ? "both ICs at the last verified code"
+           : "could not verify a matched state on both ICs");
     }
+    ics_.done();
   }
 
   void describe(unsigned i)
@@ -679,14 +751,19 @@ class Controller {
     summary_ = Summary{};
   }
   pianoauto::Ambient ambient_;
+  struct {
+    uint64_t seq = 0;
+    uint32_t session = 0, lux = 0;
+    int32_t target = -1;
+  } snapshot_;
   Summary summary_;
   bool quiet_ = false;
   LogLimit limit_{24, 10000};
-  bool control_ = false, exponential_ = false, armed_ = false, displayOn_ = true, asleep_ = false;
+  bool controlled_ = false, control_ = false, exponential_ = false, armed_ = false, displayOn_ = true, asleep_ = false;
   bool rawSeen_ = false, rawOn_ = false;
   uint32_t rawSystem_ = 0, rawApi_ = 0;
   int lid_ = -1;
-  uint16_t code_ = 0, ceiling_ = kFullScale;
+  uint16_t code_ = 0, ceiling_ = kFullScale, matchedCode_ = kFullScale + 1;
   uint32_t errors_ = 0, failedAttempts_ = 0, writes_ = 0;
   bool pwmFull_ = false, pwmQualified_ = true, pwmWakePending_ = false;
   unsigned pwmChecks_ = 0;

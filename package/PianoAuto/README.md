@@ -5,8 +5,8 @@ the keyboard cover's lock and the touch screen following it, and automatic brigh
 that resume after every off/on. They are independent of the sensor transport (which waits on PianoPower's client API) and are tested
 on the host now.
 
-**Status: offline, host-tested code only (2026-11-11).** PianoAuto itself is not a kext and nothing has run on the tablet. The headers
-are taken in by PianoTouch (`piano-touch-rotate=1`) and PianoBacklight (`piano-backlight-auto=1`), both linked and off by default;
+**Auto-rotate is off by default and in [RAM qualification](../../docs/drivers/auto-rotate.md#ram-qualification-checklist).** PianoAuto is a
+userland agent and a set of shared sources. PianoTouch (`piano-touch-rotate=1`) and PianoBacklight (`piano-backlight-auto=1`) use its headers.
 `AutoStream`/`AutoLight` are compiled into PianoSensors' kext for its level 4 (`piano-sensors=4`, `sensors.md` section 5c).
 Interfaces: `sensors.md` section 5a.
 

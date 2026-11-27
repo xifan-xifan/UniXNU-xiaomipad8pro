@@ -3,9 +3,8 @@ Copyright (c) 2026, Leo Zhang.
 
 _MTLFunction's returnType and arguments for visible (stitchable) functions, from the function's own AIR (AirSignature.h, ours, MIT:
 the signature the compiler wrote as !air.visible / air.stitching_info metadata into the function's bitcode in its library's metallib).
-Core Image's modern CIKL path reflects every kernel of a library it compiled from source; without the answers it made no kernel
-(host replay, private/host-checks/20261116-ahead/b11-cameras/APPS.md). Objects as Apple's Metal answers the same compiled function,
-qualified field by field on a Mac (private/host-checks/20261122-preview/QUAL.md); nil with one log line otherwise, never a guess.
+Core Image's modern CIKL path reflects every kernel of a library it compiled from source; without the answers it made no kernel.
+Objects as Apple's Metal answers the same compiled function, qualified field by field on a Mac; nil with one log line otherwise.
 Context: UniXNU-turnip 527b8b7a31192df14b96d10a70c339845ed2cd12, native frontend after the earlier piano patches (0001-0009).
 
 --- a/frontend.mm
@@ -28,10 +27,10 @@ Context: UniXNU-turnip 527b8b7a31192df14b96d10a70c339845ed2cd12, native frontend
 +// ---- function reflection (UniXNU-piano tooling/metal/turnip-a830/frontend 0010, 2026-11-22, MIT as the file) ----
 +// _MTLFunction's returnType and arguments for a visible (stitchable) function: Core Image's modern CIKL path reflects every kernel of a
 +// library it compiled from source (reflect(CIKernelLibrary): returnType's dataType, each argument's type, name and dataTypeDescription,
-+// a struct's typeName and members) and without the answers its kernels could not be made (host replay, APPS.md). The answers are the
++// a struct's typeName and members) and without the answers its kernels could not be made. The answers are the
 +// function's own: the signature the compiler wrote into its AIR (AirSignature.h reads it from the function's bitcode in its library's
 +// metallib), turned into objects as Apple's Metal answers the same compiled function (qualified field by field against Apple's Metal
-+// on a Mac: private/host-checks/20261122-preview/QUAL.md). A function whose AIR says nothing of the kind, or holds a type outside that
++// on a Mac). A function whose AIR says nothing of the kind, or holds a type outside that
 +// qualified set, answers nil with one line in the log, never a guessed signature.
 +#include "AirSignature.h"
 +static NSData *functionBitcode(NBFunction *function);

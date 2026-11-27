@@ -58,6 +58,7 @@ struct HttRx {
   // the buffers: the refill ring's, then each status ring's
   uint64_t refillBus[kRxRefillEntries] = {};
   uint8_t *refillVa[kRxRefillEntries] = {};   // level 8 reads the received frames out of them
+  uint16_t refillSlot[kRxRefillEntries] = {}; // buffer cookie -> the slot of its last post
   uint64_t statusBus[kRxRadios][kRxMonStatusEntries] = {};
   uint32_t statusSlotBuffer[kRxRadios][kRxMonStatusEntries] = {};   // status ring slot -> which of its buffers sits there
   uint32_t rbm = kRxBufRbmFw;
@@ -168,6 +169,7 @@ inline void httFill(HttRx &rx)
   HttRing &refill = rx.ring[kHttRefill];
   for (uint32_t i = 0; i + 1 < refill.entries; ++i) {
     putBuffer(refill.va + i * refill.entryWords * 4, rx.refillBus[i], rx.rbm, i);
+    rx.refillSlot[i] = uint16_t(i);
     ++rx.refillPosted;
   }
   refill.ours = refill.entries - 1;
@@ -275,15 +277,25 @@ inline uint32_t httRefillFree(const HttRx &rx)
   return r.entries - 1 - used;
 }
 
-// Buffer `buffer` (its cookie) into the refill ring again; false when it is not one of the refill ring's or there is no room.
+// Buffer `buffer` (its cookie) into the refill ring again. A duplicate completion
+// cannot queue a second copy while the first post is still waiting for firmware.
 inline bool httRefillPost(HttRx &rx, uint32_t buffer)
 {
   using namespace httdetail;
   HttRing &r = rx.ring[kHttRefill];
-  if (buffer + 1 >= kRxRefillEntries || !r.planned) return false;
-  if (!httRefillFree(rx)) return false;
+  if (buffer >= kRxRefillEntries - 1 || !r.planned || !r.entries) return false;
+  const uint32_t tail = r.announced ? slotOf(r, load(r.tail)) : 0;
+  const uint32_t next = (r.ours + 1) % r.entries;
+  if (next == tail) return false;
+  const uint32_t slot = rx.refillSlot[buffer];
+  const bool queued = tail <= r.ours ? (tail <= slot && slot < r.ours) : (slot >= tail || slot < r.ours);
+  if (queued) {
+    const uint32_t info = get32(r.va + slot * r.entryWords * 4 + 4);
+    if (((info >> kRxBufCookieShift) & kRxBufCookieMask) == buffer) return false;
+  }
   putBuffer(r.va + r.ours * r.entryWords * 4, rx.refillBus[buffer], rx.rbm, buffer);
-  r.ours = (r.ours + 1) % r.entries;
+  rx.refillSlot[buffer] = uint16_t(r.ours);
+  r.ours = next;
   store(r.head, r.ours * r.entryWords);
   ++rx.refillPosted;
   return true;

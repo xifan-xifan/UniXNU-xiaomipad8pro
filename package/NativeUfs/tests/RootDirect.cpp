@@ -67,8 +67,9 @@ int main ()
   // hostReadPrd: one READ(10) with the table in the command descriptor; the command path cleans only its own entry and descriptor.
   reset ();
   UfsPrd two[2] = { { 0x880000000ULL, 16384 }, { 0x880100000ULL, 4096 } };
+  bool live = true;
   const unsigned before = m.releases;
-  assert (hostReadPrd (0, 9, 5, two, 2) == 0 && !gHost.poisoned);
+  assert (hostReadPrd (0, 9, 5, two, 2, &live) == 0 && !gHost.poisoned);
   assert (m.releases - before == 2);   // the request list entry and the command descriptor, not the data
   const uint8_t *ucd = memory + ufsSlotUcdOffset (m.lastSlot), *utrd = memory + ufsSlotUtrdOffset (m.lastSlot);
   const uint32_t *table = reinterpret_cast<const uint32_t *> (ucd + kPrdtOffset);
@@ -82,20 +83,20 @@ int main ()
   assert (hostRead4k (0, 9, 1, out.data ()) == 0 && m.releases - before2 == 3);
   // Refused before the controller: a table that does not add up, none, too many blocks, past the last LBA.
   const unsigned writes = m.writes;
-  assert (hostReadPrd (0, 9, 4, two, 2) == kIOReturnBadArgument);
-  assert (hostReadPrd (0, 9, 5, two, 0) == kIOReturnBadArgument);
-  assert (hostReadPrd (0, 9, 5, nullptr, 2) == kIOReturnBadArgument);
-  assert (hostReadPrd (0, 9, 257, two, 2) == kIOReturnBadArgument);
-  assert (hostReadPrd (0, 0xffffffffULL, 5, two, 2) == kIOReturnBadArgument);
+  assert (hostReadPrd (0, 9, 5, two, 2, nullptr) == kIOReturnBadArgument);
+  assert (hostReadPrd (0, 9, 4, two, 2, &live) == kIOReturnBadArgument);
+  assert (hostReadPrd (0, 9, 5, two, 0, &live) == kIOReturnBadArgument);
+  assert (hostReadPrd (0, 9, 5, nullptr, 2, &live) == kIOReturnBadArgument);
+  assert (hostReadPrd (0, 9, 257, two, 2, &live) == kIOReturnBadArgument);
+  assert (hostReadPrd (0, 0xffffffffULL, 5, two, 2, &live) == kIOReturnBadArgument);
   UfsPrd big[1] = { { 0x880000000ULL, kPrdMax + 4096 } };
-  assert (hostReadPrd (0, 9, (kPrdMax + 4096) / 4096, big, 1) == kIOReturnBadArgument);   // an entry over 256 KiB
+  assert (hostReadPrd (0, 9, (kPrdMax + 4096) / 4096, big, 1, &live) == kIOReturnBadArgument);   // an entry over 256 KiB
   assert (m.writes == writes && !gHost.poisoned);
   // Busy and task-set-full answers are sent again, as for hostRead4k; a timeout quarantines the transport.
-  reset (Fault::Busy); m.busyLeft = 3; assert (hostReadPrd (0, 9, 5, two, 2) == 0 && !gHost.poisoned);
-  reset (Fault::Timeout); assert (hostReadPrd (0, 9, 5, two, 2) != 0); assertQuarantined ();
+  reset (Fault::Busy); m.busyLeft = 3; assert (hostReadPrd (0, 9, 5, two, 2, &live) == 0 && !gHost.poisoned);
+  reset (Fault::Timeout); assert (hostReadPrd (0, 9, 5, two, 2, &live) != 0); assertQuarantined ();
   // Review H1 (2026-11-14): *live only when the read's own command was rung and did not complete; a refusal before the doorbell or a
   // completed command with a bad response or a SCSI error is an ordinary failure (the pages are the caller's again).
-  bool live = true;
   reset (Fault::None); assert (hostReadPrd (0, 9, 5, two, 2, &live) == 0 && !live);
   reset (Fault::Timeout); live = false; assert (hostReadPrd (0, 9, 5, two, 2, &live) != 0 && live); assertQuarantined ();
   reset (Fault::Type); live = true; assert (hostReadPrd (0, 9, 5, two, 2, &live) != 0 && !live && gHost.poisoned);

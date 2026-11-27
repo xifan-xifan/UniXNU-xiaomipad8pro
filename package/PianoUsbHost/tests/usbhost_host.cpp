@@ -7,7 +7,7 @@
 //   - the QMP DP_COM decode (mode, software lane select, orientation);
 //   - the PMIC Type-C decode (a computer's Rp, an OTG device's Rd on CC2, an audio accessory, nothing) with Linux's bit order;
 //   - the orientation witnesses and the role policy (PMIC only, UCSI over PMIC, docks).
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. -I../../PianoDwc3 usbhost_host.cpp -o /tmp/usbhost_host && /tmp/usbhost_host
+//   c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I.. -I../../PianoDwc3 usbhost_host.cpp -o /tmp/usbhost_host && /tmp/usbhost_host
 #include "UsbHostSurvey.h"
 #include <cstdio>
 #include <cstring>

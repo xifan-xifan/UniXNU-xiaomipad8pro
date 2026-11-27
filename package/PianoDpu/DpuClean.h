@@ -6,6 +6,12 @@ namespace pianodpu::flip {
 
 constexpr uint32_t kSurfaceWriteCombined = 0x400;   // IOSurface's requested mode
 
+template <class BootArg>
+bool readCleanSkip(uint32_t flipLevel, BootArg bootArg)
+{
+  return flipLevel == 4 && bootArg("piano-dpu-clean-skip", 0) == 1;
+}
+
 enum class CleanReason : unsigned {
   eligible,
   forced,

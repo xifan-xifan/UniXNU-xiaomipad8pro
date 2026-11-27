@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// A simulated WCN7860 Bluetooth controller for the host tests (bt_host.cpp drives it frame by frame, bt_bringup_host.cpp byte by
+// A simulated WCN7860 Bluetooth controller for the host tests (bt_host.cpp drives it frame by frame, BtBoardSim.h byte by
 // byte through a model of the GENI UART): the vendor commands of QcaCodec.h, the firmware download (an ELF rampatch acknowledged at
 // its end, an NVM acknowledged segment by segment), the speed change (its reply sent at the new speed), the address, and faults. It
 // answers what the Ubuntu piano kernel's btqca/hci_qca expect of the chip (behaviour only); it is not the chip.
@@ -51,6 +51,7 @@ struct Sim {
   // State.
   enum { kPatch, kNvm } phase = kPatch;
   std::vector<uint8_t> received[2];
+  std::vector<unsigned> segmentLengths[2];
   unsigned segments[2] = {0, 0};
   uint32_t expect[2] = {0, 0};
   uint8_t address[6] = {};        // least significant first
@@ -61,7 +62,7 @@ struct Sim {
   bool romIgnoresReset = false;   // no answer to HCI_Reset before the rampatch
   bool forgetsAddress = false;    // an HCI_Reset after an address write brings back the NVM's default (once)
   bool addressWritten = false;
-  // The byte stream (bt_bringup_host.cpp): a framer for what arrives, the junk it could not frame.
+  // The byte stream (BtBoardSim.h): a framer for what arrives, the junk it could not frame.
   std::vector<uint8_t> frame;
   size_t need = 0;
   unsigned junk = 0;
@@ -103,6 +104,7 @@ struct Sim {
         const unsigned len = p[1];
         std::vector<uint8_t> &r = received[phase];
         r.insert(r.end(), p + 2, p + 2 + len);
+        segmentLengths[phase].push_back(len);
         ++segments[phase];
         if (phase == kPatch && hwErrorInPatch && segments[phase] == 10) {
           events.push_back({chipBaud, {kEvHardwareError, 1, 0x0b}});
@@ -164,7 +166,7 @@ struct Sim {
     if (hostBaud != chipBaud) return 0;
     return handle(b, n);
   }
-  // bt_bringup_host.cpp's byte stream (already at the controller's speed).
+  // BtBoardSim.h's byte stream (already at the controller's speed).
   void rxByte(uint8_t b)
   {
     if (frame.empty()) {

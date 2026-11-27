@@ -8,54 +8,70 @@ each (u64 base, u64 size, u32 bank, u32 use). An older FD leaves it zeroed.
 """
 import struct
 import sys
+from pathlib import Path
 
 NAME = 'piano-extra-ram'
 BYTES = 24 * 16
 
 
-def _node_end(t, off):
-    """Offset after the node at off; also its (props, children, first child offset, name)."""
-    nprops, nchildren = struct.unpack_from('<II', t, off)
-    o = off + 8
-    name = None
-    for _ in range(nprops):
-        pname = t[o:o + 32].split(b'\0', 1)[0].decode()
-        (length,) = struct.unpack_from('<I', t, o + 32)
-        length &= 0x7fffffff
-        if pname == 'name':
-            name = t[o + 36:o + 36 + length].split(b'\0', 1)[0].decode()
-        o += 36 + ((length + 3) & ~3)
-    props_end = o
-    for _ in range(nchildren):
-        o = _node_end(t, o)[0]
-    return o, nprops, nchildren, props_end, name
+def _chosen(t):
+    chosen = None
+
+    def walk(off, depth):
+        nonlocal chosen
+        if depth > 64 or len(t) - off < 8:
+            raise ValueError('invalid ADT node header or nesting depth')
+        nprops, nchildren = struct.unpack_from('<II', t, off)
+        o = off + 8
+        name = value = None
+        for _ in range(nprops):
+            if len(t) - o < 36:
+                raise ValueError('truncated ADT property header')
+            pname, terminator, _ = t[o:o + 32].partition(b'\0')
+            if not terminator:
+                raise ValueError('unterminated ADT property name')
+            word, = struct.unpack_from('<I', t, o + 32)
+            length = word & 0x7fffffff
+            start = o + 36
+            o = start + ((length + 3) & ~3)
+            if o > len(t):
+                raise ValueError('truncated ADT property value or padding')
+            if pname == b'name':
+                if name is not None:
+                    raise ValueError('duplicate ADT node name property')
+                name = t[start:start + length]
+            if pname == NAME.encode():
+                if value is not None:
+                    raise ValueError(f'duplicate {NAME} properties')
+                if word & 0x80000000:
+                    raise ValueError(f'{NAME} has a flagged length')
+                value = bytes(t[start:start + length])
+        if depth == 1 and name == b'chosen\0':
+            if chosen is not None:
+                raise ValueError('duplicate /chosen nodes')
+            chosen = off, o, value
+        elif value is not None:
+            raise ValueError(f'{NAME} outside /chosen')
+        for _ in range(nchildren):
+            o = walk(o, depth + 1)
+        return o
+
+    if walk(0, 0) != len(t):
+        raise ValueError('trailing bytes after the ADT root')
+    if chosen is None:
+        raise ValueError('no /chosen node')
+    return chosen
 
 
 def find_chosen(t):
     """(node offset, props end) of /chosen (a child of the root)."""
-    _, _, nchildren, o, _ = _node_end(t, 0)
-    for _ in range(nchildren):
-        end, _, _, props_end, name = _node_end(t, o)
-        if name == 'chosen':
-            return o, props_end
-        o = end
-    raise ValueError('no /chosen node')
+    off, props_end, _ = _chosen(t)
+    return off, props_end
 
 
 def extra_ram_property(t):
     """Return the raw /chosen property, or None if it is absent."""
-    off, _ = find_chosen(t)
-    nprops = struct.unpack_from('<I', t, off)[0]
-    value = None
-    o = off + 8
-    for _ in range(nprops):
-        length = struct.unpack_from('<I', t, o + 32)[0] & 0x7fffffff
-        if t[o:o + 32].split(b'\0', 1)[0].decode() == NAME:
-            if value is not None:
-                raise ValueError(f'/chosen has duplicate {NAME} properties')
-            value = bytes(t[o + 36:o + 36 + length])
-        o += 36 + ((length + 3) & ~3)
-    return value
+    return _chosen(t)[2]
 
 
 def has_extra_ram(t):
@@ -64,13 +80,12 @@ def has_extra_ram(t):
 
 def add_extra_ram(tree):
     t = bytearray(tree)
-    if has_extra_ram(t):
+    off, props_end, value = _chosen(t)
+    if value is not None:
         raise ValueError(f'/chosen already has {NAME}')
-    off, props_end = find_chosen(t)
     prop = NAME.encode().ljust(32, b'\0') + struct.pack('<I', BYTES) + bytes(BYTES)
     t[props_end:props_end] = prop
     struct.pack_into('<I', t, off, struct.unpack_from('<I', t, off)[0] + 1)
-    assert _node_end(t, 0)[0] == len(t)
     return bytes(t)
 
 
@@ -87,6 +102,9 @@ def ensure_extra_ram_placeholder(tree):
 if __name__ == '__main__':
     if len(sys.argv) != 3:
         sys.exit(__doc__)
-    data = open(sys.argv[1], 'rb').read()
-    open(sys.argv[2], 'wb').write(add_extra_ram(data))
+    try:
+        data = add_extra_ram(Path(sys.argv[1]).read_bytes())
+    except (OSError, ValueError) as error:
+        sys.exit(str(error))
+    Path(sys.argv[2]).write_bytes(data)
     print(f'{sys.argv[2]}: /chosen {NAME} placeholder ({BYTES} bytes) added')

@@ -167,6 +167,37 @@ static void testProtocol()
     CHECK(v.owner == 0 && tMaskDepth == 0);
   }
 
+  // A late nested give must leave the replacement holder's nesting intact.
+  {
+    PianoSpmiWords v{};
+    PianoSpmiLock c = makeLock(&v, a.tag);
+    const PianoSpmiToken outer = piano_spmi_take(&c), nested = piano_spmi_take(&c);
+    v.owner = b.tag;
+    v.holder = hSelf(nullptr) + 1;
+    v.depth = 2;
+    piano_spmi_give(&c, nested);
+    CHECK(v.owner == b.tag && v.depth == 2 && c.lost == 1 && tMaskDepth == 1);
+    piano_spmi_give(&c, outer);
+    CHECK(v.owner == b.tag && v.depth == 2 && c.lost == 2 && tMaskDepth == 0);
+  }
+
+  // The total keeps the full wait when the calling thread is preempted for more than 32 bits of microseconds.
+  {
+    PianoSpmiWords v{};
+    PianoSpmiLock c = makeLock(&v, a.tag);
+    v.owner = b.tag;
+    const uint64_t pause = uint64_t(UINT32_MAX) + 99;
+    gSpinHook = [&] {
+      gClockUs += pause;
+      v.owner = 0;
+    };
+    const PianoSpmiToken token = piano_spmi_take(&c);
+    gSpinHook = nullptr;
+    piano_spmi_give(&c, token);
+    CHECK(c.wait_max_us == UINT32_MAX && v.wait_max_us == UINT32_MAX);
+    CHECK(c.wait_total_us == pause + 1 && v.wait_total_us == pause + 1);
+  }
+
   char line[512];
   piano_spmi_format(&a, line, sizeof line);
   CHECK(std::strstr(line, "SPMI lock: ours 2 tx (") && std::strstr(line, "), waited 1 (") && std::strstr(line, "last behind THER") &&

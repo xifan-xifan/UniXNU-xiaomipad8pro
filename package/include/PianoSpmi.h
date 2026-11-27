@@ -132,7 +132,8 @@ static inline PianoSpmiToken piano_spmi_take(PianoSpmiLock *l)
     // one that sees the same hold for bound_us of its own spinning.
     const uint32_t bound = l->bound_us ? l->bound_us : (uint32_t)PianoSpmiDefaultBoundUs;
     const uint64_t start = piano_spmi_now(l);
-    uint32_t spins = 0, same = 0, other = 0, over = 0, epoch = __atomic_load_n(&w->takes, __ATOMIC_RELAXED);
+    uint64_t spins = 0;
+    uint32_t same = 0, other = 0, over = 0, epoch = __atomic_load_n(&w->takes, __ATOMIC_RELAXED);
     for (;;) {
         uint32_t expected = 0;
         if (__atomic_compare_exchange_n(&w->owner, &expected, l->tag, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) break;
@@ -162,17 +163,18 @@ static inline PianoSpmiToken piano_spmi_take(PianoSpmiLock *l)
     t.since = piano_spmi_now(l);
     t.kind = PianoSpmiTokenOuter;
     // The counts, with the word held.
-    const uint32_t waited = spins ? (uint32_t)(o->now_us ? t.since - start : spins) : 0;
     l->takes++;
     w->takes = w->takes + 1;
     if (spins) {
+        const uint64_t waited = o->now_us ? t.since - start : spins;
+        const uint32_t max_sample = waited > UINT32_MAX ? UINT32_MAX : (uint32_t)waited;
         l->contended++;
         l->last_other = other;
         l->wait_total_us += waited;
-        if (waited > l->wait_max_us) l->wait_max_us = waited;
+        if (max_sample > l->wait_max_us) l->wait_max_us = max_sample;
         w->contended = w->contended + 1;
         w->wait_total_us = w->wait_total_us + waited;
-        if (waited > w->wait_max_us) w->wait_max_us = waited;
+        if (max_sample > w->wait_max_us) w->wait_max_us = max_sample;
         w->last_waiter = l->tag;
         w->last_holder = other;
     }
@@ -189,15 +191,15 @@ static inline void piano_spmi_give(PianoSpmiLock *l, PianoSpmiToken t)
     if (t.kind == PianoSpmiTokenNone || !piano_spmi_valid(l)) return;
     const PianoSpmiLockOps *o = l->ops;
     PianoSpmiWords *w = l->words;
-    if (t.kind == PianoSpmiTokenNested) {
-        if (w->depth > 1) w->depth = w->depth - 1;
-        else l->unbalanced++;
-        o->unmask(o->context, t.was);
-        return;
-    }
     const uint64_t self = o->self(o->context);
     if (__atomic_load_n(&w->holder, __ATOMIC_RELAXED) != self) {
         l->lost++;                     // taken over while we held it: not ours to free any more
+        o->unmask(o->context, t.was);
+        return;
+    }
+    if (t.kind == PianoSpmiTokenNested) {
+        if (w->depth > 1) w->depth = w->depth - 1;
+        else l->unbalanced++;
         o->unmask(o->context, t.was);
         return;
     }

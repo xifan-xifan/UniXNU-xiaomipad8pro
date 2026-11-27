@@ -43,10 +43,12 @@ struct PolicyEvent {
   State before, after;
   bool unknownBefore, unknownAfter;
   bool criticalPending;     // the critical threshold is met but not yet for criticalHoldMs
+  bool incomplete;          // at least one expected sensor lacks a fresh reading
   // the sensor that decided (the hottest relative to the threshold of the resulting state, or the hottest overall)
   unsigned controller, sensor;
   int32_t deci;
   bool changed() const { return before != after || unknownBefore != unknownAfter; }
+  bool gpuLimited() const { return incomplete || after >= State::passive; }
 };
 
 class Policy {
@@ -55,7 +57,7 @@ class Policy {
 
   PolicyEvent update(const Monitor &m, uint64_t nowMs)
   {
-    PolicyEvent e{state_, state_, unknown_, unknown_, false, 0, 0, 0};
+    PolicyEvent e{state_, state_, unknown_, unknown_, false, !m.allFresh(), 0, 0, 0};
     if (!m.anyUsable()) {
       if (!noReading_) noReadingSinceMs_ = nowMs;
       if (noReading_ < 0xffffffffu) ++noReading_;
@@ -79,7 +81,7 @@ class Policy {
     unsigned who[4][2] = {};
     for (unsigned c = 0; c < kControllers; ++c)
       for (unsigned s = 0; s < kMap[c].count; ++s) {
-        if (!m.usable(c, s)) continue;
+        if (!m.fresh(c, s)) continue;
         const int32_t t = m.deci(c, s);
         const Sensor &sn = kMap[c].sensors[s];
         const int32_t critical = sn.criticalDeci - config_.criticalMarginDeci;
@@ -118,6 +120,7 @@ class Policy {
         next = k;
         break;
       }
+    if (e.incomplete && next < unsigned(state_)) next = unsigned(state_);
     state_ = State(next);
     if (next && enter[next]) {
       e.controller = who[next][0];
@@ -134,6 +137,7 @@ class Policy {
   bool unknown() const { return unknown_; }
   State peak() const { return peak_; }
   const PolicyConfig &config() const { return config_; }
+  void resetCriticalStreak() { criticalStreak_ = 0; }
 
  private:
   PolicyConfig config_;

@@ -14,8 +14,16 @@ class InvalidCapture(ValueError):
 
 
 def records(text, prefix):
-    return [dict(re.findall(r"(\w+)=([^\s]+)", line))
-            for line in text.splitlines() if line.startswith(prefix)]
+    found = []
+    for line in text.splitlines():
+        if not line.startswith(prefix):
+            continue
+        pairs = re.findall(r"(?:^|\s)(\w+)=(\S*)", line[len(prefix):])
+        record = dict(pairs)
+        if len(record) != len(pairs):
+            raise InvalidCapture(f"duplicate field in {prefix.strip()} record")
+        found.append(record)
+    return found
 
 
 def one(text, prefix):
@@ -26,7 +34,7 @@ def one(text, prefix):
 
 
 def success(text, tag):
-    codes = re.findall(rf"^{re.escape(tag)}=(\d+)$", text, re.M)
+    codes = re.findall(rf"^{re.escape(tag)}=(.*)$", text, re.M)
     if any(c in ("124", "137", "142") for c in codes) or re.search(
             r"Alarm clock|timed? out|TIMEOUT", text, re.I):
         raise InvalidCapture(f"TIMEOUT ({tag}); no numeric readback")
@@ -66,13 +74,16 @@ def probe(text, wanted=None):
     success(text, "probe_rc")
     dev = one(text, "default_output ")
     require(dev, status=0)
-    if number(dev, "device") <= 0:
+    if not re.fullmatch(r"[1-9][0-9]*", dev.get("device", "")):
         raise InvalidCapture("no default output")
     controls = one(text, "control_list_read ")
     require(controls, status=0)
     all_controls = records(text, "control ")
-    if number(controls, "count") != len(all_controls) or not all_controls:
+    if not all_controls or controls.get("count") != str(len(all_controls)):
         raise InvalidCapture("incomplete control list")
+    ids = [c.get("id", "") for c in all_controls]
+    if len(set(ids)) != len(ids) or not all(re.fullmatch(r"[1-9][0-9]*", cid) for cid in ids):
+        raise InvalidCapture("control IDs must be unique positive integers")
     level = [c for c in all_controls if c.get("class") == "0x766c6d65(vlme)"]
     if len(level) != 1:
         raise InvalidCapture("expected one main volume control")
@@ -94,7 +105,7 @@ def probe(text, wanted=None):
         raise InvalidCapture(f"incoherent scalar properties: {scalars}")
     if wanted is not None and any(abs(n-wanted/100) > 0.00001 for n in scalars):
         raise InvalidCapture(f"scalars {scalars}, wanted {wanted}%")
-    return f"device={dev['device']} controls=" + ",".join(sorted(c["id"] for c in all_controls))
+    return f"device={dev['device']} controls=" + ",".join(sorted(ids))
 
 
 def identity(text):
@@ -129,7 +140,7 @@ def main():
             print("finite coherent level/volm/vmvc; " + probe(texts[0], args.wanted))
         else:
             print(identity(texts[0]))
-    except (InvalidCapture, OSError, KeyError) as error:
+    except (ValueError, OSError, KeyError) as error:
         print(str(error), file=sys.stderr)
         return 1
     return 0

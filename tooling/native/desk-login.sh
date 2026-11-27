@@ -57,7 +57,8 @@ session_state() {
     raw=$(/bin/bash /tmp/tmo.sh 12 /bin/bash /tmp/tssh "printf 'C=%s ' \"\$(/usr/bin/stat -f %u /dev/console)\"; r=\$(/usr/sbin/ioreg -n Root -d1 -w0); case \"\$r\" in *IOConsoleUsers*) printf 'U=1 ';; *) printf 'U=0 ';; esac; case \"\$r\" in *'\"CGSSessionScreenIsLocked\"=Yes'*) printf 'L=1 ';; *) printf 'L=0 ';; esac; printf 'S=%s ' \"\$(/usr/bin/pgrep -x SecurityAgent | /usr/bin/wc -l | /usr/bin/tr -d ' ')\"; printf 'F='; /usr/bin/pgrep -u $LOGIN_UID -x Finder | /usr/bin/tr '\n' ','; echo" </dev/null 2>/dev/null) || return 1
   fi
   raw=${raw//$'\n'/ }
-  [[ $raw =~ ^C=[0-9]+\ U=[01]\ L=[01]\ S=[0-9]+\ F=[0-9,]*\ *$ ]] || return 1
+  local format='^C=[0-9]+ U=[01] L=[01] S=[0-9]+ F=([1-9][0-9]*(,[1-9][0-9]*)*,?)? *$'
+  [[ $raw =~ $format ]] || return 1
   console_uid= users= locked= agents= finder_pids=
   for kv in $raw; do
     k=${kv%%=*} v=${kv#*=}

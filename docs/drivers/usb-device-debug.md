@@ -1,5 +1,23 @@
 # USB device-mode debug channel: PianoDwc3
 
+## Daily status (2026-11-27)
+
+- **Installed v13.1y12q.** The USB-C debug console, root shell and SSH over the cable work. The daily profile sets
+  `piano-usb-net-txflow=1` by default, and TX flow control was active on the November 27 disk check. When the TX ring
+  fills, the output queue retains frames for retry.
+  [Support status](../STATUS.md) · [November 27 disk results](../results-2026-11-27.md) · [USB network source](../../package/PianoDwc3/PianoUsbNet.cpp)
+- **Full boot arguments.** Kernel patch **0076** exposes the merged boot line through `kern.piano_bootargs`. The USB shell
+  and other helpers can read arguments past the legacy 1024-byte cut. The first installed check was on v13.1y12o on
+  November 26.
+  [November 26 installed results](../results-2026-11-26.md#v131y12o-installed) · [Kernel patch 0076](../../patches/k27/0076-k27-export-merged-piano-boot-args.patch)
+- **RAM qualification, `v131y12t-qual1`, November 27.** The TX flow-control matrix passed **66/66 exact transfers**
+  with **zero driver drops**.
+  [November 27 RAM results](../results-2026-11-27.md#ram-qualification)
+
+## Historical bring-up notes
+
+The design, boot arguments, test plans and measurements below describe the builds under test at the time.
+
 > **Status 2026-11-11 06:25: working.** With the Mac allowing new accessories (the owner switched "Allow accessories to connect" to
 > automatic), the Mac configures the device (AppleUSBCDCCompositeDevice, configuration 1) and creates /dev/cu.usbmodemPIANODBG1
 > (kernel console + monitor) and /dev/cu.usbmodemPIANODBG3 (user pipe); `tooling/native/usb-console.py --capture N` saved 1.5 MB of
@@ -31,7 +49,7 @@
 Status: design and code, 2026-11-11. Built, host-tested and linked into a test KC (`out/k27/kc-k27-usb-test.bin`); **not
 run on hardware**. Template: `README.md`. Code: `package/PianoDwc3`.
 
-## 1. Purpose and gate
+### 1. Purpose and gate
 
 Today the only view into a native k27 boot is the pstore-console RAM mailbox, read back from Ubuntu after a reset
 (`docs/bringup-debugging.md` §2). PianoDwc3 makes the tablet's single USB-C port, already cabled to the Mac, a live
@@ -48,7 +66,7 @@ Mac sees a composite USB device with two CDC-ACM serial ports (no driver to inst
 It gates nothing in M1–M5; it shortens every later loop (UFS, display, touch, GPU) from "reset, Ubuntu, read the mailbox"
 to watching the log and asking the kernel questions while it runs.
 
-## 2. Hardware facts
+### 2. Hardware facts
 
 | Item | Value | Source | State |
 |---|---|---|---|
@@ -67,7 +85,7 @@ to watching the log and asking the kernel questions while it runs.
 | UEFI's USB | piano-uefi (FD A) runs Qualcomm's binary `UsbConfigDxe` + `UsbfnDwc3Dxe` + `UsbDeviceDxe`; `PianoFastboot.c` (18d1:d00d, "piano-uefi") only cancels its poll timer at ExitBootServices; `UsbConfigDxe` registers its own ExitBootServices handler (strings `DisableUsbClocks`, `EnterLPM`, `UsbStopController`); the device leaves the Mac's bus at the hand-over (`bringup-debugging.md` §2) | piano-uefi sources and binaries | what the handler leaves on: **needs-boot** (probe step T1) |
 | DWC3 IP | GSNPSID / GVERSION, IN endpoints (GHWPARAMS3) | — | needs-boot (accepted: DWC_usb3 0x5533…, DWC_usb31 0x3331…, DWC_usb32 0x3332…) |
 
-## 3. Linux and Project-SunUEFI as the specification
+### 3. Linux and Project-SunUEFI as the specification
 
 Read, not copied (`package/PianoDwc3/UPSTREAM`): mainline `drivers/usb/dwc3/{core.h,core.c,gadget.c,ep0.c,dwc3-qcom.c}` for
 the programming model (event buffer, DEPCMD, TRBs, control phases, conndone/reset handling, VBUS override, UTMI clock
@@ -81,9 +99,9 @@ select); `gcc-sm8750.c` / `tcsrcc-sm8750.c` for offsets. **Project-SunUEFI** (BS
 - END TRANSFER with ForceRM, then 1 ms before reusing the TRB; DEPSTARTCFG(0) once and one transfer resource per endpoint;
 - the M31 PHY init writes (used only with `piano-usb-phy=1`).
 
-## 4. Design
+### 4. Design
 
-### 4.1 Apple's device stack in the macOS 27.0.1 KC (vma2 26A434)
+#### 4.1 Apple's device stack in the macOS 27.0.1 KC (vma2 26A434)
 
 From the KC's `__PRELINK_INFO` (`$PIANO_K27_TREE/out/kc/kc27.bin`, the base `tooling/kc/build-kc-k27.sh` links):
 
@@ -97,7 +115,7 @@ From the KC's `__PRELINK_INFO` (`$PIANO_K27_TREE/out/kc/kc27.bin`, the base `too
 | `IOSerialFamily`, `IONetworkingFamily` | yes (already kept) | IOSerialFamily has no headers in the macOS 27 SDK |
 | Mac host side | — | CDC-ACM → `/dev/cu.usbmodem*`; CDC-ECM/NCM drivers exist for a later network function |
 
-### 4.2 Options, and the choice
+#### 4.2 Options, and the choice
 
 1. **Apple's NCM function** (best end state: a network interface, Apple's own code): needs an IOUSBDeviceController
    subclass for DWC3, i.e. reconstructing IOUSBDeviceFamily's private controller ABI (vtable, request and endpoint
@@ -111,7 +129,7 @@ From the KC's `__PRELINK_INFO` (`$PIANO_K27_TREE/out/kc/kc27.bin`, the base `too
    the fallback.
 5. A vendor-class bulk pipe: no advantage over ACM, needs a Mac tool.
 
-### 4.3 What runs
+#### 4.3 What runs
 
 ```
 IOPlatformExpertDevice ── PianoDwc3 (start, matching thread)   read-only probe -> [SMMU SID 0x40 -> bypass bank]
@@ -143,14 +161,14 @@ IOPlatformExpertDevice ── PianoDwc3 (start, matching thread)   read-only pro
 - **Timing**: polled every 1 ms; nothing on the USB thread waits for the console (notes go through a ring to their own
   thread: with `-v`, IOLog scrolls the 3200x2136 console).
 
-## 5. IOKit family / ABI
+### 5. IOKit family / ABI
 
 `PianoDwc3 : IOService` on `IOPlatformExpertDevice` (IOMatchCategory PianoDwc3, probe score 100, after NativeUfs's), libraries
 `com.apple.kpi.*` only, no vtable check needed (no family base class). BSD KPI for `/dev/pianousb`: `cdevsw_add`,
 `devfs_make_node`, `uiomove`, `msleep`/`wakeup`, `selrecord`/`selwakeup`. No weak imports, no large `__bss` (rings are
 `IOMallocData`). Kext JSON: `tooling/k27/kext/PianoDwc3.json` (bundle `com.unixnu.driver.PianoDwc3`).
 
-## 6. Boot args and the Mac side
+### 6. Boot args and the Mac side
 
 | Boot arg | Default | Effect |
 |---|---|---|
@@ -168,7 +186,7 @@ IOPlatformExpertDevice ── PianoDwc3 (start, matching thread)   read-only pro
 | `piano-usb-hid=1` | 0 | (needs `piano-usb=2`) a keyboard and a pointer HID device for macOS and the third port that drives them (§12); without it the USB device is the two-port one, unchanged |
 | `piano-usb-hid-hold=MS` | 3000 | a key or button still down this long after the last input command is released |
 | `piano-usb-net=1` | 0 | (needs `piano-usb=2`) the CDC-NCM network function after the ports and its Ethernet interface on the tablet (§14); without it the USB device is exactly the ACM-only one |
-| `piano-usb-net-txflow=1` | 0 | (needs `piano-usb-net=1`) retain and retry frames through the family output queue when the TX frame ring fills. [Reset analysis and RAM qualification](usb-net-reset.md) |
+| `piano-usb-net-txflow=1` | 0 in the driver, 1 in the v13.1y12q daily profile | (needs `piano-usb-net=1`) retain and retry frames through the family output queue when the TX frame ring fills. [Reset analysis and RAM qualification](usb-net-reset.md) |
 | `piano-usb-net-fifo=0` | 1 | with `piano-usb-net=1`: keep the TX FIFO sizes the core reset left instead of the plan of §14.2 (a first-run experiment) |
 | `piano-usb-idle=0` | 1 | the old USB loop (1 ms after every quiet pass) instead of the adaptive wait of §15 |
 | `piano-usb-irq=1` | 0 | the core's interrupt (SPI 133) ends the USB thread's waits (§15); falls back to polling by itself |
@@ -222,7 +240,7 @@ Use: `tooling/native/usb-console.py --port 1`, interactive, or unattended
 `tooling/native/usb-console.py --port 1 --send 'echo HELLO' --capture 10`. The first bytes to arrive are the echo of what you sent:
 the banner and the first prompt went out before the port was open.
 
-## 7. Build, kernel collection, RAM image
+### 7. Build, kernel collection, RAM image
 
 ```sh
 tooling/k27/build-piano-dwc3.sh            # host tests (gadget core, SMMU planner), then the kext: out/native-kexts/PianoDwc3
@@ -255,7 +273,7 @@ branch's builder, so **no `data-persist`**: the Data disk is the RAM seed only, 
 
 Both pass `verify-ram-images.py` (unsigned, as every RAM image so far).
 
-## 8. Hardware test plan
+### 8. Hardware test plan
 
 RAM boots only, cable to the Mac, owner present; `piano-reset-after` stays the backstop. Read the run's
 `xnu-console.txt` (`grep PianoDwc3`) and, from T2 on, the Mac's `logs/usb-console/`.
@@ -270,7 +288,7 @@ RAM boots only, cable to the Mac, owner present; `piano-reset-after` stays the b
 Fail-safe: everything is a RAM boot; without `piano-usb` the driver declines in probe(); level 1 writes nothing (the SPMI
 observer read issues a read command only); a hang or panic is a reset (watchdog, `piano-reset-after`) back to ABL/Ubuntu.
 
-### 8.1 T2, first run (2026-11-11): enumeration stops after the configuration descriptor
+#### 8.1 T2, first run (2026-11-11): enumeration stops after the configuration descriptor
 
 The Mac addressed the device, read the device descriptor, strings 2/1/3 (each first with wLength 2) and the configuration
 (9, then 141 bytes), then sent nothing for ~100 s: no SET_CONFIGURATION, no reset; the last note was `DSTS 00838740` (link
@@ -297,12 +315,12 @@ drivers, interfaces) when no serial port exists: run it during T2. What to read 
 `ev … ep 1 xfer-complete … trb 00000000` (all 141 bytes went out), then `ep 0 not-ready status`, `ep 0 xfer-complete` in
 phase status, then the next `ep 0 xfer-complete` in phase setup (a new request) or only snapshots (the host is silent).
 
-## 9. Fallback
+### 9. Fallback
 
 The pstore mailbox (`tooling/native/xnu-log.py`) is unchanged and still has everything PianoDwc3 logs (its own lines
 included). If the takeover fails, the driver logs the stage and leaves the controller alone; the boot continues.
 
-## 10. Risks
+### 10. Risks
 
 - **UEFI powered USB down at ExitBootServices** (UsbConfigDxe's handler): then level 2 refuses (clocks) or the link never
   comes up (PHY/repeater in low power). Seen on the normal boot path (2026-11-11: no host for 2.4 h). Since 2026-11-12 the cold
@@ -317,7 +335,7 @@ included). If the takeover fails, the driver logs the stage and leaves the contr
 - **Security**: port 1 + the helper is an unauthenticated root shell: development tablets, boot-arg gated, never by default.
 - **Charging** is unaffected (the PMIC charger is not touched; the override is in the DWC3 glue only).
 
-## 11. Open questions
+### 11. Open questions
 
 1. What do piano-uefi's Qualcomm DXEs leave on at ExitBootServices (GDSC, clocks, M31, repeater, RUN_STOP, QSCRATCH)? → T1
    answered it for the fastboot path (everything on, RUN_STOP off). The normal path: the cold start's `cold: inherited ...` lines
@@ -331,7 +349,7 @@ included). If the takeover fails, the driver logs the stage and leaves the contr
    `IOEthernetController` on this gadget core? Decided: our own CDC-NCM + `IOEthernetController`, no private ABI (§14).
 7. Panic output over USB: a polled gadget path from the panic handler (the core already polls) — after T3.
 
-## 12. Keyboard and mouse from the Mac (`piano-usb-hid=1`)
+### 12. Keyboard and mouse from the Mac (`piano-usb-hid=1`)
 
 Debug only: to type the login password and click through the first screens while no touch or keyboard driver is in use.
 Not run on hardware yet (2026-11-11).
@@ -398,7 +416,7 @@ Failure signs: no `event service … published` (IOHIDEventDriver did not attach
 (a report refused); `(no input port: it needs 7 IN endpoints)`; on the Mac `piano-input.py` saying `no answer from the tablet` (the
 port's IN endpoint, e.g. a TX FIFO 5/6 of size 0: `--no-ack` still sends). The monitor's `usb` command prints the HID counters.
 
-## 13. Licence note
+### 13. Licence note
 
 New code under BSD-2-Clause-Patent (`package/PianoDwc3/LICENSE`). Taken from BSD-2-Clause-Patent sources with attribution
 (`UPSTREAM`): Project-SunUEFI (takeover order, quirks, M31 init values), QcomDwc3's `QcomDwc3.cpp` (SPMI read and GDSC
@@ -408,13 +426,13 @@ ECM 1.2 specifications; Linux's `f_ncm` / `u_ether` (GPL) were not copied, and t
 programming model as Linux's `gadget.c` describes it (specification only). PianoUsbNet follows this repository's
 PianoNullEthernet (the VM-era Ethernet kext's pattern, BSD-2-Clause-Patent; its UPSTREAM).
 
-## 14. A network link to the Mac (`piano-usb-net=1`)
+### 14. A network link to the Mac (`piano-usb-net=1`)
 
 Status 2026-11-11: built, host-tested (`package/PianoDwc3/tests/run.sh`), linked into the native KC with its vtable checked; **not
 run on hardware** (the owner is away). Goal: IP between the tablet and the Mac over the cable that already carries the console,
 for NTP time, file transfer and ssh, with Internet Sharing for the rest.
 
-### 14.1 What the Mac and the tablet see
+#### 14.1 What the Mac and the tablet see
 
 - **USB:** with `piano-usb-net=1` (and `piano-usb=2`) the composite device gets one more function after the serial ports:
   **CDC-NCM 1.0** ("piano network"): an IAD, a communications interface (header, union, Ethernet networking descriptor with
@@ -444,7 +462,7 @@ guaranteed at boot; nothing shows it would be there in time on every boot, so en
 is unchanged. Why **NCM rather than ECM**: both need the same three endpoints, so the budget below does not force ECM; NCM
 aggregates frames per USB transfer (fewer, larger transfers for a polled controller) and the Mac has a native driver for it.
 
-### 14.2 Endpoints and TX FIFOs
+#### 14.2 Endpoints and TX FIFOs
 
 piano's core (T1 probe): DWC_usb31 (GSNPSID 0x33313130), GHWPARAMS3 0x90420086 = **32 endpoints, 16 IN**; GHWPARAMS0 MDWIDTH 64
 bits (8-byte FIFO words); GHWPARAMS1 bit 23 clear (dual-port RAM), so the TX FIFOs live in RAM1: GHWPARAMS7 = **3462 words**
@@ -477,7 +495,7 @@ function is left out with a note and the ports keep the reset's FIFOs. DMA: the 
 of the existing 128 KiB region (notification at 0x15000, NTB IN at 0x16000, NTB OUT at 0x1a000, 16 KiB each), with the same
 non-cacheable mapping and SMMU bypass as the ports; the allocation does not change.
 
-### 14.3 What changes for the existing ports
+#### 14.3 What changes for the existing ports
 
 - **Without `piano-usb-net`: nothing.** Device, configuration (both speeds), other-speed and string descriptors are byte for
   byte those of the ACM-only device (FNV-1a sums of the pre-network bytes in `tests/usb_gadget_host.cpp`), no TX FIFO register is
@@ -487,7 +505,7 @@ non-cacheable mapping and SMMU bypass as the ports; the allocation does not chan
   8 exist; the ports' IN FIFOs get the plan's sizes instead of the reset's (`piano-usb-net-fifo=0` keeps the reset's, to tell a
   FIFO problem from an NCM one). The device descriptor and the VID:PID are unchanged.
 
-### 14.4 Data path and logging
+#### 14.4 Data path and logging
 
 ```
 macOS stack -> PianoUsbNet::outputPacket (copy into a 64 KiB frame queue; dropped when the link is down or the queue full)
@@ -501,7 +519,7 @@ copies; not measured. Logged (`grep "PianoDwc3: net:"`): link changes, the inter
 one line of counters at most every 10 s while they change; never frame contents. The monitor's `usb` prints the same counters
 plus the NCM state (alternate, NTB input size, packet filter, notifications, zero-length packets).
 
-### 14.5 Bring-up
+#### 14.5 Bring-up
 
 Build the test image (all native kexts, the KC, the RAM image in `out/ram`; RAM boot only):
 
@@ -546,7 +564,7 @@ Set to DHCP with no server, both ends fall back to self-assigned 169.254.x.x add
 DHCP" for the interface on the Mac), enough for ssh/scp by address. Files without sshd: on the Mac
 `python3 -m http.server 8000 --bind 192.0.2.1`, on the tablet `curl -O http://192.0.2.1:8000/<file>`.
 
-### 14.6 Expected log lines and failure signs
+#### 14.6 Expected log lines and failure signs
 
 In this order (`grep PianoDwc3` in the console log; `usb-console.py` shows them live):
 
@@ -579,7 +597,7 @@ PianoDwc3: net: link up, en1 up; to the Mac 12 frames 1480 bytes (9 NTBs), from 
 | `macOS named the interface` only about 240 s after launchd started | InterfaceNamer's quiet timeout: the MAC was not in its database (§14.8) |
 | `drops: send N` growing | the link is down, the interface is down (`ifconfig en1 up`), or the queue is full (the Mac is not reading) |
 
-### 14.7 Risks
+#### 14.7 Risks
 
 - **The Mac's NCM driver** has only been reasoned about from the spec: its request sequence, whether it takes each notification
   as one interrupt transfer (16 bytes = one packet of the 16-byte endpoint, no zero-length packet after it), and whether it takes
@@ -595,7 +613,7 @@ PianoDwc3: net: link up, en1 up; to the Mac 12 frames 1480 bytes (9 NTBs), from 
 - **Security**: whatever the tablet serves on this link (sshd, a shell) is reachable from the Mac (and with Internet Sharing from
   nothing else: NAT); development tablets only, as the user pipe.
 
-### 14.8 The interface's name and address on desk-dev (2026-11-12)
+#### 14.8 The interface's name and address on desk-dev (2026-11-12)
 
 **What desk-dev at 17:27 showed.** The Mac had its end at once (its NCM interface, MAC 02:50:49:41:4e:03, active, self-assigned 169.254).
 The tablet logged `net: interface published` during boot. But for minutes after login, `ifconfig -a` there listed only `lo0` and
@@ -653,7 +671,7 @@ desk-dev: iokit busy (configd 260+ s): <name> (<class>) busy 1 (<ms>)       the 
 `named after Ns` with N near 240 means the database did not match: check the MAC in `ifconfig en1`, and
 `/Library/Preferences/SystemConfiguration/NetworkInterfaces.plist` on the tablet. Not yet run on the tablet (2026-11-12 evening).
 
-### 14.9 The address after the login (2026-11-14): `piano-usbnet-address`
+#### 14.9 The address after the login (2026-11-14): `piano-usbnet-address`
 
 What the tablet showed (confirmed in the consoles of ufs4a, ufs4b and the v6 RAM test): desk-dev set `en1 inet 169.254.80.2 (fixed
 link-local)` at T+33-62 s and sshd answered locally, then ssh from the Mac timed out after the desktop login and PianoDwc3's `to the
@@ -691,7 +709,7 @@ self-assigned 169.254.x.y in its place: H1; the address still there and pf enabl
 `tooling/native/piano-usbnet-address/test_piano_usbnet_address.py` (stub commands: no piano-usb-net, configd's service set Manual,
 a new service when none, a loss logged and repaired, a DHCP lease left alone). Not run on the tablet yet.
 
-## 15. Power: the USB thread's wait (`piano-usb-idle`, `piano-usb-irq`)
+### 15. Power: the USB thread's wait (`piano-usb-idle`, `piano-usb-irq`)
 
 Until 2026-11-11 the USB thread slept 1 ms after every pass without events, forever: about 1000 wake-ups a second even with
 no cable. Now (`UsbIdle.h`, host-tested by `tests/usb_idle_host.cpp`) each pass picks a tier: **busy** 1 ms (an event, log
@@ -716,7 +734,7 @@ handled, S strays, M missed`. Expected at rest: no cable ~240/min (polled) or ~6
 open ~3000/min (open tier, the log pump). A cable plugged in after more than 3 s without a host may lose the first SETUP in poll
 mode (the Mac re-enumerates within seconds). Test plan and images: [`../power-irq.md`](../power-irq.md) §5.
 
-## 16. System sleep (`piano-sleep-usb`, 2026-11-11)
+### 16. System sleep (`piano-sleep-usb`, 2026-11-11)
 
 [`../power.md`](../power.md) §4's contract for PianoDwc3, built as `UsbSleep.h` (host-tested by `tests/usb_sleep_host.cpp`; the
 gadget's half, `sleepDisconnect` / `sleepConnect`, by `tests/usb_gadget_host.cpp`'s sleep cycle). At `piano-usb=2` the service
@@ -746,9 +764,9 @@ Failure lines: `sleep: the USB thread did not answer within 500 ms`, `wake N: th
 `QSCRATCH 0x10 = ... not written now (...): recorded for the wake`. The cable to a host keeps the HS PHY out of its low-power state
 (power.md §4): a suspend measurement is made without it (`piano-sleep-usb` then decides nothing: no host is configured).
 
-### 16.1 EP0 after a kept sleep and the controller recovery (2026-11-22, usb/wedge1)
+#### 16.1 EP0 after a kept sleep and the controller recovery (2026-11-22, usb/wedge1)
 
-energy-e4 lost the USB link after its third wake (`private/host-checks/20261122-energy/USB-WEDGE.md`). The Mac had sent requests to
+The `energy-e4` test boot lost the USB link after its third wake. The Mac had sent requests to
 the frozen device during sleeps 1 and 2; they were answered after the thaw, and the 1 s watchdog abandoned the last of each by arming
 SETUP again. Without SET STALL (or the transfer's status stage) the core's own control state machine still owes that stage, and in
 that state no SETUP from the host completes (chg-fix1's three failed enumerations show it with the event trace: a bus reset ended
@@ -768,7 +786,7 @@ never complete, and nothing soft-reset the core afterwards. Now, as the referenc
   hook; the monitor's `usb` prints `wedge: ...` with the counters.
 - after each kept wake the event trace and the SETUP notes get a fresh budget (32 events, 16 SETUPs).
 
-## 17. The cold start (`piano-usb-cold`, 2026-11-12)
+### 17. The cold start (`piano-usb-cold`, 2026-11-12)
 
 Status: built, host-tested (`tests/usb_cold_host.cpp` against a model of the hardware), linked into the native kernel collection.
 **Run on the tablet on 2026-11-12** (queue7, C0-C7 of [`../forensics-2026-11-11.md`](../forensics-2026-11-11.md) §7.5):
@@ -780,7 +798,7 @@ The role switch and the role rule (§17.8) fix that. They are host-tested but no
 link watch) and its kernel side in `PianoDwc3.cpp` (`ColdHal`, `coldDecide`, `takeover(cold)` with its role gate, `coldRestart`,
 `coreRd`/`coreWr`). Test plan: forensics §7.
 
-### 17.1 Why
+#### 17.1 Why
 
 Every console so far followed ABL fastboot. ABL ran the controller as a device for the Mac, and the FD stopped it at
 ExitBootServices with power, clocks, the M31 PHY and the repeater still on. The probe of `20261111-201656` reads GDSC `fa22f800`,
@@ -794,7 +812,7 @@ comes, which is how a D+ pull-up that the Mac never sees looks. Likely causes ar
 lines), the M31 PHY, or their rails not being voted, on a path where ABL never ran USB. The probe's own lines of that boot had been
 overwritten in the ring by then. The cold start does not need to know which it was.
 
-### 17.2 What runs
+#### 17.2 What runs
 
 | Step | What | Shared resource, rule | On failure |
 |---|---|---|---|
@@ -819,7 +837,7 @@ Not touched: the ADSP (charging, audio and the sensor hub live there), the QMP P
 both D+/D- pairs meet in the receptacle), the CX/MX levels and the interconnect votes. Those are RPMh resources shared on DRV-2,
 which keeps one vote per DRV, so a second writer would replace another kext's vote.
 
-### 17.3 Timeouts, retries, the link watch
+#### 17.3 Timeouts, retries, the link watch
 
 - Every poll is bounded: the GDSC and each branch 10 ms, an RCG 1 ms, a halt 100 ms (the xHCI's HCHalted too), GSTS.CURMOD 10 ms, the
   role switch's DCTL.CSFTRST 250 ms (then 50 ms settling), the repeater 10 ms, an SPMI access 1 ms, a TCS 100 ms, the DRV-2 lock 2 s,
@@ -834,7 +852,7 @@ which keeps one vote per DRV, so a second writer would replace another kext's vo
   boot. A hand-off to PianoUsbHost disarms it. It acts only while the system is awake. If the auto decision took a state as running
   that was not, the watch catches it. Without a cable it costs at most three cold starts in the first 2 minutes.
 
-### 17.4 Proving it from ABL fastboot: the test hook and `usb cold`
+#### 17.4 Proving it from ABL fastboot: the test hook and `usb cold`
 
 `piano-usb-cold-sim=MASK` (with `piano-usb=2`) runs on the USB thread before the decision. It changes only what it can change
 safely: the core only while clocked (halted first), the repeater only when its APID is EE 0's.
@@ -852,7 +870,7 @@ monitor's `usb cold [sim MASK]` does the same live: the reply goes out, 0.5 s la
 `usb-console.py` reconnects and shows the lines in its replay. `usb` prints a `cold:` line with the mode, the steps, the reasons
 found at the takeover, the cold starts so far, the breadcrumb and the watch.
 
-### 17.5 Lines
+#### 17.5 Lines
 
 In this order (`grep 'PianoDwc3: cold'`), here from the fastboot path's values. The normal path shows its own:
 
@@ -887,7 +905,7 @@ PianoDwc3: cold: link watch: no bus reset from a host within 15 s: a cold start 
 PianoDwc3: cold: link watch: a host reset the device: the watch ends (1 cold starts this boot)
 ```
 
-### 17.6 Failure signs
+#### 17.6 Failure signs
 
 | Sign | Meaning, next step |
 |---|---|
@@ -905,7 +923,7 @@ PianoDwc3: cold: link watch: a host reset the device: the watch ends (1 cold sta
 | `FAILED at takeover: core soft reset` after a cold start | no UTMI clock from the PHY: c3 (l2d) and c5 are the suspects |
 | `cold: link watch: still no host after 3 cold starts` | the controller side is up; the path to the Mac is not: the DIO4485 (not touched), the cable, the Mac's accessory approval |
 
-### 17.7 Shared resources, power, sources
+#### 17.7 Shared resources, power, sources
 
 - **Locks**: the GCC vote word `0x52020` (only GPLL0's bit, only ever set) under PianoA830's `sm8750_gcc_vote_owner`, and apps
   DRV-2 under `sm8750_rpmh_drv2_owner`, both with this kext's tag `DWC3`. These are the words PianoTouch, PianoKeyboard, PianoWifi
@@ -923,7 +941,7 @@ PianoDwc3: cold: link watch: a host reset the device: the watch ends (1 cold sta
   tuning and the rails from piano's DT (board facts, the same on every unit). Reused from this repository: PianoBluetooth's
   `BtRpmh.h`, PianoKeyboard's `CmdDb.h`, PianoPower's `ChargerPmic.h`/`SpmiObserver.h` (`UPSTREAM`).
 
-### 17.8 The role rule (C6, 2026-11-12)
+#### 17.8 The role rule (C6, 2026-11-12)
 
 C6 (`piano-usb-cold-sim=31`) stopped the whole system at stage 19, with every c-step reported ready. The cause and the evidence are in
 forensics §7.6. In short: c2 left the core in the host role, the takeover soft-reset it in the host role, and only afterwards did
@@ -950,7 +968,7 @@ The DWC3 facts these rest on (Dwc3Regs.h, UsbCold.h):
 - The xHCI: USBCMD.RS (bit 0) and INTE (bit 2) at CAPLENGTH. USBSTS.HCHalted (bit 0) is 1 by default and 0 while it executes.
 - piano's reset value after `USB30_PRIM_BCR` is GCTL `00102004`, the device role (C7).
 
-## 18. The console stream on long, busy runs (desk1, 2026-11-12)
+### 18. The console stream on long, busy runs (desk1, 2026-11-12)
 
 **Symptom.** desk1 was a GPU desktop image at the login window, 1200 s. Its USB capture
 (`logs/usb-console/20261112-081349-port0.txt`, 100 k lines) holds this boot's first 5-10 k lines 12 times, and never the live tail.

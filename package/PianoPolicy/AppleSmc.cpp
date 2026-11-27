@@ -231,7 +231,7 @@ bool AppleSMC::start(IOService *provider)
     bzero(&gOidSmc, sizeof gOidSmc);
     gOidSmc.oid_parent = &sysctl__machdep_children;
     gOidSmc.oid_number = OID_AUTO;
-    gOidSmc.oid_kind = CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_OID2;
+    gOidSmc.oid_kind = static_cast<int>(CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_OID2);
     gOidSmc.oid_name = "piano_smc";
     gOidSmc.oid_handler = sysctlSmc;
     gOidSmc.oid_fmt = "A";

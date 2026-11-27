@@ -22,7 +22,15 @@ done
 # changes, so EDK II rebuilds it only then); the shared checkout itself stays the pin of unixnu.lock.
 if [ -d "$R/DarwinBoot/.git" ]; then
   db=$D/out/deps/DarwinBoot
-  pin=$(python3 -c "import tomllib;print(tomllib.load(open('$D/unixnu.lock','rb'))['pin']['DarwinBoot']['commit'])")
+  pin=$(python3 -I -B - "$D/scripts" "$D/unixnu.lock" <<'PY'
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from repo_manifest import load_manifest
+
+print(load_manifest(sys.argv[2])['pin']['DarwinBoot']['commit'])
+PY
+)
   head=$(cat "$R/DarwinBoot/.git/$(sed -n 's/^ref: //p' "$R/DarwinBoot/.git/HEAD")" 2>/dev/null || cat "$R/DarwinBoot/.git/HEAD")
   [ "$head" = "$pin" ] || echo "tooling/unixnu.sh: $R/DarwinBoot is at $head, unixnu.lock pins $pin" >&2
   rm -rf "$db.new"; mkdir -p "$db.new"

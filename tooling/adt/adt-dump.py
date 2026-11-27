@@ -6,24 +6,38 @@ Values: printable strings as "...", 4/8-byte values as hex integers, the rest as
 Volatile properties (random-seed, unique-chip-id seed) are masked unless --raw.
 """
 import hashlib, struct, sys
+from pathlib import Path
 
 VOLATILE = {'random-seed', 'unique-chip-id'}
 
-def parse(data, offset=0):
+def parse(data, offset=0, depth=0):
+    if depth > 64 or not 0 <= offset <= len(data) - 8:
+        raise ValueError('invalid ADT node header or nesting depth')
     nprops, nchildren = struct.unpack_from('<II', data, offset)
     offset += 8
     props = []
     for _ in range(nprops):
+        if len(data) - offset < 36:
+            raise ValueError('truncated ADT property header')
         name = data[offset:offset + 32].split(b'\0', 1)[0].decode(errors='replace')
         size = struct.unpack_from('<I', data, offset + 32)[0] & 0x7fffffff
+        end = offset + 36 + ((size + 3) & ~3)
+        if end > len(data):
+            raise ValueError('truncated ADT property value or padding')
         value = data[offset + 36:offset + 36 + size]
-        offset += 36 + ((size + 3) & ~3)
+        offset = end
         props.append((name, value))
     children = []
     for _ in range(nchildren):
-        child, offset = parse(data, offset)
+        child, offset = parse(data, offset, depth + 1)
         children.append(child)
     return (props, children), offset
+
+def parse_tree(data):
+    tree, end = parse(data)
+    if end != len(data):
+        raise ValueError('trailing bytes after the ADT root')
+    return tree
 
 def fmt(name, value, raw):
     if name in VOLATILE and not raw:
@@ -50,7 +64,10 @@ def walk(node, path, raw, out):
 
 if __name__ == '__main__':
     raw = '--raw' in sys.argv
-    tree, _ = parse(open(sys.argv[1], 'rb').read())
+    try:
+        tree = parse_tree(Path(sys.argv[1]).read_bytes())
+    except (OSError, ValueError) as error:
+        sys.exit(str(error))
     lines = []
     walk(tree, None, raw, lines)
     print('\n'.join(sorted(lines)))

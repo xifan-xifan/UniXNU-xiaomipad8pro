@@ -3,7 +3,7 @@
 //
 //   InputGate    piano-keyboard-lid-drop=1: while the hall sensor reads closed, key and touchpad reports are dropped (Linux's
 //                input-off-while-closed: a closed cover pressed in a bag neither types nor wakes the display); the caller releases
-//                every key and button once when the gate closes.
+//                every key and button once when the gate closes or the MCU reports detachment.
 //   latch...     the keyboard's wake line for a system sleep (k27 0062 piano-sleep-wake bit 16): gpio95's INTR_CFG with raw status
 //                and a rising edge latched, enable off (nothing reaches the GIC), armed only when PianoPolicy says so (acting:
 //                "piano-policy-keyboard-wake"), else by the driver's own rule (the MCU running, a cover attached, the cover not read
@@ -25,6 +25,13 @@ namespace pianokeyboard {
 class InputGate {
  public:
   void configure(bool enabled) { enabled_ = enabled; }
+  // Until the MCU reports a detach, permit input even if its first attach message has not arrived.
+  bool attach(bool attached)
+  {
+    const bool detaching = !attached && !detached_;
+    detached_ = !attached;
+    return detaching;
+  }
   // The accepted hall level (1 open, 0 closed, -1 not read). True when the gate has just closed (release everything once).
   bool hall(int level)
   {
@@ -38,7 +45,7 @@ class InputGate {
   // A key, consumer, touchpad or mouse report: true when it may go on; false when dropped (counted).
   bool pass()
   {
-    if (!closed_) return true;
+    if (!closed_) return !detached_;
     ++dropped_;
     ++droppedNow_;
     return false;
@@ -50,8 +57,50 @@ class InputGate {
   uint32_t changes() const { return changes_; }
 
  private:
-  bool enabled_ = false, closed_ = false;
+  bool enabled_ = false, closed_ = false, detached_ = false;
   uint32_t dropped_ = 0, droppedNow_ = 0, changes_ = 0;
+};
+
+// A latched GPIO edge starts a short confirmation window. With no latch, retain the two-sample poll debounce.
+class HallDebounce {
+ public:
+  static constexpr uint32_t kConfirmMs = 20;
+
+  void reset(int level)
+  {
+    candidate_ = level;
+    pending_ = false;
+  }
+  bool pending() const { return pending_; }
+  uint32_t waitMs(uint64_t now, uint32_t limit) const
+  {
+    if (!pending_) return limit;
+    const uint64_t elapsed = now >= edgeMs_ ? now - edgeMs_ : 0;
+    const uint32_t left = elapsed < kConfirmMs ? kConfirmMs - uint32_t(elapsed) : 0;
+    return left < limit ? left : limit;
+  }
+  bool sample(int accepted, int level, bool edge, uint64_t now)
+  {
+    if (level == accepted) {
+      reset(level);
+      return false;
+    }
+    if (edge) {
+      candidate_ = level;
+      pending_ = true;
+      edgeMs_ = now;
+      return false;
+    }
+    if (pending_ && waitMs(now, 1)) return false;
+    const bool agreed = candidate_ == level;
+    reset(level);
+    return agreed;
+  }
+
+ private:
+  int candidate_ = -1;
+  bool pending_ = false;
+  uint64_t edgeMs_ = 0;
 };
 
 // ------------------------------------------------------------------------------------------------------------- gpio95's latch
@@ -91,7 +140,7 @@ inline bool wakeNow(bool answered, bool policyNow, int hall, bool attached)
 // ------------------------------------------------------------------------------------------------------------- the MCU's power
 class CoverPower {
  public:
-  enum class Step : uint8_t { none, blank, unblank };
+  enum class Step : uint8_t { none, release, blank, unblank };
   static constexpr uint64_t kEarlyWakeMs = 10000;
 
   void configure(bool enabled) { enabled_ = enabled; }
@@ -99,6 +148,7 @@ class CoverPower {
   bool running() const { return running_; }
   bool asleep() const { return asleep_; }
   int display() const { return display_; }
+  static bool releasesInput(Step step) { return step == Step::release || step == Step::blank; }
 
   // NativeGopDisplay's piano-display-power: 1 on, 0 off, -1 not known (no NativeGopDisplay, or before WindowServer's first call).
   Step display(int state, uint64_t nowMs)
@@ -114,7 +164,8 @@ class CoverPower {
     if (asleep == asleep_) return Step::none;
     asleep_ = asleep;
     early_ = false;
-    return settle(nowMs);
+    const Step step = settle(nowMs);
+    return asleep && running_ ? Step::release : step;
   }
   // gpio95 rose while blanked and awake; now: the display may wake now (wakeNow()).
   Step wakeRequest(bool now, uint64_t nowMs)

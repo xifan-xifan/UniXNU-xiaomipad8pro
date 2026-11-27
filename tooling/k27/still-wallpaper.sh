@@ -74,8 +74,9 @@ for f in "$DSLOCAL"/*.plist; do
   u=$(plutil -extract uid.0 raw -o - "$f" 2>/dev/null) || continue
   [ "$u" -ge 501 ] 2>/dev/null || continue
   g=$(plutil -extract generateduid.0 raw -o - "$f" 2>/dev/null) || continue
+  [ "${#g}" -eq 36 ] && printf '%s\n' "$g" | grep -Exq '[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}' || continue
   h=$(plutil -extract home.0 raw -o - "$f" 2>/dev/null) || h=
-  login=$(put "$(echo "$g" | tr a-f A-F)")
+  login=$(put "$(printf '%s' "$g" | tr a-f A-F)")
   store=unavailable
   L="$h/Library/Application Support"
   if [ -n "$h" ] && [ -d "$h/Library" ]; then

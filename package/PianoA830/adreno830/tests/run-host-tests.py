@@ -11,6 +11,7 @@ named like <name>; a test may instead list its sources in a comment line "host-t
 Paths starting with kits/ in that line are relative to --unixnu.
 With a UniXNU build tree (--tree, or found under --unixnu), every kernel object is also compiled with the tree's real
 XNU compile records and the archive symbols are checked (scripts/build-adreno830.py into build/host-tests/kernel).
+The two GPU tier tests use -O1 -g -fno-sanitize-recover=all, including their linked host objects.
 """
 import argparse
 import json
@@ -22,6 +23,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TESTS = ROOT / 'tests'
 FLAGS = ['-O2', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined']
+TIER_FLAGS = ['-O1', '-g', *FLAGS[1:], '-fno-sanitize-recover=all']
+TIER_TESTS = {'test_a830gputier', 'test_tier_boalloc'}
 # ArmSmmu4K (the static builder) and ArmSmmu4KPaged (the on-demand tables, GPU-PAGED P0a): test_pagedvm compares them.
 SMMU_HOST = ['ArmSmmu4KContext', 'ArmSmmu4KProgram', 'ArmSmmu4KLive', 'ArmSmmu4KStreams', 'ArmSmmu4K', 'ArmSmmu4KPaged']
 CORE = ['NativeAdrenoMemory.cpp', 'NativeAdrenoSmmuMemory.cpp']
@@ -42,7 +45,7 @@ KNOWN = {
         'transactions', 'M2/M7/M10'),
     'test_ring': (['NativeAdrenoRing.cpp'], ['pm4'],
         'PASS: Gen8 ring: register-free attach, kernel/raw/framed packets with both SRAM inits, fenced WPTR 10 us x 200 with '
-        'poison on failure, Busy vs NoResources, exact publication, A830Fence waiter, ring lock, recovery (15 cases)', 'M4/M10'),
+        'poison on failure, Busy vs NoResources, exact publication, A830Fence waiter, ring lock, recovery (16 cases)', 'M4/M10'),
     'test_submit': (SUBMIT, ['smmu', 'pm4'],
         'PASS: 12 execbuf cases over software SMMU/CP peers: exact framed IB packet and fence with no SMMU access, cache '
         'maintenance or TLBI on submit; 9 pre-reference refusals; 44 job slots with one reserved per range (32) and Busy only with '
@@ -69,6 +72,7 @@ KNOWN = {
     'test_p1wire': (['NativeAdrenoMemory.cpp'], [], None, 'GPU-PAGED P1b'),
     # UniXNU-piano (2026-11-22, GPU-PAGED P0b): the pool bypass through the user client (test_userclient's fixture and doubles)
     'test_poolbypass': (SUBMIT + ['NativeAdrenoUserClient.cpp', 'NativeAdrenoTimer.cpp'], ['smmu', 'pm4', 'proc'], None, 'GPU-PAGED P0b'),
+    'test_a830gputier': ([], [], None, 'RAM16G R1'),
     'test_tier_boalloc': (SUBMIT + ['NativeAdrenoUserClient.cpp', 'NativeAdrenoTimer.cpp'], ['smmu', 'pm4', 'proc'], None, 'RAM16G R1'),
     'test_timer': (['NativeAdrenoTimer.cpp'], [],
         'PASS: GMU AO counter at gmu +0x47100/+0x47104 and CP 0x8E7/0x8E8, 19 high-low-high reads (rollovers included), 12 '
@@ -144,52 +148,55 @@ class Runner:
         self.includes = ['-I', includes, '-I', TESTS, '-I', ROOT, '-I', ROOT.parents[1] / 'include'] + (['-DADRENO830_MACOS'] if args.macos else [])
         self.objects = {}
 
-    def host_objects(self, kinds):
+    def host_objects(self, kinds, flags):
         result = []
+        suffix = '-tier-host.o' if flags == TIER_FLAGS else '-host.o'
         for kind in kinds:
-            if kind not in self.objects:
+            key = (kind, tuple(flags))
+            if key not in self.objects:
                 if kind == 'proc':   # kernel process query the user client records with each import
                     source = self.out / 'proc-host.c'
                     source.write_text('int proc_selfpid(void);\nint proc_selfpid(void) {return 100;}\n')
-                    obj = self.out / 'proc-host.o'
-                    result_ = run(['xcrun', 'clang', '-std=c11', *FLAGS, '-c', source, '-o', obj])
+                    obj = self.out / f'proc{suffix}'
+                    result_ = run(['xcrun', 'clang', '-std=c11', *flags, '-c', source, '-o', obj])
                     if result_.returncode:
                         raise SystemExit(f'host double proc_selfpid: {result_.stderr[-2000:]}')
-                    self.objects[kind] = [obj]
-                    result += self.objects[kind]
+                    self.objects[key] = [obj]
+                    result += self.objects[key]
                     continue
                 stems = {'smmu': SMMU_HOST, 'mmio': ['ArmSmmu4KMmio'], 'pm4': ['AdrenoPM4']}[kind]
                 kit = self.kits / ('AdrenoPM4' if kind == 'pm4' else 'ArmSmmu4K')
                 built = []
                 for stem in stems:
-                    obj = self.out / f'{stem}-host.o'
-                    result_ = run(['xcrun', 'clang', '-std=c11', *FLAGS, '-c', kit / f'{stem}.c', '-o', obj])
+                    obj = self.out / f'{stem}{suffix}'
+                    result_ = run(['xcrun', 'clang', '-std=c11', *flags, '-c', kit / f'{stem}.c', '-o', obj])
                     if result_.returncode:
                         raise SystemExit(f'host kit {stem}: {result_.stderr[-2000:]}')
                     built.append(obj)
-                self.objects[kind] = built
-            result += self.objects[kind]
+                self.objects[key] = built
+            result += self.objects[key]
         return result
 
     def build(self, name, test, sources, kinds):
         binary = self.out / name
+        flags = TIER_FLAGS if name in TIER_TESTS else FLAGS
         c_sources = [s for s in sources if s.suffix == '.c']
         cpp_sources = [s for s in sources if s.suffix == '.cpp']
-        objects = list(self.host_objects(kinds))
+        objects = self.host_objects(kinds, flags)
         includes = self.includes + ['-I', self.kits / 'ArmSmmu4K', '-I', self.kits / 'AdrenoPM4',
                                     '-I', self.kits / 'AdrenoFirmware', '-I', ROOT / 'platform/sm8750']
         if test.suffix == '.c' and not cpp_sources:
-            command = ['xcrun', 'clang', '-std=c11', *FLAGS, '-I', ROOT / 'platform/sm8750', '-I', TESTS, test, *c_sources,
+            command = ['xcrun', 'clang', '-std=c11', *flags, '-I', ROOT / 'platform/sm8750', '-I', TESTS, test, *c_sources,
                        '-o', binary]
         else:
             for source in c_sources:
                 obj = self.out / f'{name}-{source.stem}.o'
-                result = run(['xcrun', 'clang', '-std=c11', *FLAGS, *includes, '-c', source, '-o', obj])
+                result = run(['xcrun', 'clang', '-std=c11', *flags, *includes, '-c', source, '-o', obj])
                 if result.returncode:
                     return None, result.stdout + result.stderr
                 objects.append(obj)
             std = '-std=c++17' if name == 'test_vm_alias' else '-std=c++23'
-            command = ['xcrun', 'clang++', std, *FLAGS, '-DADRENO830_HOST_TEST', *includes, *cpp_sources, test, *objects,
+            command = ['xcrun', 'clang++', std, *flags, '-DADRENO830_HOST_TEST', *includes, *cpp_sources, test, *objects,
                        '-o', binary]
         result = run(command)
         if result.returncode:

@@ -159,7 +159,7 @@ inline int parseImage(const uint8_t *d, uint32_t bytes, Image &im)
 // --------------------------------------------------------------------------------------------------------------- the chip
 struct Chip {
   Bus bus = {};
-  uint8_t *tx = nullptr, *rx = nullptr;   // caller's buffers: tx >= maxWrite + 1 bytes, rx >= maxRead + 2 bytes
+  uint8_t *tx = nullptr, *rx = nullptr;   // caller's buffers: tx >= 3 and maxWrite + 1 bytes, rx >= maxRead + 2 bytes
   uint32_t txBytes = 0, rxBytes = 0;
   // identify
   uint8_t id[6] = {};
@@ -196,7 +196,7 @@ inline int setPage(Chip &c, uint32_t addr)
 // Writes len bytes from addr on, in transfers of at most maxWrite data bytes, each after its own page select.
 inline int write(Chip &c, uint32_t addr, const uint8_t *data, uint32_t len)
 {
-  if (!len || c.txBytes < 2 || !c.bus.maxWrite) return kErrParam;
+  if (!len || c.txBytes < 3 || !c.bus.maxWrite) return kErrParam;
   const uint32_t chunk = c.bus.maxWrite < c.txBytes - 1 ? c.bus.maxWrite : c.txBytes - 1;
   for (uint32_t done = 0; done < len;) {
     const uint32_t n = len - done < chunk ? len - done : chunk;

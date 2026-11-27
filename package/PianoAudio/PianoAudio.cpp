@@ -122,6 +122,7 @@ void readArgs()
   if (!spk_miplay_valid(int(l.miplay))) l.miplay = 0;   // inside the protection plan only (machdep.piano_audio_miplay at run time)
   l.duplexHold = bootArg("piano-audio-duplex-hold", 0);   // duplex-hold1 A/B: 0 off, 1 the two LPASS votes, 3 also the VA mclk
   if (!ar_hold_valid(int(l.duplexHold))) l.duplexHold = 0;   // level 10 (machdep.piano_audio_duplex_hold at run time)
+  l.spkProbe = l.level >= 9 && piano_audio_spk_probe_enabled(PE_boot_args());
   l.tap = bootArg("piano-audio-tap", 1) ? 1 : 0;   // level 10: the microphone tap of "Mic (noise reduced)" (AudioTap.h); 0 none
   l.micRoute = AUDIO_MIC_ROUTE_LEGACY;
   l.micRouteDiag = 0;

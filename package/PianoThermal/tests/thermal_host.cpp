@@ -11,7 +11,7 @@
 //     test, the poll tiers (the fast-clock rule fast only when warm); Tsens.h's interrupt encoders and the suspend mask.
 //   thermal_host         run the tests
 //   thermal_host --map   print the sensor map for tooling/k27/check-thermal-map.py
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. thermal_host.cpp -o /tmp/thermal_host && /tmp/thermal_host
+// Build: c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I.. thermal_host.cpp -o /tmp/thermal_host && /tmp/thermal_host
 #include "Cluster.h"
 #include "Governor.h"
 #include "Perf.h"
@@ -925,6 +925,48 @@ static void testInterruptsAndPolling()
   CHECK(!strcmp(pollName(Poll::clock), "clock") && !strcmp(pollName(Poll::fast), "fast") && kPollTiers == 4);
 }
 
+static void testSensorFaults()
+{
+  Scene scene;
+  CHECK(scene.step(0, 1, 1120).after == State::passive);
+  GovernorConfig config;
+  Governor g;
+  g.init(CpuMode::govern, config, kNcc1, 16, 14, 14);
+  for (unsigned fault = 0; fault < 3; ++fault) {
+    scene.model.all(450);
+    scene.m.poll(scene.model.io());
+    scene.p.update(scene.m, scene.now += 1000);
+    scene.model.mapped[0] = fault != 2;
+    scene.model.status[0][1] = statusWord(fault == 1 ? 2047 : 450, fault == 1);
+    for (unsigned i = 0; i <= kStalePolls + 1; ++i) {
+      scene.m.poll(scene.model.io());
+      CHECK(scene.p.update(scene.m, scene.now).gpuLimited());
+      CHECK(!clusterThermal(scene.m, 0, {}, false).valid);
+      CHECK(clusterThermal(scene.m, 1, {}, false).valid);
+      g.thermal(clusterThermal(scene.m, 0, {}, false), scene.now += 1000);
+      g.setRuntimeCaps(false, 0, capKhz(4320), true);
+      g.setBoostFloor(capKhz(4320));
+      CHECK(g.tick({1000, PowerSource::external}) == 0);
+    }
+    scene.model.mapped[0] = true;
+  }
+  CHECK(!scene.step(0, 1, 450).gpuLimited());
+  CHECK(!g.thermal(clusterThermal(scene.m, 0, {}, false), scene.now));
+  CHECK(!g.thermal(clusterThermal(scene.m, 0, {}, false), scene.now + 999));
+  CHECK(g.thermal(clusterThermal(scene.m, 0, {}, false), scene.now + 1000) && g.limit() == 1);
+
+  Scene hot;
+  CHECK(hot.step(2, 3, 1150).criticalPending);
+  hot.model.status[2][3] = statusWord(1150, false);
+  for (unsigned i = 0; i <= kStalePolls; ++i) {
+    hot.m.poll(hot.model.io());
+    const PolicyEvent e = hot.p.update(hot.m, hot.now += 1000);
+    CHECK(e.after == State::passive && !e.criticalPending);
+  }
+  CHECK(hot.step(2, 3, 1150).criticalPending);
+  CHECK(hot.step(2, 3, 1150).after == State::critical);
+}
+
 static void printMap()
 {
   for (unsigned c = 0; c < kControllers; ++c)
@@ -1047,15 +1089,17 @@ static void testAndroidCpuStep()
 static void testPerf()
 {
   using namespace pianothermal::perf;
-  // virtual skin: all five at 30 C -> 30 C + 1.6; battery missing -> invalid; only battery + msm -> their weights renormalised
+  // Virtual skin uses the stock sum, with a specific exception for the DSP-owned charger pin.
   int32_t in[kSkinInputs] = {30000, 30000, 30000, 30000, 30000};
   Skin s = virtualSkin(in, 0x1f);
   CHECK(s.valid && s.milliC == 30000 * 943 / 1000 + 1600 && s.used == 0x1f);
   CHECK(!virtualSkin(in, 0x1e).valid);                     // no battery
   CHECK(!virtualSkin(in, (1u << kSkinBattery) | (1u << kSkinWifi)).valid);   // no skin thermistor
-  int32_t mix[kSkinInputs] = {30000, 0, 0, 0, 40000};
-  s = virtualSkin(mix, (1u << kSkinBattery) | (1u << kSkinMsm));
-  CHECK(s.valid && s.milliC == int32_t(int64_t(500 * 30000 + 232 * 40000) * 943 / (732 * 1000)) + 1600);
+  const uint32_t pinHeldMask = kSkinMask & ~(1u << kSkinCharger);
+  s = virtualSkin(in, pinHeldMask, true);
+  CHECK(s.valid && s.used == pinHeldMask && s.milliC == 30000 * 943 / 1000 + 1600);
+  CHECK(!virtualSkin(in, pinHeldMask, false).valid);
+  CHECK(!virtualSkin(in, pinHeldMask & ~(1u << kSkinQuiet), true).valid);
   int32_t stock[kSkinInputs] = {35000, 38000, 36000, 40000, 42000};   // the stock arithmetic: weighted sum / 1000 + 1.6 C
   CHECK(virtualSkin(stock, 0x1f).milliC == (500 * 35000 + 131 * 38000 - 9 * 36000 + 89 * 40000 + 232 * 42000) / 1000 + 1600);
   // step tables: below 15 C no cap; 15 C -> 2745.6 / 3072; up the triggers at once, down only under the clear point
@@ -1069,7 +1113,7 @@ static void testPerf()
   CHECK(c0.update(kCluster0, kCluster0Steps, true, 48500) == 748800 && c0.step() == int(kCluster0Steps) - 1);
   CHECK(c0.update(kCluster0, kCluster0Steps, false, 0) == 748800);       // no reading: the step stays
   SkinCap cold;
-  CHECK(cold.update(kCluster1, kCluster1Steps, false, 0) == 3072000);    // no reading from the start: the first step, not "no cap"
+  CHECK(cold.update(kCluster1, kCluster1Steps, false, 0) == skinFaultCap(1));
   CHECK(c0.update(kCluster0, kCluster0Steps, true, 36000) == 2400000);   // 48.5 -> 36: down to the step whose clear point holds (37 C, clear 35)
   CHECK(c0.update(kCluster0, kCluster0Steps, true, 34900) == 2745600);
   // the tables are ordered and every clear point under its trigger
@@ -1090,6 +1134,12 @@ static void testPerf()
   CHECK(!b.tick(bc, 3080, true, true, true, 30000));                     // an onset inside the 500 ms gap: refused
   CHECK(!b.tick(bc, 3700, false, true, true, 30000) && b.tick(bc, 3720, true, true, true, 30000));
   CHECK(!b.tick(bc, 3740, true, true, true, 48000));                     // the skin limit closes it
+  Burst missing;
+  CHECK(!missing.tick(bc, 0, true, true, false, 0));
+  CHECK(!missing.tick(bc, 10, false, true, true, 30000));
+  CHECK(missing.tick(bc, 20, true, true, true, 30000));
+  CHECK(!missing.tick(bc, 30, true, true, false, 0));
+  CHECK(!missing.tick(bc, 600, true, true, true, 30000));
   Burst saver;
   CHECK(!saver.tick(bc, 0, false, false, true, 30000) && !saver.tick(bc, 20, true, false, true, 30000));
   CHECK(perfCapKhz(3072000, false, 4089999) == 3072000 && perfCapKhz(3072000, true, 4089999) == 4089999);
@@ -1340,6 +1390,7 @@ int main(int argc, char **argv)
   testBoost();
   testProfileAndSleep();
   testCluster();
+  testSensorFaults();
   testInterruptsAndPolling();
   testPerf();
   testBoosts();

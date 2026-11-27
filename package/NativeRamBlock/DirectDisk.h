@@ -4,12 +4,12 @@
 // immutable base for pages the window does not hold: a page whose bit is set is read from the window, any other page from the seed (or zero).
 // A self-contained store (PersistOverlay.h kSelfContained, after data-store-flatten) holds every page its seed had, so the seed is not
 // read at all: a page whose bit is clear is zero, whatever seed this boot brought.
-// Writes always go to the window, durably, before they are reported done; the seed is never modified.
+// Writes go to the window according to the selected cache policy. The seed is immutable.
 //   Buf: uint64_t read(uint64_t at, void *p, uint64_t n)        bytes of the request buffer (the data of a write)
 //        uint64_t copy(uint64_t at, const void *p, uint64_t n)  bytes into the request buffer (the data of a read)
 //   Store: bool read(block, count, dst); bool write(block, count, src)   (PersistOverlay.h's Ops)
 // `stage` is stagePages * 4096 bytes. Returns the bytes completed; *storeError is set when the store refused or failed (a short
-// copy by the buffer is not a store error). The policy selects the presence lookup and how a write is made durable.
+// copy by the buffer is not a store error). The policy selects the presence lookup and cache behavior.
 #include "SparseDisk.h"
 #include "SeedDisk.h"
 #include "PersistOverlay.h"
@@ -23,6 +23,7 @@ static uint64_t directDiskIOWithPolicy(const Seed &seed, persist::Overlay &ov, S
   if (!stagePages || !length || offset > seed.bytes || length > seed.bytes - offset) return 0;
   if (!ov.active || (write && ov.readOnly)) return 0;
   const uint64_t lastIndex = (offset + length - 1) / 4096;
+  if (lastIndex >= ov.pages) return 0;
   uint64_t done = 0;
   while (done < length) {
     uint64_t at = offset + done, index = at / 4096, skip = at & 4095;
@@ -46,7 +47,7 @@ static uint64_t directDiskIOWithPolicy(const Seed &seed, persist::Overlay &ov, S
       if (got != n) break;
       continue;
     }
-    if (skip == 0 && length - done >= 4096) {          // whole pages: one run, one durable commit
+    if (skip == 0 && length - done >= 4096) {          // whole pages: one run up to the stage size
       uint32_t n = 0;
       while (n < stagePages && (uint64_t) (n + 1) * 4096 <= length - done) ++n;
       if (buf.read(done, stage, (uint64_t) n * 4096) != (uint64_t) n * 4096) break;

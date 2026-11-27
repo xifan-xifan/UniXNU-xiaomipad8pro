@@ -21,7 +21,7 @@
 //            an iATU that will not enable, the wrong endpoint, an impossible BAR mask, a refused rail vote, an unreadable rail, a
 //            BHI error, a BHIe error, a system error, a crash dump, a timeout) must make the level fail at that step and leave
 //            WLAN_EN low and PERST# asserted.
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. bringup_host.cpp -o /tmp/bringup_host && /tmp/bringup_host
+//   c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I.. bringup_host.cpp -o /tmp/bringup_host && /tmp/bringup_host
 #include "WifiBringup.h"
 #include "WifiMhi.h"
 #include "WifiPbl.h"

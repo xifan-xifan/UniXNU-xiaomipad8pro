@@ -4,7 +4,7 @@
 // PianoDwc3's for the whole boot, as before. Shared by both kexts (PianoUsbHost includes it from package/PianoDwc3); no link
 // dependency: PianoUsbHost finds the registered PianoDwc3 service by class and calls
 //     callPlatformFunction("piano-usb-handoff", false, (void *)ask, (uint32_t *)state, (void *)timeoutMs, nullptr)
-// ask: release (PianoDwc3 stops its device controller, masks its event interrupt, stops touching the core and parks its USB thread;
+// ask: release (PianoDwc3 masks its event interrupt, stops the device controller and retires its transfers, then parks its USB thread;
 // the console rings keep filling and are replayed later; only while awake) or reclaim (PianoDwc3 waits out a sleep, re-reads the core's
 // power domain and clocks and, only when they read on, runs its whole takeover again: halt, soft reset, device mode, the VBUS/session
 // override through its sleep guard, run), or state (which also withdraws a pending ask: a release not taken in time). It
@@ -25,7 +25,7 @@ enum HandoffState : uint32_t {
   kHoDevice = 2,     // the device controller runs: PianoDwc3's
   kHoReleased = 3,   // stopped and parked: the core is free for PianoUsbHost
   kHoReclaiming = 6, // request accepted; the USB thread owns recovery
-  kHoUnsafe = 5,     // halt unconfirmed: never lend; only a device recovery is permitted
+  kHoUnsafe = 5,     // device quiescence unconfirmed: never lend; only a device recovery is permitted
   kHoFailed = 4,     // a takeover failed: idle; not permission for a host to borrow
 };
 inline const char *handoffStateName(uint32_t s)
@@ -36,7 +36,7 @@ inline const char *handoffStateName(uint32_t s)
     case kHoDevice: return "device (PianoDwc3 runs the controller)";
     case kHoReleased: return "released";
     case kHoReclaiming: return "reclaiming";
-    case kHoUnsafe: return "unsafe (device halt unconfirmed)";
+    case kHoUnsafe: return "unsafe (device quiescence unconfirmed)";
     case kHoFailed: return "failed (PianoDwc3 idle)";
     default: return "?";
   }

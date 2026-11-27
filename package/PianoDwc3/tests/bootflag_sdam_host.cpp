@@ -3,6 +3,7 @@
 // the survey never stores to the owner channel and reads 0x40..0xbf; a request is refused before any store when writes are off,
 // the request is unknown, the byte is foreign, or the APID is not EE 0's; a write changes byte 0x49 only and is read back; channel
 // failures, a denied write and a lying read-back are reported; every request over all 256 bytes agrees with bootflag.h.
+//   c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=undefined -I.. bootflag_sdam_host.cpp -o /tmp/bootflag_sdam_host && /tmp/bootflag_sdam_host
 #include <cstdio>
 #include <cstring>
 #include "../../include/PianoBootFlagSdam.h"

@@ -69,6 +69,7 @@ tail -1 "$T/pon-history-fixture.txt"
 "$T/cp_driver_host_san"
 "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -I "$P" "$P/tests/battery_host.cpp" -o "$T/battery_host"   # BatteryMap.h (piano-power-ps)
 "$T/battery_host" || { echo "Error: PianoPower battery host tests failed" >&2; exit 1; }
+bash "$P/tests/run-battery-health-host.sh"
 # The DSP client contract (package/include/PianoAdspContract.h): the QRTR port table against the router codec, the health pieces and
 # the quiet flag (QrtrPorts.c, AdspHealth.h), the charger codec's "configured", GLINK's late registration (QcomGlink.c).
 "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -I "$P" -I "$D/package/include" "$P/tests/ports_host.cpp" "$T/QrtrPorts.o" "$T/QcomQrtr.o" \

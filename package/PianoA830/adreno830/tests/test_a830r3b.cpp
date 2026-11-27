@@ -196,6 +196,16 @@ static void dockedProfile() {
     /* the effective-cap probe from the top shows 14 (it started at 7 and never showed more) */
     qual.thermal().skinTable=1;k=skinOf(20000);driveF(60,740,&k);
     CHECK(power.qualificationEffectiveCap(A830ExitContext::Guard,14)==14 && power.qualificationEffectiveCap(A830ExitContext::Guard)==7);
+    k=skinOf(55000);driveF(3,740,&k);CHECK(dcvs.level()==6);
+    qual.thermal().skinTable=0;
+    driveF(3,740,nullptr);CHECK(dcvs.level()==6);
+    k=skinOf(20000);k.valid&=~(1u<<PIANO_SKIN_XO);
+    driveF(3,740,&k);CHECK(dcvs.level()==6);
+    k=skinOf(20000);k.valid&=~(1u<<PIANO_SKIN_QUIET);
+    qual.thermal().skinTable=1;
+    driveF(3,740,&k);CHECK(dcvs.level()==6);
+    qual.thermal().skinTable=0;
+    k=skinOf(20000);driveF(60,740,&k);CHECK(dcvs.level()==14);
 }
 /* gpu/throttle1: which limit holds the cap (the y12c consoles' "cause=skin25" under Low Power Mode's 342 MHz) */
 static void bindNames() {

@@ -116,7 +116,9 @@ static BOOL checkTargets(PianoHistoryReader read, PianoAppReader app)
     id choice = key && app ? app(domain, key) : nil;
     const char *action;
     BOOL front = NO;
-    if ([choice isKindOfClass:NSString.class] && [choice length]) {
+    if (choice && ![choice isKindOfClass:NSString.class]) {
+      action = "unknown-app-choice";
+    } else if ([choice length]) {
       front = [choice caseInsensitiveCompare:PIANO_FRONT_ID] == NSOrderedSame;
       action = front ? "front-ready-app-choice" : "other-camera-app-choice";
     } else if (historyIsFront(history)) {

@@ -6,8 +6,8 @@
 #
 # [[unit]]       one piece: name, about, default_on (its launchd job runs in the installed profile: loaded at install; false: the
 #                job file is installed with Disabled and the owner turns it on with launchctl enable), status = "planned" (listed,
-#                not built or staged). A unit has at most one launchd job; a unit without one is a command-line tool and is always
-#                installed (default_on must be true).
+#                may omit files and is skipped by the stager). A unit has at most one launchd job. A ready unit without one
+#                is a command-line tool and is always installed (default_on must be true).
 # [[unit.file]]  one installed file:
 #   dest         its path on the tablet: /Library/LaunchDaemons/<Label>.plist, /Library/LaunchAgents/<Label>.plist (a launchd job,
 #                root:wheel 0644: launchd refuses any other), /usr/local/bin/<name> (commands), /usr/local/libexec/<name> (helpers),
@@ -250,6 +250,21 @@ dest = "/usr/local/bin/piano-torch"
 mode = "0755"
 
 [[unit]]
+name = "piano-ir"
+about = "the IR transmitter from macOS (docs/drivers/ir.md section 3): sudo piano-ir status|raw|nec|blink; sends need PianoIR at piano-ir=2"
+default_on = true
+
+[[unit.file]]
+source = "tooling/native/piano-ir/piano-ir.c"
+build = "cc"
+arch = "arm64"
+cflags = ["-I", "package/PianoIR"]
+inputs = ["package/PianoIR/IrWave.h", "package/PianoIR/PianoIRClient.h"]
+frameworks = ["IOKit", "CoreFoundation"]
+dest = "/usr/local/bin/piano-ir"
+mode = "0755"
+
+[[unit]]
 name = "piano-camera-grab"
 about = "one capture per camera through PianoCamera's user client (docs/drivers/camera.md section 4.5): sudo piano-camera-grab [front|rear|both] writes /private/var/tmp/piano-camera-<sensor>.ppm; its job runs once at boot only with the kernel arguments piano-camera=5 piano-camera-grab=1 and prints its results and thumbnails on the console"
 default_on = true
@@ -391,7 +406,7 @@ default_on = true
 [[unit.file]]
 source = "tooling/native/piano-brightness-sync/piano-brightness-sync.m"
 build = "cc"
-inputs = ["package/include/PianoBootArgs.h"]
+inputs = ["package/include/PianoBootArgs.h", "tooling/native/piano-brightness-sync/SyncPolicy.h"]
 arch = "arm64"
 cflags = ["-fobjc-arc"]
 frameworks = ["Foundation", "IOKit"]
@@ -478,14 +493,6 @@ name = "piano-wifi"
 about = "the Wi-Fi command-line tool of docs/drivers/wifi.md section 13.1 (scan, join, status over PianoWifi's control socket); not written yet"
 status = "planned"
 default_on = true
-
-[[unit.file]]
-source = "tooling/native/piano-wifi/piano-wifi.c"
-build = "cc"
-arch = "arm64"
-frameworks = ["CoreFoundation"]
-dest = "/usr/local/bin/piano-wifi"
-mode = "0755"
 
 [[unit]]
 name = "piano-charge-config"

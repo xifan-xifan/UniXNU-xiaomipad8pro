@@ -9,6 +9,7 @@
 #include "AudioSurvey.h"
 #include "AudioPins.h"
 #include "AudioAmps.h"
+#include "AudioLog.h"
 #include "SmmuStream.h"
 #include <cstdio>
 #include <cstring>
@@ -259,8 +260,25 @@ static void testSmmuBypass()
   }
 }
 
+static void testSpeakerProbeOptIn()
+{
+  CHECK(!piano_audio_spk_probe_enabled(nullptr));
+  CHECK(!piano_audio_spk_probe_enabled("piano-audio=10 piano-audio-spk=1"));
+  CHECK(!piano_audio_spk_probe_enabled("piano-audio-spk-probe"));
+  CHECK(!piano_audio_spk_probe_enabled("piano-audio-spk-probe="));
+  CHECK(!piano_audio_spk_probe_enabled("piano-audio-spk-probe=0x1"));
+  CHECK(!piano_audio_spk_probe_enabled("piano-audio-spk-probe=11"));
+  CHECK(!piano_audio_spk_probe_enabled("piano-audio-spk-probe=4294967297"));
+  CHECK(!piano_audio_spk_probe_enabled("piano-audio-spk-probe-extra=1"));
+  CHECK(!piano_audio_spk_probe_enabled("piano-audio-spk-probe=1 piano-audio-spk-probe=0"));
+  CHECK(!piano_audio_spk_probe_enabled("piano-audio-spk-probe=1 piano-audio-spk-probe"));
+  CHECK(piano_audio_spk_probe_enabled("piano-audio=9\tpiano-audio-spk-probe=1 "));
+  CHECK(piano_audio_spk_probe_enabled("piano-audio-spk-probe=0 piano-audio-spk-probe=1"));
+}
+
 int main()
 {
+  testSpeakerProbeOptIn();
   testTables();
   testLoads();
   testDecode();

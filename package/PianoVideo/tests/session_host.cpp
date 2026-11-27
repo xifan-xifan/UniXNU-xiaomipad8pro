@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Copyright (c) 2026 Leo Zhang.
 // Independent scripted firmware peer: asynchronous commands, reordered PSC/FBD packets, ownership and fault injection.
+// c++ -std=c++20 -O2 -Wall -Wextra -Werror -I .. -I ../../include session_host.cpp -o /tmp/session_host && /tmp/session_host
 #include <cstdio>
 #include <cstdlib>
 #include <cstdarg>

@@ -11,5 +11,4 @@ $(OUT)/piano-brightness-sync: piano-brightness-sync.m SyncPolicy.h ../../../pack
 	$(CC) -arch arm64 -mmacosx-version-min=14.0 $(CFLAGS) -fobjc-arc piano-brightness-sync.m -framework Foundation -framework IOKit -o $@
 
 test: all
-	$(CC) -std=c11 $(CFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=all tests/sync_policy_host.c -o $(OUT)/sync_policy_host
-	$(OUT)/sync_policy_host
+	bash tests/run-sync-host.sh

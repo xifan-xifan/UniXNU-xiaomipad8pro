@@ -242,7 +242,15 @@ struct Stats {
   uint64_t refused[kPianoDpuFlipResults] = {};
   uint64_t windowStartUs = 0, windowFlips = 0, windowRefused = 0;
   uint64_t cleanSkips = 0, cleanInits = 0, cleanFailures = 0, aliasFailures = 0, cleanCheckUs = 0;
+  uint64_t cleanFull = 0, cleanPolicyWrites = 0, cleanUnderruns = 0;
   uint64_t cleanReasons[unsigned(CleanReason::count)] = {};
+
+  void recordCleanShown(CleanEpoch::Action action)
+  {
+    if (action == CleanEpoch::Action::skipped) ++cleanSkips;
+    else if (action == CleanEpoch::Action::initialized) ++cleanInits;
+    else if (action == CleanEpoch::Action::fallback) ++cleanFull;
+  }
 
   template<class Line>
   void formatClean(Line line) const
@@ -256,6 +264,12 @@ struct Stats {
          reason(CleanReason::attributes), reason(CleanReason::backing), reason(CleanReason::initialClean));
     line("clean: pixel-us %llu check-us %llu", n(cleanUs), n(cleanCheckUs));
   }
+};
+
+struct CleanQualification {
+  int policy = -1;   // -1 legacy, 0 strict full clean, 1 verified-WC skip
+  bool serving = false;
+  uint32_t pendingUnderruns = 0;   // acknowledged by the IRQ, not yet consumed by the flip/watch path
 };
 
 template <class Hw>
@@ -314,7 +328,10 @@ class Flipper {
   uint32_t underruns()
   {
     const uint32_t bits = (hw.rd(kMdp + kTopIntrStatus) | hw.takeIrqBits()) & kUnderrunBits;
-    if (bits) hw.wr(kMdp + kTopIntrClear, bits);
+    if (bits) {
+      if (cfg.cleanSkip) ++st.cleanUnderruns;
+      hw.wr(kMdp + kTopIntrClear, bits);
+    }
     return bits;
   }
   uint32_t fsr() { return smmuOn ? hw.smmuRd(plan.cb + smmu::kFsr) : 0; }
@@ -699,16 +716,15 @@ class Flipper {
       st.mapUs += mapUs;
     }
     const uint64_t c0 = hw.nowUs();
-    bool skipped = false;
+    auto action = CleanEpoch::Action::refused;
     if (cfg.cleanSkip) {
       if (hw.surfaceLength(r) != backingBytes[s] || r.offset + need.bytes > backingBytes[s]) {
         cleanEpochs[s] = {};
         ++st.cleanReasons[unsigned(CleanReason::backing)];
         return refuse(r, kPianoDpuFlipSize);
       }
-      const auto clean = cleanForFlip(unsigned(s), r, need.bytes, producerComplete, mapped ? &before : nullptr);
-      if (clean == CleanEpoch::Action::refused) return refuse(r, kPianoDpuFlipClean);
-      skipped = clean == CleanEpoch::Action::skipped;
+      action = cleanForFlip(unsigned(s), r, need.bytes, producerComplete, mapped ? &before : nullptr);
+      if (action == CleanEpoch::Action::refused) return refuse(r, kPianoDpuFlipClean);
     } else if (cfg.clean) {
       const bool cleaned = hw.surfaceClean(slots.slot[s].cookie, r.offset, need.bytes);
       st.cleanUs += hw.nowUs() - c0;
@@ -723,7 +739,7 @@ class Flipper {
     const Target t{smmu::slotIova(unsigned(s)) + uint32_t(r.offset), uint32_t(r.rowBytes), true};
     if (s == slots.shown && (!cfg.cleanSkip || sameTarget(current, t))) {
       ++st.reshows;
-      if (skipped) ++st.cleanSkips;
+      if (cfg.cleanSkip) st.recordCleanShown(action);
       if (cfg.cadenceS) ++cad.reshows;
       ++st.windowFlips;
       r.result = kPianoDpuFlipShown;
@@ -760,7 +776,7 @@ class Flipper {
     r.result = kPianoDpuFlipShown;
     r.workUs = uint32_t(work);
     ++st.flips;
-    if (skipped) ++st.cleanSkips;
+    if (cfg.cleanSkip) st.recordCleanShown(action);
     ++st.windowFlips;
     st.latchUs += l.us;
     if (l.us > st.latchMaxUs) st.latchMaxUs = l.us;
@@ -960,7 +976,6 @@ class Flipper {
       return ok;
     };
     const auto result = cleanEpochs[s].prepare(reason, clean, verify, [&] { hw.barrier(); });
-    if (result.action == CleanEpoch::Action::initialized) ++st.cleanInits;
     if (result.reason != CleanReason::eligible) ++st.cleanReasons[unsigned(result.reason)];
     if (reportMap)
       hw.note("clean map %llu: span %u off %u row %u mode %#x WC/other/unknown %u/%u/%u -> %u/%u/%u init %u reason %s",

@@ -45,24 +45,30 @@ static int armed(void)
   int value = 0; size_t size = sizeof value;
   return !sysctlbyname("machdep.piano_wifi_power_explicit", &value, &size, NULL, 0) && size == sizeof value && value == 1;
 }
-static int probe(SCDynamicStoreRef store, int set_check)
+static int country_probe(int set_check)
 {
-  struct sample s = sample(store);
-  printf("probe_started=yes\nconsole_desktop=%s\nsc_published=%s\nraw_power_on=%s\nguard_armed=%s\n",
-         s.desktop ? "yes" : "no", s.published ? "yes" : "no", s.on ? "yes" : "no", armed() ? "yes" : "no");
   char country[3] = {0}; int error = raw(51, country, sizeof country, 0);
   int valid = !error && country[0] >= 'A' && country[0] <= 'Z' && country[1] >= 'A' && country[1] <= 'Z' && !country[2] &&
               memcmp(country, "XX", 2);
   printf("country_raw_error=%d\ncountry_raw_valid=%s\n", error, valid ? "yes" : "no");
   if (valid) printf("country_raw=%.2s\n", country);
+  int verified = valid;
   if (set_check && valid) {
     uint8_t wire[8] = {1, 0, 0, 0, (uint8_t)country[0], (uint8_t)country[1], 0, 0};
-    printf("country_same_set_ok=%s\n", raw(51, wire, sizeof wire, 1) == 0 ? "yes" : "no");
+    verified = raw(51, wire, sizeof wire, 1) == 0;
+    printf("country_same_set_ok=%s\n", verified ? "yes" : "no");
     // No foreign-country write: refusal of unsupported changes is covered by
     // the production parser host tests; the hardware probe is idempotent only.
   }
   puts("probe_complete=yes");
-  return valid ? 0 : 2;
+  return verified ? 0 : 2;
+}
+static int probe(SCDynamicStoreRef store, int set_check)
+{
+  struct sample s = sample(store);
+  printf("probe_started=yes\nconsole_desktop=%s\nsc_published=%s\nraw_power_on=%s\nguard_armed=%s\n",
+         s.desktop ? "yes" : "no", s.published ? "yes" : "no", s.on ? "yes" : "no", armed() ? "yes" : "no");
+  return country_probe(set_check);
 }
 int main(int argc, char **argv)
 {

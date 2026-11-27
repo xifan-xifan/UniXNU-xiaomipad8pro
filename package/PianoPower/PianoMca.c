@@ -152,7 +152,7 @@ int piano_mca_write_allowed_for(const PianoMca *m, uint32_t property, uint32_t v
     case PIANO_MCA_QC_VOLT: return bytes == 4 && m->qc3_allowed && (value == 5000 || value == 9000);
     case PIANO_MCA_PPS: {
         const uint32_t mv = (value >> 16) * 20, ma = (value & 0xffffu) * 50;
-        return bytes == 4 && ((m->pps_allowed && mv == 9000 && ma >= 500 && ma <= 3000) ||
+        return bytes == 4 && ((m->pps_allowed && mv == 9000 && ma >= 500 && ma <= 2500) ||
                               (gCpPps && mv >= 5000 && mv <= 11000 && ma >= 1000 && ma <= 6000));
     }
     case PIANO_MCA_QC_PULSE: return bytes == 4 && gCpQc && (value == 0x20u || value == 0x10u);

@@ -6,6 +6,7 @@
 // view: programmed), the slice active (refused, nothing written), a block that reads all ones or is older than v6 (refused), writes
 // the hypervisor ignores or masks (read-back failure, the values found put back), no bank count when ATTR3 is needed (refused), a
 // failed read, and ready() before and after.
+// c++ -std=c++20 -O1 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I.. test_llcc_island.cpp -o /tmp/test_llcc_island && /tmp/test_llcc_island
 #include "PianoLlccIsland.h"
 #include <cstdio>
 #include <cstdlib>

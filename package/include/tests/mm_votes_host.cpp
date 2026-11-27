@@ -404,6 +404,10 @@ static void testCmdDb()
 
 int main()
 {
+  // Saturation must hold even when the unsaturated sum would overflow uint32_t.
+  const std::vector<uint32_t> needs(262161, 0x3fffu << 14 | 7u);
+  CHECK(piano_mm_bcm_vote(needs.data(), unsigned(needs.size())) ==
+        (PIANO_MM_BCM_COMMIT | PIANO_MM_BCM_VALID | 0x3fffu << 14 | 7u));
   testOneUser();
   testTwoUsers();
   testFailures();

@@ -32,6 +32,7 @@ test_property(void)
 	CHECK(piano_bootargs_property("00", name) == 0 && strcmp(name, "piano-boot-args-00") == 0);
 	CHECK(piano_bootargs_property("", name) == PIANO_BA_BAD_SET);
 	CHECK(piano_bootargs_property("a b", name) == PIANO_BA_BAD_SET);
+	CHECK(piano_bootargs_property("a\tb", name) == PIANO_BA_BAD_SET && name[0] == '\0');
 	CHECK(piano_bootargs_property("a/b", name) == PIANO_BA_BAD_SET);
 	CHECK(piano_bootargs_property("a=b", name) == PIANO_BA_BAD_SET);
 }
@@ -63,6 +64,7 @@ test_merge(void)
 	CHECK(merge(out, sizeof(out), "a=1", "x", 0, &tail, &total) == PIANO_BA_EMPTY);
 	// a byte outside printable ASCII before the NUL: refused whole
 	CHECK(merge(out, sizeof(out), "a=1", "b=2\tc=3", 8, &tail, &total) == PIANO_BA_BAD_CHAR && strcmp(out, "untouched") == 0);
+	CHECK(merge(out, sizeof(out), "a=1", " \t ", 4, &tail, &total) == PIANO_BA_BAD_CHAR && tail == 0 && total == 0);
 	CHECK(merge(out, sizeof(out), "a=1", "b=2\nc=3", 8, &tail, &total) == PIANO_BA_BAD_CHAR);
 	CHECK(merge(out, sizeof(out), "a=1", "b=\x80", 4, &tail, &total) == PIANO_BA_BAD_CHAR);
 	CHECK(merge(out, sizeof(out), "a=1", "b=\x7f", 4, &tail, &total) == PIANO_BA_BAD_CHAR);

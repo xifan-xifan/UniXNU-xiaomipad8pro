@@ -448,6 +448,7 @@ kiss_fft_state *rnn_fft_alloc_twiddles(int nfft,void * mem,size_t * lenmem,
         opus_int16 *bitrev;
         kiss_twiddle_cpx *twiddles;
 
+        memset(st, 0, sizeof(*st));
         st->nfft=nfft;
 #ifdef FIXED_POINT
         st->scale_shift = celt_ilog2(st->nfft);
@@ -468,8 +469,10 @@ kiss_fft_state *rnn_fft_alloc_twiddles(int nfft,void * mem,size_t * lenmem,
               goto fail;
         } else {
            st->twiddles = twiddles = (kiss_twiddle_cpx*)KISS_FFT_MALLOC(sizeof(kiss_twiddle_cpx)*nfft);
-           compute_twiddles(twiddles, nfft);
            st->shift = -1;
+           if (!twiddles)
+              goto fail;
+           compute_twiddles(twiddles, nfft);
         }
         if (!kf_factor(nfft,st->factors))
         {

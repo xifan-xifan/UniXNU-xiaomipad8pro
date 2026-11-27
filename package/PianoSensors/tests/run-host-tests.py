@@ -6,6 +6,7 @@
   wire     PaganiSensors' protobuf and SNS vectors (unchanged test), vector 4 framed by PianoPower's own QcomQrtr.c
   fixed    the integer float conversions and axis maps (PaganiSensors' test)
   orient   the orientation state machine (PaganiSensors' test)
+  persist  read-only ext4 extraction and registry equivalence against synthetic partition images and sensor packs
   rpc      the FastRPC file service against PaganiSensors' simulated DSP, then a pack made by tools/make-sensor-pack.py
   bringup  the file service's bring-up after the tablet's first S2 (2026-11-14): Linux's metadata page with every invoke, the init2
            framing ladder, the release after the attach (withheld from a dying DSP), the deadline, the guard's file-service strike; and
@@ -58,8 +59,17 @@ def run(exe, *args):
     result = subprocess.run([str(exe), *map(str, args)], capture_output=True, text=True)
     text = (result.stdout + result.stderr).strip()
     print(text)
-    if result.returncode or not text.splitlines()[-1].startswith('PASS'):
+    if result.returncode or not text or not text.splitlines()[-1].startswith('PASS'):
         sys.exit(f'FAIL: {exe.name}')
+
+
+def persist_tests(out):
+    pack = out / 'SensorsPack.o'
+    subprocess.run([os.environ.get('CC', 'cc'), *CFLAGS, '-c', str(PKG / 'SensorsPack.c'), '-o', str(pack)], check=True)
+    exe = out / 'persist_ext4_ro_host'
+    subprocess.run([os.environ.get('CXX', 'c++'), '-std=c++17', *CFLAGS[1:], str(HERE / 'persist_ext4_ro_host.cpp'),
+                    str(pack), '-o', str(exe)], check=True)
+    run(exe)
 
 
 def member(tar, name, data=None, link=None):
@@ -229,10 +239,10 @@ def addon_checks(pack, scratch):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--only', action='append', default=[],
-                        choices=['wire', 'fixed', 'orient', 'rpc', 'bringup', 'pack', 'piano', 'streams', 'load', 'addon', 'kernel'])
+    suites = ('wire', 'fixed', 'orient', 'persist', 'rpc', 'bringup', 'pack', 'piano', 'streams', 'load', 'addon', 'kernel')
+    parser.add_argument('--only', action='append', default=[], choices=suites)
     args = parser.parse_args()
-    want = set(args.only) or {'wire', 'fixed', 'orient', 'rpc', 'bringup', 'pack', 'piano', 'streams', 'load', 'addon', 'kernel'}
+    want = set(args.only) or set(suites)
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp)
         src = lambda *names: [PKG / n for n in names]
@@ -242,6 +252,8 @@ def main():
             run(build(out, 'fixed', [HERE / 'fixed.c', *src('SensorsFixed.c')], ['-lm']))
         if 'orient' in want:
             run(build(out, 'orient', [HERE / 'orient.c', *src('SensorsOrient.c')], ['-lm']))
+        if 'persist' in want:
+            persist_tests(out)
         pack = None
         REPO_OUT.mkdir(parents=True, exist_ok=True)
         scratch = Path(tempfile.mkdtemp(prefix='sensor-pack-', dir=REPO_OUT))   # the only place a pack may be written

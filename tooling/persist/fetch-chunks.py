@@ -168,7 +168,10 @@ def fetch(transport, source, destination, expected, timeout):
             raise FetchError('complete received SHA-256 differs from tablet')
         with part.open('rb', buffering=0) as disk:
             fcntl.fcntl(disk, F_NOCACHE, 1)
-            disk_sha = hashlib.file_digest(disk, 'sha256').hexdigest()
+            disk_hash = hashlib.sha256()
+            for chunk in iter(lambda: disk.read(1 << 20), b''):
+                disk_hash.update(chunk)
+            disk_sha = disk_hash.hexdigest()
         if disk_sha != tablet_sha:
             raise FetchError('cache-free SSD SHA-256 differs from tablet')
         part.replace(destination)

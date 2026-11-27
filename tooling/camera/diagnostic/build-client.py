@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-2-Clause-Patent
 """Build the diagnostic bundle with the B-TC development signing identity."""
+import argparse
 import hashlib
 import importlib.util
 import json
@@ -12,13 +13,9 @@ import sys
 import tempfile
 
 HERE = Path(__file__).resolve().parent
-sys.dont_write_bytecode = True
-spec = importlib.util.spec_from_file_location("package_camera", HERE.parent / "extension/package-camera.py")
-camera = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(camera)
 IDENTIFIER = "com.unixnu.PianoCamera.DiagClient"
 
-def build(output):
+def compile_client(output):
     app = output / "DiagClient.app"
     binary = app / "Contents/MacOS/DiagClient"
     binary.parent.mkdir(parents=True, exist_ok=False)
@@ -36,6 +33,15 @@ def build(output):
                  "Metal", "IOSurface", "ImageIO"):
         command.extend(("-framework", name))
     subprocess.run(command, check=True)
+    return app, binary
+
+
+def build(output):
+    sys.dont_write_bytecode = True
+    spec = importlib.util.spec_from_file_location("package_camera", HERE.parent / "extension/package-camera.py")
+    camera = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(camera)
+    app, binary = compile_client(output)
     rights = {"com.apple.security.device.camera": True}
     with tempfile.TemporaryDirectory(dir=output) as tmp:
         entitlements = Path(tmp) / "entitlements.plist"
@@ -54,5 +60,16 @@ def build(output):
     fields["ExecutableSHA256"] = hashlib.sha256(binary.read_bytes()).hexdigest()
     (output / "artifact.json").write_text(json.dumps(fields, indent=2) + "\n")
 
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("output", type=Path)
+    parser.add_argument("--build-only", action="store_true", help="compile the app locally without signing or archiving")
+    args = parser.parse_args()
+    if args.build_only:
+        compile_client(args.output.resolve())
+    else:
+        build(args.output.resolve())
+
+
 if __name__ == "__main__":
-    build(Path(sys.argv[1]).resolve())
+    main()

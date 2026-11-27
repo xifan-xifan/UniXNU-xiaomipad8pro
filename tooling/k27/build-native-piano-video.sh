@@ -44,6 +44,12 @@ done
 python3 "$P/tests/hevc_files_host.py" --host "$O/host-tests/hevc_host" "$P/tests/fixtures/v9/main10-1080.mp4" "$P/tests/fixtures/v9/main8-1080.mp4" \
   || { echo "Error: PianoVideo owned HEVC files failed admission" >&2; exit 1; }
 python3 "$P/tests/fixture_host.py" || { echo "Error: PianoVideo own AVC fixture/golden check failed" >&2; exit 1; }
+# E1 (piano-video-enc=1): the encoder geometry/sizes/layout/script and the HFI encode transaction against a scripted peer, then the
+# host stream checker against ffmpeg's own encode of the same pattern (skipped without ffmpeg).
+"${CXX:-c++}" -std=c++20 -O2 -Wall -Wextra -Werror -I "$P" -I "$D/package/include" "$P/tests/enc_host.cpp" -o "$O/host-tests/enc_host"
+"$O/host-tests/enc_host" || { echo "Error: PianoVideo E1 encoder tests failed" >&2; exit 1; }
+python3 "$P/tests/enc_stream_check.py" --self-test --pattern-tool "$O/host-tests/enc_host" \
+  || { echo "Error: PianoVideo E1 stream checker self-test failed" >&2; exit 1; }
 "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -I "$P/vt" "$P/tests/vt_host.cpp" -o "$O/host-tests/vt_host"
 "$O/host-tests/vt_host" || { echo "Error: PianoVideo VT wire host tests failed" >&2; exit 1; }
 "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -I "$P/vt" "$P/tests/vt_surface_host.cpp" -o "$O/host-tests/vt_surface_host"

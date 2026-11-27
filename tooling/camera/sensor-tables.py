@@ -111,6 +111,12 @@ def sha256(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def hex_field(text, line):
+    if not re.fullmatch(r'0x[0-9a-fA-F]+', text):
+        raise Bad(f'line {line}: malformed hexadecimal field')
+    return int(text, 16)
+
+
 # ------------------------------------------------------------------------------------------------------------- extraction
 def defines(src):
     """Register-name macros of the form NAME CCI_REGn(0x....)."""
@@ -173,8 +179,14 @@ def mode_params(src, array, fields, tables):
                     raise Bad(f'{array}: a mode without a known register list')
                 if set(params) != set(fields):
                     raise Bad(f'{array}: mode {tables[rm.group(1)]} lacks {sorted(set(fields) - set(params))}')
+                if tables[rm.group(1)] in modes:
+                    raise Bad(f'{array}: duplicate mode {tables[rm.group(1)]}')
                 modes[tables[rm.group(1)]] = params
                 start = None
+            elif depth < 0:
+                raise Bad(f'{array}: unmatched closing brace')
+    if depth:
+        raise Bad(f'{array}: truncated mode')
     return modes
 
 
@@ -185,6 +197,8 @@ def extract_sensor(name, src_text, src_sha):
     if set(arrays) != set(cfg['arrays']):
         raise Bad(f'{name}: arrays {sorted(arrays)} differ from the expected {sorted(cfg["arrays"])}')
     modes = mode_params(src_text, cfg['modes'][0], cfg['modes'][1], cfg['mode_tables'])
+    if set(modes) != set(cfg['mode_tables'].values()):
+        raise Bad(f'{name}: missing mode metadata')
     sections = []
     if cfg.get('start'):
         sections.append(('start', 'start', {}, cfg['start']))
@@ -357,7 +371,7 @@ def parse_phy(text):
         elif f[0] == 'r':
             if cur is None or len(f) != 5 or not f[1].startswith('0x') or not f[2].startswith('0x') or not f[3].isdigit():
                 raise Bad(f'line {n}: "r OFFSET VALUE DELAY_US KIND" inside a section')
-            off, value, delay, kind = int(f[1], 16), int(f[2], 16), int(f[3]), f[4]
+            off, value, delay, kind = hex_field(f[1], n), hex_field(f[2], n), int(f[3]), f[4]
             if off >= 0x2000 or off & 3 or value > 0xff or delay > 1000 or kind not in PHY_KIND_CODES:
                 raise Bad(f'line {n}: offset, value, delay or kind out of range')
             cur['items'].append(('r', off, value, delay, kind))
@@ -408,14 +422,14 @@ def parse(text):
             cur = {'kind': kind, 'name': name, 'params': {}, 'items': []}
             t['sections'].append(cur)
         elif f[0] == 'p':
-            if cur is None or cur['kind'] != 'mode' or len(f) != 3 or not f[2].isdigit() or cur['items']:
+            if cur is None or cur['kind'] != 'mode' or len(f) != 3 or not f[2].isdigit() or cur['items'] or f[1] in cur['params']:
                 raise Bad(f'line {n}: a parameter belongs at the top of a mode section: "p KEY DECIMAL"')
             cur['params'][f[1]] = int(f[2])
         elif f[0] == 'w':
             if cur is None or len(f) != 4 or f[1] not in ('8', '16', '24'):
                 raise Bad(f'line {n}: "w 8|16|24 ADDR VALUE" inside a section')
-            bits, addr, value = int(f[1]), int(f[2], 16), int(f[3], 16)
-            if not f[2].startswith('0x') or not f[3].startswith('0x') or addr > 0xffff or value >= 1 << bits:
+            bits, addr, value = int(f[1]), hex_field(f[2], n), hex_field(f[3], n)
+            if addr > 0xffff or value >= 1 << bits:
                 raise Bad(f'line {n}: address or value out of range')
             cur['items'].append(('w', bits, addr, value))
         elif f[0] == 'd':
@@ -690,7 +704,8 @@ def self_test():
         raise AssertionError(f'{why} was accepted')
     for bad in [text.replace('w 16 0x6028 0x2400', 'w 16 0x6028 0x12400'), text.replace('[on on]', '[on stream]'),
                 text.replace('p width 4080', 'p width 4096'), text.replace('d 5000 6000', 'd 6000 5000'),
-                text.replace('[off off]\nw 8 0x0100 0x00\n', '')]:
+                text.replace('[off off]\nw 8 0x0100 0x00\n', ''), text.replace('0x6028', '0x'),
+                text.replace('p width 4080', 'p width 4080\np width 4080')]:
         try:
             parse(bad)
         except Bad:

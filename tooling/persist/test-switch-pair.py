@@ -2,14 +2,18 @@
 # SPDX-License-Identifier: BSD-2-Clause-Patent
 """T-16 switcher, phase 1 (private/host-checks/20261123-switcher/DESIGN.md 3.1): maint-session.py accepts Android's slot-A pair
 (vendor_boot 99ef425b + init_boot dce4a752 Magisk or ae0b5153 stock) as well as the Ubuntu-era pair of macos-set-v5, refuses an
-unknown pair, and refuses map / boot-a / check while boot_a holds stock Android (17e89056). A fake tablet (test-persist.py's)."""
+unknown pair, and refuses map / boot-a / check while boot_a holds stock Android (17e89056). It uses test-persist.py's fake tablet
+with file-backed transfers and optional PIANO_TEST_PERSIST_OUT pointing to the read-only reference/GPT fixture directory."""
+import contextlib
+import hashlib
 import importlib.util
+import io
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -20,6 +24,9 @@ tp = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tp)
 CB = common.BACKUP
 failures = tp.failures
+spec = importlib.util.spec_from_file_location('maint', HERE / 'maint-session.py')
+maint = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(maint)
 
 
 def unit():
@@ -43,26 +50,49 @@ def unit():
 
 def session(tmp):
     print('== maint-session.py with Android\'s slot-A pair (a fake tablet)')
-    root, out, window, old = tp.build_fake(tmp)
+    fixtures = Path(os.environ.get('PIANO_TEST_PERSIST_OUT', str(common.DEVICE / 'out/persistent')))
+    root, out, _, _ = tp.build_fake(tmp, fixtures)
     nas = tmp / 'nas'
     nas.mkdir()
-    env = dict(os.environ, FAKE_ROOT=str(root), PIANO_PERSIST_OUT=str(out), PIANO_MAINT_HOST='127.0.0.1',
-               PIANO_BACKUP_DIR=str(nas), PIANO_SERIAL='test', PIANO_MAINT_SHELL=str(tmp / 'fake-shell.py'),
-               PYTHONDONTWRITEBYTECODE='1')
-    (tmp / 'fake-shell.py').write_text(f'import sys; sys.path.insert(0, {str(HERE)!r}); import importlib.util\n'
-                                       f'spec = importlib.util.spec_from_file_location("t", {str(HERE / "test-persist.py")!r})\n'
-                                       'm = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n'
-                                       'sys.stdout.write(m.fake_shell(sys.argv[1]))\n')
-    base = ['python3', str(HERE / 'maint-session.py'), '--session', str(tmp / 'session'), '--esp', 'esp-test.img',
-            '--esp-final', 'esp-test.img', '--boot-image', 'boot-test-signed.img', '--http-port', '18030', '--nc-port', '19030']
+    env = dict(FAKE_ROOT=str(root), PIANO_BACKUP_DIR=str(nas), PIANO_LOCALNET_PREFLIGHT='off')
+    base = ['maint-session.py', '--session', str(tmp / 'session'), '--esp', 'esp-test.img',
+            '--esp-final', 'esp-test.img', '--boot-image', 'boot-test-signed.img']
+    served = {}
+
+    def receive(dev, skip, count, bs, dests):
+        disk, offset, length = tp.region(tp.fake_nodes(root), dev, skip, count, bs)
+        digest = hashlib.sha256()
+        with contextlib.ExitStack() as stack:
+            src = stack.enter_context(disk.open('rb'))
+            outputs = [stack.enter_context(path.open('wb')) for path in dests]
+            src.seek(offset)
+            left = length
+            while left and (chunk := src.read(min(left, 4 * tp.MiB))):
+                for dst in outputs:
+                    dst.write(chunk)
+                digest.update(chunk)
+                left -= len(chunk)
+        return length - left, digest.hexdigest()
 
     def run(*steps, expect=0):
-        r = subprocess.run(base + list(steps), capture_output=True, text=True, env=env, timeout=3600)
-        log = r.stdout + r.stderr
+        output = io.StringIO()
+        with (patch.dict(os.environ, env), patch.object(maint, 'OUT', out), patch.object(maint, 'JOB_POLL', 0.001),
+              patch.object(sys, 'argv', base + list(steps)), contextlib.redirect_stdout(output),
+              patch.object(maint.Session, 'shell', side_effect=lambda command, timeout=120: tp.fake_shell(command)),
+              patch.object(maint.Session, 'serve', side_effect=served.update),
+              patch.object(maint.Session, 'receive', side_effect=receive),
+              patch.object(maint.Session, 'fastboot', side_effect=AssertionError('fake tablet must never call fastboot')),
+              patch.object(tp, 'http_get', side_effect=lambda port, name: served[name].read_bytes())):
+            code = 0
+            try:
+                maint.main()
+            except SystemExit as exc:
+                code = exc.code
+        log = output.getvalue()
         (tmp / 'session-out.txt').open('a').write(log)
-        if r.returncode != expect:
+        if code != expect:
             print(log[-3000:])
-        tp.check(r.returncode == expect, f'maint-session.py {" ".join(steps)} -> {r.returncode} (want {expect})')
+        tp.check(code == expect, f'maint-session.py {" ".join(steps)} -> {code} (want {expect})')
         return log
 
     lun4 = root / 'lun4.img'
@@ -81,12 +111,15 @@ def session(tmp):
     put('init_boot_a', CB / 'android-set-root/init_boot-magisk-shellgrant.img')
     log = run('map', 'backup')
     tp.check('Android\'s pair with the Magisk init_boot (macos-set-v5a)' in log, 'map: Android + Magisk pair accepted and named')
+    before = region('boot_a')
     run('boot-a')        # check needs the new GPT tables (test-persist's session writes them first): not this test's subject
     tp.check(region('boot_a') == common.sha(out / 'boot-test-signed.img'), 'boot-a writes boot_a with the Android pair in place')
+    run('rollback', 'boot-a')
+    tp.check(region('boot_a') == before, 'rollback boot-a restores the exact verified backup')
     put('init_boot_a', CB / 'android-set/init_boot.img')
     log = run('map')
     tp.check('Android\'s stock pair (android-set)' in log, 'map: Android stock pair accepted and named')
-    put('init_boot_a', tp.LUN4 and (common.DEVICE / 'out/persistent/ref/28-init_boot_a.img'))   # Ubuntu init_boot + Android vendor_boot
+    put('init_boot_a', fixtures / 'ref/28-init_boot_a.img')   # Ubuntu init_boot + Android vendor_boot
     log = run('map', expect=3)
     tp.check('UNKNOWN' in log, 'map refuses a mixed pair (Android vendor_boot + Ubuntu init_boot)')
     log = run('boot-a', expect=3)

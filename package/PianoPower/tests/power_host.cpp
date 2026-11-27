@@ -15,7 +15,9 @@
 #include "ChargerEnable.h"
 #include "ChargerFix.h"
 #include "Gauge.h"
+#include "gauge_model.h"
 #include "GaugeAlerts.h"
+#include "BatteryMap.h"
 #include "RtcReadout.h"
 #include <algorithm>
 #include <ctime>
@@ -1206,135 +1208,105 @@ static void testChgFix()
 }
 
 // --------------------------------------------------------------------------------------------------------- I2C gauge model
-struct Gauge {
-  uint8_t address = kGaugeAddress;
-  bool present = true, stuckLow = false;
-  std::map<uint8_t, uint16_t> regs;
-  std::map<uint8_t, std::vector<uint16_t>> replies;
-  std::map<uint8_t, unsigned> replyAt;
-  unsigned nackReadNumber = 0;
-  unsigned stretchReadNumber = 0;
-  bool mSda = true, mScl = true, sSda = true, lastSda = true, lastScl = true;
-  enum State { idle, address_, command, ignore, transmit } state = idle;
-  int bits = 0;
-  uint8_t shift = 0, reg = 0, txByte = 0;
-  int txBits = 0, txIndex = 0;
-  bool ackPhase = false, ackIsMine = false, nacked = false, reading = false;
-  unsigned starts = 0, stops = 0, reads = 0;
+using pianopower::test::Gauge;
+using pianopower::test::fillGauge;
 
-  bool sda() const { return mSda && sSda && !stuckLow; }
-  bool scl() const { return mScl; }
-  void driveBit(bool one) { sSda = one; }
-  void startTx()
-  {
-    if (!txIndex && replies.count(reg) && replyAt[reg] < replies[reg].size())
-      regs[reg] = replies[reg][replyAt[reg]++];
-    const uint16_t v = regs.count(reg) ? regs[reg] : 0;
-    txByte = uint8_t(txIndex == 0 ? v : v >> 8);
-    txIndex++;
-    txBits = 1;
-    driveBit((txByte >> 7) & 1);
-  }
-  void rising(bool d)
-  {
-    if (ackPhase) {
-      if (!ackIsMine) nacked = d;
-      return;
-    }
-    if (state == address_ || state == command || state == ignore) {
-      shift = uint8_t(shift << 1 | (d ? 1 : 0));
-      bits++;
-    }
-  }
-  void falling()
-  {
-    if (ackPhase) {
-      ackPhase = false;
-      if (ackIsMine) {
-        sSda = true;
-        if (state == transmit) startTx();
-      } else if (nacked) {
-        sSda = true;
-        state = idle;
-      } else {
-        startTx();
-      }
-      return;
-    }
-    if (state == transmit) {
-      if (txBits < 8) {
-        driveBit((txByte >> (7 - txBits)) & 1);
-        txBits++;
-      } else {
-        sSda = true;
-        ackPhase = true;
-        ackIsMine = false;
-        nacked = false;
-      }
-      return;
-    }
-    if ((state == address_ || state == command || state == ignore) && bits == 8) {
-      bits = 0;
-      if (state == address_) {
-        if (present && (shift >> 1) == address &&
-            !((shift & 1) && nackReadNumber && reads + 1 == nackReadNumber)) {
-          reading = shift & 1;
-          state = reading ? transmit : command;
-          if (reading) {txIndex = 0; reads++;}
-          sSda = false;
-          ackPhase = true;
-          ackIsMine = true;
-        } else {
-          state = idle;
-        }
-      } else if (state == command) {
-        reg = shift;
-        state = ignore;
-        sSda = false;
-        ackPhase = true;
-        ackIsMine = true;
-      } else {
-        sSda = false;
-        ackPhase = true;
-        ackIsMine = true;
-      }
-      shift = 0;
-    }
-  }
-  void update()
-  {
-    const bool d = sda(), c = scl();
-    if (c && lastScl && lastSda != d) {
-      if (!d) {starts++; state = address_; bits = 0; shift = 0; ackPhase = false; sSda = true;}
-      else {stops++; state = idle; sSda = true;}
-    }
-    if (!lastScl && c) rising(d);
-    if (lastScl && !c) falling();
-    lastSda = sda();
-    lastScl = c;
-  }
-  static void setSda(void *ctx, bool release) { Gauge *g = static_cast<Gauge *>(ctx); g->mSda = release; g->update(); }
-  static void setScl(void *ctx, bool release) { Gauge *g = static_cast<Gauge *>(ctx); g->mScl = release; g->update(); }
-  static bool getSda(void *ctx) { return static_cast<Gauge *>(ctx)->sda(); }
-  static bool getScl(void *ctx) {
-    Gauge *g = static_cast<Gauge *>(ctx);
-    return g->scl() && !(g->stretchReadNumber && g->reads >= g->stretchReadNumber);
-  }
-  static void delay(void *, unsigned) {}
-  I2cIo io() { return I2cIo{this, setSda, setScl, getSda, getScl, delay}; }
-};
-
-static void fillGauge(Gauge &g, int mv, int ma, int soc, int rem, int full, int deciC, uint16_t status)
+static void testGaugeBatteryFields()
 {
-  g.regs[kGaugeVoltage] = uint16_t(mv);
-  g.regs[kGaugeCurrent] = uint16_t(int16_t(ma));
-  g.regs[kGaugeAverageCurrent] = uint16_t(int16_t(ma));
-  g.regs[kGaugeSoc] = uint16_t(soc);
-  g.regs[kGaugeRemaining] = uint16_t(rem);
-  g.regs[kGaugeFull] = uint16_t(full);
-  g.regs[kGaugeTemperature] = uint16_t(deciC + 2732);
-  g.regs[kGaugeStatus] = status;
-  g.regs[kGaugeCycles] = 172;
+  // 2026-11-11 level-1 capture, charging.md and 20261111-045251-loop/xnu-console.txt.
+  // Replay the measured per-pack data. The design split uses equal halves of the recorded
+  // 9200 mAh aggregate. The time words are fixtures for registers the old collection did not read.
+  Gauge a, b;
+  fillGauge(a, 4480, 0, 99, 4287, 4344, 293, 0x60);
+  fillGauge(b, 4479, 0, 99, 4235, 4290, 281, 0x60);
+  a.regs[0x2a] = 113;
+  b.regs[0x2a] = 114;
+  a.regs[0x3c] = b.regs[0x3c] = 4600;
+  a.regs[0x16] = b.regs[0x16] = 0xffff;
+  a.regs[0x18] = b.regs[0x18] = 0xffff;
+  I2cBus busA(a.io()), busB(b.io());
+  GaugeReading packs[] = {readGauge(busA), readGauge(busB)};
+  CHECK(a.reads == 10 && b.reads == 10);
+  CHECK(packs[0].timeToEmpty == 0xffff && packs[1].timeToFull == 0xffff);
+
+  PortState ac;
+  ac.ok = ac.sourceSeen = true;
+  const BatteryValues baseline = mapBattery(packs, 2, combinePacks(packs, 2), &ac, 0);
+  CHECK(!baseline.gaugeFields && baseline.systemTimeRemaining() == 65535);
+  packs[0] = readGauge(busA, true);
+  packs[1] = readGauge(busB, true);
+  CHECK(a.reads == 22 && b.reads == 22);
+  BatteryValues v = mapBattery(packs, 2, combinePacks(packs, 2), &ac, 0);
+  mapGaugeBatteryFields(v, packs);
+  CHECK(v.gaugeFields && v.cycles == 114 && v.designMah == 9200);
+  CHECK(v.rawMah == 8522 && v.fullMah == 8634 && v.percent == 99 && v.maxCapacity == 100);
+  CHECK(v.full && !v.charging && v.gaugeStatusValid && !v.gaugeFullyDischarged && !v.lowCapacity);
+  CHECK(v.timeToEmpty == kTimeUnknown && v.timeToFull == kTimeUnknown && v.systemTimeRemaining() == -1);
+
+  a.regs[0x16] = 0x012c;
+  b.regs[0x16] = 0x0102;
+  a.regs[0x18] = 0;
+  b.regs[0x18] = 62;
+  packs[0] = readGauge(busA, true);
+  packs[1] = readGauge(busB, true);
+  CHECK(packs[0].timeToEmpty == 300 && packs[1].timeToEmpty == 258);
+  CHECK(packs[0].timeToFull == 0 && packs[1].timeToFull == 62);
+
+  // The policy may clear the time before the gauge fields are applied. A battery-only report
+  // must still expose time to empty, while a charge hold must hide time to full.
+  v = mapBattery(packs, 2, combinePacks(packs, 2), nullptr, 0);
+  v.timeRemaining = kTimeUnknown;
+  mapGaugeBatteryFields(v, packs);
+  CHECK(v.timeToEmpty == 258 && v.systemTimeRemaining() == 258 && v.timeToFull == kTimeUnknown);
+  v = baseline;
+  v.full = false;
+  v.charging = true;
+  mapGaugeBatteryFields(v, packs);
+  CHECK(v.timeToFull == 62 && v.systemTimeRemaining() == 62 && v.timeToEmpty == kTimeUnknown);
+  v.charging = false;
+  v.healthHold = true;
+  mapGaugeBatteryFields(v, packs);
+  CHECK(v.external && v.healthHold && !v.charging && v.timeToFull == kTimeUnknown && v.systemTimeRemaining() == -1);
+
+  // A failed optional transaction leaves core readings and the other time intact.
+  a.nackReadNumber = a.reads + 12;
+  packs[0] = readGauge(busA, true);
+  CHECK(packs[0].ok && packs[0].error == I2cResult::ok && packs[0].cycles == 113);
+  CHECK(packs[0].timeToEmpty == 300 && packs[0].timeToFull == kTimeUnknown);
+  v = baseline;
+  v.full = false;
+  v.charging = true;
+  mapGaugeBatteryFields(v, packs);
+  CHECK(v.systemTimeRemaining() == -1 && v.timeToFull == kTimeUnknown);
+
+  // A valid zero means the endpoint has been reached. FD is a charge state even with healthy capacity.
+  packs[0].timeToEmpty = 0;
+  packs[0].status |= kGaugeFd;
+  v = mapBattery(packs, 2, combinePacks(packs, 2), nullptr, 0);
+  mapGaugeBatteryFields(v, packs);
+  CHECK(v.systemTimeRemaining() == 0 && v.gaugeFullyDischarged && !v.lowCapacity);
+
+  packs[0].fullMah = packs[1].fullMah = 3500;
+  packs[0].remainingMah = packs[1].remainingMah = 3200;
+  packs[0].cycles = 0;
+  packs[1].cycles = 0;
+  v = mapBattery(packs, 2, combinePacks(packs, 2), nullptr, 0);
+  mapGaugeBatteryFields(v, packs);
+  CHECK(v.cycles == 0 && v.designMah == 9200 && v.fullMah == 7000 && v.lowCapacity);
+
+  packs[1].cycles = 0xffff;
+  packs[1].designMah = 0;
+  packs[1].status = 0xffff;
+  v = mapBattery(packs, 2, combinePacks(packs, 2), nullptr, 0);
+  mapGaugeBatteryFields(v, packs);
+  CHECK(v.cycles == kCycleCountUnknown && v.designMah == 0 && !v.gaugeStatusValid);
+  CHECK(v.known && v.rawMah == 6400 && v.fullMah == 7000 && v.systemTimeRemaining() == 0);
+
+  packs[1].ok = false;
+  v = mapBattery(packs, 2, combinePacks(packs, 2), nullptr, 0);
+  mapGaugeBatteryFields(v, packs);
+  CHECK(v.known && v.cycles == kCycleCountUnknown && v.designMah == 0 && !v.gaugeStatusValid);
+  CHECK(v.rawMah == 3200 && v.fullMah == 3500 && v.systemTimeRemaining() == -1);
 }
 
 static void testGauge()
@@ -2934,8 +2906,9 @@ static void testLinkSleepShutdown()
   r.period();
   r.period();
   CHECK(r.relinks == 1 && r.d.last(PIANO_MCA_CHARGE_ENABLE) == 1 && r.link.hold);
-  // nothing attached: the handover is ready at once
+  // Nothing is attached and there is no SOC hold: the handover is ready at once.
   LinkRig n(o);
+  n.soc(60);
   n.d.props[PIANO_MCA_BUS_VOLTAGE] = 0;
   n.period();
   n.sleep = true;
@@ -3161,6 +3134,10 @@ static void testRtc()
   CHECK(r.ok && r.rtc.apid == rtc && r.rtc.owner == 0 && r.sdam.apid == sdam && r.type == 0x0b && r.subtype == 0x07);
   CHECK(r.enabled && r.count == raw && r.sdamOk && r.sdamOffset == cell);
   CHECK(r.source == RtcOffsetSource::sdam && r.offset == cell && r.utc == 1794355200u && r.dated);
+  Arbiter unsupported = arb;
+  unsupported.v7 = false;
+  CHECK(!readRtc(io, unsupported, false, 0).ok);
+  CHECK(!readRtc(io, unsupported, false, 0, &r).ok);
   // The argument wins over the cell; an offset that gives no date is reported as such; the counter stopped.
   r = readRtc(io, arb, true, 1794355200u - raw + 7, &r);
   CHECK(r.source == RtcOffsetSource::arg && r.utc == 1794355207u && r.dated);
@@ -3223,6 +3200,7 @@ int main()
   testChgEn();
   testChgFix();
   testGauge();
+  testGaugeBatteryFields();
   testGaugeAlertRestore();
   testGaugeReobserve();
   testBuckQueueCancellation();

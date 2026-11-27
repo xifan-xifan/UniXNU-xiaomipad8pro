@@ -56,6 +56,8 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <IOKit/IOKitLib.h>
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <cxxabi.h>
 #include <dlfcn.h>
@@ -83,15 +85,15 @@ static const char *const kDeviceName = "NativeSoftMetal (software, no GPU)";
 // ---- boot arguments and short stderr lines ----------------------------------------------------------------------------------------
 static bool bootArg(const char *name, unsigned *value)
 {
-    static char args[1024];
-    static bool read;
-    if (!read) {
-        size_t size = sizeof(args) - 1;
-        if (sysctlbyname("kern.bootargs", args, &size, nullptr, 0)) args[0] = 0;
-        read = true;
-    }
+    static const auto bootArgs = [] {
+        std::array<char, 1024> args{};
+        size_t size = args.size() - 1;
+        if (sysctlbyname("kern.bootargs", args.data(), &size, nullptr, 0)) args[0] = 0;
+        return args;
+    }();
+    const char *args = bootArgs.data();
     size_t length = strlen(name);
-    for (char *at = args; (at = strstr(at, name)); at += length) {
+    for (const char *at = args; (at = strstr(at, name)); at += length) {
         if ((at == args || at[-1] == ' ') && at[length] == '=') {
             *value = (unsigned)strtoul(at + length + 1, nullptr, 0);
             return true;
@@ -176,9 +178,11 @@ static void reportCrashMessages()
                 const char *path = _dyld_get_image_name(i), *slash = path ? strrchr(path, '/') : nullptr;
                 char line[160];
                 size_t length = strnlen(message, 600);
-                for (size_t at = 0; at < length; at += 72)
-                    writeLine(line, sizeof line, snprintf(line, sizeof line, "NativeSoftMetal: %s: crash message (%.20s): %.72s\n",
-                        getprogname(), slash ? slash + 1 : path ? path : "?", message + at));
+                for (size_t at = 0; at < length; at += 72) {
+                    int chunk = static_cast<int>(std::min<size_t>(72, length - at));
+                    writeLine(line, sizeof line, snprintf(line, sizeof line, "NativeSoftMetal: %s: crash message (%.20s): %.*s\n",
+                        getprogname(), slash ? slash + 1 : path ? path : "?", chunk, message + at));
+                }
             }
         }
     }
@@ -330,15 +334,18 @@ static void noteOnce(const char *kind, SEL selector)
     static NSMutableSet *seen;
     static dispatch_once_t once;
     static std::atomic<unsigned> count;
+    if (!selector || count.load(std::memory_order_relaxed) >= 240) return;
     dispatch_once(&once, ^{ seen = [NSMutableSet set]; });
-    if (count.load() >= 240) return;
     NSString *name = NSStringFromSelector(selector);
+    if (!name) return;
+    bool atLimit;
     @synchronized(seen) {
-        if ([seen containsObject:name]) return;
+        if (count.load(std::memory_order_relaxed) >= 240 || [seen containsObject:name]) return;
         [seen addObject:name];
+        atLimit = count.fetch_add(1, std::memory_order_relaxed) == 239;
     }
     report("%s %.90s", kind, name.UTF8String);
-    if (++count == 240) report("240 selectors named; no more");
+    if (atLimit) report("240 selectors named; no more");
 }
 
 // The stubs, by what the selector returns. Arguments are ignored; on arm64 the extra integer parameters are simply the registers the
@@ -375,7 +382,12 @@ static IMP stubFor(const char *types)
 static NSString *deviceName(id, SEL) { return @(kDeviceName); }
 static uint64_t registryID(id, SEL) { return gRegistryID; }
 static uint32_t acceleratorPort(id, SEL) { return 0; }   // SkyLight: no accelerator, so the software compositor
-static void setAcceleratorService(id, SEL, id service) { gAcceleratorService = service; }
+static void setAcceleratorService(id self, SEL, id service)
+{
+    @synchronized(self) {
+        gAcceleratorService = service;
+    }
+}
 static void setDeviceWrapper(id, SEL, id wrapper) { gDeviceWrapper = wrapper; }
 static id deviceWrapper(id self, SEL) { id wrapper = gDeviceWrapper; return wrapper ? wrapper : self; }
 static BOOL yes(id, SEL) { return YES; }
@@ -485,6 +497,7 @@ static unsigned addProtocolStubs(Class cls)
         for (BOOL required : {YES, NO}) {
             unsigned count = 0;
             struct objc_method_description *list = protocol_copyMethodDescriptionList(protocol, required, YES, &count);
+            if (!list) continue;
             for (unsigned i = 0; i < count; i++) {
                 if (!list[i].name || !list[i].types) continue;
                 if ([cls instancesRespondToSelector:list[i].name]) continue;

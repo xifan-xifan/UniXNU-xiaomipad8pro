@@ -4,11 +4,14 @@ import importlib.util
 import math
 from pathlib import Path
 import struct
+import sys
 import tempfile
 import unittest
 import wave
 
-spec = importlib.util.spec_from_file_location('route', Path(__file__).parents[1] / 'piano-mic-route.py')
+NATIVE = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(NATIVE))
+spec = importlib.util.spec_from_file_location('route', NATIVE / 'piano-mic-route.py')
 route = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(route)
 
@@ -51,6 +54,10 @@ class RouteFixtureTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'seed'):
                 route.reader_frames(wav, log, 12)
             frames = route.reader_frames(wav, log, 11)
+            text = log.read_text()
+            log.write_text(text.replace('result=0', 'result=01'))
+            with self.assertRaisesRegex(ValueError, 'lifecycle'):
+                route.reader_frames(wav, log, 11)
             route.write_wav(wav, [0] * (frames - 480))
             with self.assertRaisesRegex(ValueError, 'frame count'):
                 route.score(wav, 2.0, 997, .20, frames)

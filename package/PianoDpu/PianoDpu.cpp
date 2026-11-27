@@ -608,7 +608,7 @@ IOReturn PianoDpu::callPlatformFunction(const OSSymbol *name, bool wait, void *p
   IOReturn result = kIOReturnUnsupported;
   if (flipFunction(name, p1, p2, &result)) return result;
   if (name && name->isEqualTo(kPianoDpuScanoutFunction))
-    return scanoutRead(static_cast<PianoDpuScanoutRequest *>(p1));
+    return scanoutRead(static_cast<PianoDpuScanoutRequest *>(p1), static_cast<PianoDpuScanoutDiagnostics *>(p2));
   if (dpuSlicesPlatformFunction(name, p1, p2, p3, &result)) return result;
   return IOService::callPlatformFunction(name, wait, p1, p2, p3, p4);
 }

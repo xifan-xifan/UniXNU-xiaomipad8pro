@@ -15,6 +15,7 @@ The decoded mailbox has DRAM bit damage: names can be garbled, so a missing mile
 """
 import argparse
 import datetime
+import math
 import re
 import sys
 from pathlib import Path
@@ -55,7 +56,10 @@ def read(path):
     for raw in Path(path).read_bytes().decode('utf-8', 'replace').split('\n'):
         stamp, tab, text = raw.partition('\t')
         if tab and re.fullmatch(r'\d+\.\d{3}', stamp):
-            rows.append((float(stamp), text))
+            arrival = float(stamp)
+            if not math.isfinite(arrival):
+                raise ValueError('invalid console arrival timestamp')
+            rows.append((arrival, text))
         else:
             rows.append((None, raw))
     return rows
@@ -70,11 +74,14 @@ def xnu_start(rows, a):
     if a.loop:
         m = re.search(r'^(\d\d:\d\d:\d\d) XNU started', Path(a.loop).read_text(), re.M)
         loop = m and m.group(1)
-    if loop and rows and rows[0][0] is not None:
-        first = datetime.datetime.fromtimestamp(rows[0][0])
-        hh, mm, ss = map(int, loop.split(':'))
-        start = first.replace(hour=hh, minute=mm, second=ss, microsecond=0)
-        if start.timestamp() > rows[0][0] + 600:
+    arrival = next((t for t, _ in rows if t is not None), None)
+    if loop and arrival is not None:
+        clock = datetime.time.fromisoformat(loop)
+        if not re.fullmatch(r'[0-9]{2}:[0-9]{2}:[0-9]{2}', loop):
+            raise ValueError('XNU start must be HH:MM:SS')
+        first = datetime.datetime.fromtimestamp(arrival)
+        start = datetime.datetime.combine(first.date(), clock)
+        if start.timestamp() > arrival + 600:
             start -= datetime.timedelta(days=1)
         return start.timestamp(), 'loop.log "XNU started"'
     return None, None
@@ -87,9 +94,14 @@ def main():
     p.add_argument('--loop', type=Path, help='the run\'s loop.log (its "XNU started" line)')
     p.add_argument('--execs', action='store_true', help='list every exec and exit')
     a = p.parse_args()
-    rows = read(a.log)
-    timed = any(t is not None for t, _ in rows)
-    t0, source = xnu_start(rows, a) if timed else (None, None)
+    try:
+        rows = read(a.log)
+        if not any(text.strip() for _, text in rows):
+            raise ValueError('empty console capture')
+        timed = any(t is not None for t, _ in rows)
+        t0, source = xnu_start(rows, a) if timed else (None, None)
+    except (OSError, OverflowError, ValueError) as exc:
+        p.exit(1, f'boot-timeline: {exc}\n')
     burst = next((t for t, _ in rows if t is not None), None)
 
     def when(t, text):

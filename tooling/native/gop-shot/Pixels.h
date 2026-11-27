@@ -33,7 +33,12 @@ static inline void gop_shot_rgbx(uint8_t pixel[4], int packed10)
 static inline int gop_shot_decode_reply(GopShotHeader *frame, size_t size, GopShotLayout override_layout,
                                        GopShotLayout *layout)
 {
-    if (size != GOP_SHOT_BYTES || frame->version != GOP_SHOT_VERSION ||
+    if (size != GOP_SHOT_BYTES)
+        return EPROTO;
+    if (!frame || !layout || (override_layout != GOP_SHOT_LAYOUT_AUTO &&
+        override_layout != GOP_SHOT_LAYOUT_BGRA8 && override_layout != GOP_SHOT_LAYOUT_PACKED10))
+        return EINVAL;
+    if (frame->version != GOP_SHOT_VERSION ||
         frame->width != GOP_SHOT_WIDTH || frame->height != GOP_SHOT_HEIGHT ||
         (frame->source != GOP_SHOT_FLIP && (frame->source != GOP_SHOT_BOOT || frame->format != GOP_SHOT_BGRA8)))
         return EPROTO;

@@ -13,11 +13,13 @@
 // this reader does not know (a node kind, a qualifier, a malformed record) makes read() fail with the reason: a signature is either
 // the one the compiler wrote or none, never guessed. No Apple code or data is in this file.
 #pragma once
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace air_signature {
@@ -43,10 +45,13 @@ struct Signature {std::shared_ptr<Type> result; std::vector<Argument> arguments;
 namespace detail {
 class Bits {
  public:
-  Bits(const uint8_t *data, size_t length) : p_(data), bits_(length * 8) {}
+  Bits(const uint8_t *data, size_t length) : p_(data), bits_(0) {
+    if ((!data && length) || length > SIZE_MAX / 8) bad_ = true;
+    else bits_ = length * 8;
+  }
   uint64_t fixed(unsigned width) {
     if (!width) return 0;
-    if (width > 64 || pos_ + width > bits_) {bad_ = true; pos_ = bits_; return 0;}
+    if (width > 64 || width > bits_ - pos_) {bad_ = true; pos_ = bits_; return 0;}
     uint64_t v = 0; unsigned got = 0;
     while (got < width) {
       const size_t byte = pos_ >> 3; const unsigned off = pos_ & 7, take = std::min(8u - off, width - got);
@@ -61,16 +66,23 @@ class Bits {
     for (;;) {
       const uint64_t piece = fixed(width);
       if (bad_) return 0;
-      if (shift < 64) v |= (piece & (high - 1)) << shift;
+      const uint64_t payload = piece & (high - 1);
+      if (shift >= 64 || payload > (UINT64_MAX >> shift)) {bad_ = true; return 0;}
+      v |= payload << shift;
       if (!(piece & high)) return v;
       shift += width - 1;
-      if (shift > 70) {bad_ = true; return 0;}
     }
   }
-  void align32() {pos_ = (pos_ + 31) & ~size_t(31); if (pos_ > bits_) {bad_ = true; pos_ = bits_;}}
+  void align32() {
+    const size_t padding = -pos_ & 31;
+    if (padding > bits_ - pos_) {bad_ = true; pos_ = bits_;}
+    else pos_ += padding;
+  }
   bool bytes(size_t n, std::string &out) {
     if (pos_ & 7 || n > (bits_ - pos_) / 8) {bad_ = true; return false;}
-    out.assign((const char *)p_ + pos_ / 8, n); pos_ += n * 8; return true;
+    if (n) out.assign((const char *)p_ + pos_ / 8, n);
+    else out.clear();
+    pos_ += n * 8; return true;
   }
   size_t pos() const {return pos_;}
   size_t size() const {return bits_;}
@@ -367,6 +379,7 @@ class Builder {
 // The signature of `function` from its bitcode (a 0x0B17C0DE wrapper is unwrapped): false, with the reason, when the module has no
 // stitching information for it or anything on the way is unknown.
 inline bool read(const uint8_t *bitcode, size_t length, const std::string &function, Signature &out, std::string &why) {
+  if (!bitcode) {why = "no bitcode"; return false;}
   if (length >= 20 && bitcode[0] == 0xDE && bitcode[1] == 0xC0 && bitcode[2] == 0x17 && bitcode[3] == 0x0B) {
     uint32_t offset, size; memcpy(&offset, bitcode + 8, 4); memcpy(&size, bitcode + 12, 4);
     if (offset > length || size > length - offset) {why = "a bitcode wrapper past the end"; return false;}

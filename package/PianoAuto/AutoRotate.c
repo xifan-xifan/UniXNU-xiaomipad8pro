@@ -69,8 +69,9 @@ void par_cover(ParAgent *a, int cover, uint64_t now_ms)
     if (cover == a->cover) return;
     const int was = attached_value(a, a->cover), is = attached_value(a, cover);
     a->cover = cover;
+    if (a->cfg.cover_lock == PAR_LOCK_IGNORE) return;
     if (is && !was) {
-        a->force = a->cfg.cover_lock != PAR_LOCK_IGNORE;
+        a->force = 1;
         a->hold_until = 0;
     } else if (was && !is) {
         a->force = 0;
@@ -83,6 +84,7 @@ void par_edge(ParAgent *a, int edge, uint64_t now_ms)
 {
     (void)now_ms;
     if (edge < PS_EDGE_TOP || edge > PS_EDGE_RIGHT) edge = PS_EDGE_NONE;
+    if (edge != a->edge) a->rot.edge = PS_EDGE_NONE;
     a->edge = edge;
     if (a->manual && edge != PS_EDGE_NONE && edge != a->manual_edge) a->manual = 0;   /* turned to another edge: automatic again */
 }
@@ -104,12 +106,18 @@ static void failed(ParAgent *a, uint64_t now)
 
 void par_observed(ParAgent *a, int degrees, uint64_t now_ms)
 {
-    if (!par_valid_degrees(degrees)) return;
+    if (!par_valid_degrees(degrees)) {
+        a->shown = a->rot.rotation = -1;
+        a->rot.edge = PS_EDGE_NONE;
+        a->touch = -1;
+        return;
+    }
+    if (degrees != a->shown) a->touch_retry_at = 0;
     if (a->asked >= 0) {
-        if (degrees != a->asked) return;   /* still the old rotation (or one on the way): the verify deadline decides */
-        a->asked = -1;
         a->shown = degrees;
         a->rot.rotation = degrees;
+        if (degrees != a->asked) return;   /* track read-back while waiting for the requested angle */
+        a->asked = -1;
         a->failures = a->backoff_ms = 0;
         a->retry_at = 0;
         a->manual = 0;
@@ -173,7 +181,6 @@ ParDecision par_step(ParAgent *a, uint64_t now_ms, int can_apply)
         return d;
     }
     const int cover = cover_now(a, now_ms);
-    const uint64_t changed = a->rot.changed_ms;   /* a rotation wanted but not applied now does not start the minimum interval */
     if (cover == 1) {
         a->rot.edge = PS_EDGE_NONE;
         d.why = "the keyboard cover is attached";
@@ -191,9 +198,11 @@ ParDecision par_step(ParAgent *a, uint64_t now_ms, int can_apply)
         d.why = "the keyboard cover was just detached";
         return d;
     } else {
+        const uint64_t changed = a->rot.changed_ms;
         const int r = ps_rotation_step(&a->rot, &a->cfg.rot, a->edge, 0, a->locked || a->manual, now_ms);
+        a->rot.rotation = a->shown;
+        a->rot.changed_ms = changed;   /* only par_applied records a request */
         if (r < 0 || r == a->shown) {
-            a->rot.rotation = a->shown;
             d.why = a->locked ? "rotation locked" : a->manual ? "a rotation chosen by hand holds until the tablet turns"
                   : a->edge == PS_EDGE_NONE ? "no edge up (flat, or no sensor)" : "nothing to do";
             return d;
@@ -202,8 +211,6 @@ ParDecision par_step(ParAgent *a, uint64_t now_ms, int can_apply)
         d.why = "the tablet turned";
     }
     if (!can_apply || now_ms < a->retry_at) {
-        a->rot.rotation = a->shown;
-        a->rot.changed_ms = changed;
         d.why = !can_apply ? "wanted, but not now (session, display asleep, or observing only)" : "wanted, backing off after a failure";
         return d;
     }
@@ -211,7 +218,7 @@ ParDecision par_step(ParAgent *a, uint64_t now_ms, int can_apply)
     return d;
 }
 
-uint64_t par_deadline(const ParAgent *a, uint64_t now_ms)
+uint64_t par_deadline(const ParAgent *a, uint64_t now_ms, int can_apply)
 {
     uint64_t best = 0;
 #define TAKE(t) do { const uint64_t t_ = (t); if (t_ && (!best || t_ < best)) best = t_; } while (0)
@@ -222,16 +229,19 @@ uint64_t par_deadline(const ParAgent *a, uint64_t now_ms)
     } else if (!a->gave_up && a->shown >= 0) {
         const int cover = cover_now(a, now_ms);
         uint64_t at = 0;
+        int want = 0;
         if (cover == 1) {
-            if (a->force && a->shown != 0) at = a->rot.changed_ms + a->cfg.rot.min_interval_ms;
+            want = a->force && a->shown != 0;
+            at = a->rot.changed_ms + a->cfg.rot.min_interval_ms;
         } else if (cover == 2) {
-            at = a->hold_until;
+            TAKE(a->hold_until);
         } else if (!a->locked && !a->manual && a->edge != PS_EDGE_NONE && a->cfg.rot.degrees[a->edge] != a->shown) {
+            want = 1;
             const uint64_t settle = a->rot.edge == a->edge ? a->rot.edge_since + a->cfg.rot.settle_ms : now_ms;
             const uint64_t interval = a->rot.rotation >= 0 ? a->rot.changed_ms + a->cfg.rot.min_interval_ms : 0;
             at = settle > interval ? settle : interval;
         }
-        if (at) TAKE(at > a->retry_at ? at : a->retry_at);
+        if (want && (can_apply || at > now_ms)) TAKE(at > a->retry_at ? at : a->retry_at);
     }
 #undef TAKE
     return best && best < now_ms ? now_ms : best;

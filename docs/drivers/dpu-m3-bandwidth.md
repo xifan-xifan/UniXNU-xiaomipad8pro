@@ -1,5 +1,7 @@
 # Piano DPU M3 bandwidth at 144 Hz
 
+**Owner decision (2026-11-27, `OWNER-0748`):** 120 Hz is approved as the daily default refresh rate; keep 144 Hz as opt-in.
+
 y12o reached the INTF underrun check during 60 → 144 Hz after both links had passed timing, DMA and cadence checks. The sticky status only locates the error within the switch interval. Fixed 120 Hz is the working control. See [the qualification and rollback analysis](dpu-m3.md#y12o-qual1-underrun-and-login-failure) and [the earlier high-refresh analysis](dpu-m3-144.md).
 
 ## Ubuntu calculation
@@ -48,6 +50,11 @@ Ubuntu lines refer to `b5100d5f2e0b`. DPU files are under `drivers/gpu/drm/msm/d
 
 The timed host model exercises both 60 and 120 Hz as the starting rate, confirms no timing or DCS stores after a failed vote, and models both clean 144 and continued starvation after success. It checks the restored rate after starvation and the held-vote path through panel sleep and wake. The tablet capture needs the `mode: MM0` line (command-db aux, command word, TCS result), the active MDP RCG and PLL0 registers from the earlier analysis, and the INTF underrun bits around timing/DSI handover and during steady scanout. An ACTIVE TCS completion establishes command acceptance. Effective fabric bandwidth and the absence of underruns require direct observation.
 
+`piano-dpu-clkread=1` adds the live apps DRV-2 MM0, SH0, ACV and MC0
+responses, MMCX/MXC corner votes, MDP clock rate and CESTA enable to the root
+snapshot. Aggregate allocation and aggregate corner qualification remain open.
+[Clock and vote readback](dpu-clkread.md)
+
 ## Fix-image gate
 
 Path: NativeGopDisplay → `PianoDpuMode` → slices worker under the flip lock → confirmed bandwidth vote → bonded CTL/INTF/DSI timing and panel group → cadence/underrun verification → single IOMFB timing, refresh attributes and VBL period. Ubuntu's active path is DRM CRTC/planes → DPU core perf → ICC `mdp0-mem` via MM0, SH0 and ACV/MC0 → OPP/DISPCC/MMCX → encoder/DSI/P81.
@@ -56,4 +63,4 @@ Checks: **ours-OK** for fixed 120, matching timing geometry, fetch readback, pan
 
 Root cause: The 144 timing cuts line service time by one sixth while the native display requests no additional feed bandwidth. The missing MM0 request is the first isolated capacity gap to test. Prior logs do not establish the applied bandwidth or exclude an MDP clock or timing-handover cause. The pinned Linux OPP path provides no 120-to-144 core clock step for this surface.
 
-ONE change: Add `piano-dpu-modes=144` as a fixed qualification profile. Complete the active MM0 vote for 5,109,350 kB/s AB before touching 144 timing. Use the larger of KMS IB and the reference 120 Hz splash peak to avoid deliberately lowering the reference boot peak when replacing the same DRV-2 resource. Hold the vote for the boot, including a verified rollback, because the inherited vote cannot be read back and restored. Leave shared LLCC/DDR and the inherited DISPCC/MMCX settings with their current owners. Keep existing 60/120 behavior and publish 144 only after both links verify. The next tablet read must check the MM0 command and effective fabric allocation, MDP PLL/core and MMCX, and per-INTF underruns through the switch and steady 144 under load against fixed 120.
+ONE change: Add `piano-dpu-modes=144` as a fixed qualification profile. Complete the active MM0 vote for 5,109,350 kB/s AB before touching 144 timing. Use the larger of KMS IB and the reference 120 Hz splash peak to avoid deliberately lowering the reference boot peak when replacing the same DRV-2 resource. Hold the vote for the boot, including a verified rollback. Keep existing 60/120 behavior and publish 144 only after both links verify. The next tablet read must check the MM0 command and effective fabric allocation, MDP PLL/core and MMCX, and per-INTF underruns through the switch and steady 144 under load against fixed 120.

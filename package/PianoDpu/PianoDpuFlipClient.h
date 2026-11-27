@@ -34,6 +34,19 @@ struct PianoDpuScanoutRequest {
   void *context;
   int error;                  // callback result
 };
+// Optional second argument to PianoDpuScanout for the boot-gated snapshot diagnostic.
+// A sample is available only when the corresponding try-lock succeeded.
+enum class PianoDpuScanoutBusy : uint8_t { none, initialLock, finalLock, changed };
+struct PianoDpuScanoutSample {
+  bool available = false;
+  bool surface = false;
+  uint32_t base = 0, stride = 0, state = 0;
+  uint64_t flips = 0, reshows = 0, toBoot = 0;
+};
+struct PianoDpuScanoutDiagnostics {
+  PianoDpuScanoutBusy busy = PianoDpuScanoutBusy::none;
+  PianoDpuScanoutSample before, after;
+};
 // Optional pointer-sized value in handoff. Legacy callers pass nullptr. Only pass this at a producer handoff with known completion.
 constexpr uintptr_t kPianoDpuFlipProducerComplete = 1;
 

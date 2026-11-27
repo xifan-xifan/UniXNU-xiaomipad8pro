@@ -1647,6 +1647,7 @@ static void testV5DemandLifetime()
     CHECK(x.b->dmaHeld && x.b->dma.session && x.b->pst.on && x.m->fw.authed);
     CHECK(x.b->tables.pageCount == vsmmu::kSessionTablePages);
     CHECK(x.m->fw.session == 0 && x.b->v4.etb == 0 && x.b->rep.collapses == 0); // no autonomous session
+    CHECK(!x.b->layout.find(enc::BufArp, 0) && !x.m->logged("E1 "));
     if (kind == 1) x.m->f.scmFail = "shutdown";
     if (kind == 2) x.m->f.tlbStuck = true;
     if (kind == 3) x.m->f.releaseSmrStuck = true;
@@ -1665,7 +1666,15 @@ static void testNativeQuarantine()
   for (unsigned kind=0;kind<4;++kind) {
     Run x(6);
     CHECK(x.go()==kOk && x.b->dmaHeld && x.b->pst.on && x.m->fw.authed);
-    if(kind==0)x.b->quarantineReason=kErrHfiTimeout;
+    session::Buffer *arp = nullptr;
+    if (kind == 0) {
+      x.b->encoder = true;
+      CHECK(x.b->encGeometry.configure(640, 480) && x.b->prepareResidentSession() == kOk);
+      arp = x.b->layout.find(enc::BufArp, 0);
+      CHECK(arp);
+      if (arp) arp->queued = true;   // emulate an E1 CLOSE timeout with ARP outstanding
+      x.b->quarantineReason = kErrHfiTimeout;
+    }
     if(kind==1)x.b->watchdogSeen=8;
     if(kind==2)x.b->rep.fsr=2;
     if(kind==3)x.m->R(kIris+kWrapperIntrStatus)=8;
@@ -1675,6 +1684,8 @@ static void testNativeQuarantine()
     CHECK(x.b->teardown()==want && x.b->quarantineReason==want);
     CHECK(x.b->ops.reads==reads+(kind==3?1u:0u) && x.b->log.writes==writes && x.m->calls==calls);
     CHECK(x.b->dmaHeld && x.b->pst.on && x.m->fw.authed && x.m->dmaFrees==frees);
+    if (arp)
+      CHECK(arp->queued && vsmmu::walk(x.b->tables, arp->iova()) == x.b->dma.arenaPages[arp->off / 4096]);
     CHECK(x.b->teardown()==want && x.b->ops.reads==reads+(kind==3?1u:0u) && x.b->log.writes==writes);
     CHECK(x.m->logged("no-cleanup-MMIO 1 reboot-required 1"));
     quiet(*x.m,"native failure quarantine");
@@ -1732,6 +1743,11 @@ static void testQueues()
   CHECK(hfi::read(m, 2, out, sizeof out, &bytes, bar) == -1);
   m.st(hfi::qhdr(2) + hfi::kQWrite, end);
   CHECK(hfi::read(m, 2, out, sizeof out, &bytes, bar) == -3);
+  const uint32_t invalidWords = (UINT32_MAX / 4u) + 1;
+  m.st(hfi::qhdr(2) + hfi::kQRead, 0);
+  m.st(hfi::qhdr(2) + hfi::kQWrite, invalidWords);
+  CHECK(hfi::read(m, 2, out, sizeof out, &bytes, bar) == -3 && bytes == 0);
+  CHECK(hfi::write(m, 2, pkt, sizeof pkt, bar) == -2 && m.ld(hfi::qhdr(2) + hfi::kQWrite) == invalidWords);
 }
 
 static void testPackets()
@@ -1765,6 +1781,13 @@ static void testPackets()
   a[8] = 32;
   a[0] = 60;
   CHECK(!hfi::parse(a, 64, bad));
+  a[0] = 64;
+  a[7] = 0;
+  CHECK(!hfi::parse(a, 64, bad));
+  a[7] = 1;
+  a[0] = 68;
+  hfi::Reply trailing;
+  CHECK(!hfi::parse(a, 68, trailing) && trailing.malformed == 1 && !trailing.initDone && !trailing.packets);
   a[0] = 64;
   a[1] = 3;     // a session's message: not ours to answer yet, counted
   hfi::Reply s;

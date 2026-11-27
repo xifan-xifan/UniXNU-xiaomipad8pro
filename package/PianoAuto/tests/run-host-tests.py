@@ -9,7 +9,8 @@
            from its own package, unchanged
   ambient  tests/ambient_host.cpp: AmbientBacklight.h (PianoBacklight's automatic mode) against PianoBacklight's own Ktz8866.h step
            ladder (included read only) and end to end from lux through AutoLight.c
-  daemon   daemon/piano-rotated.m compiles for arm64 macOS (syntax and types only; on a Mac with xcrun, else skipped)
+  daemon   daemon/piano-rotated.m compiles for arm64 macOS and runs with synthetic boot args and displays on a Mac with xcrun
+           shell boot-argument reader tested with a stub sysctl
   kernel   every part a kernel driver includes compiles freestanding with AArch64 general registers only (no C library, no floating
            point): AutoStream.c, AutoLight.c, TouchRotation.h in C and C++, AmbientBacklight.h in C++ (no exceptions, no RTTI),
            AutoRotate.c (portable, though only piano-rotated uses it)
@@ -43,7 +44,7 @@ def run(exe):
     result = subprocess.run([str(exe)], capture_output=True, text=True)
     text = (result.stdout + result.stderr).strip()
     print(text)
-    if result.returncode or not text.splitlines()[-1].startswith('PASS'):
+    if result.returncode or not text or not text.splitlines()[-1].startswith('PASS'):
         sys.exit(f'FAIL: {exe.name}')
 
 
@@ -66,13 +67,48 @@ def ambient_tests(out):
     run(exe)
 
 
-def daemon_check():
-    if subprocess.run(['xcrun', '--show-sdk-path'], capture_output=True).returncode:
-        print('SKIP daemon: no xcrun (not a Mac)')
+def daemon_check(out):
+    if sys.platform != 'darwin' or subprocess.run(['xcrun', '--show-sdk-path'], capture_output=True).returncode:
+        print('SKIP daemon: macOS SDK unavailable')
         return
-    subprocess.run(['xcrun', 'clang', '-arch', 'arm64', '-mmacosx-version-min=14.0', '-fobjc-arc', '-fsyntax-only', *WARN, *INCLUDES,
-                    str(PKG / 'daemon/piano-rotated.m')], check=True)
-    print('PASS daemon: piano-rotated.m compiles for arm64 macOS')
+    command = ['xcrun', 'clang', '-mmacosx-version-min=14.0', '-fobjc-arc', *WARN, *INCLUDES]
+    subprocess.run([*command, '-arch', 'arm64', '-fsyntax-only', str(PKG / 'daemon/piano-rotated.m')], check=True)
+    exe = out / 'daemon_boot'
+    subprocess.run([*command, *SANITIZE, str(HERE / 'daemon_boot.m'), str(PKG / 'AutoRotate.c'), *map(str, POLICY),
+                    '-framework', 'Foundation', '-framework', 'CoreGraphics', '-framework', 'IOKit', '-o', str(exe)], check=True)
+    run(exe)
+
+
+def shell_bootargs(out):
+    helper = PKG.parents[1] / 'tooling/native/piano-usbnet-address/piano-bootargs.sh'
+    sysctl = out / 'sysctl'
+    sysctl.write_text('''#!/bin/sh
+case "$2" in
+  kern.piano_bootargs)
+    case "$MERGED_MODE" in
+      ok) printf '%s\\n' "$MERGED_ARGS" ;;
+      absent) echo "sysctl: unknown oid 'kern.piano_bootargs'" >&2; exit 1 ;;
+      error) echo "sysctl: permission denied" >&2; exit 1 ;;
+    esac ;;
+  kern.bootargs) echo 'piano-rotate=1' ;;
+  *) exit 2 ;;
+esac
+''')
+    sysctl.chmod(0o755)
+    cmd = ['bash', '-c', '. "$1" && piano_bootarg piano-rotate', 'bootargs', str(helper)]
+    prefix = 'padding=1 ' * 300
+    for mode, args, code, value in (
+        ('ok', prefix + 'piano-rotate=2\tpiano-rotated=3', 0, '2\n'),
+        ('ok', prefix + 'piano-rotate=2 piano-rotate=0', 0, '0\n'),
+        ('ok', 'piano-auto-rotate=0 other=piano-rotate=2', 0, '\n'),
+        ('absent', '', 0, '1\n'),
+        ('error', '', 1, ''),
+    ):
+        env = dict(os.environ, PATH=f'{out}{os.pathsep}{os.environ["PATH"]}', MERGED_MODE=mode, MERGED_ARGS=args)
+        result = subprocess.run(cmd, env=env, capture_output=True, text=True, check=False)
+        if (result.returncode, result.stdout, result.stderr) != (code, value, ''):
+            sys.exit(f'FAIL shell bootargs ({mode}): {result}')
+    print('PASS shell bootargs: exact late arguments, last override, and legacy fallback')
 
 
 def kernel_checks(out, c_files=(), headers=(), cpp_headers=()):
@@ -106,7 +142,8 @@ def main():
         if 'ambient' in want:
             ambient_tests(out)
         if 'daemon' in want:
-            daemon_check()
+            daemon_check(out)
+            shell_bootargs(out)
         if 'kernel' in want:
             kernel_checks(out, c_files=[PKG / n for n in C_FILES], headers=['TouchRotation.h'], cpp_headers=['AmbientBacklight.h'])
     print('PASS PianoAuto host tests')

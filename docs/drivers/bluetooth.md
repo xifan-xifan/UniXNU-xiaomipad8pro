@@ -1,5 +1,21 @@
 # Bluetooth: the WCN7860's Bluetooth over QUP2 SE6 ("UART14"): PianoBluetooth
 
+## Daily status (2026-11-27)
+
+Installed **v13.1y12q** reported **`BT_PREFLIGHT READY` with 32/32 checks passing** after 48 seconds. `piano-bt=5` was
+active, `bluetoothd` was running, all four runtime hashes verified, and `IOBluetoothHCIController` published with
+`power=1` and System Profiler reporting Bluetooth On. The LE event-mask fix has been armed on the daily line since
+v13.1y12m on November 26. The November 27 check confirmed a positive patch counter and LE event-mask bits 6 and 11 set.
+[November 27 Bluetooth preflight](../results-2026-11-27.md#bluetooth-preflight)
+
+The November 20 session on installed v13.1 verified discovery and hit HCI timeout `0x08` on the LE connection. Keyboard
+and mouse pairing and reconnect await the owner's 20-minute HID session. Wi-Fi coexistence is under analysis, and
+Bluetooth audio remains open. [Owner session checklist](../tools/bt-session.md) · [Support status](../STATUS.md) · [Hardware backlog](../BACKLOG-hardware.md)
+
+## Historical Bluetooth bring-up
+
+These notes record the early UART, firmware, and macOS transport work, including the gates and assumptions at each stage.
+
 Status update, 2026-11-17 (B9): the original BT1 run confirmed levels 1–3, shared rails/Wi-Fi coexistence, EE0 BT_EN,
 SE6 UART protocol 2, 48/48 loopback and CTS low. A later same-name short run ended before the driver delay; its missing
 lines are a harness failure, not a hardware regression. Level 4 firmware initialization and the new level 5 host transport
@@ -20,27 +36,26 @@ truthful standard capabilities, random-address sequencing and the extended-adver
 and valid patch guards do not establish a working controller or menu. `piano-bt-probe --scan 20` reports only bounded
 discovery counts; no pairing, connections or owner-key persistence are part of this test.
 
-The older level 1–4 design below is retained for hardware details. Its “not run”, A0-first, UART.SK, private-address-only
-and study-only licensing statements are superseded above and by the per-file NOTICE entries for the new BSD imports.
+The original level 1–4 design predates the level 5 transport and the BSD imports documented in the per-file NOTICE entries.
 
 Original design (2026-11-11): `package/PianoBluetooth` is a native kext with level 1 (a read-only survey), level
 2 (power: the PMU rails through the helper shared with PianoWifi, BT_EN over SPMI), level 3 (the GENI UART at 115200 with RTS/CTS)
 and level 4 (the controller set-up: rampatch and NVM from the tablet's own `bluetooth_a`, 3.2 Mbit/s, the unit's address), all
 **host-tested, linked into the native KC, not run**: inert without `piano-bt`, the radio powered only from `piano-bt=2`.
 **Owner decision 2026-11-15: path A approved** (patch Apple's bluetoothd; binary analysis of the daemon for our 26C5035r build for
-interoperability; Apple binaries and patched copies never in the repo, our offsets/notes may). The step plan — A0 first, then
-levels on the tablet, then the patch — and step 1 (`bt1`: the levels 1–3 boot on the current production Wi-Fi args, image built and
-queued by ready line, runner `/tmp/bt1run.sh`) are recorded in `private/host-checks/20261115-bt/PLAN.md`. The shared
-rails helper is `package/include/PianoWcnRails.h` (§7.1, its words in PianoA830); the change PianoWifi makes to use it is §7.2. The
+interoperability; Apple binaries and patched copies never in the repo, our offsets/notes may). The plan was A0 first, then
+the levels on the tablet, then the patch. The first `bt1` image used the production Wi-Fi arguments of the time and was
+queued by ready line for the levels 1–3 boot. The shared rails helper is `package/include/PianoWcnRails.h` (§7.1, its words
+in PianoA830). The change PianoWifi makes to use it is §7.2. The
 macOS side is the hard half: §5 is its verdict. The batched tablet test list is §8.4. Template: `README.md`.
 
-## 1. Purpose and gate
+### 1. Purpose and gate
 
 Keyboards, mice and headphones without a cable (Ubuntu: "pairing, file transfer and audio work"). Gates nothing in M1–M5; daily use,
 after B7/B10 in the backlog order (`../BACKLOG-hardware.md` §3). The chip half (power, UART, firmware, HCI) is well specified by
 Ubuntu and has a hardware-verified UniXNU precedent on SM8550 (§4); the macOS half has no kernel transport to plug into (§5).
 
-## 2. Hardware facts
+### 2. Hardware facts
 
 Sources: DT = `out/inputs/piano-boot.dtb` (Ubuntu's running DT); KDTS = the Ubuntu kernel's `sm8750.dtsi` / `sm8750-xiaomi-piano.dts`
 (piano/dev 7f8d6bed); GCC/RCG/PINS/PGPIO = its `gcc-sm8750.c`, `clk-rcg2.c`, `pinctrl-sm8750.c`, `pinctrl-spmi-gpio.c`; FW =
@@ -63,7 +78,7 @@ Every value is in `package/PianoBluetooth/BtHw.h`.
 | Firmware | the stock **`bluetooth_a`** FAT image, directory `image/`: `gngbtfw20.mbn` (232436 B, the ROM 0x20 rampatch, an ELF), `gngbtnv20.bin` and 25 `gngbtnv20.bXX` (13399 B; b2e/b3e 13291), picked by board id. Not `modem_a` (that holds Wi-Fi's `image/peach/`); "bdwlan" is a Wi-Fi board-file name | FW | verified on saved partition: 8 MiB GPT prefix of declared 64 MiB FAT16; all 27 file sizes/hashes match the third-party upstream pins. Live mount pending. |
 | Address | the controller reports its NVM's default address: Ubuntu sees it "unconfigured" and sets the unit's own (from the stock system, written by the installer) with MGMT Set Public Address = vendor `0xfc14`. The unit's address is private: never committed, never logged | `device/bluetooth/README.md`, btqca | verified (behaviour) |
 
-### 2.1 One PMU, two radios
+#### 2.1 One PMU, two radios
 
 The PMU is one power unit with two enables. Linux (`pwrseq-qcom-wcn.c`, the wcn7860 entry) models it as one shared unit (the six rails,
 reference-counted) under two targets: "bluetooth" = rails, then BT_EN high, then 50 ms; "wlan" = rails, then WLAN_EN high, then 50 ms;
@@ -73,7 +88,7 @@ the six rails (only ever adding, never lowering, the UFS PHY's LDOs untouched) a
 default, never withdraws a rail (`piano-wifi-release=1` aside). The contract between the two drivers is the shared helper of §7.1
 (built; PianoBluetooth uses it, PianoWifi after the change of §7.2).
 
-## 3. Ubuntu as the specification
+### 3. Ubuntu as the specification
 
 Kernel `piano/dev` 7f8d6bed (`unixnu-research/ubuntu-ref/kernel`; v1.1.0 = d2710cd1), behaviour only (GPL-2.0, §11):
 `drivers/bluetooth/hci_qca.c` (`qca_setup`, `qca_power_on`, `qca_set_speed`, `qca_set_baudrate`, the WCN7860-only `peri_set_baudrate`
@@ -99,7 +114,7 @@ Around sleep (`ubuntu-history/kernel.md` §2.4, K:7291c862688c, K:a2b4feb14264, 
 sleep (else its clocks and bandwidth stay on), and quiesced in this order: stop RX/TX, clear sequencer and DMA status, mask the SE IRQ,
 wait for handlers; a level IRQ answered "not mine" once disabled the Bluetooth UART for good.
 
-## 4. UniXNU templates, and what can be borrowed
+### 4. UniXNU templates, and what can be borrowed
 
 | Piece | Where | Licence | Use |
 |---|---|---|---|
@@ -111,9 +126,9 @@ wait for handlers; a level IRQ answered "not mine" once disabled the Bluetooth U
 | cmd-db lookup, RSC layout, the VRM transaction | PianoKeyboard `CmdDb.h` (included), PianoWifi `vrmLocked` / PianoKeyboard `voteLocked` (re-expressed: `BtRpmh.h`) | BSD (this repo) | level 2's rails when Bluetooth comes first |
 | IOHIDDevice publication | PianoKeyboard, PianoTouch | BSD (this repo) | §5.3 C |
 
-## 5. IOKit family / ABI: the macOS side
+### 5. IOKit family / ABI: the macOS side
 
-### 5.1 What the macOS 27 KC has (vma2 26A434: Info.plists and class-name strings only)
+#### 5.1 What the macOS 27 KC has (vma2 26A434: Info.plists and class-name strings only)
 
 - `com.apple.iokit.IOBluetoothFamily` 9.0.0: personalities `IOBluetoothHCIController` (IOClass on `IOResources`, a singleton) and two
   `AppleUSBHostMergeProperties` ones that put `UsbUserClientEntitlementRequired = com.apple.bluetooth.control` on Apple's own USB
@@ -129,7 +144,7 @@ wait for handlers; a level IRQ answered "not mine" once disabled the Bluetooth U
   clients for USB controllers. HID devices: `IOBluetoothHIDDriver`, `AppleBluetoothHIDKeyboard/Mouse/Multitouch` on
   `IOBluetoothL2CAPChannel`, i.e. fed by bluetoothd too.
 
-### 5.2 What bluetoothd does natively today (measured: its stderr in the console of the 2026-11-11 native runs)
+#### 5.2 What bluetoothd does natively today (measured: its stderr in the console of the 2026-11-11 native runs)
 
 It starts (`MobileBluetooth-2700.51`), finds no `BT_DEVICE_ADDRESS`, reports `marconi-bt: Unable to match bluetooth service in device
 tree` and `bluetooth: Unable to match bluetooth service in device tree`, `Not a valid MAC address (all 00s)` for both, and
@@ -137,7 +152,7 @@ tree` and `bluetooth: Unable to match bluetooth service in device tree`, `Not a 
 service named `bluetooth` with a MAC: the contract UniXNU-sheng's board meets (ADT `bluetooth` node, `device_type` bluetooth,
 `transport-encoding` 1, `transport-speed` 3200000, a matching IOService with `local-mac-address`).
 
-### 5.3 Options
+#### 5.3 Options
 
 | | Option | Private ABI | Effort | Main risks |
 |---|---|---|---|---|
@@ -147,7 +162,7 @@ service named `bluetooth` with a MAC: the contract UniXNU-sheng's board meets (A
 | B | A USB-HCI shim: present the controller as a USB Bluetooth device | AppleUSBHostController (virtual host controller) or AppleUSBUserHCI's user-client protocol, plus IOUSBHostFamily natively (`usb-host.md` §5.2: links only with ten stand-ins) | 4–8 weeks | more private ABI than A and the same daemon gate (public reports: macOS 12+ needs bluetoothd patched for third-party USB controllers, e.g. BlueToolFixup): **not easier** — rejected |
 | C | **Our own HID host, no bluetoothd**: HCI host + L2CAP + SMP (LE Secure Connections) + ATT/GATT + HID-over-GATT, then BR/EDR (SSP, HID on L2CAP PSM 0x11/0x13), publishing `IOHIDDevice`s (PianoKeyboard's proven shape); pairing by a control socket + `pianobt` CLI; link keys under `/private/var` (mode 600) | none | keyboards/mice 6–10 weeks (LE first); A2DP source (AVDTP + SBC + an IOAudio2 output) +6–8 weeks | no Bluetooth menu, AirPods features, Continuity or Bluetooth File Exchange; interoperability and pairing-security work is ours; fresh code (BTstack's licence and BlueZ's GPL rule them out; Apache-2.0 stacks like Zephyr's host are candidates) |
 
-### 5.4 Verdict
+#### 5.4 Verdict
 
 The chip side is a two-to-three-week job on known ground (levels 1–5, §8). The macOS side has no supported kernel transport in macOS 27:
 **do A0 first** (cheap, licence-clean, and the only way to learn what the stock daemon accepts without analysing it); if it stops at
@@ -155,7 +170,7 @@ chipset/VM gates, as is likely, choose between **C** (licence-clean, keyboards a
 UI) and **A** (the full Apple experience, by owner decision only, like `wifi.md`'s IO80211 option). B is not a shortcut. My
 recommendation: C for input devices, A kept open for audio if the owner accepts binary patching of bluetoothd.
 
-## 6. Boot args
+### 6. Boot args
 
 | Boot arg | Default | Effect |
 |---|---|---|
@@ -175,7 +190,7 @@ recommendation: C for input devices, A kept open for audio if the owner accepts 
 | `piano-bt-lemask=0` | 1 at level 5 (0 before bt/hid1, 2026-11-26) | level 5: OR LE Data Length Change (bit 6) and LE PHY Update Complete (bit 11) into the host's LE Set Event Mask (§8.5); root changes it at run time with `machdep.piano_bt_lemask` (applies to bluetoothd's next HCI start) |
 | `piano-bt-lerdy=1` | 0 | level 5: the LE link-ready assist (§8.5); `machdep.piano_bt_lerdy` at run time |
 
-## 7. Build, kernel collection
+### 7. Build, kernel collection
 
 `tooling/k27/build-native-piano-bluetooth.sh`: the host tests (`package/include/tests/run.sh`: the shared helper; `tests/bt_host.cpp`;
 `tests/bt_bringup_host.cpp`), a store check of the survey headers (`GeniUart.h`, `BtHw.h`), a check that nothing writes WLAN_EN, the
@@ -197,7 +212,7 @@ libraries; both are listed before PianoBluetooth in `configs/k27-native-kexts.tx
 | `PianoBluetooth.cpp` | the IOService: the survey, the ladder's thread, the windows and their logged writes, the locks, the rails helper's kernel side, BT_EN's owner channel, the firmware cache, the address, the power-state hooks |
 | `tests/QcaSim.h` | the simulated controller both host tests use |
 
-### 7.1 The shared rails helper (`package/include/PianoWcnRails.h`, built)
+#### 7.1 The shared rails helper (`package/include/PianoWcnRails.h`, built)
 
 One helper both radios **run** (header-only, C and C++), over two 32-bit words that **PianoA830 owns** (`board/PianoA830.cpp`, next to
 `sm8750_scm_owner`), because the KC linker merges weak definitions only inside one kext (`tooling/k27/coalesce-weak.py`): a word every
@@ -242,7 +257,7 @@ PianoBluetooth: `piano_wcn_rails_get(PIANO_WCN_BT)` inside its PMU-lock section 
 failure, at system sleep and at shutdown (`piano-bt-release=0`: without RELEASE). Host test: `package/include/tests/wcn_rails_host.cpp`
 (§8.4 "host").
 
-### 7.2 The change PianoWifi makes to use it (for PianoWifi's owner; not applied here)
+#### 7.2 The change PianoWifi makes to use it (for PianoWifi's owner; not applied here)
 
 Against PianoWifi as on main at 2026-11-11 (level 5, `PianoWifi.cpp` sha256 `6ac47f0a…dad600`); only `PianoWifi.cpp` and its build
 script change, the descriptor already names PianoA830. Checked on a scratch copy: the kext object compiles with the native flags (no
@@ -392,7 +407,7 @@ Its tablet check (one boot, with this driver): `piano-wifi=2 piano-bt=2 piano-bt
 enabled: owners now 0x80003f03`) or the reverse; one `PMU lock held by 0x…: waiting` / `free again` pair at most, and no `given up`.
 `wifi.md` §8 then gains one line: level 2's rails come from the helper.
 
-## 8. Bring-up ladder, test plan and effort
+### 8. Bring-up ladder, test plan and effort
 
 RAM boots only, cable to the Mac, owner present, `piano-reset-after` as the backstop; each level only after the previous one's log.
 
@@ -419,7 +434,7 @@ ladder again from level 2 (the controller lost its RAM patch with BT_EN low: the
 interrupt is attached (polled), so there is none to mask. While up and idle the controller holds RFR deasserted once the RX FIFO is
 full; nothing polls it between levels.
 
-### 8.1 Level 1 test image
+#### 8.1 Level 1 test image
 
 ```sh
 tooling/k27/build-native-image.sh            # the native KC (PianoBluetooth linked, inert) and the regular images
@@ -464,7 +479,7 @@ function at hand-over, BT_EN's subtype (LV/MV: the level is bit 7 of 0x44), its 
 step 202), the SMMU entry for 0x423 (only SE DMA needs one). A hang after "stage 3" would mean a gate let a load through to an
 unclocked block: rerun with `piano-bt-se=0`. `FAILED`/`not read` lines name their cause.
 
-### 8.2 What levels 2..4 write, and their lines
+#### 8.2 What levels 2..4 write, and their lines
 
 Every MMIO write goes through the kext's `hwWrite` (one line per kind, `write <window>+<offset> = <value>: <what>`, then counted; the
 TX FIFO's words are never logged), every PMIC write through `hwPmicWrite` (BT_EN's five registers only, owner EE 0 only: `pmic write
@@ -472,11 +487,11 @@ BT_EN 0x44 = 80: status 00000001 (done)`), every rail transaction through the he
 completed ...`). Each level ends with `level N: W writes (K kinds, 0 refused accesses in all); repeated: ...`. The lines in order
 are §8.4's expected blocks; `..` are values to record.
 
-### 8.3 The unit's address (private)
+#### 8.3 The unit's address (private)
 
-The address is a private installation input, as on Ubuntu (`/etc/piano/bluetooth-address` there): one line, six hex pairs separated
-by colons, most significant first, in **`private/bluetooth-address`** (ignored: `.gitignore` has `/private/*`), never committed, never
-logged. `tooling/adt/make-piano-adt.py` (run by `build-native-image.sh`) puts it, when that file exists, into the locally built ADT as
+The address is a private installation input, as on Ubuntu. Its file holds one line of six colon-separated hex pairs,
+most significant first, and stays out of Git and logs. `tooling/adt/make-piano-adt.py` (run by `build-native-image.sh`)
+puts it, when that file exists, into the locally built ADT as
 `/arm-io/piano-bt` property `bt-address` (six bytes; `--bt-address-file FILE` another file, `--no-bt-address` none; the builder prints
 only "with /arm-io/piano-bt (a private Bluetooth address)"). No driver matches that node. Level 4 reads it at run time (refusing all
 zeros, all ones and a group address), writes it with `0xfc14`, reads it back with Read BD_ADDR, checks it again after the second
@@ -485,7 +500,7 @@ controller keeps its NVM's default (`level 4: address: the controller started wi
 ADT ...`). `tooling/adt/adt-dump.py` shows the property: do not paste such a dump into a log or a document. Option A0 (§5.3) will
 copy it into a `bluetooth` node's `local-mac-address` for bluetoothd.
 
-### 8.4 Results so far and the batched tablet test list
+#### 8.4 Results so far and the batched tablet test list
 
 | Check | Result (2026-11-11, offline) |
 |---|---|
@@ -608,7 +623,7 @@ Record: the version words, the board id (selects the NVM file), the build label,
 the read time of the rampatch, the counts. A `FAILED at step N (...; last opcode .... status .. hardware error ..)` line names the
 step, the command and the controller's answer.
 
-### 8.5 LE link ready (2026-11-21, host-tested; tablet result pending)
+#### 8.5 LE link ready (2026-11-21, host-tested; tablet result pending)
 
 The owner's LE connects of 2026-11-20 completed (LE Connection Complete, the remote version and features read) and then sat in
 bluetoothd's `ready-state: LE_READY_WAIT_FOR_LENGTH` until a supervision timeout or a local cancel; GATT, SMP and HID never started.
@@ -645,7 +660,7 @@ logs `secure-read`. `hid` shows that CoreBluetooth refuses a third-party HID ser
 macOS 27.2): HID over GATT itself needs a real keyboard or mouse. `piano-bt-probe --le-rssi SECONDS` reports the RSSI distribution
 of the test peripheral's advertisements (the RF check at a known distance).
 
-### 8.6 Radio health (bt-radio1, 2026-11-26, host-tested; tablet result pending)
+#### 8.6 Radio health (bt-radio1, 2026-11-26, host-tested; tablet result pending)
 
 The 11-22 owner session's HCI trace (1739 LE extended advertising reports in 27 minutes) had 1570 of them (90 %) at -101 dBm or
 below, the best at -41 dBm; the strong reports came only in about 1.5 s windows every 120 s that line up with PianoWifi's background
@@ -663,13 +678,43 @@ LE Advertising Report, LE Extended Advertising Report, Inquiry Result with RSSI,
 No address is kept. A healthy receiver with Apple devices in the room puts most LE reports above -90 dBm; the 11-22 boot would
 have read `55/10/81/23/1570 best=-41`.
 
-## 9. Fallback
+#### 8.7 Goal 11 offline HCI link model
+
+The [host model](../../package/PianoBluetooth/BtHciLinkModel.h) exercises one LE central link to an explicitly addressed
+peer. The WCN7860 board reference is the pinned Ubuntu `piano/dev` tree in §3, with H4 on QUP2 SE6 at 3.2 Mbit/s for the
+level 5 path. H4 indicators, HCI opcodes and event layouts, feature bits, and errors `0x08` and `0x3e` use Bluetooth Core
+5.4. [UART framing](https://www.bluetooth.com/wp-content/uploads/Files/Specification/HTML/Core-54/out/en/host-controller-interface/uart-transport-layer.html) ·
+[HCI and flow control](https://www.bluetooth.com/wp-content/uploads/Files/Specification/HTML/Core-54/out/en/host-controller-interface/host-controller-interface-functional-specification.html) ·
+[Controller errors](https://www.bluetooth.com/wp-content/uploads/Files/Specification/HTML/Core-54/out/en/architecture%2C-mixing%2C-and-conventions/controller-error-codes.html)
+
+- The model accepts exactly one CMD, ACL, SCO, or EVT frame at a time, using the existing decoder's 1024-byte payload
+  limit for ACL. It matches command replies by event kind, exact length, and little-endian opcode. Its event-mask patch
+  uses the same `H4LeMaskPatcher` as level 5. It adds bits 6 and 11 to an eligible `0x2001` command and preserves local
+  and remote feature masks byte for byte. The test supplies controller events explicitly.
+- The fixture permits three create attempts per request. `0x08` and `0x3e` allow retries after 20 ms and 40 ms of
+  simulated time. A successful Disconnection Complete releases the handle and credits for its unacknowledged ACL
+  packets. A lost response or stuck command credit requires a power cycle. The attempt count, timings, three ACL
+  buffers, peer addresses, handles, and bond keys are synthetic fixture values.
+- Suspend closes admission to HCI TX and ACL TX immediately. The normal sequence drains outstanding work, waits for
+  Reset Command Complete, then permits power-off. If a deadline expires, the model discards outstanding host work
+  and requires power-off before reinitialization. Wake waits for fresh Reset and LE Set Event Mask completions.
+  A mutex serializes transitions and a transport epoch rejects queued work from before wake.
+- The fixture represents SMP outcomes and HOGP setup as host callbacks. It keeps one peer's successful bond in
+  memory across power cycles. Each new link requires encryption and HOGP setup before it can accept HID input.
+  The test covers failed pairing, wrong peers and keys, and stale callbacks even when the controller reuses a handle.
+
+Run the [ASan/UBSan host test](../../package/PianoBluetooth/tests/hci_link_model_host.cpp) with
+`python3 scripts/ci/self-tests.py --only package/PianoBluetooth/tests/`.
+**Fix-image gate: HOLD.** Real keyboard and mouse pairing, HID input, and reconnect after wake still require the
+owner's hands-on session. [Owner session checklist](../tools/bt-session.md)
+
+### 9. Fallback
 
 `piano-bt=0` (the default): nothing runs, the controller stays off (BT_EN low), the shared rails as PianoWifi leaves them. A level that
 fails leaves the radio off (§8, safeOff); `piano-bt-baud=115200`, `piano-bt-peri=0`, `piano-bt-reset0=0`, `piano-bt-loop=0`,
 `piano-bt-stop=N` narrow a failure down. USB keyboards and mice (B7) or the keyboard cover meanwhile.
 
-## 10. Open questions and risks
+### 10. Open questions and risks
 
 1. BT_EN's SPMI owner (level 1). If it is not EE 0, the apps processor cannot drive it: level 2 stops at step 202 with that line and
    writes nothing; Linux's working BT_EN would then mean a different arbiter path (a question for the SPMI docs, then the owner).
@@ -683,8 +728,8 @@ fails leaves the radio off (§8, safeOff); `piano-bt-baud=115200`, `piano-bt-per
    board id this unit's controller reports (selects `gngbtnv20.bXX`). (needs-boot)
 5. The WCN7860 peripheral baud frame (`31 00 f1 ff 02 02 code`) is Ubuntu-only (not mainline); `piano-bt-peri=0` tests without it.
    The first HCI_Reset (ours) to a ROM without its patch: an answer is noted, none is not fatal (`piano-bt-reset0=0` skips it).
-6. The address: whether the controller keeps a `0xfc14` address over HCI_Reset (written once more if not); the private file must be
-   in `private/` of the checkout that builds the image. Natively the stock partition that holds the unit's address is still unknown.
+6. The address: whether the controller keeps a `0xfc14` address over HCI_Reset (written once more if not). The image build
+   needs the private installation input. At this stage, the stock partition holding the unit's address was unknown.
 7. Polled FIFO at 3.2 Mbit/s: lossless with RTS/CTS, but the thread spins in 5–20 µs steps during the download (~1 s); SE DMA (stream
    0x423 through a bypass bank, sheng's 32 KiB) or the IRQ path (level 6) before audio.
 8. Two radios: until §7.2 is applied, PianoWifi neither takes the PMU lock nor owns a bit, so a boot with both waits 30 s on
@@ -695,7 +740,7 @@ fails leaves the radio off (§8, safeOff); `piano-bt-baud=115200`, `piano-bt-per
 10. Pairing-key storage: Apple's stack wants the keychain (AppleKeyStore, absent natively); option C keeps keys in its own file.
 11. Coexistence: both radios' firmware runs on the one chip; Ubuntu runs them together. Heat and power: sessions stay attended.
 
-## 11. Licence note
+### 11. Licence note
 
 This repository's packages are BSD-2-Clause-Patent. Linux (`hci_qca`, `btqca`, `hci_sync`, `qcom_geni_serial`, `qcom-geni-se`,
 `pwrseq-qcom-wcn`, `clk-rcg2`, `gcc-sm8750`, `pinctrl-spmi-gpio`) and QcaBluetooth's GPL core are the specification only: opcodes,
@@ -705,4 +750,4 @@ analysed beyond the KC's kext names, class names and Info.plist matching diction
 change that and is the owner's decision. No Qualcomm binary is reverse engineered: the rampatch and NVM
 (`LicenseRef-Proprietary-Firmware`) are data, read at run time from the tablet's own `bluetooth_a` (or a staged copy under the ignored
 `out/`), never committed; only their names and sizes are logged. The Bluetooth address is a private installation input
-(`private/bluetooth-address`, the locally built ADT), read at run time, never logged or committed.
+read at run time from the locally built ADT. It stays out of logs and commits.

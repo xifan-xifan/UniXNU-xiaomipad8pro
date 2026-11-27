@@ -28,7 +28,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import tomllib
 from pathlib import Path
 
 D = Path(__file__).resolve().parents[2]
@@ -59,7 +58,8 @@ def main():
         p.add_argument('--' + name, type=Path, required=True, help=f'the 27.3 entry\'s {name}')
     p.add_argument('--id', default='macos-27.3')
     p.add_argument('--title', default='macOS 27.3 (Mac17,11)')
-    p.add_argument('--arg', action='append', default=[], help='one more argument for the 27.3 entry (NAME=VALUE, replaces NAME)')
+    p.add_argument('--arg', action='append', default=[], type=common.boot_arg_edit, metavar='NAME=VALUE',
+                   help='one more argument for the 27.3 entry (replaces NAME)')
     p.add_argument('--root-json', type=Path, default=common.DEVICE / 'out/inputs/k273/root/root.json',
                    help='the 27.3 root image\'s record (tooling/k273/make-root-image.sh): the store must lie after it')
     p.add_argument('--name', default='esp-dual')
@@ -73,12 +73,15 @@ def main():
         installed = json.loads((out / 'installed.json').read_text())
         base_json = out / (Path(installed['image']).stem + '.json')
     base = json.loads(base_json.read_text())
-    base_img = base_json.with_name(base['image'])
-    if common.sha(base_img) != base['sha256']:
-        raise SystemExit(f'{base_img}: not the image its record {base_json.name} names')
+    base_img = common.checked_esp_base(base_json, base)
     for n in ('kc', 'adt', 'trust', 'seed'):
         if not getattr(a, n).is_file():
             raise SystemExit(f'--{n} {getattr(a, n)}: missing')
+    with common.stage_esp_output(out, a.name, base_img, base_json) as image:
+        build(a, base_json, base, base_img, image)
+
+
+def build(a, base_json, base, base_img, image):
 
     # the 27.3 collection: the native kext rule, the markers its arguments need
     natives, vm_era, _, kc_guard = build_esp.kc_bundles(a.kc)
@@ -122,7 +125,7 @@ def main():
         text = toml_path.read_text()
         if text != base['unixnu_toml']:
             raise SystemExit(f'{base_img}: unixnu.toml differs from its record')
-        config = tomllib.loads(text)
+        config = common.toml_loads(text)
         entries = config['entry']
         ids = [e['id'] for e in entries]
         if a.id in ids:
@@ -135,8 +138,9 @@ def main():
         args = args[:tail] + a.arg + ['native-ufs-root-part=linux_data', f'data-store-lba={first}'] + args[tail:]
         common.check_store_size(seed, args)
         line = ' '.join(args)
-        if len(line) >= 1000:
-            raise SystemExit(f'{a.id}: kernel command line is {len(line)} bytes; DarwinBoot passes at most 1023 (keep under 1000)')
+        line_bytes = len(line.encode())
+        if line_bytes >= 1000 or any(c in line for c in ('"', '\\', '\0')):
+            raise SystemExit(f'{a.id}: invalid kernel command line ({line_bytes} bytes, keep under 1000)')
         # firmware: the 27.3 collection's pins must be the files the base carries
         problems = []
         for pin in firmware.kc_pins(a.kc):
@@ -160,15 +164,13 @@ def main():
         if text.count(marker) != 1:
             raise SystemExit(f'{base_img}: unixnu.toml has no single fastboot entry to insert before')
         new_text = text.replace(marker, '[[entry]]\n' + entry_text(entry) + marker)
-        parsed = tomllib.loads(new_text)
+        parsed = common.toml_loads(new_text)
         if [e for e in parsed['entry'] if e['id'] != a.id] != entries or parsed['boot'] != config['boot']:
             raise SystemExit('the base\'s entries or boot settings changed: refused')
         toml_path.write_text(new_text)
         for path in [stage, *stage.rglob('*')]:
             build_esp.os.utime(path, (build_esp.EPOCH, build_esp.EPOCH))
         want = {str(f.relative_to(stage)): common.sha(f) for f in sorted(stage.rglob('*')) if f.is_file()}
-        image = out / f'{a.name}.img'
-        image.unlink(missing_ok=True)
         build_esp.mtools('mformat', '-C', '-F', '-S', '5', '-M', '4096', '-T', str(common.ESP_BLOCKS), '-h', '1', '-s', '1', '-c', '1',
                          '-H', str(common.ESP_FIRST), '-v', build_esp.LABEL, '-N', build_esp.SERIAL, '-i', str(image), '::')
         build_esp.mtools('mcopy', '-i', str(image), '-s', '-Q', '-m', str(stage / 'EFI'), '::/')
@@ -179,7 +181,9 @@ def main():
         mback = {str(f.relative_to(back)): common.sha(f) for f in sorted(back.rglob('*')) if f.is_file()}
     fat = common.fat32_read(image)
     got = {n: common.hashlib.sha256(b).hexdigest() for n, b in fat['files'].items()}
-    problems = list(fat['problems'])
+    if fat['problems']:
+        raise SystemExit(f'{image}: the FAT reader finds {fat["problems"]}')
+    problems = []
     if image.stat().st_size != common.ESP_BLOCKS * common.LBA:
         problems.append('image size')
     if fat['sector_bytes'] != 4096 or fat['sectors_per_cluster'] != 1 or fat['total_sectors'] != common.ESP_BLOCKS:
@@ -204,7 +208,7 @@ def main():
         'unixnu_toml': new_text,
         'cmdlines': {**base['cmdlines'], a.id: line},
         'fat': {k: v for k, v in fat.items() if k not in ('files', 'problems')},
-        'k273': {'id': a.id, 'title': a.title, 'cmdline': line, 'bytes': len(line),
+        'k273': {'id': a.id, 'title': a.title, 'cmdline': line, 'bytes': line_bytes,
                  'inputs': {n: {'path': str(getattr(a, n)), 'sha256': common.sha(getattr(a, n))} for n in ('kc', 'adt', 'trust', 'seed')},
                  'kc_natives': natives, 'kc_has_boot_guard': kc_guard, 'ram_window': window, 'seed': seed,
                  'store': {'partition': 'linux_data', 'first_lba': first, 'blocks': seed['store_blocks'],
@@ -213,7 +217,7 @@ def main():
                            'root_first_lba': root['write']['first_lba'], 'root_last_lba': root_last,
                            'root_image_sha256': root['image_sha256']}},
     })
-    common.write_json(out / f'{a.name}.json', record)
+    common.write_json(image.with_suffix('.json'), record)
     print(f'{image.name}: {record["bytes"]} bytes sha256 {record["sha256"]}; base {base["image"]} kept; {a.id}: {len(line)} bytes of '
           f'arguments, store on linux_data LBA {first}-{first + seed["store_blocks"] - 1} bound, seed {seed["identity_sha256"][:16]} '
           f'({seed["logical_bytes"] >> 30} GiB)')

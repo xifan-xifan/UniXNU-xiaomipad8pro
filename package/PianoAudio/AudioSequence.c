@@ -2,8 +2,6 @@
 #include "AudioSequence.h"
 #include "PianoGpr.h"
 
-#define UNDO_TOKEN 0x100u
-
 void ar_seq_init(ArSeq *s, const ArStep *steps, unsigned count, uint32_t port, uint32_t prm_port, uint32_t token_base, void *context)
 {
     for (unsigned i = 0; i < sizeof *s; ++i) ((uint8_t *)s)[i] = 0;
@@ -69,7 +67,7 @@ uint32_t ar_seq_next(ArSeq *s, uint8_t *out, uint32_t capacity)
                 continue;
             }
             if (!st->undo || s->dsp_down) continue;
-            const uint32_t token = s->token_base + UNDO_TOKEN + i;
+            const uint32_t token = s->token_base + AR_SEQ_TOKEN_SPAN / 2u + i;
             const uint32_t n = st->undo(s, out, capacity, token);
             if (!n) continue;   /* nothing to undo (e.g. no handle was ever returned) */
             return send(s, n, token, st->undo_opcode, st->undo_answer, st->prm, 1);
@@ -394,11 +392,13 @@ int ar_pump_done(ArPump *p, const ArAnswer *a)
         p->bad_origin++; p->errors++; return -1;
     }
     const uint64_t at = a->address - p->base;
-    if (p->capture && (a->address < p->base || at >= (uint64_t)p->slots * p->period_bytes)) {
-        p->bad_range++; p->errors++; return -1;
+    if (a->address < p->base || at >= (uint64_t)p->slots * p->period_bytes) {
+        if (p->capture) p->bad_range++;
+        p->errors++;
+        return -1;
     }
     const uint32_t slot = (uint32_t)(at / p->period_bytes);
-    if (a->address < p->base || at % p->period_bytes || slot >= p->slots || !p->busy[slot] || a->token != p->token_base + slot ||
+    if (at % p->period_bytes || !p->busy[slot] || a->token != p->token_base + slot ||
         a->handle != p->handle) {
         p->errors++;
         return -1;

@@ -155,7 +155,7 @@ struct StormGuard {
       start = now;
       count = 0;
     }
-    if (++count > limit) tripped = true;
+    if (count == UINT32_MAX || ++count > limit) tripped = true;
     return tripped;
   }
 };
@@ -204,8 +204,11 @@ struct WakeStats {
       startMs = nowMs;
       return false;
     }
-    if (nowMs < startMs || nowMs - startMs < windowMs) return false;
-    *out = Window{uint32_t((nowMs - startMs + 500) / 1000), wakeups, irqs, kicks, timeouts};
+    if (nowMs < startMs) return false;
+    const uint64_t elapsed = nowMs - startMs;
+    if (elapsed < windowMs) return false;
+    const uint64_t seconds = elapsed / 1000 + (elapsed % 1000 >= 500);
+    *out = Window{seconds > UINT32_MAX ? UINT32_MAX : uint32_t(seconds), wakeups, irqs, kicks, timeouts};
     startMs = nowMs;
     wakeups = irqs = kicks = timeouts = 0;
     return true;

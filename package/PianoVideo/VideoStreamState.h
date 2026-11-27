@@ -91,8 +91,9 @@ struct Ledger {
     Record *f=find(t);if(!f||f->phase!=Phase::Submitted||i>=Raws||rawHeld[i])return false;
     f->phase=Phase::Picture;rawHeld[i]=true;rawToken[i]=t;if(rawUses[i]++)++rawReuse;return true;
   }
+  bool ownsRaw(unsigned i,uint64_t t) const {return i<Raws&&rawHeld[i]&&rawToken[i]==t;}
   bool release(unsigned i,uint64_t t) {
-    if(i>=Raws||!rawHeld[i]||rawToken[i]!=t)return false;
+    if(!ownsRaw(i,t))return false;
     rawHeld[i]=false;return true;
   }
   bool retire(uint64_t t) {
@@ -105,9 +106,15 @@ struct Ledger {
   bool drained() {if(!drainReady()||pending||!loansEmpty())return false;draining=false;paused=true;return true;}
   bool resume() {if(stopped||draining||pending||!paused)return false;paused=ack=last=false;return true;}
   void cancel() {stopped=true;for(auto &f:frames)if(f.phase!=Phase::Free){f.phase=Phase::Free;++cancelled;}pending=0;}
+  void closed() {
+    cancel();
+    for(unsigned i=0;i<Inputs;++i){inputOwned[i]=false;inputToken[i]=0;}
+    for(unsigned i=0;i<Raws;++i){rawHeld[i]=false;rawToken[i]=0;}
+    barrier=0;draining=ack=last=paused=false;
+  }
 };
-// One guest request at a time. An epoch belongs to one session UUID; IDs never
-// reset within it. No blocking wait is required to keep pumping firmware.
+// One guest request at a time. The transport assigns IDs across sessions.
+// No blocking wait is required to keep pumping firmware.
 struct Guest {
   uint64_t request=0, deadline=0;
   uint32_t type=0;

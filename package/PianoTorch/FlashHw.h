@@ -88,7 +88,9 @@ constexpr uint8_t kSts2Voltage = kSts2VphLow;
 constexpr uint8_t kPianoChannelMask = 0x03;          // led-sources <1 2>: channel indices 0 and 1
 constexpr unsigned kPianoChannels = 2;
 constexpr unsigned kTorchStepUa = 5000;              // with the IRESOLUTION bit set
+constexpr unsigned kFlashStepUa = 12500;             // with the IRESOLUTION bit clear
 constexpr unsigned kUbuntuTorchMaxMa = 100;          // led-max-microamp 100000 for the lamp (both channels)
+constexpr unsigned kFactoryTorchMaxMa = 400;         // 2 x 200 mA, factory-safe range approved by the owner 2026-11-27
 constexpr unsigned kTorchMinMa = kPianoChannels * kTorchStepUa / 1000;   // 10: one step on each channel
 
 // The two other channels' bits of a register that holds one bit per channel.
@@ -115,6 +117,7 @@ static_assert(itargetForMa(100) == 9 && maForItarget(9) == 100, "Ubuntu's 100 mA
 static_assert(itargetForMa(400) == 39 && maForItarget(39) == 400, "factory 400 mA = 2 x 200 mA");
 static_assert(itargetForMa(10) == 0 && maForItarget(0) == 10, "one step a channel");
 static_assert(clampForMa(kUbuntuTorchMaxMa) == 9, "Linux's clamp for piano");
+static_assert(clampForMa(kFactoryTorchMaxMa) == 39, "factory 400 mA clamp");
 
 // --------------------------------------------------------------------------------------------------------------- decoding
 inline const char *subtypeName(uint8_t subtype)

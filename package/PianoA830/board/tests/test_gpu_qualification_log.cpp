@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT
  * Copyright (c) 2026 Leo Zhang
  */
+// c++ -std=c++20 -O1 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I.. test_gpu_qualification_log.cpp -o /tmp/test_gpu_qualification_log && /tmp/test_gpu_qualification_log
 #include "PianoGpuQualificationLog.h"
 #include <cstdio>
 #include <cstdlib>

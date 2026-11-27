@@ -2,31 +2,35 @@ SPDX-License-Identifier: MIT
 Copyright (c) 2026, Leo Zhang.
 
 MTLGPUFamilyMac2 for the browsers' GPU images alone (ANGLE, Dawn, the Chromium frameworks): ANGLE's Metal display exists on macOS only for a
-default device in Mac2, so Chrome lost GL, WebGL and WebGPU. Every other caller keeps the device's own answer (private analysis
-20261124-browser-gpu section 9; host check tooling/metal/turnip-a830/family_host.mm).
+default device in Mac2, so Chrome lost GL, WebGL and WebGPU. Every other caller keeps the device's own answer
+(host check tooling/metal/turnip-a830/family_host.mm).
 
 --- NativeBridgeMetalFrontend.mm
 +++ NativeBridgeMetalFrontend.mm
-@@ -5840,7 +5840,17 @@
+@@ -5840,7 +5840,21 @@
   return [NSString stringWithUTF8String:text.c_str()];
  }
  static BOOL (*gFamilyAnswer)(id,SEL,NSInteger);
 -enum FamilyCaller {FamilyCallerOther,FamilyCallerRenderBox,FamilyCallerWebGPU};
 +enum FamilyCaller {FamilyCallerOther,FamilyCallerRenderBox,FamilyCallerWebGPU,FamilyCallerBrowserGPU};
 +// UniXNU-piano (0011): the images that hold ANGLE's Metal display or Dawn's Metal backend (the browsers' GL, WebGL and WebGPU), matched
-+// by path: WebKit's ANGLE, a standalone ANGLE or Dawn, and the Chromium frameworks that link both in (Chrome, Chromium, Edge, Brave,
-+// Electron apps). private host-checks 20261124-browser-gpu ANALYSIS.md section 9.
++// by exact library basename or framework directory: WebKit's ANGLE, a standalone ANGLE or Dawn, and the Chromium frameworks
++// that link both in (Chrome, Chromium, Edge, Brave, Electron apps).
 +static bool browserGpuImage(const char *path) {
-+ static const char *const images[]={"/libANGLE-shared.dylib","/libGLESv2.dylib","/libwebgpu_dawn.dylib",
++ const char *slash=strrchr(path,'/');
++ if(!slash)return false;
++ static const char *const libraries[]={"libANGLE-shared.dylib","libGLESv2.dylib","libwebgpu_dawn.dylib"};
++ for(const char *library:libraries)if(strcmp(slash+1,library)==0)return true;
++ static const char *const frameworks[]={
 +  "/Google Chrome Framework.framework/","/Chromium Framework.framework/","/Microsoft Edge Framework.framework/",
 +  "/Brave Browser Framework.framework/","/Electron Framework.framework/"};
-+ for(const char *image:images)if(strstr(path,image))return true;
++ for(const char *framework:frameworks)if(strstr(path,framework))return true;
 + return false;
 +}
  // The framework whose code is at a return address, looked up once per address: dladdr searches the image's symbol table, and
  // QuartzCore's pixel-format queries ask supportsFamily: for every surface it makes (a masked corner, a backdrop, a blur's mips) and every
  // IOSurface it checks -- the render server's display thread spent 15% of its running time in that search during page swipes.
-@@ -5853,6 +5863,7 @@
+@@ -5853,6 +5867,7 @@
   if(dladdr(address,&caller) && caller.dli_fname) {
    if(strstr(caller.dli_fname,"/RenderBox.framework/"))kind=FamilyCallerRenderBox;
    else if(strstr(caller.dli_fname,"/WebGPU.framework/"))kind=FamilyCallerWebGPU;
@@ -34,7 +38,7 @@ default device in Mac2, so Chrome lost GL, WebGL and WebGPU. Every other caller 
   }
   std::lock_guard<std::mutex> hold(lock);
   if(known.size()<4096)known.emplace(address,kind);
-@@ -5862,9 +5873,18 @@
+@@ -5862,9 +5877,18 @@
  // feature set tables list no WebGPU limits for Apple1 to Apple3, so requestAdapter() answered null and every page saw no WebGPU. The rows
  // Apple4 adds that this device refuses (gfxprobe families: imageblocks, tile shaders, raster order groups, post-depth coverage) are the
  // Apple GPUs' tile-memory features, which WebGPU has no API for, so WebGPU alone is told Apple4 (the family its tables start at).

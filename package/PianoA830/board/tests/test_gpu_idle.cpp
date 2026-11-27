@@ -2,6 +2,7 @@
 // Host test of PianoGpuIdle.h (docs/power.md "Idle wakeups by driver"): the mailbox server's wait (the poll of before with
 // piano-gpu-mailbox-poll=1; the doorbell trusted after enough rung requests and distrusted when they stop ringing; the display-off
 // wait), and the DCVS screen rule's word.
+// c++ -std=c++20 -O1 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I.. test_gpu_idle.cpp -o /tmp/test_gpu_idle && /tmp/test_gpu_idle
 #include "PianoGpuIdle.h"
 #include <cstdio>
 #include <cstdlib>

@@ -14,6 +14,7 @@
 //   - a record that arrives between the step's take and its mask write stays masked; the writes stay inside the allowlist.
 //   uplow_host         run the tests
 //   uplow_host --map   print the controllers' TM addresses and SPIs for tooling/k27/check-tsens-irq.py
+// Build: c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I.. uplow_host.cpp -o /tmp/uplow_host && /tmp/uplow_host
 #include "TsensIrq.h"
 #include <cstdarg>
 #include <cstdio>

@@ -42,6 +42,8 @@
 #include <AudioToolbox/AudioToolbox.h>
 #include <CoreAudio/CoreAudio.h>
 #include <mach/mach_time.h>
+#include <limits.h>
+#include <stddef.h>
 #include <math.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -51,6 +53,8 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include "../audio-cli.h"
+#include "../audio-wav.h"
 
 enum Mode {MODE_VPIO, MODE_BYPASS, MODE_RAW, MODE_AVREC};
 enum {kMaxSlice = 16384, kVpioSlice = 4096};
@@ -84,7 +88,7 @@ static uint64_t host_ticks(double s) {return (uint64_t)(s * 1e9 * timebase.denom
 
 static long long now_ms(void)
 {
-    struct timeval tv;
+    struct timeval tv = {0};
     gettimeofday(&tv, NULL);
     return (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
 }
@@ -95,77 +99,63 @@ static int exists(const char *path)
     return path && stat(path, &st) == 0;
 }
 
-static void put16(FILE *f, uint16_t v) {fputc(v & 0xff, f); fputc(v >> 8, f);}
-static void put32(FILE *f, uint32_t v) {put16(f, (uint16_t)(v & 0xffff)); put16(f, (uint16_t)(v >> 16));}
+static int write_marker(const char *path, const char *line)
+{
+    if (!path) return 0;
+    FILE *f = fopen(path, "w");
+    if (!f) {perror(path); return -1;}
+    const int error = fprintf(f, "%s\n", line) < 0;
+    if (fclose(f) || error) {perror(path); return -1;}
+    return 0;
+}
 
 static int write_wav(const char *path, uint32_t rate, const int16_t *s, uint64_t frames)
 {
     FILE *f = fopen(path, "wb");
     if (!f) {perror(path); return -1;}
-    fwrite("RIFF", 1, 4, f); put32(f, (uint32_t)(36 + frames * 2)); fwrite("WAVEfmt ", 1, 8, f);
-    put32(f, 16); put16(f, 1); put16(f, 1); put32(f, rate); put32(f, rate * 2); put16(f, 2); put16(f, 16);
-    fwrite("data", 1, 4, f); put32(f, (uint32_t)(frames * 2));
-    for (uint64_t i = 0; i < frames; ++i) put16(f, (uint16_t)s[i]);
-    return fclose(f) ? -1 : 0;
+    const int error = audio_wav_write_header(f, rate, frames) ||
+                      fwrite(s, sizeof *s, (size_t)frames, f) != frames;
+    return fclose(f) || error ? -1 : 0;
 }
-
-static uint32_t le32(const uint8_t *b) {return b[0] | b[1] << 8 | b[2] << 16 | (uint32_t)b[3] << 24;}
-static uint16_t le16(const uint8_t *b) {return (uint16_t)(b[0] | b[1] << 8);}
 
 // 16-bit PCM (also WAVE_FORMAT_EXTENSIBLE), any channel count, mixed to mono float.
 static int load_wav(const char *path, float **out, uint64_t *frames, double *rate)
 {
     FILE *f = fopen(path, "rb");
     if (!f) {perror(path); return -1;}
-    uint8_t h[12];
-    int rc = -1, have_fmt = 0;
-    uint16_t fmt = 0, ch = 0, bits = 0;
-    uint32_t sr = 0;
-    if (fread(h, 1, 12, f) != 12 || memcmp(h, "RIFF", 4) || memcmp(h + 8, "WAVE", 4)) {
-        fprintf(stderr, "vpio-probe: %s: not a RIFF/WAVE file\n", path);
-        goto out;
+    AudioWav wav;
+    if (audio_wav_read_header(f, &wav, 1)) {
+        fprintf(stderr, "vpio-probe: %s: expected complete 16-bit PCM RIFF/WAVE\n", path);
+        fclose(f);
+        return -1;
     }
-    for (;;) {
-        uint8_t c[8];
-        if (fread(c, 1, 8, f) != 8) {fprintf(stderr, "vpio-probe: %s: no data chunk\n", path); goto out;}
-        const uint32_t len = le32(c + 4);
-        if (!memcmp(c, "fmt ", 4)) {
-            uint8_t b[40] = {0};
-            const size_t want = len < sizeof b ? len : sizeof b;
-            if (len < 16 || fread(b, 1, want, f) != want) {fprintf(stderr, "vpio-probe: %s: bad fmt chunk\n", path); goto out;}
-            if (fseek(f, (long)(len - want + (len & 1)), SEEK_CUR)) goto out;
-            fmt = le16(b); ch = le16(b + 2); sr = le32(b + 4); bits = le16(b + 14);
-            if (fmt == 0xfffe && len >= 26) fmt = le16(b + 24);
-            have_fmt = 1;
-        } else if (!memcmp(c, "data", 4)) {
-            if (!have_fmt || fmt != 1 || bits != 16 || !ch || !sr) {
-                fprintf(stderr, "vpio-probe: %s: 16-bit PCM only (format %u, %u bit, %u channels)\n", path, fmt, bits, ch);
-                goto out;
-            }
-            const uint64_t n = len / (2u * ch);
-            int16_t *raw = malloc(n * ch * 2 + 2);
-            float *mono = malloc(n * sizeof(float) + sizeof(float));
-            if (!raw || !mono || fread(raw, 2, n * ch, f) != n * ch) {
-                fprintf(stderr, "vpio-probe: %s: short data\n", path);
-                free(raw); free(mono);
-                goto out;
-            }
-            for (uint64_t i = 0; i < n; ++i) {
-                float acc = 0;
-                for (uint16_t k = 0; k < ch; ++k) acc += (float)(int16_t)le16((const uint8_t *)&raw[i * ch + k]) / 32768.0f;
-                mono[i] = acc / ch;
-            }
-            free(raw);
-            *out = mono; *frames = n; *rate = sr;
-            rc = 0;
-            goto out;
-        } else if (fseek(f, (long)(len + (len & 1)), SEEK_CUR)) {
-            goto out;
+    float *mono = malloc((size_t)wav.frames * sizeof *mono);
+    const size_t stride = 2u * wav.channels;
+    // A block holds at least one complete frame, including high channel counts.
+    const size_t capacity = MAX(16384 / stride, 1u);
+    uint8_t *raw = malloc(capacity * stride);
+    size_t offset = 0;
+    while (mono && raw && offset < wav.frames) {
+        const size_t count = MIN(wav.frames - offset, capacity);
+        if (fread(raw, stride, count, f) != count)
+            break;
+        for (size_t i = 0; i < count; ++i) {
+            float acc = 0;
+            for (uint16_t k = 0; k < wav.channels; ++k)
+                acc += (float)(int16_t)audio_le16(raw + i * stride + 2u * k) / 32768.0f;
+            mono[offset + i] = acc / wav.channels;
         }
+        offset += count;
     }
-out:
+    free(raw);
     fclose(f);
-    return rc;
+    if (offset != wav.frames) {
+        fprintf(stderr, "vpio-probe: %s: cannot read complete PCM data\n", path);
+        free(mono);
+        return -1;
+    }
+    *out = mono; *frames = wav.frames; *rate = wav.rate;
+    return 0;
 }
 
 static OSStatus on_render(void *user, AudioUnitRenderActionFlags *flags, const AudioTimeStamp *ts, UInt32 bus, UInt32 n,
@@ -173,6 +163,7 @@ static OSStatus on_render(void *user, AudioUnitRenderActionFlags *flags, const A
 {
     Probe *p = user;
     (void)flags; (void)bus;
+    if (!io) return kAudio_ParamError;
     const int host_ok = ts && (ts->mFlags & kAudioTimeStampHostTimeValid);
     if (!p->out_callbacks && host_ok) {p->out_first_host = ts->mHostTime; p->out_first_valid = 1;}
     if (!p->far_marked && p->out_frames + n > p->far_delay_frames) {
@@ -185,6 +176,7 @@ static OSStatus on_render(void *user, AudioUnitRenderActionFlags *flags, const A
     for (UInt32 b = 0; b < io->mNumberBuffers; ++b) {
         float *o = io->mBuffers[b].mData;
         const UInt32 cap = io->mBuffers[b].mDataByteSize / sizeof(float);
+        if (!o) continue;
         for (UInt32 i = 0; i < n && i < cap; ++i) {
             const uint64_t k = p->out_frames + i;
             o[i] = p->far && k >= p->far_delay_frames && k - p->far_delay_frames < p->far_frames ? p->far[k - p->far_delay_frames]
@@ -201,7 +193,7 @@ static OSStatus on_input(void *user, AudioUnitRenderActionFlags *flags, const Au
 {
     Probe *p = user;
     (void)unused;
-    if (n > kMaxSlice) {p->oversize++; n = kMaxSlice;}
+    if (n > kMaxSlice) {p->oversize++; return noErr;}
     AudioBufferList abl;
     abl.mNumberBuffers = 1;
     abl.mBuffers[0].mNumberChannels = 1;
@@ -209,21 +201,32 @@ static OSStatus on_input(void *user, AudioUnitRenderActionFlags *flags, const Au
     abl.mBuffers[0].mData = p->slice;
     const OSStatus st = AudioUnitRender(p->mode == MODE_RAW ? p->in_unit : p->vpio, flags, ts, bus, n, &abl);
     if (st) {p->render_errors++; p->last_render_error = st; return noErr;}
-    const uint32_t got = abl.mBuffers[0].mDataByteSize / sizeof(float);
+    const UInt32 bytes = abl.mBuffers[0].mDataByteSize;
+    if (bytes > n * sizeof(float) || bytes % sizeof(float)) {
+        p->render_errors++; p->last_render_error = kAudio_ParamError; return noErr;
+    }
+    const uint32_t got = bytes / sizeof(float);
+    for (uint32_t i = 0; i < got; ++i) {
+        if (!isfinite(p->slice[i])) {
+            p->render_errors++; p->last_render_error = kAudio_ParamError; return noErr;
+        }
+    }
     uint64_t frames = atomic_load_explicit(&p->rec_frames, memory_order_relaxed);
-    if (ts && (ts->mFlags & kAudioTimeStampSampleTimeValid)) {
+    if (ts && (ts->mFlags & kAudioTimeStampSampleTimeValid) && isfinite(ts->mSampleTime)) {
         if (p->have_next) {
             const double d = ts->mSampleTime - p->next_sample;
             if (d > 0.5 || d < -0.5) {
                 p->gaps++;
-                const uint64_t g = (uint64_t)fabs(d);
+                const uint64_t g = fabs(d) >= 0x1p64 ? UINT64_MAX : (uint64_t)fabs(d);
                 if (g > p->largest_gap) {p->largest_gap = g; p->largest_gap_at = (double)frames / p->rec_rate;}
             }
         }
         p->next_sample = ts->mSampleTime + got;
         p->have_next = 1;
+    } else {
+        p->have_next = 0;
     }
-    if (!p->in_callbacks && ts && (ts->mFlags & kAudioTimeStampHostTimeValid)) {p->in_first_host = ts->mHostTime; p->in_first_valid = 1;}
+    if (got && !atomic_load_explicit(&p->started, memory_order_relaxed) && ts && (ts->mFlags & kAudioTimeStampHostTimeValid)) {p->in_first_host = ts->mHostTime; p->in_first_valid = 1;}
     p->in_callbacks++;
     for (uint32_t i = 0; i < got && frames < p->rec_cap; ++i) {
         const float v = p->slice[i], a = fabsf(v);
@@ -235,7 +238,7 @@ static OSStatus on_input(void *user, AudioUnitRenderActionFlags *flags, const Au
         p->rec[frames++] = (int16_t)(s >= 32767.0f ? 32767 : s <= -32768.0f ? -32768 : lrintf(s));
     }
     atomic_store_explicit(&p->rec_frames, frames, memory_order_release);
-    atomic_store(&p->started, 1);
+    if (got) atomic_store(&p->started, 1);
     return noErr;
 }
 
@@ -277,6 +280,7 @@ static AudioObjectID device_by_uid(const char *uid)
     const AudioObjectPropertyAddress a = {kAudioHardwarePropertyTranslateUIDToDevice, kAudioObjectPropertyScopeGlobal,
                                           kAudioObjectPropertyElementMain};
     CFStringRef u = CFStringCreateWithCString(NULL, uid, kCFStringEncodingUTF8);
+    if (!u) return kAudioObjectUnknown;
     AudioObjectID id = kAudioObjectUnknown;
     UInt32 size = sizeof id;
     const OSStatus st = AudioObjectGetPropertyData(kAudioObjectSystemObject, &a, sizeof u, &u, &size, &id);
@@ -296,10 +300,13 @@ static long input_channels(AudioObjectID id)
     const AudioObjectPropertyAddress a = {kAudioDevicePropertyStreamConfiguration, kAudioObjectPropertyScopeInput,
                                           kAudioObjectPropertyElementMain};
     UInt32 size = 0;
-    if (AudioObjectGetPropertyDataSize(id, &a, 0, NULL, &size) || !size) return 0;
-    AudioBufferList *l = malloc(size);
+    const size_t header = offsetof(AudioBufferList, mBuffers);
+    if (AudioObjectGetPropertyDataSize(id, &a, 0, NULL, &size) || size < header) return 0;
+    const UInt32 capacity = size;
+    AudioBufferList *l = malloc(capacity);
     long n = 0;
-    if (l && !AudioObjectGetPropertyData(id, &a, 0, NULL, &size, l))
+    if (l && !AudioObjectGetPropertyData(id, &a, 0, NULL, &size, l) &&
+        size >= header && size <= capacity && l->mNumberBuffers <= (size - header) / sizeof(l->mBuffers[0]))
         for (UInt32 i = 0; i < l->mNumberBuffers; ++i) n += l->mBuffers[i].mNumberChannels;
     free(l);
     return n;
@@ -494,9 +501,11 @@ static int avrec(double seconds, const char *out_path, const char *ready, const 
         NSDictionary *settings = @{AVFormatIDKey: @(kAudioFormatLinearPCM), AVSampleRateKey: @48000.0, AVNumberOfChannelsKey: @1,
                                    AVLinearPCMBitDepthKey: @16, AVLinearPCMIsFloatKey: @NO, AVLinearPCMIsBigEndianKey: @NO};
         NSError *err = nil;
-        NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:out_path]];
+        NSString *path = [NSString stringWithUTF8String:out_path];
+        if (!path.length) return 2;
+        NSURL *url = [NSURL fileURLWithPath:path];
         AVAudioRecorder *r = [[AVAudioRecorder alloc] initWithURL:url settings:settings error:&err];
-        if (!r) {printf("vpio-probe: avrec init failed: %s\n", err.localizedDescription.UTF8String); return 1;}
+        if (!r) {printf("vpio-probe: avrec init failed: %s\n", err.localizedDescription.UTF8String ?: "unknown error"); return 1;}
         char in[256];
         device_string(default_device(1), kAudioObjectPropertyName, in, sizeof in);
         const BOOL prepared = [r prepareToRecord];
@@ -504,7 +513,9 @@ static int avrec(double seconds, const char *out_path, const char *ready, const 
         const long long t0 = now_ms();
         printf("vpio-probe: avrec input \"%s\" prepare %d record %d at %lld\n", in, prepared, started, t0);
         if (!started) return 1;
-        if (ready) {FILE *f = fopen(ready, "w"); if (f) {fprintf(f, "ready %lld\n", t0); fclose(f);}}
+        char marker[64];
+        snprintf(marker, sizeof marker, "ready %lld", t0);
+        if (write_marker(ready, marker)) {[r stop]; return 1;}
         while (r.recording && now_ms() - t0 < (long long)(seconds * 1000) + 5000) {
             CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, false);
             if (exists(stop)) {[r stop]; break;}
@@ -530,9 +541,17 @@ static int avrec(double seconds, const char *out_path, const char *ready, const 
              frames && sum > 0 ? 10 * log10(sum / (double)frames) : -999.0, frames ? 100.0 * (double)zeros / (double)frames : 100.0,
              out_path, rate, (unsigned long long)frames);
     printf("%s\n", summary);
-    if (done) {FILE *f = fopen(done, "w"); if (f) {fprintf(f, "%s\n", summary); fclose(f);}}
     free(pcm);
-    return 0;
+    return write_marker(done, summary) ? 1 : 0;
+}
+
+static void dispose_unit(AudioUnit *unit)
+{
+    if (!*unit) return;
+    AudioOutputUnitStop(*unit);
+    AudioUnitUninitialize(*unit);
+    AudioComponentInstanceDispose(*unit);
+    *unit = NULL;
 }
 
 static void usage(const char *argv0)
@@ -557,25 +576,38 @@ int main(int argc, char **argv)
     }
     if (argc == 2 && !strcmp(argv[1], "--list")) {list_devices(); return 0;}
     if (argc < 5) {usage(argv[0]); return 2;}
-    Probe p;
-    memset(&p, 0, sizeof p);
+    Probe p = {0};
     if (!strcmp(argv[1], "vpio")) p.mode = MODE_VPIO;
     else if (!strcmp(argv[1], "bypass")) p.mode = MODE_BYPASS;
     else if (!strcmp(argv[1], "raw")) p.mode = MODE_RAW;
     else if (!strcmp(argv[1], "avrec")) p.mode = MODE_AVREC;
     else {usage(argv[0]); return 2;}
-    const double seconds = atof(argv[2]);
+    double seconds;
+    if (!audio_parse_double(argv[2], &seconds) || seconds <= 0 || seconds > 1800) {
+        fprintf(stderr, "vpio-probe: bad seconds or far delay\n"); return 2;
+    }
     const char *far_path = argv[3], *out_path = argv[4], *ready = NULL, *done = NULL, *stop = NULL, *duck = "min", *input_uid = NULL;
     double opt_rate = 0, far_delay = 0;
     int agc = -1, advanced = 0;
     for (int i = 5; i < argc; i += 2) {
         const char *o = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
         if (!v) {usage(argv[0]); return 2;}
-        if (!strcmp(o, "--rate")) opt_rate = atof(v);
-        else if (!strcmp(o, "--far-delay")) far_delay = atof(v);
-        else if (!strcmp(o, "--duck")) duck = v;
-        else if (!strcmp(o, "--advanced-duck")) advanced = atoi(v) != 0;
-        else if (!strcmp(o, "--agc")) agc = atoi(v) != 0;
+        if (!strcmp(o, "--rate")) {
+            if (!audio_parse_double(v, &opt_rate) || opt_rate < 8000 || opt_rate > 192000 ||
+                opt_rate != floor(opt_rate)) {
+                fprintf(stderr, "vpio-probe: bad rate\n"); return 2;
+            }
+        } else if (!strcmp(o, "--far-delay")) {
+            if (!audio_parse_double(v, &far_delay) || far_delay < 0 || far_delay > 600) {
+                fprintf(stderr, "vpio-probe: bad seconds or far delay\n"); return 2;
+            }
+        } else if (!strcmp(o, "--duck")) duck = v;
+        else if (!strcmp(o, "--advanced-duck") || !strcmp(o, "--agc")) {
+            long toggle;
+            if (!audio_parse_long(v, 0, 1, &toggle)) {usage(argv[0]); return 2;}
+            if (!strcmp(o, "--agc")) agc = (int)toggle;
+            else advanced = (int)toggle;
+        }
         else if (!strcmp(o, "--ready")) ready = v;
         else if (!strcmp(o, "--done")) done = v;
         else if (!strcmp(o, "--stop")) stop = v;
@@ -589,16 +621,16 @@ int main(int argc, char **argv)
     else if (!strcmp(duck, "mid")) duck_level = kAUVoiceIOOtherAudioDuckingLevelMid;
     else if (!strcmp(duck, "max")) duck_level = kAUVoiceIOOtherAudioDuckingLevelMax;
     else if (duck_set) {usage(argv[0]); return 2;}
-    if (seconds <= 0 || seconds > 1800 || far_delay < 0 || far_delay > 600) {fprintf(stderr, "vpio-probe: bad seconds or far delay\n"); return 2;}
-    mach_timebase_info(&timebase);
+    if (!out_path[0]) {usage(argv[0]); return 2;}
+    if (mach_timebase_info(&timebase) != KERN_SUCCESS || !timebase.numer || !timebase.denom) return 1;
 
     float *far = NULL;
     uint64_t far_frames = 0;
     double far_rate = 0;
     if (strcmp(far_path, "none") && load_wav(far_path, &far, &far_frames, &far_rate)) return 1;
     const double rate = opt_rate > 0 ? opt_rate : far ? far_rate : 48000.0;
-    if (rate < 8000 || rate > 192000) {fprintf(stderr, "vpio-probe: bad rate\n"); return 2;}
-    if (far && far_rate != rate) {fprintf(stderr, "vpio-probe: %s is %.0f Hz, the client rate is %.0f Hz\n", far_path, far_rate, rate); return 1;}
+    if (rate < 8000 || rate > 192000) {fprintf(stderr, "vpio-probe: bad rate\n"); free(far); return 2;}
+    if (far && far_rate != rate) {fprintf(stderr, "vpio-probe: %s is %.0f Hz, the client rate is %.0f Hz\n", far_path, far_rate, rate); free(far); return 1;}
     p.rate = p.rec_rate = rate;
     p.far = far;
     p.far_frames = far_frames;
@@ -609,34 +641,35 @@ int main(int argc, char **argv)
     print_tcc("vpio-probe: tcc ");
     // --input UID: that device as the system default input for this run (VPIO and AVAudioRecorder take the default), restored at exit
     AudioObjectID previous_input = kAudioObjectUnknown;
+    AudioObjectID din = kAudioObjectUnknown, dout = kAudioObjectUnknown, unit_dev = kAudioObjectUnknown;
+    int rc = 1;
     if (input_uid) {
         const AudioObjectID want = device_by_uid(input_uid);
-        if (want == kAudioObjectUnknown) {printf("vpio-probe: input %s: no such device\n", input_uid); return 1;}
+        if (want == kAudioObjectUnknown) {printf("vpio-probe: input %s: no such device\n", input_uid); goto cleanup;}
         previous_input = default_device(1);
         const OSStatus dst = want == previous_input ? 0 : set_default_input(want);
         for (int i = 0; i < 50 && default_device(1) != want; ++i) usleep(20000);
         printf("vpio-probe: input %s device %u set-default rc %d now %u (was %u)\n", input_uid, (unsigned)want, (int)dst,
                (unsigned)default_device(1), (unsigned)previous_input);
-        if (default_device(1) != want) return 1;
+        if (default_device(1) != want) goto cleanup;
     }
     if (p.mode == MODE_AVREC) {
-        const int rc = avrec(seconds, out_path, ready, done, stop);
-        if (previous_input != kAudioObjectUnknown && previous_input != default_device(1)) set_default_input(previous_input);
-        return rc;
+        rc = avrec(seconds, out_path, ready, done, stop);
+        goto cleanup;
     }
-    const AudioObjectID din = default_device(1), dout = default_device(0);
+    din = default_device(1);
+    dout = default_device(0);
     print_device("input", din, 1);
     print_device("output", dout, 0);
     listen_overload(din, &p.overloads_in);
     listen_overload(dout, &p.overloads_out);
-    AudioObjectID unit_dev = kAudioObjectUnknown;
     const AudioStreamBasicDescription cf = mono_float(rate);
     const AURenderCallbackStruct render_cb = {on_render, &p}, input_cb = {on_input, &p};
     OSStatus st;
 
     if (p.mode != MODE_RAW) {
         p.vpio = new_unit(kAudioUnitSubType_VoiceProcessingIO, &st);
-        if (!p.vpio) {printf("vpio-probe: unit vpio new %d\n", (int)st); return 1;}
+        if (!p.vpio) {printf("vpio-probe: unit vpio new %d\n", (int)st); goto cleanup;}
         const OSStatus ein = set_u32(p.vpio, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1, 1);
         const OSStatus eout = set_u32(p.vpio, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0, 1);
         const OSStatus slice = set_u32(p.vpio, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, kVpioSlice);
@@ -658,7 +691,7 @@ int main(int argc, char **argv)
                (unsigned)bypass, (int)byp, (int)agc_st, duck_set ? duck_name(duck_level) : "unset", (int)duck_st);
         st = AudioUnitInitialize(p.vpio);
         printf("vpio-probe: init %d%s\n", (int)st, st == kAUVoiceIOErr_UnexpectedNumberOfInputChannels ? " (unexpected number of input channels)" : "");
-        if (st) return 1;
+        if (st || ein || eout || fo || fi || rcb || icb) goto cleanup;
         if (duck_set && duck_st) {   // some properties are only accepted on an initialized unit
             duck_st = AudioUnitSetProperty(p.vpio, kAUVoiceIOProperty_OtherAudioDuckingConfiguration, kAudioUnitScope_Global, 0, &dc,
                                            sizeof dc);
@@ -682,7 +715,7 @@ int main(int argc, char **argv)
     } else {
         p.out_unit = new_unit(kAudioUnitSubType_HALOutput, &st);
         p.in_unit = p.out_unit ? new_unit(kAudioUnitSubType_HALOutput, &st) : NULL;
-        if (!p.out_unit || !p.in_unit) {printf("vpio-probe: unit raw new %d\n", (int)st); return 1;}
+        if (!p.out_unit || !p.in_unit) {printf("vpio-probe: unit raw new %d\n", (int)st); goto cleanup;}
         const OSStatus odev = AudioUnitSetProperty(p.out_unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &dout,
                                                    sizeof dout);
         const OSStatus ofmt = AudioUnitSetProperty(p.out_unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &cf, sizeof cf);
@@ -694,10 +727,16 @@ int main(int argc, char **argv)
         const OSStatus eout = set_u32(p.in_unit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0, 0);
         const OSStatus idev = AudioUnitSetProperty(p.in_unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &din,
                                                    sizeof din);
-        AudioStreamBasicDescription hw;
+        AudioStreamBasicDescription hw = {0};
         UInt32 size = sizeof hw;
         const OSStatus hwst = AudioUnitGetProperty(p.in_unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 1, &hw, &size);
-        p.rec_rate = !hwst && hw.mSampleRate > 0 ? hw.mSampleRate : device_rate(din) > 0 ? device_rate(din) : rate;
+        const double nominal = device_rate(din);
+        p.rec_rate = !hwst && isfinite(hw.mSampleRate) && hw.mSampleRate > 0 ? hw.mSampleRate :
+                     isfinite(nominal) && nominal > 0 ? nominal : rate;
+        if (p.rec_rate < 1 || p.rec_rate > UINT32_MAX / 2 || seconds * p.rec_rate > AUDIO_WAV_MAX_MONO_FRAMES) {
+            fprintf(stderr, "vpio-probe: raw recording would exceed WAV limits\n");
+            goto cleanup;
+        }
         const AudioStreamBasicDescription cfin = mono_float(p.rec_rate);
         const OSStatus ifmt = AudioUnitSetProperty(p.in_unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 1, &cfin,
                                                    sizeof cfin);
@@ -707,20 +746,24 @@ int main(int argc, char **argv)
         printf("vpio-probe: unit raw out device %d fmt %d render-cb %d init %d; in enable-in %d enable-out %d device %d hw %d fmt %d "
                "input-cb %d init %d; record rate %.0f\n", (int)odev, (int)ofmt, (int)orcb, (int)oinit, (int)ein, (int)eout, (int)idev,
                (int)hwst, (int)ifmt, (int)icb, (int)iinit, p.rec_rate);
-        if (oinit || iinit || ifmt || icb || orcb) return 1;
+        if (odev || ofmt || orcb || oinit || ein || eout || idev || ifmt || icb || iinit) goto cleanup;
         print_format("hw-in", p.in_unit, kAudioUnitScope_Input, 1);
         print_format("hw-out", p.out_unit, kAudioUnitScope_Output, 0);
     }
 
     p.rec_cap = (uint64_t)llround(seconds * p.rec_rate);
+    if (!p.rec_cap) {
+        fprintf(stderr, "vpio-probe: duration is shorter than one PCM frame\n");
+        goto cleanup;
+    }
     p.rec = calloc(p.rec_cap + 1, sizeof(int16_t));
     p.slice = calloc(kMaxSlice, sizeof(float));
-    if (!p.rec || !p.slice) {fprintf(stderr, "vpio-probe: out of memory\n"); return 1;}
+    if (!p.rec || !p.slice) {fprintf(stderr, "vpio-probe: out of memory\n"); goto cleanup;}
     const long long t_start = now_ms();
     if (p.mode != MODE_RAW) st = AudioOutputUnitStart(p.vpio);
     else if (!(st = AudioOutputUnitStart(p.in_unit))) st = AudioOutputUnitStart(p.out_unit);
     printf("vpio-probe: start %d at %lld\n", (int)st, t_start);
-    if (st) return 1;
+    if (st) goto cleanup;
     int ready_done = 0, why = 0;
     for (;;) {
         CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.02, false);
@@ -728,10 +771,9 @@ int main(int argc, char **argv)
             const long long io_ms = p.in_first_valid ? now_ms() - (long long)llround((host_s(mach_absolute_time()) - host_s(p.in_first_host)) * 1000)
                                                      : now_ms();
             printf("vpio-probe: io-start %lld (%lld ms after start)\n", io_ms, io_ms - t_start);
-            if (ready) {
-                FILE *f = fopen(ready, "w");
-                if (f) {fprintf(f, "ready %lld\n", io_ms); fclose(f);}
-            }
+            char marker[64];
+            snprintf(marker, sizeof marker, "ready %lld", io_ms);
+            if (write_marker(ready, marker)) goto cleanup;
             ready_done = 1;
             if (p.vpio) print_readback(p.vpio);
         }
@@ -740,12 +782,9 @@ int main(int argc, char **argv)
         if (now_ms() - t_start > (long long)(seconds * 1000) + 20000) {why = 2; break;}
     }
     if (p.vpio) print_readback(p.vpio);
-    if (p.vpio) {AudioOutputUnitStop(p.vpio); AudioUnitUninitialize(p.vpio); AudioComponentInstanceDispose(p.vpio);}
-    if (p.out_unit) {AudioOutputUnitStop(p.out_unit); AudioUnitUninitialize(p.out_unit); AudioComponentInstanceDispose(p.out_unit);}
-    if (p.in_unit) {AudioOutputUnitStop(p.in_unit); AudioUnitUninitialize(p.in_unit); AudioComponentInstanceDispose(p.in_unit);}
-    unlisten_overload(din, &p.overloads_in);
-    unlisten_overload(dout, &p.overloads_out);
-    if (unit_dev != kAudioObjectUnknown && unit_dev != din && unit_dev != dout) unlisten_overload(unit_dev, &p.overloads_unit);
+    dispose_unit(&p.vpio);
+    dispose_unit(&p.out_unit);
+    dispose_unit(&p.in_unit);
     printf("vpio-probe: stop %lld%s\n", now_ms(), why == 1 ? " (stop file)" : why == 2 ? " (timeout: the input fell short)" : "");
 
     if (p.far_valid && p.in_first_valid)
@@ -768,7 +807,7 @@ int main(int argc, char **argv)
     if (p.rec_rate != rate) {
         const double ratio = p.rec_rate / rate;
         int16_t *d = NULL;
-        if (fabs(ratio - llround(ratio)) < 1e-9 && llround(ratio) > 1 &&
+        if (ratio <= (INT_MAX - 1) / 16 && fabs(ratio - llround(ratio)) < 1e-9 && llround(ratio) > 1 &&
             (d = decimate(p.rec, raw_frames, (unsigned)llround(ratio), &frames))) {
             wav = d;
             out_rate = (uint32_t)llround(rate);
@@ -778,8 +817,13 @@ int main(int argc, char **argv)
             printf("vpio-probe: recorded at %.0f Hz (no integer ratio to %.0f Hz)\n", p.rec_rate, rate);
         }
     }
-    if (write_wav(out_path, out_rate, wav, frames)) {fprintf(stderr, "vpio-probe: cannot write %s\n", out_path); return 1;}
+    if (!frames) {
+        fprintf(stderr, "vpio-probe: no PCM frames captured\n");
+        goto cleanup;
+    }
+    const int write_error = write_wav(out_path, out_rate, wav, frames);
     if (wav != p.rec) free(wav);
+    if (write_error) {fprintf(stderr, "vpio-probe: cannot write %s\n", out_path); goto cleanup;}
     const double rms = raw_frames ? sqrt(p.sum_sq / (double)raw_frames) : 0;
     const double zeros = raw_frames ? 100.0 * (double)p.zeros / (double)raw_frames : 100.0;
     char summary[512];
@@ -794,14 +838,21 @@ int main(int argc, char **argv)
     if (zeros >= 99.0)
         printf("vpio-probe: all-zero input: a TCC denial (an ssh-started process needs a kTCCServiceMicrophone grant for its responsible "
                "process) or a muted path; not a result\n");
-    if (done) {
-        FILE *f = fopen(done, "w");
-        if (f) {fprintf(f, "%s\n", summary); fclose(f);}
-    }
+    rc = write_marker(done, summary) ? 1 : 0;
+cleanup:
+    dispose_unit(&p.vpio);
+    dispose_unit(&p.out_unit);
+    dispose_unit(&p.in_unit);
+    unlisten_overload(din, &p.overloads_in);
+    unlisten_overload(dout, &p.overloads_out);
+    if (unit_dev != kAudioObjectUnknown && unit_dev != din && unit_dev != dout)
+        unlisten_overload(unit_dev, &p.overloads_unit);
     free(p.rec); free(p.slice); free(far);
     if (previous_input != kAudioObjectUnknown && previous_input != default_device(1)) {
         const OSStatus r = set_default_input(previous_input);
-        printf("vpio-probe: default input restored to %u rc %d\n", (unsigned)previous_input, (int)r);
+        if (p.mode != MODE_AVREC || r)
+            printf("vpio-probe: default input restored to %u rc %d\n", (unsigned)previous_input, (int)r);
+        if (r) rc = 1;
     }
-    return 0;
+    return rc;
 }

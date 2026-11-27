@@ -225,24 +225,30 @@ bool listPages(IOMemoryDescriptor *md, uint64_t *pages, unsigned max, unsigned *
   const uint64_t length = md->getLength();
   unsigned n = 0;
   for (uint64_t off = 0; off < length;) {
+    const uint64_t remaining = length - off;
     IOByteCount seg = 0;
     const addr64_t pa = md->getPhysicalSegment(off, &seg, kIOMemoryMapperNone);
     if (!pa || !seg) {
       *why = "no physical segment";
       return false;
     }
-    if ((pa & 0xfffu) || (off + seg < length && (seg & 0xfffu))) {
+    if ((pa & 0xfffu) || (seg < remaining && (seg & 0xfffu))) {
       *why = "a segment not 4 KiB aligned";
       return false;
     }
-    for (uint64_t a = 0; a < seg && off + a < length; a += 4096) {
-      if (n == max) {
-        *why = "more pages than a window";
-        return false;
-      }
-      pages[n++] = pa + a;
+    const uint64_t span = seg < remaining ? seg : remaining;
+    const uint64_t pageCount = 1 + (span - 1) / 4096;
+    if (pageCount > max - n) {
+      *why = "more pages than a window";
+      return false;
     }
-    off += seg;
+    const uint64_t lastPage = (pageCount - 1) * 4096;
+    if (lastPage > UINT64_MAX - pa) {
+      *why = "physical segment address overflow";
+      return false;
+    }
+    for (uint64_t i = 0; i < pageCount; ++i) pages[n++] = pa + i * 4096;
+    off += span;
   }
   *count = n;
   if (!n) *why = "empty";
@@ -272,12 +278,12 @@ class KernelHw {
 
   uint32_t rd(uint64_t pa)
   {
-    if (!mdss || pa < kMdss || pa + 4 > kMdp + kMdpBytes) return 0xffffffffu;
+    if (!mdss || (pa & 3u) || pa < kMdss || pa > kMdp + kMdpBytes - 4) return 0xffffffffu;
     return rd32(mdss + uintptr_t(pa - kMdss));
   }
   void wr(uint64_t pa, uint32_t v)
   {
-    if (!mdss || pa < kMdp || pa + 4 > kMdp + kMdpBytes) {   // MDSS top is read only here; nothing outside the DPU
+    if (!mdss || (pa & 3u) || pa < kMdp || pa > kMdp + kMdpBytes - 4) {   // MDSS top is read only here; nothing outside the DPU
       ++refusedStores;
       return;
     }
@@ -287,13 +293,14 @@ class KernelHw {
   void barrier() { dsb(); }
   uint32_t smmuRd(uint32_t off)
   {
+    if (off & 3u) return 0xffffffffu;
     if (smmu0 && off < 0x1000) return rd32(smmu0 + off);
-    if (bank && off >= bankOff && off < bankOff + 0x1000) return rd32(bank + (off - bankOff));
+    if (bank && off >= bankOff && off - bankOff < 0x1000) return rd32(bank + (off - bankOff));
     return 0xffffffffu;
   }
   void smmuWr(uint32_t off, uint32_t v)
   {
-    if (!bank || off < bankOff || off >= bankOff + 0x1000) {   // the route (SMR, S2CR, CBAR, CBA2R) and other banks: never
+    if (!bank || (off & 3u) || off < bankOff || off - bankOff >= 0x1000) {   // the route (SMR, S2CR, CBAR, CBA2R) and other banks: never
       ++refusedStores;
       return;
     }
@@ -437,7 +444,9 @@ class KernelHw {
   bool surfaceClean(void *cookie, uint64_t offset, uint64_t bytes)
   {
     Cookie *c = static_cast<Cookie *>(cookie);
-    if (!c->alias || offset + bytes > c->alias->getLength()) return false;
+    if (!c->alias) return false;
+    const uint64_t length = c->alias->getLength();
+    if (offset > length || bytes > length - offset) return false;
     cleanSplit(reinterpret_cast<const uint8_t *>(c->alias->getVirtualAddress() + offset), size_t(bytes),
                __atomic_load_n(&cleanThreads, __ATOMIC_ACQUIRE));
     return true;
@@ -463,6 +472,7 @@ class KernelHw {
   }
   bool surfaceCleanPhysical(const uint64_t *ptes, uint64_t offset, uint64_t bytes)
   {
+    if (offset > smmu::kSlotBytes || bytes > smmu::kSlotBytes - offset) return false;
     // Use the same wired pages the DPU sees. The DRAM aperture is used solely for maintenance.
     // Bound each contiguous run and finish its DSB on the issuing CPU.
     while (bytes) {
@@ -476,7 +486,7 @@ class KernelHw {
         run += bytes - run < 4096 ? bytes - run : 4096;
       }
       const vm_offset_t va = phystokv_range(page + inPage, &run);
-      if (!va || !run || run > UINTPTR_MAX - va) return false;
+      if (!va || !run || run > bytes || run > UINTPTR_MAX - va) return false;
       disable_preemption();
       cleanRange(reinterpret_cast<const void *>(va), run);
       enable_preemption();
@@ -561,6 +571,7 @@ TablePage gTablePages[16];
 unsigned gTablePageCount;
 uint64_t tableLoad64(uint64_t pa)
 {
+  if (pa & 7u) return 0;
   const uint64_t base = pa & ~0xfffull;
   uintptr_t va = 0;
   for (unsigned i = 0; i < gTablePageCount && !va; ++i)
@@ -588,21 +599,30 @@ void publish(const char *what)
 
 }  // namespace
 
-IOReturn scanoutRead(PianoDpuScanoutRequest *request)
+IOReturn scanoutRead(PianoDpuScanoutRequest *request, PianoDpuScanoutDiagnostics *diagnostics)
 {
   if (!request || !request->read) return kIOReturnBadArgument;
   IOLock *lock = __atomic_load_n(&gLock, __ATOMIC_ACQUIRE);
   if (!lock) return kIOReturnNotFound;   // no flip engine
-  if (!IOLockTryLock(lock)) return kIOReturnBusy;
+  if (!IOLockTryLock(lock)) {
+    if (diagnostics) diagnostics->busy = PianoDpuScanoutBusy::initialLock;
+    return kIOReturnBusy;
+  }
 
   const auto target = gFlipper.current;
   const auto state = gFlipper.state;
   const auto generation = [] { return gFlipper.st.flips + gFlipper.st.reshows + gFlipper.st.toBoot; };
+  const auto sample = [] {
+    const auto &t = gFlipper.current;
+    const auto &st = gFlipper.st;
+    return PianoDpuScanoutSample{true, t.surface, t.base, t.stride, uint32_t(gFlipper.state), st.flips, st.reshows, st.toBoot};
+  };
   const uint64_t before = generation();
+  if (diagnostics) diagnostics->before = sample();
   const int shown = gFlipper.slots.shown;
   Cookie *cookie = nullptr;
   uint64_t offset = 0;
-  if (target.surface && state == flip::State::ready && shown >= 0)
+  if (target.surface && state == flip::State::ready && unsigned(shown) < smmu::kSlots)
     cookie = static_cast<Cookie *>(gFlipper.slots.slot[shown].cookie);
   if (cookie) {
     offset = target.base - smmu::slotIova(unsigned(shown));
@@ -623,8 +643,15 @@ IOReturn scanoutRead(PianoDpuScanoutRequest *request)
   gHw.surfaceRelease(cookie);
   if (request->error) return kIOReturnSuccess;
 
-  if (!IOLockTryLock(lock)) return kIOReturnBusy;
+  if (!IOLockTryLock(lock)) {
+    if (diagnostics) diagnostics->busy = PianoDpuScanoutBusy::finalLock;
+    return kIOReturnBusy;
+  }
   const bool stable = state == gFlipper.state && before == generation() && flip::sameTarget(target, gFlipper.current);
+  if (diagnostics) {
+    diagnostics->after = sample();
+    if (!stable) diagnostics->busy = PianoDpuScanoutBusy::changed;
+  }
   IOLockUnlock(lock);
   return stable ? kIOReturnSuccess : kIOReturnBusy;
 }
@@ -705,12 +732,17 @@ bool flipFunction(const OSSymbol *name, void *request, void *handoff, IOReturn *
   return true;
 }
 
-bool flipStatsSnapshot(flip::Stats &stats)
+bool flipStatsSnapshot(flip::Stats &stats, flip::CleanQualification &clean)
 {
   IOLock *lock = __atomic_load_n(&gLock, __ATOMIC_ACQUIRE);
   if (!lock) return false;
   IOLockLock(lock);
   stats = gFlipper.st;
+  if (gFlipper.cfg.cleanSkip) {
+    clean.policy = !gFlipper.cfg.forceFullClean;
+    clean.serving = gFlipper.state == flip::State::ready;
+    clean.pendingUnderruns = flipPendingUnderruns(false);
+  }
   IOLockUnlock(lock);
   return true;
 }
@@ -729,6 +761,7 @@ int cleanSkipSysctl(struct sysctl_oid *oid, void *, int, struct sysctl_req *req)
   if (value != 0 && value != 1) return EINVAL;
   IOLockLock(lock);
   gFlipper.cfg.forceFullClean = !value;
+  ++gFlipper.st.cleanPolicyWrites;
   // Restart epoch qualification even for a slot that is idle during the control.
   flipInvalidateCleanEpochs();
   IOLockUnlock(lock);
@@ -762,7 +795,7 @@ void flipRun(IOService *owner, const Survey &s, const SmmuSurvey &m, uint32_t sm
   cfg.irq = bootArg("piano-dpu-irq", 1) != 0;
   cfg.clean = bootArg("piano-dpu-clean", 1);
   if (cfg.clean > 2) cfg.clean = 2;
-  cfg.cleanSkip = cfg.level == 4 && bootArg("piano-dpu-clean-skip", 0) == 1;
+  cfg.cleanSkip = flip::readCleanSkip(cfg.level, bootArg);
   cfg.flush = bootArg("piano-dpu-flush", 0);
   cfg.underrun = bootArg("piano-dpu-underrun", 1) != 0;
   cfg.latchMs = bootArg("piano-dpu-latch", 50);

@@ -13,10 +13,17 @@ installed system only after RAM boots have passed docs/identity.md section 6). A
 the ADT made without one). The input is parsed and written back first and must come out byte for byte (else nothing is written).
 """
 import argparse
-import struct
+import importlib.util
 import sys
-import tomllib
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.9 and 3.10 use the tomli backport.
+    try:
+        import tomli as tomllib
+    except ModuleNotFoundError:
+        from pip._vendor import tomli as tomllib
 
 DEVICE = Path(__file__).resolve().parents[2]
 IDENTITIES = DEVICE / 'configs/k27-identity'
@@ -25,35 +32,9 @@ SHOW = (('', ('model', 'target-type', 'target-sub-type', 'compatible', 'manufact
         ('product', ('product-name', 'product-description', 'fdr-product-type', 'sub-product-type', 'unique-model',
                      'compatible-device-fallback', 'compatible-app-variant')))
 
-
-def parse(data, at=0):
-    """A node as [props, children] with props a list of [name, size word, value] (the size word keeps its flag bits)."""
-    nprops, nchildren = struct.unpack_from('<II', data, at)
-    at += 8
-    props = []
-    for _ in range(nprops):
-        name = data[at:at + 32].split(b'\0', 1)[0].decode()
-        word = struct.unpack_from('<I', data, at + 32)[0]
-        size = word & 0x7fffffff
-        props.append([name, word, data[at + 36:at + 36 + size], data[at:at + 32]])
-        at += 36 + ((size + 3) & ~3)
-    children = []
-    for _ in range(nchildren):
-        child, at = parse(data, at)
-        children.append(child)
-    return [props, children], at
-
-
-def serialize(node, data=None):
-    props, children = node
-    out = bytearray(struct.pack('<II', len(props), len(children)))
-    for name, word, value, raw_name in props:
-        out += raw_name if raw_name is not None else name.encode().ljust(32, b'\0')
-        out += struct.pack('<I', word)
-        out += value + bytes(((len(value) + 3) & ~3) - len(value))
-    for child in children:
-        out += serialize(child)
-    return bytes(out)
+spec = importlib.util.spec_from_file_location('boot_args', Path(__file__).with_name('boot_args.py'))
+boot_args = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(boot_args)
 
 
 def prop(node, name):
@@ -113,9 +94,7 @@ def main():
     p.add_argument('--show', action='store_true')
     a = p.parse_args()
     data = a.input.read_bytes()
-    root, end = parse(data)
-    if end != len(data) or serialize(root) != data:
-        raise SystemExit(f'{a.input}: does not parse and write back byte for byte; not an ADT this tool can edit')
+    root = boot_args.load(data)
     if a.show:
         show(root)
         return
@@ -130,9 +109,11 @@ def main():
     table = load_identity(a.identity)
     product = child(root, 'product')
     for name, text in table.get('root', {}).get('string', {}).items():
-        if name == 'compatible':
-            old = prop(root, 'compatible')
-            rest = [s for s in strings(old[2]) if s != text] if old else []
+        old = prop(root, name)
+        if name == 'compatible' and old:
+            if old[1] & 0x80000000:
+                raise SystemExit('compatible: a placeholder property (DarwinBoot fills it), not an identity value')
+            rest = [s for s in strings(old[2]) if s != text]
             value = b''.join(s.encode() + b'\0' for s in [text, *rest])
             old[1], old[2] = len(value), value
         else:
@@ -140,9 +121,8 @@ def main():
     for name, text in table.get('product', {}).get('string', {}).items():
         set_string(product, name, text)
     set_string(root, MARK, a.identity)
-    out = serialize(root)
-    check, end = parse(out)
-    assert end == len(out) and serialize(check) == out
+    out = boot_args.serialize(root)
+    check = boot_args.load(out)
     a.output.parent.mkdir(parents=True, exist_ok=True)
     a.output.write_bytes(out)
     print(f'{a.output}: identity {a.identity} ({table.get("identity", {}).get("summary", "")}), {len(out)} bytes')

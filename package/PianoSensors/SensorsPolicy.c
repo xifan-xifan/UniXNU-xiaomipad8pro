@@ -166,7 +166,9 @@ int32_t ps_als_step_curve(PsAls *a, PsAlsCurve curve, uint16_t floor, int have_s
             a->published = target;
             return (int32_t)target;
         }
-        if (distance(target, a->goal) >= PS_ALS_HYSTERESIS) a->goal = target;
+        /* A gradual sweep can leave the last goal within the deadband of an endpoint forever. */
+        if (lux == 0 || lux >= ps_als_end_lux(curve) || distance(target, a->goal) >= PS_ALS_HYSTERESIS)
+            a->goal = target;
     }
     if (!a->has) return -1;
     if (now_ms > a->last_ms) {
@@ -210,12 +212,23 @@ const char *ps_edge_name(int edge)
     return "none";
 }
 
-int ps_accel_sample(SnoState *s, const SfxAxes *axes, const uint32_t bits[3], uint64_t now_ms)
+int ps_accel_sample_at(SnoState *s, const SfxAxes *axes, const uint32_t bits[3], uint64_t now, uint64_t hold)
 {
     int32_t in[3], out[3];
-    for (unsigned i = 0; i < 3; ++i) in[i] = sfx_accel_ios(bits[i]);
+    for (unsigned i = 0; i < 3; ++i) {
+        if ((bits[i] & 0x7f800000u) == 0x7f800000u) {
+            s->candidate = s->state;
+            return -1;
+        }
+        in[i] = sfx_accel_ios(bits[i]);
+    }
     sfx_axes_apply(axes, in, out);
-    return sno_update(s, out[0], out[1], out[2], now_ms);
+    return sno_update_at(s, out[0], out[1], out[2], now, hold);
+}
+
+int ps_accel_sample(SnoState *s, const SfxAxes *axes, const uint32_t bits[3], uint64_t now_ms)
+{
+    return ps_accel_sample_at(s, axes, bits, now_ms, SNO_HOLD_MS);
 }
 
 void ps_rotation_defaults(PsRotationConfig *c)

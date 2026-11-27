@@ -17,13 +17,14 @@ spec.loader.exec_module(capacity)
 
 class BatteryTests(unittest.TestCase):
     def test_raw_capacity_before_percentage(self):
-        text = '      "AppleRawCurrentCapacity" = 2560\n      "CurrentCapacity" = 30\n'
+        text = '      "AppleRawCurrentCapacity" = 2560\n\t"CurrentCapacity"\t=\t30\n'
         self.assertEqual(capacity.current_capacity(text), 30)
 
     def test_requires_exact_key_and_one_percentage(self):
         for text in ('"AppleRawCurrentCapacity" = 30\n',
                      'prefix "CurrentCapacity" = 30\n',
                      '"CurrentCapacity" = 101\n',
+                     '"CurrentCapacity" = 30\n"CurrentCapacity" = broken\n',
                      '"CurrentCapacity" = 30\n"CurrentCapacity" = 31\n'):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 capacity.current_capacity(text)
@@ -73,6 +74,22 @@ class MicTests(unittest.TestCase):
             p = root / 'restart-probe.txt'
             p.write_text(p.read_text().replace('CONNECTION_CLOSED rc=0x0 result=0', ''))
         self.assertNotEqual(self.grade(corrupt).returncode, 0)
+
+    def test_failed_or_ambiguous_restart_close_refused(self):
+        for suffix in ('01', '1\nCONNECTION_CLOSED rc=0x0 result=0'):
+            def corrupt(root):
+                p = root / 'restart-probe.txt'
+                p.write_text(p.read_text().replace('result=0', 'result=' + suffix))
+            with self.subTest(suffix=suffix):
+                self.assertNotEqual(self.grade(corrupt).returncode, 0)
+
+    def test_capture_epochs_must_match_current_console(self):
+        for seed in (1, 3):
+            def corrupt(root):
+                p = root / 'restart-probe.txt'
+                p.write_text(p.read_text().replace('seed=2', f'seed={seed}'))
+            with self.subTest(seed=seed):
+                self.assertNotEqual(self.grade(corrupt).returncode, 0)
 
 
 if __name__ == '__main__':

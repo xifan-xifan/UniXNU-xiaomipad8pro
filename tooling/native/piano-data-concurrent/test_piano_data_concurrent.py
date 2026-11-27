@@ -37,7 +37,8 @@ esac''',
     'mount': '''n=$(cat "$T/polls" 2>/dev/null || echo 0); echo $((n + 1)) > "$T/polls"
 echo "/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)"
 if [ -f "$T/mounted" ] && [ "$n" -ge "$(cat "$T/mounted")" ] && [ "$n" -lt "$(cat "$T/unmount_after")" ]; then
-  echo "/dev/disk3s5 on /System/Volumes/Data (apfs, local, journaled, nobrowse)"
+  echo "/dev/disk3s5 on /System/Volumes/Data ($(cat "$T/fstype"), local, journaled, nobrowse)"
+  [ ! -f "$T/mount_error" ] || exit 1
 fi''',
     'sleep': 'echo "sleep $1" >> "$T/calls"; exit 0',
     'mv': '[ ! -f "$T/refuse_status" ] || exit 1\nexec /bin/mv "$@"',
@@ -45,7 +46,8 @@ fi''',
 
 
 def run(mode='0', io='mode=single-gate depth=1 inflight_max=1 waits=0', state='2', mounted='0', mode_after='0',
-        unmount_after='100', enable='1', refuse=False, wait='20', unreadable=False, refuse_status=False):
+        unmount_after='100', enable='1', refuse=False, wait='20', unreadable=False, refuse_status=False,
+        fstype='apfs', mount_error=False):
     with tempfile.TemporaryDirectory() as t:
         T = Path(t); b = T / 'bin'; b.mkdir()
         for k, v in STUBS.items():
@@ -55,6 +57,8 @@ def run(mode='0', io='mode=single-gate depth=1 inflight_max=1 waits=0', state='2
         if state is not None: (T / 'state').write_text(state)
         (T / 'mode_after').write_text(mode_after)
         (T / 'unmount_after').write_text(unmount_after)
+        (T / 'fstype').write_text(fstype)
+        if mount_error: (T / 'mount_error').touch()
         if mounted is not None: (T / 'mounted').write_text(mounted)
         if refuse: (T / 'refuse').write_text('')
         if unreadable: (T / 'unreadable').touch()
@@ -77,6 +81,10 @@ rc, out, st, calls, m = run(mounted='4', mode_after='4')
 check(m == '1' and calls.count('sleep 2') == 4 and 'after 8 s' in out, 'late publication and mount: waited, then switched')
 rc, out, st, calls, m = run(unmount_after='1')
 check(m == '0' and 'sysctl -w' not in calls and 'disappeared before the switch' in out, 'mount lost between checks: nothing switched')
+for fixture in ({'fstype': 'apfs-test'}, {'mount_error': True}):
+    rc, out, st, calls, m = run(wait='0', **fixture)
+    check(rc == 0 and m == '0' and 'sysctl -w' not in calls and 'not mounted' in out,
+          f'only a successful APFS mount listing allows the switch ({fixture})')
 rc, out, st, calls, m = run(enable=None)
 check(m == '0' and 'sysctl -w' not in calls and 'off (PIANO_DATA_CONCURRENT_AT_BOOT is not 1)' in out, 'the plist key removed: nothing switched')
 rc, out, st, calls, m = run(enable='0')

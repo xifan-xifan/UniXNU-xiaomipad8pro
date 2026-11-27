@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-2-Clause-Patent
 """Host test of tooling/k27/desk-reports.sh (the diag desktop image's boot-job reporter, docs/attended-desktop.md) on this Mac, with
-stand-ins for launchctl and log on PATH and the "minute" scaled to 0 s:
+stand-ins for launchctl, log and ps on PATH and the "minute" scaled to 0 s:
 
   python3 tooling/k27/test-desk-reports.py
 
@@ -21,7 +21,8 @@ SCRIPT = D / 'tooling/k27/desk-reports.sh'
 
 LAUNCHCTL = r'''#!/bin/sh
 case "$1" in
-  list) printf 'PID\tStatus\tLabel\n'
+  list) if [ "${REPORT_LIST+x}" = x ]; then printf '%s' "$REPORT_LIST"; exit 0; fi
+        printf 'PID\tStatus\tLabel\n'
         printf -- '-\t0\tcom.apple.fine\n'
         printf '123\t-\tcom.apple.running\n'
         printf -- '-\t78\tcom.apple.mobileactivationd\n'
@@ -42,19 +43,25 @@ case "$*" in
      i=0; while [ $i -lt 400 ]; do echo "2026-11-12 10:00:04.000 E Finder[500:4] error $i"; i=$((i + 1)); done ;;
 esac
 '''
+PS = r'''#!/bin/sh
+[ "$*" = '-Aro pid,%cpu,cputime,comm' ] || exit 2
+printf 'PID %%CPU TIME COMM\n120 10.0 0:01.00 WindowServer\n'
+'''
 
 
-def run(console, minutes='1'):
+def run(console, minutes='1', listing=None):
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         bin_dir = tmp / 'bin'
         bin_dir.mkdir()
-        for name, body in (('launchctl', LAUNCHCTL), ('log', LOG)):
+        for name, body in (('launchctl', LAUNCHCTL), ('log', LOG), ('ps', PS)):
             (bin_dir / name).write_text(body)
             (bin_dir / name).chmod(0o755)
         out = tmp / 'console.txt'
         env = dict(os.environ, PATH=f'{bin_dir}:{os.environ["PATH"]}', DESK_REPORTS_OUT=str(out), DESK_REPORTS_TICK='1',
                    DESK_REPORTS_SCALE='0', DESK_REPORTS_CONSOLE=str(console), DESK_REPORTS_TMP=str(tmp / 'failing'))
+        if listing is not None:
+            env['REPORT_LIST'] = listing
         subprocess.run(['/bin/sh', str(SCRIPT), minutes], env=env, check=True, timeout=60)
         return out.read_text().splitlines()
 
@@ -86,7 +93,8 @@ def main():
     check(sum(1 for l in lines if 'Finder[500:4] error' in l) <= 250, 'the log is capped')
     check('Exiting: no payload' in text, 'xprotectd\'s lines')
     check('mechanism builtin:authenticate took 13 s' in text, 'authorizationhost\'s lines, unfiltered')
-    check(any(l.startswith('desk-reports: ps (login + 3 min): ') for l in lines), 'the busiest processes after the login')
+    check('desk-reports: ps (login + 3 min): 120 10.0 0:01.00 WindowServer' in lines,
+          'the busiest processes after the login')
     check(lines[-1] == 'desk-reports: end', 'the end line')
 
     lines = run('/etc/hosts', minutes='0')   # root's: no login
@@ -94,6 +102,19 @@ def main():
     check('desk-reports: no login within 0 min' in text, 'no login: said')
     check(any(l.startswith('desk-reports: failing (no login): ') for l in lines), 'no login: the failing jobs still')
     check('log: loginwindow' not in text, 'no login: no log window')
+
+    lines = run('/etc/hosts', minutes='0', listing='')
+    check([line for line in lines if 'failing (' in line] == [
+        'desk-reports: failing (start): PID STATUS LABEL',
+        'desk-reports: failing (no login): PID STATUS LABEL',
+    ], 'an empty listing only produces headings')
+
+    listing = '-\t78\tcom.apple.watchdogd\n\nfailed\t78\tcom.apple.badpid\n-\tbad\tcom.apple.badstatus\n-\t1'
+    lines = run('/etc/hosts', minutes='0', listing=listing)
+    check([line for line in lines if line.startswith('desk-reports: failing (start):')] == [
+        'desk-reports: failing (start): PID STATUS LABEL',
+        'desk-reports: failing (start): -\t78\tcom.apple.watchdogd',
+    ], 'the first valid row is kept and blank or malformed rows are ignored')
 
     print(f'{len(failures)} failed' if failures else 'all passed')
     return 1 if failures else 0

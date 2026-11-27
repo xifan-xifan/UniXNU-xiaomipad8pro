@@ -2,6 +2,7 @@
 // Host test of the controller hand-off's decisions (UsbHandoff.h, docs/drivers/usb-host.md H3): what PianoDwc3's USB thread does
 // with an ask in each state, when the asking side has its answer, and when the core is free for host mode; then a model of one
 // round (PianoUsbHost asks for the release, the thread parks; host mode; the core back in device mode, the reclaim, the takeover).
+//   c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=undefined -I.. usb_handoff_host.cpp -o /tmp/usb_handoff_host && /tmp/usb_handoff_host
 #include "UsbHandoff.h"
 #include <cstdio>
 

@@ -68,7 +68,7 @@ struct LogCursor {
     if (!cap) return;
     start %= cap;
     const uint32_t ahead = (start + cap - lastStart) % cap;
-    if (ahead && ahead <= cap - backLimit()) {
+    if (ahead && ahead < cap - backLimit()) {
       written += ahead;
       lastStart = start;
     } else if (ahead) {

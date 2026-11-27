@@ -93,7 +93,7 @@ UniXNU-piano (this repository), BSD-2-Clause-Patent:
     checks and the stream-match decode, re-expressed read-only in surveySmmu (no plan, no write); and copied byte for byte as
     SmmuStream.h but for its first three lines (the namespace pianousb -> pianowifi and one provenance line), which level 3 uses for
     stream 0x1401. PianoDwc3 is not modified.
-  package/PianoPower/FatVolume.c (sha256 a078920a1da5b073dad36817838cda66c7b1176399db48fb904776a5bd271932) and FatVolume.h
+  package/PianoPower/FatVolume.c (sha256 9e1760dbcb8d194e0ef32587f375679344c63706a357c9372e80edfbb030decf) and FatVolume.h
     (sha256 7e4107f10c6a157ac167575a4ac7c02cfdfc678d8077717490e015fffa85bf45) -> FatVolume.c / FatVolume.h: copied byte for byte but
     for two added provenance lines each (the build script checks they have not drifted). PianoPower is not modified.
   package/PianoPower/PianoAdspFirmware.c (sha256 85dade1f9003e9acd80c1bfeb9799c57350f57b73df2267fe52d27fb38f78793): how the

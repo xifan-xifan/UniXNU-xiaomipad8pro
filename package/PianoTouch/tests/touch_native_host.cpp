@@ -14,11 +14,12 @@
 //     while the other moves), eight plus one fingers, a palm resting (never a touch), a finger turning palm (a cancel of every touch,
 //     then nothing until every contact is up), frames lost (nativeCancel), all four corners at every rotation in both axis modes, idle
 //     (no report at rest), path indices under BackBoard's 30.
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. touch_native_host.cpp -o /tmp/touch_native_host && /tmp/touch_native_host
+// Build: c++ -std=c++20 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -I.. touch_native_host.cpp -o /tmp/touch_native_host && /tmp/touch_native_host
 #include "TouchNative.h"
 #include "TouchScreenHid.h"
 #include "TouchInject.h"
 #include "TouchTrack.h"
+#include "TouchPower.h"
 #include "../PianoAuto/TouchRotation.h"
 #include <cmath>
 #include <cstdio>
@@ -465,8 +466,14 @@ static void testNineFingers()
   nativeUpdate(r, c, 9, 3200, 2136, 3200, 2136, o);
   CHECK(o.count == 1 && r.downs == 8 && r.full == 1);
   for (unsigned s = 0; s < kScreenSlots; ++s) CHECK(o.report[0][1 + 6 * s + 1] == s + 1);   // path indices 1..8 (< 30)
+  nativeUpdate(r, c + 1, 8, 3200, 2136, 3200, 2136, o);
+  CHECK(o.count == 1 && r.ups == 1 && r.full == 2 && r.downs == 8);
+  CHECK(o.report[0][1] == kSlotValid && o.report[0][2] == 1);
+  nativeUpdate(r, c + 1, 8, 3200, 2136, 3200, 2136, o);
+  CHECK(o.count == 1 && r.downs == 9 && r.slot[0].track == c[8].id);
+  CHECK((o.report[0][1] & kSlotTip) && o.report[0][2] == 1);
   nativeUpdate(r, c, 0, 3200, 2136, 3200, 2136, o);
-  CHECK(o.count == 1 && r.ups == 8);
+  CHECK(o.count == 1 && r.ups == 9);
   for (unsigned s = 0; s < kScreenSlots; ++s) CHECK((o.report[0][1 + 6 * s] & kSlotTip) == 0);
   nativeUpdate(r, c, 0, 3200, 2136, 3200, 2136, o);
   CHECK(o.count == 0 && nativeIdle(r));
@@ -513,15 +520,31 @@ static void testPalms()
 static void testLost()
 {
   Rig rig;
+  TouchPower power;
+  PanelPark park;
   for (int i = 0; i < 6; ++i) rig.frame({{1000, 1000, kFingerNodes}, {1300, 1000, kFingerNodes}});
+  park.request();
+  CHECK(power.step(false, 1, true) == PowerStep::mute);
+  trackerCancel(rig.tr);
   NativeOut o;
   nativeCancel(rig.r, o);
   rig.take(o);
-  CHECK(o.count == 2 && rig.r.cancels == 1 && nativeIdle(rig.r));
+  CHECK(park.acknowledge() && !power.reporting());
+  CHECK(o.count == 2 && rig.r.cancels == 1 && nativeIdle(rig.r) && trackerLive(rig.tr) == 0);
+  for (const auto &ch : rig.events.back().children) CHECK(!ch.touch);
   nativeCancel(rig.r, o);   // nothing touching: nothing sent
   CHECK(o.count == 0);
-  trackerCancel(rig.tr);
+  park.release();
+  CHECK(power.step(false, 1) == PowerStep::unmute && power.reporting());
+  const size_t before = rig.events.size();
+  for (int i = 0; i < 4; ++i) rig.frame({{2000, 800, kFingerNodes}});
+  CHECK(rig.events.size() > before && rig.r.downs == 3);
+  if (rig.events.size() > before) {
+    CHECK(rig.events[before].children.size() == 1);
+    for (const auto &ch : rig.events[before].children) CHECK(ch.touch && ch.index == 1);
+  }
   rig.lift();
+  CHECK(nativeIdle(rig.r) && rig.m.overloads == 0);
 }
 
 static void testRotation()

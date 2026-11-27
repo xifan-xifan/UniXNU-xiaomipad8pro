@@ -11,7 +11,7 @@ payload files (its path, path.adt, path.trustcache and its initrd, the 27.3 coll
 table (id, title, type, path, initrd, args: the line) and the firmware files its collection pins. Nothing of the 27.0.1 line: no
 other payload file, no other OS entry. The new menu:
   macos-27.3        the base's entry, the default (the base's timeout)
-  macos-27.3-diag   only when the line + piano-reset-after/-to stays under DarwinBoot's 1000 bytes (the 989-byte line does not)
+  macos-27.3-diag   only when the line + piano-reset-after/-to fits the loader-line budget
   fastboot          the same payload, reset into ABL fastboot after 1 s: no UFS root, no Data store (data-persist=0), no piano-* driver
                     and no pstore console (the last run's log stays)
   reset, shutdown, tools
@@ -32,10 +32,10 @@ refusal, and without --firmware-dir nothing changes.
 
 A base entry whose line is already split (piano-boot-args=SET, k27 0066: its piano-* arguments live in the base ADT's
 /chosen/piano-boot-args-SET) is reassembled before anything else: the whole arguments are the base's line without the selector plus
-that tail, the tail taken from the base record's boot_args_split or read out of the base image's ADT (both must agree when both
-exist; a loud refusal when the tail is in neither -- never a selector left pointing at a tail a fresh --adt does not carry, which
-would drop every piano-* argument without a word). The reassembled line takes the edits and is split again; each argument name is
+the tail from the base image's ADT. The builder requires that tail and checks it against boot_args_split when the record has one.
+The reassembled line takes the edits and is split again, including when given a fresh --adt. Each argument name is
 given at most once over --arg/--seed/--root-part (twice is refused, not silently duplicated).
+--arg piano-long-boot-args=1 opts into the layout in docs/boot-args-length.md.
 """
 import argparse
 import hashlib
@@ -44,7 +44,6 @@ import json
 import shutil
 import sys
 import tempfile
-import tomllib
 from pathlib import Path
 
 D = Path(__file__).resolve().parents[2]
@@ -62,7 +61,6 @@ spec.loader.exec_module(build_esp)
 ROOT = 'EFI/UniXNU/'
 TOML = ROOT + 'unixnu.toml'
 PAYLOADS = ROOT + 'Payloads/'
-LINE_MAX = 1000                      # DarwinBoot passes at most 1023 bytes; the tools keep every line under 1000
 # The fastboot entry: the line without the root, the store, the console mirror and every piano-* driver, then a reset after 1 s.
 FASTBOOT_DROP = ('native-ufs-root', 'native-ufs-root-part', 'native-ufs-diagnostics', 'pstore-console', 'pstore-console-size',
                  'data-persist', 'data-store-lba', 'data-store-replace', 'data-store-flatten', 'sheng-smp')
@@ -94,6 +92,32 @@ def diag_line(line, secs):
     return ' '.join(args + [f'piano-reset-after={secs}', 'piano-reset-to=bootloader', 'sheng-smp=1'])
 
 
+def diag_budget(line, tail_bytes):
+    size = len(line.encode())
+    limit = boot_args.line_max(line.split())
+    if size > limit:
+        return {'bytes': size, 'included': False,
+                'why': f'{size} bytes with piano-reset-after/-to: the builder allows {limit}'}
+    if tail_bytes and size + 1 + tail_bytes > boot_args.MERGED_MAX:
+        return {'bytes': size, 'included': False,
+                'why': f'the diagnostic reset and the ADT tail exceed {boot_args.MERGED_MAX} merged bytes'}
+    return {'bytes': size, 'included': True}
+
+
+def split_line(line, *, force=False):
+    """Loader line and ADT tail. None means the line needs no ADT edit."""
+    words = line.split()
+    limit = boot_args.line_max(words)
+    long_layout = limit == boot_args.LONG_LINE_MAX
+    if not (long_layout or force or len(line.encode()) > limit):
+        return line, None
+    # Both keys are read by kexts through the merged PE boot arguments. Keep
+    # the y12q USB helpers' existing words inside the legacy sysctl clip.
+    kept, tail = boot_args.fit(words, 'macos', force=force or not long_layout,
+                               extra_tail_keys=('native-gop-display-night-shift', 'data-store-write-back'))
+    return ' '.join(kept), tail or None
+
+
 def config_text(base_name, timeout, entries, store, seed):
     text = ('# piano persistent boot (docs/persistent-boot.md): the ESP on UFS LUN 0, partition 37. boot_a holds only BootShim + FD; a\n'
             '# "fastboot boot" image with its own payload still wins (firmware/patches/unixnu/0001).\n'
@@ -116,13 +140,14 @@ def main():
     p.add_argument('--adt', type=Path, help='its ADT (the same build)')
     p.add_argument('--trust', type=Path, help='a new trust cache (it must cover the seed\'s and the system\'s code)')
     p.add_argument('--seed', type=Path, help='a new Data seed: a new store (its window from the seed\'s size, data-store-lba set)')
-    p.add_argument('--arg', action='append', default=[], metavar='NAME=VALUE', help='one more argument for the entry (replaces NAME)')
+    p.add_argument('--arg', action='append', default=[], type=common.boot_arg_edit, metavar='NAME=VALUE',
+                   help='one more argument for the entry (replaces NAME); piano-long-boot-args=1 opts into the 1008-byte layout')
     p.add_argument('--drop-arg', action='append', default=[], metavar='NAME', help='an argument of the base line left out')
     p.add_argument('--root-part', metavar='NAME', help='the root image\'s partition (native-ufs-root-part; the store then stays on '
                    'linux_data through data-store-part): linux_rootfs for the whole-disk layout of 2026-11-14')
     p.add_argument('--split', action='store_true', help='move the piano-* arguments into the ADT (k27 0066) even when the line fits')
     p.add_argument('--diag-reset-after', type=int, default=240, metavar='SECS',
-                   help='the -diag entry\'s reset (only built when its line stays under 1000 bytes)')
+                   help='the -diag entry\'s reset (included when its loader line fits the selected layout)')
     p.add_argument('--firmware-dir', type=Path, metavar='DIR',
                    help='pinned firmware the base lacks, added from DIR/<pin path> (out/firmware\'s layout), size and SHA-256 '
                         'checked against the pin (a private pin\'s hash checked, never shown or recorded)')
@@ -137,10 +162,12 @@ def main():
         installed = json.loads((out / 'installed.json').read_text())
         base_json = out / (Path(installed['image']).stem + '.json')
     base = json.loads(base_json.read_text())
-    base_img = base_json.with_name(base['image'])
-    if common.sha(base_img) != base['sha256']:
-        raise SystemExit(f'{base_img}: not the image its record {base_json.name} names')
+    base_img = common.checked_esp_base(base_json, base)
+    with common.stage_esp_output(out, a.name, base_img, base_json) as image:
+        build(a, base_json, base, base_img, image)
 
+
+def build(a, base_json, base, base_img, image):
     # -- the base, read by the independent FAT reader and by mtools ----------------------------------------------------------
     fat = common.fat32_read(base_img)
     if fat['problems']:
@@ -151,7 +178,7 @@ def main():
     text = files[TOML].decode()
     if text != base['unixnu_toml']:
         raise SystemExit(f'{base_img}: unixnu.toml differs from its record')
-    config = tomllib.loads(text)
+    config = common.toml_loads(text)
     entry = next((e for e in config['entry'] if e['id'] == a.entry), None)
     if not entry or entry.get('type') != 'xnu':
         raise SystemExit(f'{base_img}: no xnu entry {a.entry} (entries: {[e["id"] for e in config["entry"]]})')
@@ -213,15 +240,18 @@ def main():
             recorded = base.get('boot_args_split')
             recorded = recorded if isinstance(recorded, dict) and recorded.get('set') == sel else None
             in_adt = boot_args.sets(files[payload['adt']]).get(prop)
-            if recorded and recorded.get('tail') is not None and in_adt is not None and recorded['tail'] != in_adt:
+            if recorded and recorded.get('tail') is not None and recorded['tail'] != in_adt:
                 raise SystemExit(f'{base_json.name}: its boot_args_split tail is not the /chosen/{prop} of {a.entry}\'s ADT in '
                                  f'{base_img.name} (a stale record or a stale image): refused')
-            tail = recorded['tail'] if recorded and recorded.get('tail') is not None else (in_adt or '')
+            tail = in_adt or ''
             tail_args = tail.split()
             if not tail_args:
-                raise SystemExit(f'{base_img}: {a.entry}\'s line carries piano-boot-args={sel} but its tail is in neither '
-                                 f'{base_json.name} (boot_args_split) nor the base ADT\'s /chosen/{prop}: refused rather than drop '
+                raise SystemExit(f'{base_img}: {a.entry}\'s line carries piano-boot-args={sel} but its tail is missing from '
+                                 f'the base ADT\'s /chosen/{prop}: refused rather than drop '
                                  'its piano-* arguments')
+            _, status = boot_args.merged(line, files[payload['adt']])
+            if status != 'appended':
+                raise SystemExit(f'{base_img}: kernel rejects the base ADT boot-argument tail ({status})')
             if any(name_of(x) == 'piano-boot-args' for x in tail_args):
                 raise SystemExit(f'{base_img}: /chosen/{prop} itself carries piano-boot-args=: refused')
             whole = [x for x in line.split() if name_of(x) != 'piano-boot-args'] + tail_args
@@ -230,8 +260,8 @@ def main():
                 dup = sorted({n for n in names if names.count(n) > 1})
                 raise SystemExit(f'{base_img}: {a.entry}\'s line and its ADT\'s /chosen/{prop} both carry {dup}: refused rather '
                                  'than quietly let the later one win')
-            base_split = {'set': sel, 'property': prop, 'line_bytes': len(line), 'tail_bytes': len(tail),
-                          'full_bytes': len(' '.join(whole)), 'from': 'the base line + the base ADT tail, reassembled'}
+            base_split = {'set': sel, 'property': prop, 'line_bytes': len(line.encode()), 'tail_bytes': len(tail.encode()),
+                          'full_bytes': len(' '.join(whole).encode()), 'from': 'the base line + the base ADT tail, reassembled'}
             line = ' '.join(whole)
 
         edits = list(a.arg) + ([f'data-store-lba={common.k273_store_first(seed)}'] if a.seed else [])
@@ -240,8 +270,6 @@ def main():
                 raise SystemExit('--root-part: linux_data or linux_rootfs')
             edits += [f'native-ufs-root-part={a.root_part}'] + (['data-store-part=linux_data'] if a.root_part != 'linux_data' else [])
         edit_names = [name_of(x) for x in edits]
-        if any(not n for n in edit_names):
-            raise SystemExit(f'--arg {edits[edit_names.index("")]!r}: an argument is NAME=VALUE')
         if len(set(edit_names)) != len(edit_names):
             dup = sorted({n for n in edit_names if edit_names.count(n) > 1})
             raise SystemExit(f'{dup} given more than once over --arg/--seed/--root-part: one value per name (the base\'s '
@@ -272,14 +300,15 @@ def main():
 
         # -- the arguments past DarwinBoot's line: the ADT's /chosen/piano-boot-args-macos (k27 0066) -----------------------------
         split = None
-        if len(line.encode()) >= LINE_MAX or a.split or base_split:   # a reassembled (split) base is split again
+        kept, tail = split_line(line, force=bool(a.split or base_split))   # a reassembled base is split again
+        if tail is not None:
             if b'piano-boot-args: /chosen/' not in kc.read_bytes():
-                raise SystemExit(f'{a.entry}: a {len(line)}-byte line needs the ADT tail, and this collection\'s kernel lacks k27 0066')
-            kept, tail = boot_args.fit(line.split(), 'macos', force=True)
+                raise SystemExit(f'{a.entry}: a {len(line.encode())}-byte line needs the ADT tail, and this collection\'s kernel lacks k27 0066')
             adt.write_bytes(boot_args.with_set(adt.read_bytes(), 'macos', tail))
-            split = {'set': 'macos', 'property': boot_args.prop_name('macos'), 'tail': ' '.join(tail), 'tail_bytes': len(' '.join(tail)),
-                     'line_bytes': len(' '.join(kept)), 'full_bytes': len(line)}
-            line = ' '.join(kept)
+            tail_text = ' '.join(tail)
+            split = {'set': 'macos', 'property': boot_args.prop_name('macos'), 'tail': tail_text, 'tail_bytes': len(tail_text.encode()),
+                     'line_bytes': len(kept.encode()), 'full_bytes': len(line.encode())}
+        line = kept
 
         # -- firmware the 27.3 collection pins; other non-payload files stay; the 27.0.1 payload goes --------------------------
         # non-payload files only: the payload is staged above (with --kc/--adt/--trust/--seed and the ADT tail) and must not be
@@ -324,21 +353,20 @@ def main():
         k_entry['args'] = line
         entries = [k_entry]
         diag = diag_line(line, a.diag_reset_after)
-        diag_info = {'bytes': len(diag.encode()), 'included': len(diag.encode()) < LINE_MAX}
+        diag_info = diag_budget(diag, split['tail_bytes'] if split else 0)
         if diag_info['included']:
             entries.append({**k_entry, 'id': f'{a.entry}-diag', 'title': f'macOS 27.3, reset to fastboot after {a.diag_reset_after} s',
                             'args': diag})
-        else:
-            diag_info['why'] = f'{len(diag)} bytes with piano-reset-after/-to: DarwinBoot\'s lines stay under {LINE_MAX}'
         fb = fastboot_line(line)
         entries.append({**k_entry, 'id': 'fastboot', 'title': 'Reset into fastboot (ABL)', 'args': fb})
         for e in entries:
-            if len(e['args']) >= LINE_MAX or '"' in e['args'] or '\\' in e['args']:
-                raise SystemExit(f'{e["id"]}: kernel command line of {len(e["args"])} bytes, or a quote or backslash in it')
+            args = e['args']
+            if len(args.encode()) > boot_args.line_max(args.split()) or any(c in args for c in ('"', '\\', '\0')):
+                raise SystemExit(f'{e["id"]}: invalid kernel command line ({len(args.encode())} bytes)')
         boot_args.check_userland({e['id']: e['args'] for e in entries if e['id'] != 'fastboot'},
                                  adt.read_bytes(), kc, seed=a.seed, live=True)
         new_text = config_text(base['image'], config['boot']['timeout'], entries, store, seed)
-        parsed = tomllib.loads(new_text)
+        parsed = common.toml_loads(new_text)
         if parsed['boot']['default'] != a.entry or parsed['entry'][0] != (k_entry if (overrides or edits or a.drop_arg or split) else entry):
             raise SystemExit('the 27.3 entry changed in the new unixnu.toml: refused')
         rootfs = {e['id']: why for e in parsed['entry'] if (why := common.entry_uses_rootfs(e))}
@@ -351,9 +379,6 @@ def main():
             build_esp.os.utime(path, (build_esp.EPOCH, build_esp.EPOCH))
         want = {str(f.relative_to(stage)): h(f.read_bytes()) for f in sorted(stage.rglob('*')) if f.is_file()}
         staged = {role: (stage / path).read_bytes() for role, path in payload.items()}
-        image = out / f'{a.name}.img'
-        out.mkdir(parents=True, exist_ok=True)
-        image.unlink(missing_ok=True)
         build_esp.mtools('mformat', '-C', '-F', '-S', '5', '-M', '4096', '-T', str(common.ESP_BLOCKS), '-h', '1', '-s', '1', '-c', '1',
                          '-H', str(common.ESP_FIRST), '-v', build_esp.LABEL, '-N', build_esp.SERIAL, '-i', str(image), '::')
         build_esp.mtools('mcopy', '-i', str(image), '-s', '-Q', '-m', str(stage / 'EFI'), '::/')
@@ -366,7 +391,9 @@ def main():
     # -- the image read back ----------------------------------------------------------------------------------------------
     new = common.fat32_read(image)
     got = {n: h(b) for n, b in new['files'].items()}
-    problems = list(new['problems'])
+    if new['problems']:
+        raise SystemExit(f'{image}: the FAT reader finds {new["problems"]}')
+    problems = []
     if image.stat().st_size != common.ESP_BLOCKS * common.LBA:
         problems.append('image size')
     if new['sector_bytes'] != 4096 or new['sectors_per_cluster'] != 1 or new['total_sectors'] != common.ESP_BLOCKS:
@@ -395,7 +422,7 @@ def main():
         tails = boot_args.sets(new['files'].get(payload['adt'], b''))
         if tails.get(split['property']) != split['tail']:
             problems.append(f'{payload["adt"]}: /chosen/{split["property"]} is not the tail ({tails.get(split["property"])!r})')
-    back_config = tomllib.loads(new['files'].get(TOML, b'').decode())
+    back_config = common.toml_loads(new['files'].get(TOML, b'').decode())
     back_entry = next((e for e in back_config.get('entry', []) if e['id'] == a.entry), {})
     if back_entry.get('args') != line or back_entry != k_entry or back_config['boot']['default'] != a.entry:
         problems.append(f'the {a.entry} entry read back is not the base\'s (line {len(back_entry.get("args", ""))} bytes)')
@@ -416,7 +443,7 @@ def main():
         'boot_guard': base.get('boot_guard'), 'charging': base.get('charging'), 'fast_boot': base.get('fast_boot'),
         'kc_has_boot_guard': kc_guard, 'kc_has_rtc_calendar': kc_rtc, 'kc_natives': natives,
         'cmdlines': {e['id']: e['args'] for e in entries},
-        'line_bytes': len(line), 'diag': diag_info,
+        'line_bytes': len(line.encode()), 'diag': diag_info,
         # XNU's RAM window the ADT asks for: maint-session.py writes the ESP only onto a boot_a whose DarwinBoot takes it
         'ram_window': window,
         # the payload as it is on the base ESP (IMAGE:PATH; tooling/persist/base-seed.py and common.installed_trust read real files only)
@@ -438,7 +465,7 @@ def main():
                       any(pin['private'] and n == f'{firmware.ESP_DIR}/{pin["path"]}' for pin in fw) else v) for n, v in want.items()},
         'unixnu_toml': new_text,
     }
-    common.write_json(out / f'{a.name}.json', record)
+    common.write_json(image.with_suffix('.json'), record)
     print(f'{image.name}: {record["bytes"]} bytes sha256 {record["sha256"]}; from {base["image"]}: {a.entry} ({len(line)} bytes, '
           f'byte for byte), payload {payload_dir.removeprefix(ROOT)}, store on {part} LBA {lba}-{store["last_lba"]} bound, seed '
           f'{seed["identity_sha256"][:16]}; entries {[e["id"] for e in entries]} + actions'

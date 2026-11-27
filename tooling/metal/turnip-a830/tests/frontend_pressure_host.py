@@ -15,6 +15,7 @@ root = Path(__file__).resolve().parents[4]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--out', type=Path, default=root / 'out/frontend-pressure-host')
 parser.add_argument('--syntax', action='store_true', help='also syntax-check the full staged frontend with patch 0006')
+parser.add_argument('--mock-iosurface', action='store_true', help='use in-process surface ownership in sandboxed host runs')
 parser.add_argument('--frontend', type=Path, default=root / 'out/turnip-a830/plugin/frontend.mm')
 parser.add_argument('--flags', type=Path, default=root / 'out/turnip-a830/plugin/flags')
 args = parser.parse_args()
@@ -41,14 +42,15 @@ method_end = new.index('\n}', method_start) + 2
 current_method = next(line for line in new.splitlines() if line.startswith('- (NSUInteger)currentAllocatedSize {uint64_t mc[10]'))
 (args.out / 'frontend_pressure_nocopy.inc').write_text(new[method_start:method_end] + '\n' + current_method)
 binary = args.out / 'frontend_pressure_host'
+surface = ['-DTEST_MOCK_IOSURFACE'] if args.mock_iosurface else []
 subprocess.run(['xcrun', 'clang++', '-std=c++17', '-fobjc-arc', '-fblocks', '-g', '-O1',
                 '-fsanitize=address,undefined', '-Wno-deprecated-declarations',
-                '-I', str(args.out), str(Path(__file__).with_suffix('.mm')),
+                '-fno-sanitize-recover=all', *surface, '-I', str(args.out), str(Path(__file__).with_suffix('.mm')),
                 '-framework', 'Foundation', '-framework', 'IOSurface', '-o', str(binary)], check=True)
 subprocess.run([str(binary)], timeout=30, check=True)
 residency = args.out / 'surface_residency_host'
 subprocess.run(['xcrun', 'clang++', '-std=c++17', '-g', '-O1', '-Wall', '-Wextra', '-Werror',
-                '-fsanitize=address,undefined', '-I', str(patch.parent),
+                '-fsanitize=address,undefined', '-fno-sanitize-recover=all', '-I', str(patch.parent),
                 str(Path(__file__).with_name('surface_residency_host.cpp')), '-o', str(residency)], check=True)
 subprocess.run([str(residency)], timeout=30, check=True)
 if args.syntax:

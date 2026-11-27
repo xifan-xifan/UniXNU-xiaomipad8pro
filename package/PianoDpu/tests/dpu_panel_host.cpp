@@ -10,7 +10,7 @@
 //   - the failures: a DMA that never finishes (the link left alone, nothing after it), an engine that does not stop (the panel
 //     brought back), an engine that does not start; DCS only; high speed;
 //   - nothing written outside the guard's registers: never TLMM (the panel's reset and supply pins).
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. dpu_panel_host.cpp -o /tmp/dpu_panel_host && /tmp/dpu_panel_host
+//   c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -I.. dpu_panel_host.cpp -o /tmp/dpu_panel_host && /tmp/dpu_panel_host
 #include "DpuPanel.h"
 #include "dpu_model.h"
 #include "../../NativeGopDisplay/GopCompose.h"
@@ -115,11 +115,21 @@ static void testRefusals()
     CHECK(!sendDcs(m, 0x51, Options()).ok && m.stores.empty());   // brightness: not this slice's
   }
   {
-    model::Dpu m;
+    struct WrappingClock : model::Dpu {
+      uint64_t nowUs() { return model::Dpu::nowUs() - 500; }
+    } m;
     m.dsi[0].dmaPending = true;   // a DMA of someone else's that never ends
     m.dsi[0].dmaAt = UINT64_MAX;
+    const uint64_t start = m.nowUs();
     const Sent s = sendDcs(m, kDcsDisplayOff, Options());
     CHECK(!s.ok && std::strstr(s.why, "busy") && m.stores.empty());
+    CHECK(m.nowUs() - start >= kDmaBusyTimeoutUs && m.nowUs() - start < kDmaBusyTimeoutUs + 200);
+  }
+  {
+    model::Dpu m;
+    Engines e;
+    CHECK(stopEngine(m, 0, e, {}) == -1 && stopEngine(m, 3, e, {}) == -1);
+    CHECK(e.stores == 0 && m.stores.empty() && m.refused.empty());
   }
   {
     model::Dpu m;
@@ -403,34 +413,36 @@ static void testStopTimeoutTrace()
     CHECK(ring.size() == ring.total && ring.size() > 41);
     CHECK(ring.at(0).boundary && ring.at(0).step == TraceStep::drain);
     const TraceSample &last = ring.at(ring.size() - 1);
-    CHECK(last.boundary && last.step == TraceStep::end && last.link[1].en == 1 && last.link[1].status == 1);
+    CHECK(last.boundary && last.step == TraceStep::end && last.timing.link[1].en == 1 && last.timing.link[1].status == 1);
     const TraceSample *firstStopPoll = nullptr, *lastStopPoll = nullptr;
     unsigned stopPolls = 0;
     bool undo = false, flushed = false, latched = false, verified = false;
     for (unsigned i = 0; i < ring.size(); ++i) {
       const TraceSample &s = ring.at(i);
-      CHECK(s.top == 0xf0000000u && s.active == 0x6);
+      CHECK(!isHostTraceStep(s.step));
+      if (isHostTraceStep(s.step)) continue;
+      CHECK(s.timing.top == 0xf0000000u && s.timing.active == 0x6);
       CHECK(!i || s.us >= ring.at(i - 1).us);
       CHECK(s.step != TraceStep::stopSlave && s.step != TraceStep::handoff);
       if (s.step == TraceStep::stopMaster) {
-        CHECK(s.link[1].en == 1 && s.link[0].status == 1 && s.link[1].status == 1 && !s.flush && !s.intfFlush);
-        CHECK(s.link[0].en == (s.boundary || dropped ? 1u : 0u));
+        CHECK(s.timing.link[1].en == 1 && s.timing.link[0].status == 1 && s.timing.link[1].status == 1 && !s.timing.flush && !s.timing.intfFlush);
+        CHECK(s.timing.link[0].en == (s.boundary || dropped ? 1u : 0u));
         if (s.boundary) continue;
         ++stopPolls;
         if (!firstStopPoll) firstStopPoll = &s;
         lastStopPoll = &s;
       }
-      if (s.step == TraceStep::undo) undo = s.boundary && s.link[0].en == unsigned(dropped) && s.link[0].status == 1;
-      if (s.step == TraceStep::flush && (s.flush & kFlushIntf)) flushed |= s.intfFlush == kIntfFlushDsi;
-      if (s.step == TraceStep::flush && s.flush == 0) latched = true;
+      if (s.step == TraceStep::undo) undo = s.boundary && s.timing.link[0].en == unsigned(dropped) && s.timing.link[0].status == 1;
+      if (s.step == TraceStep::flush && (s.timing.flush & kFlushIntf)) flushed |= s.timing.intfFlush == kIntfFlushDsi;
+      if (s.step == TraceStep::flush && s.timing.flush == 0) latched = true;
       if (s.step == TraceStep::rate && !s.boundary) verified = true;
     }
     CHECK(undo && flushed && latched && verified && stopPolls == 41);
     if (firstStopPoll && lastStopPoll) {
       CHECK(lastStopPoll->us - firstStopPoll->us >= 40000);
       for (unsigned i = 0; i < 2; ++i) {
-        CHECK(lastStopPoll->link[i].frame > firstStopPoll->link[i].frame);
-        CHECK(lastStopPoll->link[i].line != firstStopPoll->link[i].line);
+        CHECK(lastStopPoll->timing.link[i].frame > firstStopPoll->timing.link[i].frame);
+        CHECK(lastStopPoll->timing.link[i].line != firstStopPoll->timing.link[i].line);
       }
     }
   }
@@ -438,20 +450,138 @@ static void testStopTimeoutTrace()
   TraceRing ring;
   const LivePath p = readPath(io);
   const Result off = panelOff(io, p, Options(), &ring);
-  CHECK(off.ok && ring.at(ring.size() - 1).link[1].status == 0);
+  CHECK(off.ok && ring.at(ring.size() - 1).timing.link[1].status == 0);
   ring.reset();
   const Result on = panelOn(io, p, Options(), off.enginesStopped, off.fetch, &ring);
   CHECK(on.ok && on.engines.rate.lockstep && ring.at(0).step == TraceStep::dsiReset);
-  CHECK(ring.at(ring.size() - 1).link[1].status == 1 && io.desync == 0);
+  CHECK(ring.at(ring.size() - 1).timing.link[1].status == 1 && io.desync == 0);
   CHECK(io.maxPollOverrunNs == 0);
   ring.reset();
   for (unsigned i = 0; i < TraceRing::kCapacity + 5; ++i) ring.next().us = i;
   CHECK(ring.size() == TraceRing::kCapacity && ring.at(0).us == 5 && ring.at(ring.size() - 1).us == TraceRing::kCapacity + 4);
   ring.reset();
   CHECK(!ring.size());
-  CHECK(maxSampleNs > 0 && maxSampleNs < kLineNs && maxPollShiftNs < kLineNs / 10);
+  CHECK(maxSampleNs > 0 && maxSampleNs < kLineNs && maxPollShiftNs == 0);
   std::printf("M5 trace model: max in-wait sample %llu ns, added stop poll drift %llu ns (line %u ns)\n",
               (unsigned long long)maxSampleNs, (unsigned long long)maxPollShiftNs, kLineNs);
+}
+
+struct WakeTraceIo : model::Dpu {
+  struct Load {
+    uint64_t pa, ns;
+    size_t stores;
+    uint32_t value;
+  };
+  std::vector<Load> loads;
+
+  explicit WakeTraceIo(const model::Dpu &m) : Dpu(m) {}
+
+  uint32_t rd(uint64_t pa)
+  {
+    const uint64_t at = ns;
+    const uint32_t value = Dpu::rd(pa);
+    loads.push_back({pa, at, stores.size(), value});
+    return value;
+  }
+};
+
+static void testWakeHostTrace()
+{
+  model::Dpu asleep;
+  for (unsigned l = 0; l < 2; ++l) {
+    asleep.regs[dsiReg(l, kDsiCtrl)] = 0x1f7;
+    asleep.regs[dsiReg(l, kDsiFifoStatus)] = 0x11111000 | (0x10u << l);
+    asleep.regs[dsiReg(l, kDsiLaneStatus)] = 0x100u << l;
+    asleep.regs[dsiReg(l, kDsiClkStatus)] = 0x8067c0 | (1u << l);
+  }
+  const LivePath path = readPath(asleep);
+  const Result off = panelOff(asleep, path, Options());
+  CHECK(off.ok && off.enginesStopped);
+  if (!off.ok) return;
+  const size_t wakeStart = asleep.stores.size();
+  WakeTraceIo baseline(asleep);
+  CHECK(panelOn(baseline, path, Options(), off.enginesStopped, off.fetch).ok);
+
+  constexpr TraceStep steps[] = {TraceStep::after29, TraceStep::afterMode, TraceStep::afterRoute, TraceStep::afterEnable};
+  constexpr const char *names[] = {"after-29", "after-mode", "after-route", "after-enable"};
+  constexpr uint32_t regs[] = {kDsiCtrl, kDsiStatus0, kDsiFifoStatus, kDsiLaneStatus, kDsiClkStatus};
+  const auto hostLoads = [](const WakeTraceIo &io) {
+    unsigned count = 0;
+    for (const auto &load : io.loads)
+      for (unsigned l = 0; l < 2; ++l) count += load.pa >= kDsi[l] && load.pa < kDsi[l] + kDsiBytes;
+    return count;
+  };
+  TraceRing ring;
+  for (bool videoOnly : {false, true}) {
+    ring.reset();
+    WakeTraceIo io(asleep);
+    Options options;
+    options.videoOnly = videoOnly;
+    const Result on = panelOn(io, path, options, off.enginesStopped, off.fetch, &ring);
+    CHECK(on.ok && on.engines.rate.lockstep && clean(io));
+    CHECK(ring.total == ring.size() && io.stores.size() == baseline.stores.size());
+    if (!on.ok || io.stores.size() != baseline.stores.size()) return;
+
+    const uint32_t videoCtrl = videoOnly ? 0x1f3 : 0x1f7;
+    size_t mode[2] = {}, afterCleanup = 0, afterRoute = 0, afterEnable = 0;
+    for (unsigned l = 0; l < 2; ++l) {
+      std::vector<size_t> ctrl;
+      for (size_t i = wakeStart; i < io.stores.size(); ++i)
+        if (io.stores[i].pa == dsiReg(l, kDsiCtrl)) ctrl.push_back(i);
+      CHECK(ctrl.size() == 7);
+      if (ctrl.size() != 7) return;
+      mode[l] = ctrl.back();
+      if (l == 1) afterCleanup = ctrl[5] + 1;   // DSI1 restores the last DCS 29 word
+    }
+    for (size_t i = wakeStart; i < io.stores.size(); ++i) {
+      const auto &a = baseline.stores[i], &b = io.stores[i];
+      CHECK(a.pa == b.pa && b.v == ((i == mode[0] || i == mode[1]) ? videoCtrl : a.v));
+      if (b.pa == ctlReg(0, kCtlStart)) afterRoute = i + 1;
+      if (b.pa == intfReg(2, kIntfEn) && b.v == 1) afterEnable = i + 1;
+    }
+    CHECK(afterCleanup == mode[0] && mode[0] < mode[1] && mode[1] < afterRoute && afterRoute < afterEnable);
+    if (afterEnable < 2) return;
+    CHECK(io.stores[afterEnable - 2].pa == intfReg(1, kIntfEn) && io.stores[afterEnable - 2].v == 1);
+    const size_t storeCounts[] = {afterCleanup, mode[1] + 1, afterRoute, afterEnable};
+    unsigned boundary = 0;
+    for (unsigned row = 0; row < ring.size(); ++row) {
+      const auto &sample = ring.at(row);
+      if (!isHostTraceStep(sample.step)) continue;
+      CHECK(boundary < 4);
+      if (boundary >= 4) return;
+      CHECK(sample.boundary && sample.step == steps[boundary] && !std::strcmp(traceStepName(sample.step), names[boundary]));
+      CHECK(row > 0 && sample.us >= ring.at(row - 1).us);
+      if (boundary == 0) CHECK(io.stores[mode[0]].ns >= sample.us * 1000 + 10000000);
+      if (boundary == 2) {
+        CHECK(row > 0 && ring.at(row - 1).step == TraceStep::routeOn && ring.at(row - 1).timing.flush == 0);
+        CHECK(row + 1 < ring.size() && ring.at(row + 1).step == TraceStep::enable);
+      }
+      if (boundary == 3) CHECK(row > 0 && ring.at(row - 1).step == TraceStep::rate);
+
+      bool found = false;
+      for (size_t i = 0; i + 10 <= io.loads.size(); ++i) {
+        if (io.loads[i].pa != dsiReg(0, kDsiCtrl) || io.loads[i + 1].pa != dsiReg(0, kDsiStatus0) ||
+            io.loads[i].ns / 1000 != sample.us || io.loads[i].stores != storeCounts[boundary]) continue;
+        CHECK(!found);
+        found = true;
+        for (unsigned l = 0; l < 2; ++l) {
+          const auto &host = sample.host[l];
+          const uint32_t words[] = {host.ctrl, host.status, host.fifo, host.lane, host.clk};
+          CHECK(host.ctrl == (boundary == 0 ? 0x1f5u : videoCtrl));
+          CHECK(host.status == (boundary == 3 ? kStatusVideoBusy : 0u));
+          for (unsigned reg = 0; reg < 5; ++reg) {
+            const auto &load = io.loads[i + 5 * l + reg];
+            CHECK(load.pa == dsiReg(l, regs[reg]) && load.value == words[reg] && load.stores == storeCounts[boundary]);
+          }
+        }
+      }
+      CHECK(found);
+      ++boundary;
+    }
+    CHECK(boundary == 4);
+    CHECK(hostLoads(io) == hostLoads(baseline) + 40);
+    for (const auto &load : io.loads) CHECK(load.stores != afterEnable - 1);   // paired enable stores have no intervening load
+  }
 }
 
 // Trace fixtures preserve the sampled words and intervals, with a rebased timestamp origin.
@@ -478,10 +608,10 @@ static std::vector<TraceSample> readTraceRows(std::istream &file, unsigned seria
     unsigned found = 0, index = 0;
     unsigned long long us = 0;
     char step[16] = {}, kind = 0;
-    auto &a = s.link[0], &b = s.link[1];
+    auto &a = s.timing.link[0], &b = s.timing.link[1];
     const int n = std::sscanf(line.c_str(), "m5 %u %u %llu %15s %c %x/%x/%x/%x %x/%x/%x/%x %x/%x/%x/%x",
                               &found, &index, &us, step, &kind, &a.en, &a.status, &a.frame, &a.line,
-                              &b.en, &b.status, &b.frame, &b.line, &s.top, &s.active, &s.flush, &s.intfFlush);
+                              &b.en, &b.status, &b.frame, &b.line, &s.timing.top, &s.timing.active, &s.timing.flush, &s.timing.intfFlush);
     CHECK(n == 17 && found == serial && index == rows.size() && (kind == 'B' || kind == 'P'));
     if (n != 17) return {};
     s.us = us;
@@ -521,8 +651,8 @@ static void testY12oTrace()
   const uint64_t originNs = replay.frameNs(1);
   replay.advanceTo(originNs);
   for (unsigned i = 1; i <= 2; ++i) {
-    const auto &atStop = stop.link[i - 1];
-    const auto &atStart = rows[0].link[i - 1];
+    const auto &atStop = stop.timing.link[i - 1];
+    const auto &atStart = rows[0].timing.link[i - 1];
     const uint64_t endPositionNs = uint64_t(scanPosition(atStop.frame, atStop.line)) * kLineNs;
     const uint64_t linePosition = (endPositionNs - stop.us * 1000) / kLineNs;
     replay.intf[i].frames = atStart.frame;
@@ -540,10 +670,10 @@ static void testY12oTrace()
       CHECK(replay.wr(ctlReg(0, kCtlFlush), kFlushIntf));
       CHECK(replay.wr(intfReg(2, kIntfEn), 1));
     }
-    CHECK(replay.rd(ctlReg(0, kCtlTop)) == s.top && replay.rd(ctlReg(0, kCtlIntfActive)) == s.active);
-    CHECK(replay.rd(ctlReg(0, kCtlFlush)) == s.flush && replay.rd(ctlReg(0, kCtlIntfFlush)) == s.intfFlush);
+    CHECK(replay.rd(ctlReg(0, kCtlTop)) == s.timing.top && replay.rd(ctlReg(0, kCtlIntfActive)) == s.timing.active);
+    CHECK(replay.rd(ctlReg(0, kCtlFlush)) == s.timing.flush && replay.rd(ctlReg(0, kCtlIntfFlush)) == s.timing.intfFlush);
     for (unsigned i = 1; i <= 2; ++i) {
-      const auto &l = s.link[i - 1];
+      const auto &l = s.timing.link[i - 1];
       CHECK(replay.rd(intfReg(i, kIntfEn)) == l.en && replay.rd(intfReg(i, kIntfStatus)) == l.status);
       const auto observed = scanPosition(l.frame, l.line);
       const auto simulated = scanPosition(replay.intf[i].frames, replay.line(i));
@@ -551,7 +681,7 @@ static void testY12oTrace()
       // from the capture. Even near a frame boundary compare linear position.
       CHECK(simulated >= observed - 12 && simulated <= observed + 12);
       if (index) {
-        const auto &before = rows[index - 1].link[i - 1];
+        const auto &before = rows[index - 1].timing.link[i - 1];
         CHECK(observed > scanPosition(before.frame, before.line));
       }
     }
@@ -573,7 +703,7 @@ static void testY12oTrace()
   CHECK(off.ok && off.enginesStopped && off.dcs[0].dmaDoneMask() == 3 && off.dcs[1].dmaDoneMask() == 3);
   if (!off.ok) return;
   CHECK(off.dcs[0].waitedBlanking && off.dcs[1].waitedBlanking);
-  CHECK(ring.total == ring.size() && ring.at(ring.size() - 1).active == kDsiIntfSlave);
+  CHECK(ring.total == ring.size() && ring.at(ring.size() - 1).timing.active == kDsiIntfSlave);
   const Frames asleep = readFrames(run);
   const uint32_t asleepLine[2] = {run.rd(intfReg(1, kIntfLineCount)), run.rd(intfReg(2, kIntfLineCount))};
   run.sleepMs(100);
@@ -584,7 +714,7 @@ static void testY12oTrace()
   ring.reset();
   const Result on = panelOn(run, p, Options(), off.enginesStopped, off.fetch, &ring);
   CHECK(on.ok && on.engines.rate.lockstep && run.half[0].displayOn && run.half[1].displayOn && clean(run));
-  CHECK(ring.total == ring.size() && ring.at(ring.size() - 1).active == kIntfFlushDsi && run.latchedMaster == kDsiIntfMaster);
+  CHECK(ring.total == ring.size() && ring.at(ring.size() - 1).timing.active == kIntfFlushDsi && run.latchedMaster == kDsiIntfMaster);
 }
 
 static void replayMovingCounters(const std::vector<TraceSample> &rows, unsigned link)
@@ -595,7 +725,7 @@ static void replayMovingCounters(const std::vector<TraceSample> &rows, unsigned 
   const uint64_t origin = rows.front().us;
   bool seeded = false;
   for (const auto &s : rows) {
-    const auto &sample = s.link[link];
+    const auto &sample = s.timing.link[link];
     const uint64_t when = base + (s.us - origin) * 1000;
     if (!(sample.status & kIntfStatusOn)) {
       seeded = false;
@@ -626,9 +756,9 @@ static void compareTraceBoundaries(const std::vector<TraceSample> &captured, con
     CHECK(next < model.size());
     if (next == model.size()) return;
     const auto &m = model.at(next++);
-    CHECK(m.active == s.active && m.top == s.top && m.flush == s.flush && m.intfFlush == s.intfFlush);
+    CHECK(m.timing.active == s.timing.active && m.timing.top == s.timing.top && m.timing.flush == s.timing.flush && m.timing.intfFlush == s.timing.intfFlush);
     for (unsigned l = 0; l < 2; ++l)
-      CHECK(m.link[l].en == s.link[l].en && m.link[l].status == s.link[l].status);
+      CHECK(m.timing.link[l].en == s.timing.link[l].en && m.timing.link[l].status == s.timing.link[l].status);
   }
 }
 
@@ -646,7 +776,7 @@ static void testY12pWakeTrace()
   for (unsigned l = 0; l < 2; ++l) {
     replayMovingCounters(off, l);
     replayMovingCounters(wake, l);
-    CHECK(off.back().link[l].frame == wake.front().link[l].frame && off.back().link[l].line == wake.front().link[l].line);
+    CHECK(off.back().timing.link[l].frame == wake.front().timing.link[l].frame && off.back().timing.link[l].line == wake.front().timing.link[l].line);
   }
 
   model::Dpu m;
@@ -655,8 +785,8 @@ static void testY12pWakeTrace()
   m.advanceTo(m.frameNs(1));
   const auto origin = m.ns;
   for (unsigned l = 0; l < 2; ++l) {
-    m.intf[l + 1].frames = off.front().link[l].frame;
-    m.intf[l + 1].start = m.ns - off.front().link[l].line * kLineNs;
+    m.intf[l + 1].frames = off.front().timing.link[l].frame;
+    m.intf[l + 1].start = m.ns - off.front().timing.link[l].line * kLineNs;
     m.regs[dsiReg(l, kDsiCtrl)] = 0x1f7;
     m.regs[dsiReg(l, kDsiDmaLength)] = l ? 0x84 : 4;
     m.regs[intfReg(l + 1, kIntfConfig)] = kIntfConfigProgFetch;
@@ -708,11 +838,15 @@ static void testY12pWakeTrace()
     const unsigned link = budget;
     m.dmaBudget[link] = int(budget);
     const auto start = m.nowUs();
-    const Result timedOut = panelOn(m, path, Options(), slept.enginesStopped, slept.fetch);
+    Options options;
+    options.videoOnly = true;
+    ring.reset();
+    const Result timedOut = panelOn(m, path, options, slept.enginesStopped, slept.fetch, &ring);
     CHECK(!timedOut.ok && timedOut.scanoutRestored && timedOut.step == 2 + budget);
     CHECK(timedOut.dcs[budget].triggerAttempted && timedOut.dcs[budget].dmaDoneMask() == (3u ^ (1u << link)));
     CHECK(m.nowUs() - start < kPanelReplyTimeoutMs * 1000u && m.intf[1].on && m.intf[2].on);
     if (!budget) CHECK(!m.firstDcs(kDcsDisplayOn, 0) && !m.firstDcs(kDcsDisplayOn, 1));
+    for (unsigned i = 0; i < ring.size(); ++i) CHECK(!isHostTraceStep(ring.at(i).step));
     for (unsigned l = 0; l < 2; ++l)
       CHECK(m.storesTo(dsiReg(l, kDsiSwReset)) == 4 && !m.dsi[l].dmaPending && !m.rd(dsiReg(l, kDsiTpgCtrl)) &&
             m.rd(dsiReg(l, kDsiCtrl)) == path.link[l].dsiCtrl && m.rd(dsiReg(l, kDsiClkCtrl)) == 0x33f &&
@@ -840,13 +974,18 @@ static void testFailures()
   {   // DCS only: the engines keep running
     model::Dpu m;
     m.sleepMs(3);
+    for (unsigned l = 0; l < 2; ++l) m.regs[dsiReg(l, kDsiCtrl)] = 0x1f7;
     const LivePath p = readPath(m);
     Options o;
     o.engines = false;
+    o.videoOnly = true;
     const Result off = panelOff(m, p, o);
     CHECK(off.ok && !off.enginesStopped && m.intf[1].on && m.half[0].sleeping && m.storesTo(intfReg(1, kIntfEn)) == 0);
-    const Result on = panelOn(m, p, o, off.enginesStopped, off.fetch);
+    TraceRing ring;
+    const Result on = panelOn(m, p, o, off.enginesStopped, off.fetch, &ring);
     CHECK(on.ok && m.half[0].displayOn && !m.half[1].sleeping && m.storesTo(intfReg(2, kIntfEn)) == 0);
+    for (unsigned l = 0; l < 2; ++l) CHECK(m.rd(dsiReg(l, kDsiCtrl)) == 0x1f7);
+    for (unsigned i = 0; i < ring.size(); ++i) CHECK(!isHostTraceStep(ring.at(i).step));
   }
 }
 
@@ -888,6 +1027,7 @@ int main()
   testZeroCounterReadback();
   testUnavailablePanel();
   testStopTimeoutTrace();
+  testWakeHostTrace();
   testY12oTrace();
   testY12pWakeTrace();
   testSleepReplyTimeout();

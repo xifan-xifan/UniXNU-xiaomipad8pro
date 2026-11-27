@@ -1,14 +1,25 @@
 # Boot guard (k27 0063, `piano-boot-guard=SECS`)
 
-Status 2026-11-12: **G1-G4 ran on the tablet and behaved as designed** (no pings, a hang and no healthy exec each returned to ABL
-fastboot; a healthy boot was judged healthy at 60 s, restart reason normal, the watchdog fed 6 times, longest gap 10.0 s). G5 (the
-late hang into the installed system) and G6 (sleep) have not run. Off without its argument; `tooling/persist/build-esp.py
---profile daily` adds `piano-boot-guard=180`: ESP v3 (`persistent-boot.md` §11) is the first installed system with it.
+## Status as of 2026-11-27
+
+**The boot guard is part of the installed daily profile.** The ESP builder defaults to `piano-boot-guard=180` for the daily macOS
+entries. The November 26 installed round on v13.1y12l covered the boot guard. [ESP builder](../tooling/persist/build-esp.py) · [November 26 install results](results-2026-11-26.md#install)
+
+**Installed boot on v13.1y12q.** Three consecutive November 27 disk boots reached the login window at +32 s and verified that
+the owner's Data store resumed. The `inst-y12q-obs3` console confirmed `cs-native4k-skip=1` (k27 0067), with 896 files and
+7496 MiB skipped. These were regular disk boots. G5 (watchdog bite after the healthy milestone) and G6 (guard across sleep)
+are separate cases in the original RAM test plan below. [November 27 installed boot results](results-2026-11-27.md#installed-boot) · [Hardware backlog](BACKLOG-hardware.md#4-owner-decisions)
+
+## Original guard bring-up and design (2026-11-11 to 2026-11-14)
+
+On 2026-11-12, **G1–G4 behaved as designed on RAM**. No pings, a hang and a missing healthy exec each returned to ABL fastboot.
+The healthy boot reached the 60 s milestone with restart reason normal, six watchdog pings and a longest gap of 10.0 s. G5 and
+G6 were pending at that checkpoint. ESP v3 (`persistent-boot.md` §11) was the first installed system with the guard.
 
 Facts are marked **verified** (read from source, a binary, the running system or a run's log), **spec** (Gunyah or Linux read as
 the specification only; nothing copied), **inferred** or **needs-boot**.
 
-## 1. Why
+### 1. Why
 
 The installed system boots from the ESP without `piano-reset-after`, and nothing else arms the Gunyah watchdog. On 2026-11-11 a
 hang during a GPU boot (one boot in three; the console showed stage S1, which with the asynchronous trace is the logger's
@@ -17,7 +28,7 @@ volume-down for 15-20 s. The RAM test images never had that problem: 0056 pings 
 every reset to ABL fastboot. The boot guard gives the installed system the same backstop, but with an end: once the boot is
 healthy the restart reason goes back to normal, so a later hang restarts macOS rather than parking the tablet in fastboot.
 
-## 2. Facts
+### 2. Facts
 
 | Fact | State | Source |
 |---|---|---|
@@ -25,13 +36,13 @@ healthy the restart reason goes back to normal, so a later hang restarts macOS r
 | It is not armed when the HLOS starts | inferred | `el1-hyp-notes.md` §1; every installed boot without `piano-reset-after` that hung stayed hung |
 | A bite resets the tablet: a secure-world stall during a test with 0056 armed ended in a reset about 30 s later, and so did the evening's "power1" stall in a RAM test (first read as a GPU_CC read at S1.7; the bring-up had in fact returned about 1 s before the system stopped, and the reset's timing fits a bite only if a ping 3 s before the bring-up already failed: `forensics-2026-11-11.md` §2.3): the whole system stopped, 0056's pings included | verified (runs) | `drivers/charging.md` §6; `results-2026-11-11.md` |
 | The restart reason is bits 1-7 of byte 0x48 of the SID 0 SDAM (PPID 0x071), 2 = bootloader; after 0057 wrote 2, every PSCI reset of a RAM test landed in ABL fastboot | verified (runs) | k27 0057; `bringup-debugging.md` §3 |
-| That the byte survives a watchdog bite (not a PSCI reset) and ABL honours it then | **needs-boot** | §7 test `ping0` |
+| The bootloader reason survives a watchdog bite and ABL honours it | verified (2026-11-12 RAM run) | §7 test G1 (`ping0`) |
 | `fastboot reboot` from ABL fastboot boots the installed system | verified (a run) | `persistent-boot.md` (session of 09:05) |
 | XNU counts every IRQ and FIQ a CPU takes in `cpu_stat.irq_ex_cnt` (the shared interrupt prologue in `locore.s`); `cpu_signal(SIGPnop)` is a bare IPI | verified (source) | `osfmk/arm64/locore.s` BEGIN_INTERRUPT_HANDLER, `osfmk/arm/cpu_common.c` |
 | launchd's exec comes before 45 s with the verbose console (its `hello` at 47.8-50.2 s, up to 67.5 s with several USB drivers), the login window at about 90-110 s, the login screen at about 150 s | verified (logs) | `boot-time.md` §2, §3.1 |
 | `mach_absolute_time()` does not advance across k27 0062's suspend: the guard counts awake time | verified (source) | `power.md` §3.4 |
 
-## 3. Design
+### 3. Design
 
 **One owner of the watchdog** (`machine_routines.c`, `piano_watchdog_hold/release/ping/enabled`). Before 0063 three pieces
 programmed the watchdog on their own: 0056 for a test run, 0062 around a suspend, and now the guard. 0062 turned it off 240 s
@@ -65,10 +76,9 @@ it every 5 s whoever holds it, since every thread call, the guard's included, is
    (2026-11-14). With `piano-psci-halt` (0069, default on) the restart no longer hangs, so the window was the 0.25 s of the
    shutdown notifications; the word closes it too (`tooling/k27/test-piano-halt.sh`).
 
-Why launchd and not a later process: the decision must never reset a sound boot into fastboot, which only the Mac can undo, and
-launchd's exec comes well before 180 s in every boot logged. The CPU check covers what the milestone does not: a bring-up hang
-on one CPU while launchd goes on. `piano-boot-guard-exec=loginwindow` is a stricter choice for a test (the login window at about
-90-110 s).
+The original design picked launchd because it executed well before 180 s in the bring-up logs. The CPU check also detects a
+bring-up hang on one CPU while launchd goes on. `piano-boot-guard-exec=loginwindow` is a stricter test milestone. The verbose
+bring-up logs put that milestone at about 90–110 s.
 
 What each event lands in:
 
@@ -82,7 +92,7 @@ What each event lands in:
 | The USB console's `reset fastboot` | → ABL fastboot (since 0069 also when it falls on the decision: the decision leaves the reason) | → ABL fastboot (PianoDwc3 writes 2 itself) |
 | A userland hang with the kernel well (ticks on time, every CPU takes interrupts, launchd ran) | not caught | not caught |
 
-## 4. Boot arguments
+### 4. Boot arguments
 
 | Argument | Default | Meaning |
 |---|---|---|
@@ -95,7 +105,7 @@ What each event lands in:
 | `piano-reset-to=bootloader` (0057) | — | without `piano-reset-after`: the guard keeps the reason at bootloader when healthy |
 | `piano-sleep-wdt=0` (0062) | 1 | 0062 takes no hold of its own; its loop still pings whatever another holder armed |
 
-## 5. Lines and `sysctl machdep.piano_boot_guard`
+### 5. Lines and `sysctl machdep.piano_boot_guard`
 
 ```
 piano-boot-guard: SDAM restart reason 0x00 -> 0x04 (APID n)
@@ -127,7 +137,7 @@ piano-boot-guard: healthy after 180 s, but a restart began at 171234 ms (machdep
 0062's wake window now ends with `piano-sleep: the wake went through: the Gunyah watchdog stays on (held by piano-reset-after or
 piano-boot-guard)` when another holder keeps it.
 
-## 6. Build
+### 6. Build
 
 ```sh
 tooling/k273/prepare-k27-tree.sh 0063                             # current 27.3 kernel and tree
@@ -145,7 +155,7 @@ were, `PIANO_A830_METAL=0`); images `ram-guard-ping0` `705ccd9a75814526…`, `-h
 `c5b26888f56a561c…`, `-healthy` `66f609bb57f1227a…`, `-latehang` `9616d20a9a7884ee…`, `-sleep` `c44f6407a0b856f6…`; a daily ESP
 from that KC carries `piano-boot-guard=180` on macos and macos-diag, none on fastboot. Rebuild in the main checkout before a run.
 
-## 7. RAM test procedure
+### 7. RAM test procedure
 
 Every image is a RAM boot of the GPU profile with the USB console (`piano-usb=2`), `PIANO_FAST_BOOT=1`, Data volatile
 (`data-persist=0`), and **neither `piano-reset-after` nor `piano-reset-to`** (`PIANO_RESET_AFTER=0`): the guard is the only thing
@@ -162,17 +172,16 @@ mailbox: `tooling/native/native-loop.sh` with `out/ram-guard-dump`). Order of ri
 | G5 | `ram-guard-latehang` | `piano-boot-guard=60 piano-boot-guard-test=hang-at=100` | `healthy after 60 s, restart reason normal`, the hang at 100 s, and then the **installed system** boots (not fastboot): the normal reason survived the bite | ABL fastboot instead: the write of 0 did not take (the `SDAM restart reason 0x04 -> 0x00` line), or ABL keeps a reason across boots |
 | G6 | `ram-guard-sleep` (after `power.md` S1 passed) | `piano-boot-guard=60 piano-sleep=1 piano-sleep-state=1 piano-sleep-test=90 piano-sleep-test-count=3 piano-sleep-max=30` | three `woke after 30.0 s by timer`; 240 s after the last wake `the Gunyah watchdog stays on (held by ...)`; the sysctl line keeps `watchdog on`, its pings count on; no reset. Then `reset fastboot` | a reset during a suspend: 0062's loop did not ping (report the last mailbox lines) |
 
-After G5 the installed system is running; `python3 tooling/native/usb-console.py --send 'reset fastboot' --capture 5` takes it
-back to ABL for the next image. The installed ESP gets the guard only after G1, G2, G4 and G5 passed (then `build-esp.py
---profile daily` as usual: the default is 180 s).
+In the G5 procedure, the expected return to the installed system is followed by
+`python3 tooling/native/usb-console.py --send 'reset fastboot' --capture 5` to return to ABL for the next image. The original
+checklist called for G1, G2, G4 and G5 before deploying the guard. The installed profile and newer evidence are described above.
 
-## 8. Risks and limits
+### 8. Risks and limits
 
-- **The bite path is not proven on this tablet** with the SDAM reason: G1 settles it. If ABL treats a watchdog reset differently
-  (a crash-dump mode, or the reason cleared), the guard still ends the hang, but the tablet may come back in the installed system
-  or in a dump screen instead of fastboot.
+- G1 exercised the watchdog bite with the bootloader reason and returned to ABL fastboot. G5 covers the separate case of a bite
+  with the normal reason after the healthy milestone.
 - **A restart within the window lands in ABL fastboot**, including a deliberate one from macOS or the USB console's `reset` in the
-  first SECS seconds (180 s: about half a minute after the login screen). `fastboot reboot` goes on. Telling a deliberate restart
+  first SECS seconds (180 s in the daily ESP builder). `fastboot reboot` goes on. Telling a deliberate restart
   from a panic in the reboot path would need the USB console's `reset fastboot` to say its intent; not done.
 - **A boot loop after health** (a hang that comes every time after 180 s) restarts macOS over and over, as a panic loop does today;
   power + volume-down still ends it.
@@ -182,11 +191,11 @@ back to ABL for the next image. The installed ESP gets the guard only after G1, 
 - The CPU check reads one counter per CPU and sends one IPI each every 10 s (about 0.7 wake-ups a second in all). A CPU masked
   for more than two ticks in a sound system would be reset as stuck; nothing in XNU does that on purpose (0062's frozen CPUs run
   no tick at all). `piano-boot-guard-cpus=0` turns the check off.
-- The SDAM byte is also written by PianoDwc3's `reset fastboot`; a guard decision in the same 200 ms as that command could undo
-  it (one reset into macOS instead of fastboot).
+- Before k27 0069, the guard's health decision could override the SDAM byte written by PianoDwc3's `reset fastboot`. The restart
+  marker now preserves that reason (§3).
 - The watchdog's bark (30 s) is not handled by XNU, as before.
 
-## 9. Files
+### 9. Files
 
 `patches/k27/0063-*.patch` (`osfmk/arm64/machine_routines.c`: the watchdog owner, 0056/0057 as holders, the guard;
 `osfmk/arm64/piano_guard_policy.h`; `piano_pm.c`/`piano_pm.h`: 0062 as a holder; `bsd/kern/kern_exec.c`: the milestone hook;

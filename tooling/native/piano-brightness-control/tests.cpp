@@ -18,8 +18,11 @@ int main()
   assert(parse({"tool", "--level", ".125"}, c) && c.action == Action::level && c.level == 0.125f);
   assert(parse({"tool", "--level", "1."}, c) && c.level == 1);
   assert(parse({"tool", "--adapter-nits", "0.00000762939453125"}, c) && c.value == 1);
+  assert(parse({"tool", "--adapter-nits", "0.00000762939453124"}, c) && c.value == 0);
   assert(parse({"tool", "--adapter-nits", "20.5"}, c) && c.action == Action::adapterNits && c.value == (20 << 16) + 32768);
   assert(parse({"tool", "--adapter-nits", "600"}, c) && c.value == 600 << 16);
+  assert(!parse({"tool", "--adapter-nits", "600.000000000000000001"}, c));
+  assert(!parse({"tool", "--adapter-nits", "18446744073709551615"}, c));
   assert(parse({"tool", "--reference", "1"}, c) && c.action == Action::reference && c.value == 1);
   assert(parse({"tool", "--auto", "0"}, c) && c.action == Action::automatic && c.value == 0);
   for (const char *bad : {"", ".", " .5", ".5 ", "NaN", "Inf", "-0", "0.4x", "1.1", "1.00000000000000000001", "0..5", "1e-1"})

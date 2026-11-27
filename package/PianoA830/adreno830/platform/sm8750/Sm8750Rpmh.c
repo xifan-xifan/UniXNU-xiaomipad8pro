@@ -441,7 +441,7 @@ static int command_ok(const Sm8750RpmhCmd *cmd)
     }
 }
 
-static int transact(Ctx *c, const Sm8750RpmhCmd *cmds, unsigned n, uint32_t wait_mask)
+static int transact(Ctx *c, const Sm8750RpmhCmd *cmds, unsigned n, uint32_t wait_mask, uint32_t *response)
 {
     Sm8750RpmhResult *r = c->result;
     r->step = Sm8750RpmhStepHardware;
@@ -480,10 +480,10 @@ static int transact(Ctx *c, const Sm8750RpmhCmd *cmds, unsigned n, uint32_t wait
     r->step = Sm8750RpmhStepProgram;
     for (unsigned i = 0; !rc && i < n; i++) {
         uint32_t at = base + l.msgid + i * l.stride;
-        rc = wr_checked(c, at, Sm8750RpmhMsgIdWrite);
+        rc = wr_checked(c, at, response ? Sm8750RpmhMsgIdRead : Sm8750RpmhMsgIdWrite);
         if (!rc)
             rc = wr_checked(c, at + 4, cmds[i].addr);
-        if (!rc)
+        if (!rc && !response)
             rc = wr_checked(c, at + 8, cmds[i].data);
     }
     if (!rc)
@@ -519,6 +519,10 @@ static int transact(Ctx *c, const Sm8750RpmhCmd *cmds, unsigned n, uint32_t wait
         r->irq_status = rd(c, RscIrqStatus);
     }
 
+    /* CMD_RESP_DATA follows CMD_STATUS for both RSC layouts. Copy it while
+     * this slot is still ours. Publish only after the cleanup succeeds. */
+    const uint32_t reply = !rc && response ? rd(c, base + l.msgid + 16) : 0;
+
     /* Only an untriggered or a completed TCS goes back to the pool. */
     const uint32_t failed_step = r->step;
     r->step = Sm8750RpmhStepCleanup;
@@ -530,11 +534,13 @@ static int transact(Ctx *c, const Sm8750RpmhCmd *cmds, unsigned n, uint32_t wait
     if (wr_checked(c, RscIrqEnable, (current & ~bit) | (irq & bit)))
         return Sm8750RpmhIoError;
     r->step = rc ? failed_step : (uint32_t)Sm8750RpmhStepDone;
+    if (!rc && response)
+        *response = reply;
     return rc;
 }
 
-int Sm8750RpmhWriteActive(const Sm8750RpmhIo *drv2, const Sm8750RpmhCmd *cmds, unsigned n,
-    uint32_t wait_mask, Sm8750RpmhResult *result)
+static int run_active(const Sm8750RpmhIo *drv2, const Sm8750RpmhCmd *cmds, unsigned n,
+    uint32_t wait_mask, Sm8750RpmhResult *result, uint32_t *response)
 {
     if (!result)
         return Sm8750RpmhArgument;
@@ -552,9 +558,23 @@ int Sm8750RpmhWriteActive(const Sm8750RpmhIo *drv2, const Sm8750RpmhCmd *cmds, u
     if (rc)
         return rc;
     Ctx ctx = {drv2, result};
-    rc = transact(&ctx, cmds, n, wait_mask);
+    rc = transact(&ctx, cmds, n, wait_mask, response);
     Sm8750RpmhDrv2Release();
     return rc;
+}
+
+int Sm8750RpmhWriteActive(const Sm8750RpmhIo *drv2, const Sm8750RpmhCmd *cmds, unsigned n,
+    uint32_t wait_mask, Sm8750RpmhResult *result)
+{
+    return run_active(drv2, cmds, n, wait_mask, result, NULL);
+}
+
+int Sm8750RpmhReadActive(const Sm8750RpmhIo *drv2, uint32_t addr, uint32_t *data, Sm8750RpmhResult *result)
+{
+    if (!data)
+        return Sm8750RpmhArgument;
+    const Sm8750RpmhCmd cmd = {addr, 0};
+    return run_active(drv2, &cmd, 1, 1, result, data);
 }
 
 int Sm8750RpmhSend(const Sm8750RpmhIo *drv2, const Sm8750RpmhRequest *request, Sm8750RpmhResult *result)

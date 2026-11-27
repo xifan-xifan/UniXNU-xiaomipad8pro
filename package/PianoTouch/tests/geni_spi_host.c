@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Host test: GeniSpi.c against a register model of a GENI serial engine in FIFO mode. The model is derived from the
 // documented register behaviour; it is not hardware.
+// Build: cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer geni_spi_host.c ../GeniSpi.c -o /tmp/geni_spi_host && /tmp/geni_spi_host
 #include "../GeniSpi.h"
 #include <stdio.h>
 #include <stdlib.h>

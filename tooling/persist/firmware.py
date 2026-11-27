@@ -151,12 +151,12 @@ def pad8(data):
 
 def parse_addon(blob):
     """[(path, mode, data)] of an NGPUADD2 container, every length checked as PianoFirmwareCore.c checks it."""
-    if len(blob) < 24 or blob[:8] != ADDON_MAGIC:
+    if not 24 <= len(blob) <= ADDON_MAX or blob[:8] != ADDON_MAGIC:
         raise ValueError('not an NGPUADD2 addon')
     count, zero, total = struct.unpack_from('<IIQ', blob, 8)
     if zero or total != len(blob) or count > 4096:
         raise ValueError('addon header')
-    at, out = 24, []
+    at, out, seen = 24, [], set()
     for _ in range(count):
         if len(blob) - at < 24:
             raise ValueError('addon entry')
@@ -164,15 +164,23 @@ def parse_addon(blob):
         name_at = at + 24
         data_at = name_at + (name_bytes + 7) // 8 * 8
         end = data_at + (packed + 7) // 8 * 8
-        if not 2 <= name_bytes <= 160 or end > len(blob):
+        if not 2 <= name_bytes <= 160 or not 0 < size <= MAX_BYTES or end > len(blob):
             raise ValueError('addon entry bounds')
         name = blob[name_at:name_at + name_bytes]
         if name[-1] or b'\0' in name[:-1]:
             raise ValueError('addon entry name')
-        data = zlib.decompress(blob[data_at:data_at + packed])
-        if len(data) != size:
-            raise ValueError(f'{name[:-1].decode()}: {len(data)} bytes inflated, {size} recorded')
-        out.append((name[:-1].decode(), mode, data))
+        path = name[:-1].decode()
+        if path in seen:
+            raise ValueError('duplicate addon entry path')
+        seen.add(path)
+        inflater = zlib.decompressobj()
+        try:
+            data = inflater.decompress(blob[data_at:data_at + packed], size + 1)
+        except zlib.error as error:
+            raise ValueError('invalid addon entry compression') from error
+        if len(data) != size or not inflater.eof or inflater.unused_data:
+            raise ValueError('addon entry stream does not match its recorded lengths')
+        out.append((path, mode, data))
         at = end
     if at != len(blob):
         raise ValueError('addon total')
@@ -180,39 +188,57 @@ def parse_addon(blob):
 
 
 # ------------------------------------------------------------------------------------------------ the ADT's /chosen/memory-map slot
-def _node(data, at):
+def _node(data, at, depth=0):
     """(end, props [(name, name_at, value_at, length)], children [start]) of the ADT node at AT."""
+    if depth > 64 or len(data) - at < 8:
+        raise ValueError('invalid ADT node header or nesting depth')
     nprops, nchildren = struct.unpack_from('<II', data, at)
     props, offset = [], at + 8
     for _ in range(nprops):
-        name = data[offset:offset + 32].split(b'\0', 1)[0].decode(errors='replace')
+        if len(data) - offset < 36:
+            raise ValueError('truncated ADT property header')
+        name, terminator, _ = data[offset:offset + 32].partition(b'\0')
+        if not terminator:
+            raise ValueError('unterminated ADT property name')
+        name = name.decode(errors='replace')
         length = struct.unpack_from('<I', data, offset + 32)[0] & 0x7fffffff
         props.append((name, offset, offset + 36, length))
         offset += 36 + (length + 3) // 4 * 4
+        if offset > len(data):
+            raise ValueError('truncated ADT property value or padding')
     children = []
     for _ in range(nchildren):
         children.append(offset)
-        offset = _node(data, offset)[0]
+        offset = _node(data, offset, depth + 1)[0]
     return offset, props, children
 
 
-def _child(data, at, name):
-    for child in _node(data, at)[2]:
+def _child(data, children, name):
+    for child in children:
         props = {n: data[v:v + length] for n, _, v, length in _node(data, child)[1]}
-        if props.get('name', b'').rstrip(b'\0') == name.encode():
+        if props.get('name') == name:
             return child
     return None
 
 
 def _memory_map(adt):
-    chosen = _child(adt, 0, 'chosen')
-    return None if chosen is None else _child(adt, chosen, 'memory-map')
+    end, _, children = _node(adt, 0)
+    if end != len(adt):
+        raise ValueError('trailing bytes after the ADT root')
+    chosen = _child(adt, children, b'chosen\0')
+    return None if chosen is None else _child(adt, _node(adt, chosen)[2], b'memory-map\0')
 
 
 def adt_slot(adt, name=SLOT):
     """True when the ADT's /chosen/memory-map has the slot NAME (16 bytes)."""
     at = _memory_map(adt)
-    return at is not None and any(n == name and length == 16 for n, _, _, length in _node(adt, at)[1])
+    if at is None:
+        return False
+    lengths = [struct.unpack_from('<I', adt, offset + 32)[0]
+               for n, offset, _, _ in _node(adt, at)[1] if n == name]
+    if lengths and lengths != [16]:
+        raise ValueError(f'/chosen/memory-map: expected one unflagged 16-byte {name} slot')
+    return bool(lengths)
 
 
 def adt_with_slot(adt, name=SLOT):

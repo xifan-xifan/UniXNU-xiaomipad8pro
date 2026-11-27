@@ -388,7 +388,8 @@ struct Slots {
     for (unsigned i = 0; i < kSlots; ++i) {
       if (int(i) == shown || int(i) == pending) continue;
       if (!slot[i].key) return int(i);
-      if (pick < 0 || slot[i].used < slot[pick].used) pick = int(i);
+      // Compare elapsed uses so timestamps on either side of clock wrap keep their order.
+      if (pick < 0 || clock - slot[i].used > clock - slot[pick].used) pick = int(i);
     }
     return pick;
   }

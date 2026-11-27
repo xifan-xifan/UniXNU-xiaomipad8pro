@@ -44,6 +44,7 @@ struct Sim {
   bool refuseIcl = false, ignoreFv = false, ackWrites = true, readsOk = true, bothGauges = true;
   // the source
   bool source = true, follows9v = true, typecSource = true, pdosOk = true;
+  bool ownBus = false;   // PIANO_CHG_IN_OWN_BUS: the bus is our own boost's (a USB device on the port)
   int type = PIANO_CHG_T_DCP;
   std::vector<std::vector<uint32_t>> pdos;
   int busMv = 5000;
@@ -82,9 +83,10 @@ struct Sim {
     in.generation = generation;
     in.wakes = wakes;
     in.sleep = sleep;
+    if (ownBus) in.valid |= PIANO_CHG_IN_OWN_BUS;
     if (!readsOk) return;
-    in.valid = PIANO_CHG_IN_BUS | PIANO_CHG_IN_TYPE | PIANO_CHG_IN_ICL | PIANO_CHG_IN_ENABLE | PIANO_CHG_IN_FV | PIANO_CHG_IN_VERIFY |
-               PIANO_CHG_IN_TBAT | PIANO_CHG_IN_TYPEC;
+    in.valid |= PIANO_CHG_IN_BUS | PIANO_CHG_IN_TYPE | PIANO_CHG_IN_ICL | PIANO_CHG_IN_ENABLE | PIANO_CHG_IN_FV | PIANO_CHG_IN_VERIFY |
+                PIANO_CHG_IN_TBAT | PIANO_CHG_IN_TYPEC;
     in.bus_mv = source ? busMv : 0;
     if (charger > 0) {
       // the battery's share: nothing while stuck or disabled, else what the charge current and the input left after the system allow
@@ -274,7 +276,7 @@ static void testTables()
   const uint32_t b[][3] = {{5000, 5000, 3000}, {3300, 11000, 3250}};
   CHECK(piano_charge_pdo_5v_ma(b, 2) == 3000);
   CHECK(piano_charge_pdo_9v_ma(b, 2, 0, &pps) == 0);                   // hv=1: fixed only
-  CHECK(piano_charge_pdo_9v_ma(b, 2, 1, &pps) == 3000 && pps);         // capped at 3 A
+  CHECK(piano_charge_pdo_9v_ma(b, 2, 1, &pps) == 2500 && pps);         // capped at 2.5 A
   const uint32_t c[][3] = {{3300, 5900, 2000}, {5000, 5000, 3000}};
   CHECK(piano_charge_pdo_5v_ma(c, 2) == 2000);                         // the lowest covering 5 V
   const uint32_t d[][3] = {{5000, 5000, 3000}, {9000, 9000, 50}, {3300, 11000, 400}};
@@ -325,7 +327,11 @@ static void testTables()
   CHECK(!piano_charge_write_allowed(&cfg, PIANO_CHG_FV, 4540, 4) && !piano_charge_write_allowed(&cfg, PIANO_CHG_FV, 4500, 4));
   CHECK(piano_charge_write_allowed(&cfg, PIANO_CHG_PD_FIXED, 9000, 4) && !piano_charge_write_allowed(&cfg, PIANO_CHG_PD_FIXED, 12000, 4));
   CHECK(piano_charge_write_allowed(&cfg, PIANO_CHG_QC_VOLT, 9000, 4) && piano_charge_write_allowed(&cfg, PIANO_CHG_QC_VOLT, 5000, 4));
-  CHECK(piano_charge_write_allowed(&cfg, PIANO_CHG_PPS, piano_charge_pps_word(9000, 3000), 4));
+  CHECK(!piano_charge_write_allowed(&cfg, PIANO_CHG_PPS, piano_charge_pps_word(9000, 2500), 4));
+  cfg.strict_contract = cfg.limit = 1;
+  CHECK(piano_charge_write_allowed(&cfg, PIANO_CHG_PPS, piano_charge_pps_word(9000, 2500), 4));
+  CHECK(!piano_charge_write_allowed(&cfg, PIANO_CHG_PPS, piano_charge_pps_word(9000, 2550), 4));
+  cfg.strict_contract = cfg.limit = 0;
   CHECK(!piano_charge_write_allowed(&cfg, PIANO_CHG_PPS, piano_charge_pps_word(9000, 3050), 4));
   CHECK(!piano_charge_write_allowed(&cfg, PIANO_CHG_PPS, piano_charge_pps_word(8000, 3000), 4));
   CHECK(!piano_charge_write_allowed(&cfg, PIANO_CHG_PPS, piano_charge_pps_word(9000, 450), 4));
@@ -632,7 +638,7 @@ static void testNineVolt()
     s.step();
     CHECK(s.wrote(PIANO_CHG_PD_FIXED, 9000));
   }
-  // a PPS APDO covering 9 V (hv=2 only): the PPS request at its current (3 A at most), the PD_PPS row
+  // Legacy policy never requests PPS, even with hv=2. The strict policy validates the RDO.
   {
     Sim s;
     s.cfg.hv = 1;
@@ -641,14 +647,7 @@ static void testNineVolt()
     Sim t;
     t.cfg.hv = 2; t.cfg.icl_cap_ma = 2500; t.cfg.fcc_cap_ma = 3500;
     t.pd({{5000, 5000, 3000}, {3300, 11000, 3250}}, PIANO_CHG_T_PPS);
-    for (int i = 0; i < 4; ++i) t.step();
-    CHECK(t.wrote(PIANO_CHG_PPS, 450u << 16 | 60u));
-    t.step();
-    CHECK(t.wrote(PIANO_CHG_ICL, 2500) && t.wrote(PIANO_CHG_FCC, 3500));
-    // thermal derating applies at 9 V too
-    t.temp(49);
-    t.step();
-    CHECK(t.wrote(PIANO_CHG_FCC, 3200));
+    for (int i = 0; i < 8; ++i) {t.step(); CHECK(!t.wrote(PIANO_CHG_PPS) && t.busMv == 5000);}
   }
   // hv off at 9 V without a request of ours (a wake without a handover): taken as on when allowed
   {
@@ -756,7 +755,7 @@ static void testLimit()
     t.tCoolDc = 15; t.step(); CHECK(!t.wrote(PIANO_CHG_ENABLE));
     t.tCoolDc = 20; t.step(); CHECK(t.wrote(PIANO_CHG_ENABLE, 1));
   }
-  // a stop of ours is lifted on detach (the next attach decides again) and at shutdown
+  // A health stop survives detach and reattach. Shutdown hands control back to firmware.
   {
     Sim t;
     t.cfg.limit = 1;
@@ -765,10 +764,10 @@ static void testLimit()
     CHECK(t.wrote(PIANO_CHG_ENABLE, 0));
     t.source = false;
     t.step();
-    CHECK(t.wrote(PIANO_CHG_ENABLE, 1));
+    CHECK(!t.wrote(PIANO_CHG_ENABLE) && !t.plan.charge && t.enable == 0);
     t.source = true;
     t.step();
-    CHECK(t.wrote(PIANO_CHG_ENABLE, 0));
+    CHECK(!t.wrote(PIANO_CHG_ENABLE) && !t.plan.charge && t.enable == 0);
     t.fill();
     piano_charge_shutdown(&t.cfg, &t.in, &t.st, &t.plan);
     CHECK(t.wrote(PIANO_CHG_ENABLE, 1) && !t.plan.sleep_ready);
@@ -1619,13 +1618,14 @@ struct StrictSim : Sim {
       if (!a9) in.pps9_ma = 0;
     }
     in.safety = safe; in.faults = faults;
+    in.valid |= PIANO_CHG_IN_SKIN; in.t_skin_dc = 300;
     in.mipps_pending = mippsPending;
     piano_charge_decide(&cfg, &in, &st, &plan); check();
     if (!ackWrites) return;
     for (unsigned i = 0; i < plan.writes; ++i) {
       const auto &w = plan.write[i];
       // A request must only cross the voltage boundary behind both current ACKs and ICL readback.
-      if (w.property == PIANO_CHG_PD_FIXED || w.property == PIANO_CHG_PPS) {
+      if (w.property == PIANO_CHG_PD_FIXED || (w.property == PIANO_CHG_PPS && st.hv == PIANO_CHG_HV_ASKED)) {
         CHECK(st.icl_set && st.icl_set <= st.transition_ma && st.fcc_set && st.fcc_set <= 500);
         CHECK((in.valid & PIANO_CHG_IN_ICL) && uint32_t(in.icl_ma) <= st.transition_ma);
         CHECK(!(st.pending & ((1u << PIANO_CHG_S_ICL) | (1u << PIANO_CHG_S_FCC))));
@@ -1636,7 +1636,7 @@ struct StrictSim : Sim {
       apply(w);
       if (contractFollows) {
         if (w.property == PIANO_CHG_PD_FIXED) {protocol = 1; contractMv = busMv;}
-        if (w.property == PIANO_CHG_PPS) {protocol = 2; contractMv = busMv;}
+        if (w.property == PIANO_CHG_PPS) {protocol = 2; contractMv = busMv; contractMa = (w.value & 0xffff) * 50;}
       }
     }
   }
@@ -2306,6 +2306,7 @@ static void testT14NineVolt()
   // charge/pd2: PPS 9 V (mode 2) takes in_pps 2500 only with a cool connector reading, like the fixed rule; the row 1600 otherwise
   auto pps9 = [&](StrictSim &s, uint32_t apdoMa) {
     daily(s); s.cfg.hv = 2;
+    s.boardValid |= PIANO_CHG_IN_CHGR;
     s.pd({{5000, 5000, 3000}, {9000, 9000, 3000}, {3300, 11000, apdoMa}}); s.fixed9 = 3000; s.pps9 = apdoMa;
     s.contractMa = std::min<uint32_t>(apdoMa, 3000);
     for (unsigned i = 0; i < 40 && s.busMv != 9000; ++i) s.step();
@@ -2316,12 +2317,12 @@ static void testT14NineVolt()
     CHECK(s.busMv == 9000 && s.protocol == 2 && s.st.hv_pps && s.icl == 2500 && s.fcc == 3500 && s.plan.icl_why == PIANO_CHG_ICL_9V);
   }
   {   // no connector reading: the row 1600 (was 2500 before charge/pd2)
-    StrictSim s; s.boardValid = 0; pps9(s, 5000); s.boardValid = 0; s.run(4);
+    StrictSim s; pps9(s, 5000); s.boardValid = 0; s.run(10);
     CHECK(s.busMv == 9000 && s.protocol == 2 && s.icl == 1600 && s.fcc <= 3200);
   }
   {   // a connector at 51 C -> the row; 60 C -> 100 mA; cool -> 2500 again
     StrictSim s; pps9(s, 5000); CHECK(s.icl == 2500);
-    s.conn2Dc = 515; s.run(2); CHECK(s.icl == 1600 && s.fcc <= 3200);
+    s.conn2Dc = 515; s.run(10); CHECK(s.icl == 1600 && s.fcc <= 3200);
     s.conn2Dc = 600; s.run(2); CHECK(s.icl == 100);
     s.conn2Dc = 300; s.run(20); CHECK(s.busMv == 9000 && s.icl == 2500);
   }
@@ -2444,8 +2445,84 @@ static void testT14NotifyCycle()
   }
 }
 
+// piano-power-own-bus (usb-host.md section 6.4, Q17): our own boost's 5 V (a USB device on the port: no Rp, the bus at 5 V, a type
+// the firmware reads for it) is a source without the guard (the old rule: an attach and the row written); with the guard nothing is
+// attached: no attach, no write, plan.own_bus. A charger before it is detached as by an unplug; one after it is attached as before,
+// and battery health stops it again at the limit (the 80 % policy is the same before and after).
+static void testOwnBus()
+{
+  {   // the old rule, kept without the guard
+    Sim s;
+    s.typecSource = false; s.type = PIANO_CHG_T_TYPEC; s.ownBus = true;
+    s.step();
+    CHECK((s.plan.events & PIANO_CHG_EV_ATTACH) && s.wrote(PIANO_CHG_ICL, 500) && !s.plan.own_bus);
+  }
+  {   // the guard: nothing attached, nothing written, for as long as it lasts
+    Sim s;
+    s.cfg.own_bus = 1;
+    s.typecSource = false; s.type = PIANO_CHG_T_TYPEC; s.ownBus = true;
+    for (int i = 0; i < 6; ++i) {
+      s.step();
+      CHECK(s.plan.own_bus && s.plan.writes == 0 && !(s.plan.events & PIANO_CHG_EV_ATTACH) && !s.st.attached && !s.plan.hold_awake);
+    }
+    CHECK(s.icl == 100 && s.fcc == 0 && s.enable == 1);
+    // the device out, a charger in (its Rp, the bit gone): attached as before
+    s.ownBus = false; s.typecSource = true; s.type = PIANO_CHG_T_DCP;
+    s.step();
+    CHECK(!s.plan.own_bus && (s.plan.events & PIANO_CHG_EV_ATTACH) && s.wrote(PIANO_CHG_ICL, 1500) && s.wrote(PIANO_CHG_FCC, 1500));
+  }
+  {   // a charger, then our own bus (the charger out, an OTG adapter in): the charger's values back as at a detach
+    Sim s;
+    s.cfg.own_bus = 1;
+    s.step();
+    CHECK(s.wrote(PIANO_CHG_ICL, 1500));
+    s.ownBus = true; s.typecSource = false; s.type = PIANO_CHG_T_TYPEC;
+    s.step();
+    CHECK(s.plan.own_bus && (s.plan.events & PIANO_CHG_EV_DETACH) && s.wrote(PIANO_CHG_ICL, 100) && s.wrote(PIANO_CHG_FCC, 500));
+    s.step();
+    CHECK(s.plan.own_bus && s.plan.writes == 0);
+  }
+  {   // The sourced bus never lifts an 80/75 hold, including while handing off to sleep.
+    Sim s;
+    s.cfg.own_bus = 1;
+    CHECK(piano_charge_config_limit(&s.cfg, 1, 80, 75) == 0);
+    s.soc = 80;
+    s.step(); s.step();
+    CHECK(s.enable == 0 && s.st.hold);
+    s.ownBus = true; s.typecSource = false; s.type = PIANO_CHG_T_TYPEC;
+    s.soc = 76;
+    s.step();
+    CHECK(s.plan.own_bus && s.enable == 0 && s.st.hold && !s.plan.hold_awake);
+    s.sleep = PIANO_CHG_WILL_SLEEP;
+    s.step();
+    CHECK(s.plan.own_bus && s.plan.sleep_ready && s.enable == 0 && s.st.hold);
+    s.sleep = PIANO_CHG_AWAKE;
+    s.readsOk = false;
+    s.step();
+    CHECK(s.plan.own_bus && s.enable == 0 && s.st.hold && !s.st.attached);
+    s.readsOk = true;
+    s.ownBus = false; s.typecSource = true; s.type = PIANO_CHG_T_DCP;
+    s.step(); s.step();
+    CHECK(!s.plan.own_bus && s.enable == 0 && s.st.hold);
+    s.soc = 75;
+    s.step();
+    CHECK(s.enable == 1 && !s.st.hold);
+  }
+  {   // strict (production) mode: no contract (we are the provider), the guard: no write raises anything
+    StrictSim s;
+    s.cfg.own_bus = 1;
+    s.contractValid = s.sourceValid = false; s.typecSource = false; s.type = PIANO_CHG_T_UNKNOWN; s.ownBus = true; s.pdos.clear();
+    for (int i = 0; i < 6; ++i) {
+      s.step();
+      CHECK(s.plan.own_bus && !s.st.attached && s.icl <= 100 && s.fcc <= 500 && !s.wrote(PIANO_CHG_PD_FIXED) && !s.wrote(PIANO_CHG_PPS));
+    }
+    CHECK(s.busMv == 5000);
+  }
+}
+
 int main()
 {
+  testOwnBus();
   testT14FiveVoltMax();
   testT14NineVolt();
   testT14NotifyCycle();

@@ -57,14 +57,16 @@ def main():
     (includes / 'kern/clock.h').write_text('#include "Adreno830HostClock.h"\n')
     flags = ['-I', includes, '-I', A / 'tests', '-I', A, '-I', A / 'platform/sm8750', '-I', SMMU, '-I', PM4]
     objects = []
-    for source in [*(SMMU / f'{s}.c' for s in ('ArmSmmu4KContext', 'ArmSmmu4KProgram', 'ArmSmmu4KLive', 'ArmSmmu4KStreams', 'ArmSmmu4KMmio')),
+    for source in [*(SMMU / f'{s}.c' for s in ('ArmSmmu4KContext', 'ArmSmmu4KProgram', 'ArmSmmu4KLive', 'ArmSmmu4KStreams',
+                                              'ArmSmmu4KMmio', 'ArmSmmu4K', 'ArmSmmu4KPaged')),
                    PM4 / 'AdrenoPM4.c']:
         obj = out / (source.stem + '.o')
         sh('xcrun', 'clang', '-std=c11', '-O1', '-fPIC', '-c', source, '-o', obj)
         objects.append(obj)
     for source in [SIM / 'host_gpu_service.cpp', *(A / f'{s}.cpp' for s in (
             'NativeAdrenoMemory', 'NativeAdrenoSmmuMemory', 'NativeAdrenoVm', 'NativeAdrenoRing', 'NativeAdrenoSubmit', 'NativeAdrenoUserClient',
-            'NativeAdrenoTimer', 'NativeAdrenoSmmuContext', 'NativeAdrenoGpuContext', 'NativeAdrenoGmuContext'))]:
+            'NativeAdrenoTimer', 'NativeAdrenoSmmuContext', 'NativeAdrenoGpuContext', 'NativeAdrenoGmuContext',
+            'NativeAdrenoGmuMemory'))]:
         obj = out / (source.stem + '.o')
         sh('xcrun', 'clang++', '-std=c++23', '-O1', '-fPIC', '-DADRENO830_HOST_TEST', *flags, '-c', source, '-o', obj)
         objects.append(obj)

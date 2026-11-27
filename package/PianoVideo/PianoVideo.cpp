@@ -63,6 +63,7 @@ extern volatile uint32_t piano_mm_votes[32];
 volatile int32_t piano_video_stage = 0;
 }
 #include "VideoBringup.h"
+#include "VideoEncodeSession.h"
 #include "VideoNativeState.h"
 #include "vt/PianoVideoNative.h"
 #include "vt/PianoVideoVTContract.h"
@@ -89,6 +90,13 @@ pianoxram::KernelPool &gExtra = gPianoVideoExtra;
 static_assert(pianoxram::kAllowed[0].base == kExtraArenaBase && pianoxram::kAllowed[0].end == kExtraArenaEnd &&
               pianoxram::kAllowed[0].use == pianoxram::UseVideo, "VideoHw.h's extra arena run is PianoExtraRam.h's modem run");
 static_assert(session::kAvcArenaBytes % pianoxram::kSlab == 0, "the AVC arena is whole slabs");
+
+// E1 (piano-video-enc=1): one bounded native H.264 encode self-test at level 6 (VideoEncodeSession.h). Inert without the arg.
+struct EncArgs {
+  bool enabled;
+  uint32_t delay, res, frames, kbps;
+};
+EncArgs gEnc;
 extern "C" int piano_video_vt_attach(void);
 
 uint32_t bootArg(const char *name, uint32_t fallback)
@@ -123,6 +131,14 @@ void readArgs()
   const uint32_t requestedFloor = clampArg("piano-video-mmcx-floor", kMmcxDisplayFloor, 0x1000);
   // Until a native display voter exists, V1 must not lower the boot framebuffer's MMCX rail.
   gArgs.mmcxFloor = requestedFloor < kMmcxDisplayFloor ? kMmcxDisplayFloor : requestedFloor;
+  gEnc.enabled = bootArg("piano-video-enc", 0) == 1 && enc::bootEnabled(PE_boot_args());
+  if (!gEnc.enabled) return;
+  gEnc.delay = clampArg("piano-video-enc-delay", 120, 3600);
+  gEnc.res = clampArg("piano-video-enc-res", 0, 3);   // 0 640x480, 1 1280x720, 2 1920x1080, 3 320x240
+  gEnc.frames = clampArg("piano-video-enc-frames", 10, enc::kMaxFrames);
+  gEnc.kbps = clampArg("piano-video-enc-kbps", 2000, 40000);
+  if (gEnc.frames < 2) gEnc.frames = 2;
+  if (gEnc.kbps < 100) gEnc.kbps = 100;
 }
 
 void note(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -832,6 +848,110 @@ void hashBytes(const uint8_t *bytes, uint32_t size, char text[65])
 }
 
 
+// ------------------------------------------------------------------------------------------------ E1: the encode self-test
+// Runs on its own thread piano-video-enc-delay s after start(), through the same exclusive reservation as a VT session (it
+// waits while a decoder holds the core). The encoder layout replaces the decoder's for its duration only. A failure quarantines
+// the core like a failed decode session (no reopen in this boot); a pass leaves it resident for the next VT session.
+constexpr uint32_t kEncStreamCap = 256 * 1024;
+void encodeSelfTest(IOService *service)
+{
+  static const uint32_t sizes[4][2] = {{640, 480}, {1280, 720}, {1920, 1080}, {320, 240}};
+  const uint32_t w = sizes[gEnc.res][0], h = sizes[gEnc.res][1];
+  note("E1 encode self-test armed delay %u s %ux%u frames %u kbps %u", gEnc.delay, w, h, gEnc.frames, gEnc.kbps);
+  if (gEnc.delay) IOSleep(gEnc.delay * 1000);
+  uint32_t sid = 0;
+  int rc = -16;
+  unsigned tries = 0;
+  for (; tries < 120; ++tries) {
+    IOLockLock(gNativeLock);
+    // Only inspect the core while idle. A decoder can change its state before releasing the reservation.
+    if (gNativeState.phase == stream::Owner::Poisoned) rc = -45;
+    else if (gNativeState.phase != stream::Owner::Idle) rc = -16;
+    else if (gBringup.quarantineReason || !gBringup.dmaHeld) rc = -45;
+    else rc = gNativeState.acquire(&sid);
+    IOLockUnlock(gNativeLock);
+    if (rc != -16) break;
+    IOSleep(5000);   // a decoder holds the core: try again later
+  }
+  if (rc) {
+    note("E1 encode not started reserve %d tries %u", rc, tries);
+    service->setProperty("piano-video-enc-result", "not started: the core was not free");
+    return;
+  }
+  auto &core = gBringup;
+  auto *t = new enc::EncodeSelfTest<Bringup<KernelHw>>(core, core.layout);
+  uint8_t *stream = static_cast<uint8_t *>(IOMallocZero(kEncStreamCap));
+  const uint64_t beginUs = nowUs();
+  const bool resident = core.firstHfi;
+  if (!t || !stream) rc = kErrNoMemory;
+  else if (!t->g.configure(w, h)) rc = kErrArgument;
+  else {
+    t->sessionId = sid;
+    t->set.frames = gEnc.frames;
+    t->set.bitrate = gEnc.kbps * 1000;
+    t->stream = stream;
+    t->streamCap = kEncStreamCap;
+    core.encoder = true;
+    core.encGeometry = t->g;
+    if (resident) {
+      rc = core.prepareResidentSession();
+      if (!rc) {
+        bzero(const_cast<uint8_t *>(core.dma.arena), core.layout.arenaBytes());
+        core.hw.barrier();
+      }
+    } else {
+      Options options;
+      options.level = 6;
+      options.mmcxFloor = gArgs.mmcxFloor;
+      rc = core.run(options);
+    }
+    note("E1 encode core ready status %d session %08x resident %u layout %u entries %u backing %u", rc, sid, unsigned(resident),
+         core.layout.bytes, core.layout.used, core.dma.arenaBytes);
+    if (!rc) rc = t->run();
+  }
+  // The decoder's close discipline: any device-level fault or a failed session poisons the reservation.
+  if (!rc) rc = core.rep.error ? core.rep.error : core.watchdogSeen ? kErrWatchdog : core.rep.fsr ? kErrFault : core.quarantineReason;
+  if (!rc && !t->r.pass()) rc = kErrHfi;
+  const bool pass = !rc;
+  if (t && stream && t->r.streamBytes) {
+    char digest[65];
+    hashBytes(stream, t->r.streamBytes, digest);
+    char head[3 * 32 + 1] = {};
+    for (unsigned i = 0; i < 32 && i < t->r.streamBytes; ++i) snprintf(head + 3 * i, 4, "%02x ", stream[i]);
+    note("E1 stream bytes %u SHA256 %s head %s", t->r.streamBytes, digest, head);
+    OSData *data = OSData::withBytes(stream, t->r.streamBytes);
+    if (data) {
+      service->setProperty("piano-video-enc-stream", data);
+      data->release();
+    }
+  }
+  char text[200];
+  snprintf(text, sizeof text, "%s %ux%u frames %u FBD %u IDR %u bytes %u error %d stage %u elapsed-ms %llu", pass ? "PASS" : "FAIL", w,
+           h, gEnc.frames, t ? t->r.fbd : 0, t ? t->r.idr : 0, t ? t->r.streamBytes : 0, rc, t ? t->r.failedStage : 0,
+           (unsigned long long)((nowUs() - beginUs) / 1000));
+  service->setProperty("piano-video-enc-result", text);
+  if (rc) {
+    if (!core.quarantineReason) core.quarantineReason = rc;
+    if (core.dmaHeld && !core.teardownRc) (void)core.teardown();
+  }
+  core.encoder = false;
+  const bool dmaHeld = core.dmaHeld;
+  IOLockLock(gNativeLock);
+  if (!gNativeState.closing(sid, false)) gNativeState.closed(rc && dmaHeld, rc);
+  IOLockUnlock(gNativeLock);
+  note("E1 encode end %s session %08x status %d quarantined %u dma-held %u", pass ? "PASS" : "FAIL", sid, rc, unsigned(rc != 0),
+       unsigned(dmaHeld));
+  if (stream) IOFree(stream, kEncStreamCap);
+  delete t;
+}
+void encodeThread(void *service, wait_result_t)
+{
+  thread_set_thread_name(current_thread(), "piano-video-enc");
+  auto *owner = static_cast<IOService *>(service);
+  encodeSelfTest(owner);
+  owner->release();
+}
+
 }  // namespace
 
 extern "C" bool piano_video_native_ready(void)
@@ -956,14 +1076,18 @@ extern "C" int piano_video_native_poll(uint32_t sid,native::Frame *frame)
   NativeOwner &o=*gNativeOwner;
   // Caller may already hold one output loan during a guest request. Pumping
   // continues without replacing it; other RAW completions remain in the ledger.
+  if (o.tx.r.error) return o.tx.r.error;
   const int rc=o.tx.pump();if(rc)return rc;
   if(frame->memory)return 1;
-  session::SelfTest<Bringup<KernelHw>>::OutputFrame f;
-  if(!o.tx.popOutput(f))return 1;
-  auto *b=o.core.layout.find(session::Raw,f.index);
-  if(!b||b->queued||b->pendingRelease||b->readonly||o.loans[f.index])return kErrHfi;
+  const auto *next=o.tx.nextOutput();
+  if(!next)return 1;
+  auto *b=o.core.layout.find(session::Raw,next->index);
+  if(!b||b->queued||b->pendingRelease||b->readonly||!o.tx.ledger.ownsRaw(next->index,next->token)||o.loans[next->index])
+    return o.tx.fail(kErrHfi);
   auto *loan=IOSubMemoryDescriptor::withSubRange(o.core.hw.arenaDesc,b->off,b->size,kIODirectionInOut);
   if(!loan)return kErrNoMemory;
+  session::SelfTest<Bringup<KernelHw>>::OutputFrame f;
+  if(!o.tx.popOutput(f)){loan->release();return o.tx.fail(kErrHfi);}
   o.loans[f.index]=loan;
   frame->memory=loan;frame->cpu=o.core.dma.arena+b->off;frame->length=b->size;
   frame->iova=b->iova();frame->token=f.token;frame->index=f.index;
@@ -987,7 +1111,7 @@ extern "C" int piano_video_native_frame_release(uint32_t sid,native::Frame *fram
 {
   if(!frame||!frame->memory||!gNativeOwner||!gNativeState.owns(sid)||frame->index>=stream::Raws)return -22;
   NativeOwner &o=*gNativeOwner;
-  if(o.loans[frame->index]!=frame->memory)return -22;
+  if(o.loans[frame->index]!=frame->memory||!o.tx.ledger.ownsRaw(frame->index,frame->token))return -22;
   const auto index=frame->index;const auto token=frame->token;
   o.loans[index]->release();o.loans[index]=nullptr;*frame=native::Frame{};
   return o.tx.releaseOutput(index,token);
@@ -1091,6 +1215,7 @@ IOService *PianoVideo::probe(IOService *provider, SInt32 *score)
 bool PianoVideo::start(IOService *provider)
 {
   if (!IOService::start(provider)) return false;
+  bool bootReserved = false;
   if (gArgs.level == 6) {
     gNativeLock = IOLockAlloc();
     if (!gNativeLock) return false;
@@ -1102,7 +1227,8 @@ bool PianoVideo::start(IOService *provider)
     pianoVideoExtraRamSysctl();
     note("RAM16G extra RAM: piano-extra-ram=%u piano-video-extra-ram=%u free %u slabs (machdep.piano_extra_ram_video)", gExtra.master,
          gExtra.driver, extraFree);
-    gBringup.dmaHeld = gHw.dmaAlloc(gBringup.dma);
+    bootReserved = gHw.dmaAlloc(gBringup.dma);
+    gBringup.dmaHeld = bootReserved;
     if (gBringup.dmaHeld) {
       gHw.dmaOwners("ready");
       note("V9h boot reservation ready backing %u core-lifetime 1",gBringup.dma.arenaBytes);
@@ -1121,6 +1247,16 @@ bool PianoVideo::start(IOService *provider)
   if (bootArg("piano-video-vt", 0)) {
     const int vt = piano_video_vt_attach();
     note("vt attach: piano-video-vt=1 result=%d", vt);
+  }
+  if (gEnc.enabled && bootReserved) {
+    thread_t et = nullptr;
+    retain();
+    const kern_return_t kr = kernel_thread_start(&encodeThread, this, &et);
+    if (kr == KERN_SUCCESS) thread_deallocate(et);
+    else release();
+    note("E1 piano-video-enc=1 thread %d (no VT encoder inventory: encs stays empty)", kr);
+  } else if (gEnc.enabled) {
+    note("E1 piano-video-enc=1 refused: needs piano-video=6 and the boot reservation (level %u)", gArgs.level);
   }
   note("start: piano-video=%u cc=%u smmu=%u carveout=%u delay=%u repeat=%u samples=%u (Iris %#llx, VIDEO_CC %#llx, SPI %u, streams "
        "%#x/%#x, carveout %#llx)",

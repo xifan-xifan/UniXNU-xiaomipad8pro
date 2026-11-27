@@ -11,16 +11,17 @@ struct DirectAdmission {
 
   struct Request {
     uint64_t first, last;
-    bool write;
+    bool write, exclusive;
     Request *next = nullptr;
-    Request(uint64_t offset, uint64_t length, bool out)
-      : first(offset / persist::kBlock), last((offset + length - 1) / persist::kBlock), write(out) {}
+    Request(uint64_t offset, uint64_t length, bool out, bool force = false)
+      : first(offset / persist::kBlock), last((offset + length - 1) / persist::kBlock), write(out), exclusive(force) {}
     bool conflicts(const Request &other) const {
-      return (write || other.write) && first <= other.last && other.first <= last;
+      return exclusive || other.exclusive || ((write || other.write) && first <= other.last && other.first <= last);
     }
   };
 
   unsigned depth = 0, inflight = 0, peak = 0, waiting = 0, quarantined = 0;
+  unsigned queued = 0;
   uint64_t waits = 0;
   bool online = false, parallel = false, held = false, fenced = false;
 
@@ -34,8 +35,7 @@ struct DirectAdmission {
   template<class Env> int take(Env &env, Request &request) {
     if (!online) return kOffline;
     if (!fenced && !held && !parallel) return kSerial;
-    if (tail) tail->next = &request; else head = &request;
-    tail = &request;
+    append(request);
     ++waiting;
     int slot;
     bool waited = false;
@@ -44,22 +44,39 @@ struct DirectAdmission {
       if (!fenced && !held) {
         if (!parallel) { slot = kSerial; break; }
         if (quarantined == (1U << depth) - 1) { slot = kNoStage; break; }
-        slot = freeSlot();
+        slot = freeSlot((1U << depth) - 1);
         if (slot >= 0 && eligible() == &request) {
-          active[slot] = &request;
-          if (++inflight > peak) peak = inflight;
+          activate(request, slot);
           break;
         }
       }
       if (!waited) { ++waits; waited = true; }
       env.wait();
     }
-    Request *previous = nullptr;
-    for (auto *it = head; it != &request; it = it->next) previous = it;
-    if (previous) previous->next = request.next; else head = request.next;
-    if (tail == &request) tail = previous;
+    unlink(request);
     --waiting;
     if (waiting || !online) env.wake();
+    return slot;
+  }
+
+  // The caller has reserved a record and checked that admission is open. After acceptance,
+  // workers dispatch these requests even while a fence or stop is draining the queue.
+  template<class Env> void accept(Env &env, Request &request) {
+    append(request);
+    ++queued;
+    env.wake();
+  }
+
+  template<class Env> int dispatch(Env &env, bool write, unsigned stages, Request *&request) {
+    request = nullptr;
+    const int slot = freeSlot(stages);
+    if (slot < 0 && (stages & ~quarantined)) return kNoStage;
+    request = eligible(write ? 1 : 0);
+    if (!request) return kNoStage;
+    if (slot >= 0) activate(*request, slot);
+    unlink(*request);
+    --queued;
+    env.wake();
     return slot;
   }
 
@@ -67,7 +84,7 @@ struct DirectAdmission {
     if (liveDMA) quarantined |= 1U << slot;
     active[slot] = nullptr;
     --inflight;
-    if (waiting || fenced || !online) env.wake();
+    if (waiting || queued || fenced || !online) env.wake();
   }
 
   // Admission stays closed until the owner reopens it. Wait releases the gate so requests can finish.
@@ -75,7 +92,7 @@ struct DirectAdmission {
     while (online && fenced) env.wait();
     if (!online) return false;
     fenced = true;
-    while (inflight) env.wait();
+    while (inflight || queued) env.wait();
     if (online) return true;
     endFence(env);
     return false;
@@ -90,20 +107,36 @@ struct DirectAdmission {
   template<class Env> void stop(Env &env) {
     online = false;
     env.wake();
-    while (inflight || waiting || fenced) env.wait();
+    while (inflight || waiting || queued || fenced) env.wait();
   }
 
 private:
   Request *head = nullptr, *tail = nullptr;
   Request *active[kDepth] = {};
 
-  int freeSlot() const {
+  void append(Request &request) {
+    request.next = nullptr;
+    if (tail) tail->next = &request; else head = &request;
+    tail = &request;
+  }
+  void unlink(Request &request) {
+    Request *previous = nullptr;
+    for (auto *it = head; it != &request; it = it->next) previous = it;
+    if (previous) previous->next = request.next; else head = request.next;
+    if (tail == &request) tail = previous;
+  }
+  void activate(Request &request, unsigned slot) {
+    active[slot] = &request;
+    if (++inflight > peak) peak = inflight;
+  }
+  int freeSlot(unsigned stages) const {
     for (unsigned k = 0; k < depth; ++k)
-      if (!active[k] && !(quarantined & (1U << k))) return static_cast<int>(k);
+      if (!active[k] && (stages & ~quarantined & (1U << k))) return static_cast<int>(k);
     return kNoStage;
   }
-  Request *eligible() const {
+  Request *eligible(int write = -1) const {
     for (auto *it = head; it; it = it->next) {
+      if (write >= 0 && it->write != (write != 0)) continue;
       bool conflict = false;
       for (auto *request : active)
         if (request && it->conflicts(*request)) { conflict = true; break; }
@@ -120,8 +153,41 @@ private:
 struct DirectWriteState {
   bool failed() const { return __atomic_load_n(&broken, __ATOMIC_ACQUIRE); }
   void fail() { __atomic_store_n(&broken, true, __ATOMIC_RELEASE); }
+  bool dirty() const { return __atomic_load_n(&cached, __ATOMIC_ACQUIRE); }
+  // Mark before submission. An unsuccessful command might already have changed the cache.
+  void markCached() { __atomic_store_n(&cached, true, __ATOMIC_RELEASE); }
+
+  // Called with admission closed and all earlier I/O drained.
+  template<class Store> bool flush(Store &store) {
+    if (failed()) return false;
+    if (!store.sync()) { fail(); return false; }
+    __atomic_store_n(&cached, false, __ATOMIC_RELEASE);
+    return true;
+  }
 private:
-  bool broken = false;
+  bool broken = false, cached = false;
+};
+
+static inline bool directPagePresent(const persist::Overlay &overlay, uint64_t page) {
+  return __atomic_load_n(&overlay.bitmap[page >> 3], __ATOMIC_ACQUIRE) >> (page & 7) & 1;
+}
+
+// Used only under exclusive ownership of the request's whole page range. Mixed requests
+// keep FUA even for the runs that happen to contain only previously present pages.
+template<class Store> struct CachedOverwrite {
+  const persist::Overlay &overlay;
+  Store &store;
+
+  bool eligible(const DirectAdmission::Request &range) const {
+    if (!range.write || range.exclusive) return false;
+    for (uint64_t page = range.first; page <= range.last; ++page)
+      if (!directPagePresent(overlay, page)) return false;
+    return true;
+  }
+  bool has(uint64_t page) const { return directPagePresent(overlay, page); }
+  bool write(uint64_t first, uint32_t count, const void *data) {
+    return store.writeCached(persist::pageBlock(overlay.pages, first), count, data);
+  }
 };
 
 struct DirectCommitQueue {
@@ -207,7 +273,7 @@ template<class Env, class Store> struct ConcurrentDirect {
   uint8_t *scratch;
 
   bool has(uint64_t page) const {
-    return __atomic_load_n(&overlay.bitmap[page >> 3], __ATOMIC_ACQUIRE) >> (page & 7) & 1;
+    return directPagePresent(overlay, page);
   }
   bool write(uint64_t first, uint32_t count, const void *data) {
     if (!store.write(persist::pageBlock(overlay.pages, first), count, data)) return false;

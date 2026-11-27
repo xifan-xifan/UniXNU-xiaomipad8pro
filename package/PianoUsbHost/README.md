@@ -15,9 +15,10 @@ controller unless a host level is asked for, or both sides' hand-off switches ar
   PianoPower's port events (3), and our UCSI client too on PianoPower's USB-C relay (4, `package/include/PianoUsbcContract.h`: PPM_RESET, the notification
   enable, GET_CAPABILITY, GET_CONNECTOR_CAPABILITY, GET_CONNECTOR_STATUS at every change). The role (device with nothing attached,
   host for a UFP), whether we source VBUS, and the orientation with its witnesses (UCSI 2.x, the port notification, gpio61) are
-  published as `piano-usbhost-*` properties; event-driven (no timer while nothing is in flight). `piano-usbhost-handoff=5|6`
-  (default 0) switches the controller with the decision: PianoDwc3 released and reclaimed (`piano-usb-handoff=1` on its side), host
-  with our probe (5) or Apple's xHCI (6).
+  published as `piano-usbhost-*` properties. At level 4, `piano-usbhost-handoff=5|6` (default 0) borrows the controller and DMA
+  route from PianoDwc3 (`piano-usb-handoff=1`) using a valid UCSI role and VBUS witness. The probe (5) uses `-back` as its loan
+  budget, falling back to `-watch` or 300 seconds. Apple's xHCI (6) requires nonzero `-back` and the shared S1 domain. When
+  PianoPower owns UCSI, its read-only snapshot is rechecked after the gadget releases the controller.
 - `piano-usbhost=5` (H5, writes): the survey, then host mode with our own minimal xHCI probe: stream 0x40 through an SMMU bypass
   bank, the DWC3 switched to host (glue stores only with the clocks re-read on), halt + HCRST, rings in a non-cacheable DMA region,
   a No-Op command, the root ports' connection (and with `-reset=1` a USB 2 port reset), a port watch; `-back=S` returns to device

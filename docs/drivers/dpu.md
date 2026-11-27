@@ -323,6 +323,7 @@ All from the IOMobileFramebufferLegacy hooks (the 27.0.1 ABI generated at build 
 | `piano-dpu-panel-engines=0`, `piano-dpu-panel-hs=1` | 1, 0 | DCS only (engines keep running); DCS in high speed |
 | `piano-dpu-panel-test=N` | 0 | Standalone `piano-dpu=1` test, N cycles of 5 s asleep and 5 s awake. Use display power for flip-mode qualification. |
 | `piano-dpu-snapshot=1` | 0 | B1 milestone 1 (`DpuSnapshot.h`, `DpuSnapshot.cpp`): `sudo sysctl -n machdep.piano_dpu_snapshot` reads the path's registers at the call (loads only, behind the survey's gate; root; at most once per 100 ms): CTL, INTF1/2 timing, engines and counters, both DSI controllers' TOTAL/ACTIVE, timing-shadow words, command path and clock/lane state, the DSPPs' PCC/GC, the live mode classified against `DpuModes.h` and each mode's 144/120/90/60 Hz words, B1c's VFP verdict; each line also on the console (`PianoDpu: snap: ...`) |
+| `piano-dpu-clkread=1` | 0 | Enables the root snapshot with MDP RCG/PLL0 rates, display CRM configuration and RPMh read responses for apps DRV-2 MM0/SH0/ACV/MC0 and MMCX/MXC. [SM8750 readback](dpu-clkread.md) |
 
 ## 7. Kernel collection
 

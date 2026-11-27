@@ -193,6 +193,7 @@ inline uint32_t bits(const uint8_t *m, unsigned bytes, unsigned offset, unsigned
 inline ConnectorStatus decodeStatus(const uint8_t *m, unsigned bytes, uint16_t version)
 {
   ConnectorStatus s;
+  if (!m || bytes < 9) return s;
   s.valid = true;
   s.change = uint16_t(bits(m, bytes, 0, 16));
   s.powerMode = uint8_t(bits(m, bytes, 16, 3));

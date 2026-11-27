@@ -10,7 +10,15 @@
 # Offset 0x49 (73). A byte that is not ours is never written (exit 3).
 OFF=73
 
+is_byte() {
+  case "$1" in
+    0|[1-9]|[1-9][0-9]|[1-9][0-9][0-9]) [ "$1" -le 255 ] ;;
+    *) return 1 ;;
+  esac
+}
+
 ours() {  # $1 decimal byte
+  is_byte "$1" || return 1
   v=$1
   [ "$v" -eq 0 ] && return 0
   [ $((v & 248)) -eq 160 ] || return 1
@@ -49,10 +57,15 @@ nvmem() {
 }
 
 rd() {
-  if [ "$PIANO_BOOTFLAG_BACKEND" = sysctl ]; then x=$(sysctl -n machdep.piano_bootflag) || return 1; [ "$x" -ge 0 ] 2>/dev/null || return 1; echo "$x"; return; fi
-  f=$(nvmem) || { echo "no sdam@7100 nvmem device" >&2; return 1; }
-  x=$(dd if="$f" bs=1 skip=$OFF count=1 2>/dev/null | od -An -tu1 | tr -d ' \n')
-  [ -n "$x" ] || return 1
+  if [ "$PIANO_BOOTFLAG_BACKEND" = sysctl ]; then
+    x=$(sysctl -n machdep.piano_bootflag) || return 1
+  else
+    f=$(nvmem) || { echo "no sdam@7100 nvmem device" >&2; return 1; }
+    [ -f "$f" ] || return 1
+    # The error marker makes a failed dd invalid even if it emitted a byte.
+    x=$({ dd if="$f" bs=1 skip=$OFF count=1 2>/dev/null || printf 'XX'; } | od -An -tu1 | tr -d ' \n')
+  fi
+  is_byte "$x" || return 1
   echo "$x"
 }
 
@@ -63,6 +76,7 @@ reqnum() {
 
 wrt() {  # $1 decimal (nvmem backend)
   f=$(nvmem) || return 1
+  [ -f "$f" ] || return 1   # sysfs nvmem attributes and host fixtures, never block devices
   printf "\\$(printf '%03o' "$1")" | dd of="$f" bs=1 seek=$OFF count=1 conv=notrunc 2>/dev/null
 }
 

@@ -2,7 +2,7 @@
  * Copyright (c) 2026 Leo Zhang. */
 /* "Mic (noise reduced)": the tap -> RNNoise -> FIFO core (MicNsCore.h). */
 #include "MicNsCore.h"
-#include <stdlib.h>
+#include <math.h>
 #include <string.h>
 #include "rnnoise.h"
 
@@ -13,20 +13,23 @@ _Static_assert(MICNS_MAX_READ + MICNS_RESERVE + MICNS_EXCESS + 2u * MICNS_BLOCK 
 static uint32_t fifo_fill(const MicNs *m) {return (uint32_t)(m->head - m->tail);}
 static uint64_t now(const MicNs *m) {return m->ticks ? m->ticks() : 0;}
 
+static void prime_state(DenoiseState *st)
+{
+    float in[MICNS_BLOCK] = {0}, out[MICNS_BLOCK];
+    (void)rnnoise_process_frame(st, out, in);
+}
+
 static void new_state(MicNs *m)
 {
     if (m->st) {rnnoise_destroy(m->st); m->st = 0;}
     if (m->bypass) return;
     m->st = rnnoise_create(0);
-    if (m->st) {   /* RNNoise builds its shared tables at the first frame: here, not in the IO thread */
-        float in[MICNS_BLOCK], out[MICNS_BLOCK];
-        memset(in, 0, sizeof in);
-        (void)rnnoise_process_frame(m->st, out, in);
-    }
+    if (m->st) prime_state(m->st);
 }
 
 int micns_init(MicNs *m, const PianoTapHeader *tap, int bypass, uint64_t (*ticks)(void))
 {
+    if (!m) return -1;
     memset(m, 0, sizeof *m);
     m->tap = tap;
     m->bypass = bypass;
@@ -37,6 +40,7 @@ int micns_init(MicNs *m, const PianoTapHeader *tap, int bypass, uint64_t (*ticks
 
 int micns_start(MicNs *m, const PianoTapHeader *tap)
 {
+    if (!m) return -1;
     m->tap = tap;
     new_state(m);
     m->anchored = m->primed = 0;
@@ -51,28 +55,37 @@ int micns_start(MicNs *m, const PianoTapHeader *tap)
 
 void micns_free(MicNs *m)
 {
+    if (!m) return;
     if (m->st) rnnoise_destroy(m->st);
-    m->st = 0;
+    m->st = NULL;
+    m->tap = NULL;
+    m->anchored = m->primed = 0;
+    m->head = m->tail = 0;
+    m->block_fill = 0;
 }
 
 uint32_t micns_fill(const MicNs *m)
 {
-    uint64_t raw = 0;
-    if (m->tap && m->anchored) {
-        const uint64_t w = audio_tap_written(m->tap);
-        raw = w > m->cursor ? w - m->cursor : 0;
-    }
+    if (!m || !m->tap || !m->anchored) return 0;
+    const uint64_t raw = audio_tap_written(m->tap) - m->cursor;
+    if (raw > PIANO_TAP_FRAMES) return 0;
     return (uint32_t)raw + m->block_fill + fifo_fill(m);
 }
 
 static void anchor(MicNs *m, uint64_t written)
 {
+    if (m->anchored && m->st) {
+        /* A discontinuity discards the denoiser's history as well as the queued PCM. */
+        rnnoise_reset(m->st);
+        prime_state(m->st);
+    }
     m->cursor = written;
     m->run = __atomic_load_n(&m->tap->run, __ATOMIC_ACQUIRE);
     m->anchored = 1;
     m->primed = 0;
     m->head = m->tail = 0;
     m->block_fill = 0;
+    m->last = 0;
     m->avg = m->setpoint = 0;
     m->samples = 0;
     m->s.anchors++;
@@ -92,6 +105,7 @@ static void process_block(MicNs *m)
     double in2 = 0, out2 = 0;
     if (fifo_fill(m) + MICNS_BLOCK > MICNS_FIFO) {m->tail += MICNS_BLOCK; m->s.excess++;}   /* never: the target fits; kept safe */
     for (uint32_t i = 0; i < MICNS_BLOCK; ++i) {
+        if (!isfinite(out[i])) out[i] = 0.0f;
         in2 += (double)m->block[i] * m->block[i];
         out2 += (double)out[i] * out[i];
         float v = out[i] * (1.0f / 32768.0f);
@@ -111,22 +125,29 @@ static void push(MicNs *m, int16_t v)
     if (m->block_fill == MICNS_BLOCK) process_block(m);
 }
 
-/* Moves every unread tap frame through the blocks into the FIFO; 0, or -1 when the writer lapped the copy (re-anchored). */
+/* Process the unread frames in one snapshot so a moving writer cannot prolong the read. */
 static int pull(MicNs *m)
 {
     int16_t chunk[1024];
-    for (;;) {
-        const uint64_t w = audio_tap_written(m->tap);
-        if (w <= m->cursor) return 0;
-        const uint32_t n = w - m->cursor > sizeof chunk / sizeof chunk[0] ? (uint32_t)(sizeof chunk / sizeof chunk[0]) : (uint32_t)(w - m->cursor);
+    uint64_t pending = audio_tap_written(m->tap) - m->cursor;
+    while (pending) {
+        const uint32_t capacity = sizeof chunk / sizeof chunk[0];
+        const uint32_t n = pending > capacity ? capacity : (uint32_t)pending;
         if (!audio_tap_read(m->tap, m->cursor, chunk, n)) {m->s.lapped++; anchor(m, audio_tap_written(m->tap)); return -1;}
         m->cursor += n;
+        pending -= n;
         for (uint32_t i = 0; i < n; ++i) push(m, chunk[i]);
     }
+    return 0;
 }
 
 uint32_t micns_read(MicNs *m, float *out, uint32_t n)
 {
+    if (!out || !n) return 0;
+    if (!m) {
+        memset(out, 0, n * sizeof *out);
+        return 0;
+    }
     const uint64_t t0 = now(m);
     m->s.reads++;
     uint32_t served = n > MICNS_MAX_READ ? MICNS_MAX_READ : n, got = 0;
@@ -160,9 +181,8 @@ uint32_t micns_read(MicNs *m, float *out, uint32_t n)
             m->avg += ((int32_t)total * 64 - m->avg) / 64;
             slip = m->avg > m->setpoint + (int32_t)MICNS_BAND * 64 ? 1 : m->avg < m->setpoint - (int32_t)MICNS_BAND * 64 ? -1 : 0;
         }
-        if (slip > 0 && audio_tap_written(m->tap) > m->cursor) {m->cursor++; m->s.drops++;}   /* the device reads slower: one less */
-        (void)pull(m);
-        if (slip < 0 && m->anchored) {push(m, m->last); m->s.repeats++;}                    /* it reads faster: one repeated */
+        if (slip > 0 && audio_tap_written(m->tap) != m->cursor) {m->cursor++; m->s.drops++;}   /* the device reads slower: one less */
+        if (pull(m) == 0 && slip < 0) {push(m, m->last); m->s.repeats++;}                    /* it reads faster: one repeated */
     } else {
         (void)pull(m);
         total = micns_fill(m);

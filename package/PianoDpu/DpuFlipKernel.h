@@ -8,10 +8,11 @@
 class IOService;
 class OSSymbol;
 struct PianoDpuScanoutRequest;
+struct PianoDpuScanoutDiagnostics;
 
 namespace pianodpu {
 
-namespace flip { struct Stats; }
+namespace flip { struct Stats; struct CleanQualification; }
 
 // piano-dpu=2: B1b's ladder (piano-dpu-flip=N, docs/drivers/dpu.md section 8) on the calling thread, after the survey s and m
 // (smmuLevel: piano-dpu-smmu, 3 lets a bank the boot loader translates be walked and taken over). Step 4 does not return while
@@ -20,8 +21,8 @@ void flipRun(IOService *owner, const Survey &s, const SmmuSurvey &m, uint32_t sm
 
 // PianoDpu::callPlatformFunction: true when name is "PianoDpuFlip" (PianoDpuFlipClient.h), with *result set.
 bool flipFunction(const OSSymbol *name, void *request, void *handoff, IOReturn *result);
-bool flipStatsSnapshot(flip::Stats &stats);
-IOReturn scanoutRead(PianoDpuScanoutRequest *request);
+bool flipStatsSnapshot(flip::Stats &stats, flip::CleanQualification &clean);
+IOReturn scanoutRead(PianoDpuScanoutRequest *request, PianoDpuScanoutDiagnostics *diagnostics);
 
 // Serializes timing and PCC transactions with flips.
 IOLock *flipTransactionLock();

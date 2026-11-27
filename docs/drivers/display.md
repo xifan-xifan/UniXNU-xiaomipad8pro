@@ -1,11 +1,39 @@
 # Display: GOP adoption first, then DPU address-only flips
 
-Status: design, 2026-11-10. Nothing built or run. Template: `README.md`. The GOP step (1. below) is built for the k27
-collection as `NativeGopDisplay`: [native-gop-display.md](native-gop-display.md) (2026-11-11, not run). The DPU half (the `dpu=2`
-readout, direct flips, the SMMU window, refresh, colour, panel sleep) is now [dpu.md](dpu.md) (2026-11-11), with SM8750's v12
-register layout, piano's facts and `PianoDpu`; where this page and dpu.md differ, dpu.md is current.
+## Daily status (2026-11-27)
 
-## 1. Purpose and gate
+**M1 is installed on v13.1y12q.** PianoDpu flips on the boot framebuffer pipes at **60 Hz** with neutral desktop colour.
+Native `gop-shot` captures are enabled. The November 26 root-only capture check matched all four test quadrants with the
+8-bit decoder. Night Shift routing, native panel sleep and refresh switching are off in the daily profile.
+[November 26 native screenshot check](../results-2026-11-26.md#also-on-the-daily-line) · [Native capture](native-gop-display.md#9-native-still-capture-for-the-showcase) · [PianoDpu](dpu.md)
+
+- **M2 cache clean.** The November 27 `v131y12u-m2opt2` run earned a RAM-qualified **`M2 PASS` (`rc=0`)**.
+  The ordered A/B skipped cache cleans on 99.96% of verified-WC flips and reduced clean time per shown flip by
+  99.98%. Automated C920 grading found zero mismatches in six checks per arm. `flicker-scan` found no transients
+  in 12,370 frames, and the reverse-order sanity check passed. M2 awaits install promotion, with the daily default
+  **OFF** (`piano-dpu-clean-skip=0`) on installed **v13.1y12q**.
+  [M2 analysis](dpu-m2-analysis.md#automated-optical-qualification-on-v131y12u-m2opt2)
+- **M3 high refresh.** On November 26, RAM `m120c-120` and `m120c-144` reached **120.004 Hz** and **144.146 Hz** on both
+  links without underruns. The 144 Hz run used the MM0 bandwidth vote. At 120 Hz, all 153 type-3 packets were accepted
+  with monotonic timestamps and zero transport errors. The app latched 51.2 distinct new surfaces/s, and all 3562 drawables
+  reported zero `presentedTime`. Pipelined swap-service fence waits and latches passed host tests and await a 120 Hz RAM check.
+  [Fixed refresh modes](dpu-m3.md) · [144 Hz analysis](dpu-m3-144.md) · [MM0 bandwidth](dpu-m3-bandwidth.md) · [Presentation timing](presented-time.md)
+- **M4 Night Shift.** The PCC cross-term order and signed coefficient encoding were corrected, and Night Shift was visibly
+  warm on RAM v13.1y12s on November 26. On RAM `v131y12t-qual1` on November 27, `ns-base` graded unity on both DSPPs with
+  Night Shift off and graded warm after wake. Auto-lock interrupted the mid-run transition. The unlocked RAM recheck and
+  owner approval for daily routing are pending. [M4 PCC colour](dpu-m4-pcc-colour.md)
+- **M5 panel sleep.** November 27 RAM M5R read back the bright desktop's compression-route registers byte for byte after
+  wake, with both INTFs counting and both backlight ICs at full PWM (`07ff`). The panel stayed optically dark and `gop-shot`
+  returned `EBUSY`. The fix-image gate is **HOLD**, and a read-only DSI/PHY probe is prepared. [M5 panel sleep analysis](dpu-m5-analysis.md)
+
+[November 26 RAM results](../results-2026-11-26.md#evening) · [November 27 RAM results](../results-2026-11-27.md#ram-qualification) · [Support status](../STATUS.md) · [Hardware backlog](../BACKLOG-hardware.md#2-backlog-b1b15)
+
+## Historical GOP and DPU design (November 10–11)
+
+The original design and test plan below use the project's early boot milestone names. The daily status above uses the
+PianoDpu milestones from [the DPU driver notes](dpu.md).
+
+### 1. Purpose and gate
 
 Give WindowServer an IOMobileFramebuffer on the real panel. It gates **M2**: the kernel log, then the login window, on the
 panel. Two bottom halves under one IOMFB top half:
@@ -16,7 +44,7 @@ panel. Two bottom halves under one IOMFB top half:
    rewrites the SSPP source address/stride and flushes CTL, so the panel scans the IOSurface directly. Then DPMS and
    brightness. A cold modeset (DSI PHY PLL, DSC, panel init) is **not** in scope.
 
-## 2. Hardware facts
+### 2. Hardware facts
 
 | Item | Value | Source | State |
 |---|---|---|---|
@@ -41,9 +69,9 @@ panel. Two bottom halves under one IOMFB top half:
 Which SSPP(s), CTL and LM pair ABL itself uses at 120 Hz is **needs-boot** (the `dpu=2` readout below). The sheng code
 assumes VIG0+VIG1 and CTL0; on piano that is plausible (same DPU generation offsets) but unproven.
 
-## 3. Ubuntu as the specification
+### 3. Ubuntu as the specification
 
-Kernel `linux-sm8750-piano` v1.1.0 (`~/kfirst/linux`, commit d2710cd1). Read, do not copy.
+Kernel `linux-sm8750-piano` v1.1.0 (commit d2710cd1). Read, do not copy.
 
 - **Pipe programming:** `drivers/gpu/drm/msm/disp/dpu1/dpu_hw_sspp.c` (source address/stride/format setup per rect;
   multirect for the 2x1600 split), `dpu_hw_ctl.c` (flush mask: one bit per SSPP, written to CTL_FLUSH; in video mode
@@ -62,7 +90,7 @@ Kernel `linux-sm8750-piano` v1.1.0 (`~/kfirst/linux`, commit d2710cd1). Read, do
   level>>3 to 0x05, mirrored to the secondary (`kinetic,secondary`); BL_EN 0x08 (bit 6 enable, bits 5:0 sinks).
 - **Lid/DPMS from the VM path:** `thin-direct-report.md` (SW_LID → DPMS off/on; EINVAL needed a full modeset).
 
-## 4. UniXNU template to build on
+### 4. UniXNU template to build on
 
 | Piece | Base (pin) | Change for piano |
 |---|---|---|
@@ -77,13 +105,13 @@ Kernel `linux-sm8750-piano` v1.1.0 (`~/kfirst/linux`, commit d2710cd1). Read, do
 Piano UniXNU attempts so far (`piano-unixnu/board.toml:18,36,63`) use the Pagani `NativeMobileDisplay` (GOP only, "vblank
 not implemented") with `offline-legacy-gop=1`; GopFramebuffer is the better base because it has the direct path.
 
-## 5. IOKit family / ABI
+### 5. IOKit family / ABI
 
 `IOMobileFramebufferLegacy` subclass in IOMobileFramebuffer.kext of the macOS 27.3 KC (Mac17,11 profile). The family
 runs the swap queue and user client; the driver supplies `swap_begin`/`program_hardware`, timing and colour elements
 (8-bit SDR, sRGB), `notify_swap_done`. Backlight publishes an AppleARMBacklight-compatible service.
 
-## 6. Boot args (27.3 names)
+### 6. Boot args (27.3 names)
 
 `offline-legacy-register=1 offline-legacy-gop=1 offline-legacy-unit-scale=2 offline-legacy-phase=4` (+ sheng's
 `offline-mobile-graphics-*`, `offline-legacy-pm/validate/transfer/cpu-present=1`), `vsync=120 vsync-fixed=1`,
@@ -91,13 +119,13 @@ runs the swap queue and user client; the driver supplies `swap_begin`/`program_h
 `native-display-8bit-scanout-design.md` §1), `fb-gpu=1` (GPU copy fallback), `dpu=2` (readout only), `dpu-scanout=2`
 (direct, off by default), `backlight=1`. Gamut sRGB (P3 gives the unscannable `'b3a8'`).
 
-## 7. Kernel archive / component
+### 7. Kernel archive / component
 
 `components`: `GopFramebuffer` (pinned), board glue `build-gop-legacy-display-27.py` as in UniXNU-sheng
 `board.toml:20`; backlight + GENI I2C + timing probe from the piano layer (`drivers/PianoBacklight`, sheng-derived).
 The DPU SMMU window comes with the storage component (`ShengUfs`/`NativeUfs`), so `dpu-scanout>=1` needs it linked.
 
-## 8. Hardware test plan
+### 8. Hardware test plan
 
 - **M1:** UniXNU menu on the GOP proves the splash fb is live (already implied by simpledrm on Linux).
 - **M2a (GOP only):** `vc-text=1`, no `dpu*` args. Pass: boot log, then the login window on the panel at 3200x2136
@@ -112,12 +140,12 @@ The DPU SMMU window comes with the storage component (`ShengUfs`/`NativeUfs`), s
 - **Later:** DPMS (display-off/sleep-in on idle; on with the documented delays; never reset MDSS while scanning) and
   brightness 0..2047 on both KTZ8866.
 
-## 9. Fallback
+### 9. Fallback
 
 `dpu-scanout=0` → GPU copy (`fb-gpu=1`) → CPU copy into the GOP. Without IOMFB at all, `vc-text=1` still shows the
 kernel log. The Gunyah VM path (`gunyah-guest-SWITCHBACK.md`) is untouched.
 
-## 10. Open questions
+### 10. Open questions
 
 1. Which SSPPs/CTL/LMs and multirect mode does ABL leave at 120 Hz (Linux uses `sspp_8`, a DMA pipe, at 144 Hz)? If
    ABL uses a DMA pipe with multirect, the flip must write both rects' addresses. → M2b readout.
@@ -129,7 +157,7 @@ kernel log. The Gunyah VM path (`gunyah-guest-SWITCHBACK.md`) is untouched.
 5. 120 Hz only, or a later switch to 144 Hz? Mode switching is a modeset; out of scope.
 6. IOMFB 27.3 ABI: confirm GopFramebuffer's 27.3 slot table on the Mac17,11 KC; our 27.0.1 table is a cross-check.
 
-## 11. Licence note
+### 11. Licence note
 
 The msm DPU, panel and KTZ8866 drivers are GPL-2.0 and are read as the specification only (registers, sequences,
 delays, cited above). GopFramebuffer and the sheng packages are reused under their own licences (check `LICENSE` in

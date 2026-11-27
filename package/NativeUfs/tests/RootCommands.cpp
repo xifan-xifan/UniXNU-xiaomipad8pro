@@ -123,6 +123,26 @@ int main ()
   assert (gSlotFree == (1U << (kRegionSlots - 1)) - 1);
   reset (); ufs_test_slots (1); assert (gSlotCount == 1 && gSlotFree == 1);
   assert (hostRead4k (0, 1, 1, out.data ()) == 0 && m.lastSlot == 0 && gSlotFree == 1);
+  // One-slot fallback: allow an eligible queued Data read to pass a waiting
+  // writer at a command boundary, but the next handoff must serve that writer.
+  UfsSlotWaiter read2{nullptr, -1, true, false}, read1{&read2, -1, true, false},
+                writer{&read1, -1, false, false};
+  bool pooled;
+  const auto single = hostSlotTake (&pooled);
+  gSlotWaitHead = &writer;
+  gSlotWaitTail = &read2;
+  gSlotPreferred = 2;
+  hostSlotGive (single, pooled);
+  assert (read1.slot == 0 && writer.slot < 0 && read2.slot < 0);
+  ++gSlotsBusy;  // the recipient has resumed from hostSlotTake
+  hostSlotGive (single, pooled);
+  assert (writer.slot == 0 && read2.slot < 0);
+  ++gSlotsBusy;
+  hostSlotGive (single, pooled);
+  assert (read2.slot == 0 && !gSlotWaitHead && !gSlotWaitTail);
+  ++gSlotsBusy;
+  hostSlotGive (single, pooled);
+  assert (gSlotFree == 1 && !gSlotsBusy && !gSlotPreferred);
   gHostPanic = true; assert (hostRead4k (0, 1, 1, out.data ()) == 0 && m.lastSlot == 0);
   // Tracked Data buffers: the actual transport distinguishes a live caller PRDT
   // from a completed error, a refusal before ringing and a timeout in the bounce area.
@@ -146,6 +166,23 @@ int main ()
   gTestDmaStage = stage;
   bool live = true;
   assert (hostWrite4k (0, 99, 1, stage, true, &live) == kIOReturnBadArgument && !live && !m.doorbells);
+  assert (hostWrite4k (0, 100, 1, stage, false, &live) == kIOReturnSuccess && !live);
+  assert (m.device[ufsSlotUcdOffset (0) + 16] == 0x2a && m.device[ufsSlotUcdOffset (0) + 17] == 0);
+  assert (hostSyncCache () == kIOReturnSuccess && m.syncs == 1);
+  assert (m.device[ufsSlotUcdOffset (0) + 16] == 0x35 && m.device[ufsSlotUcdOffset (0) + 17] == 0);
+  // A caller that cannot quarantine its buffer must use the controller-owned staging area.
+  for (bool write : {false, true}) {
+    reset ();
+    assert (hostStoreOpen (100, 64));
+    gTestDmaStage = stage;
+    const auto result = write ? hostWrite4k (0, 100, 1, stage) : hostRead4k (0, 100, 1, stage);
+    assert (result == kIOReturnSuccess);
+    const auto *entry = m.device.data () + ufsSlotUcdOffset (0) + kPrdtOffset;
+    uint32_t low, high;
+    memcpy (&low, entry, sizeof (low));
+    memcpy (&high, entry + 4, sizeof (high));
+    assert ((uint64_t (high) << 32 | low) == gHost.phys + ufsSlotDataOffset (0));
+  }
   // native-ufs-suspend=0 and native-ufs-ahit absent (today's): nothing here ever held the queue, entered Hibern8 or set AHIT.
   assert (!gHostHeld && gHoldWaits == 0 && m.enterCommands == 0 && reg (0x18) == 0 && gPower.suspends == 0);
   puts ("PASS: command slots: per-slot entry, descriptor, tag and data; pool; busy and task-set-full retries; panic slot; one-slot fallback");

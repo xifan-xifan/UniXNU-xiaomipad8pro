@@ -105,6 +105,11 @@ meanings: `docs/drivers/wifi.md`.
 | `tests/wmi_host.cpp` | host tests of level 6: the copy engine's registers and rings against a model of the chip, the transport's handshake and credits, the initialisation's TLVs, the scan and its list, the hand-off to level 7, each with injected faults |
 | `tests/assoc_host.cpp`, `tests/sta_host.cpp` | host tests of level 7: its messages read back as the firmware reads them; the frames, the choice, the reorder queues, the peer map and the whole join against a firmware and access-point model (refusals, silence, a late profile, a disconnect, a stop) |
 | `tests/dp_host.cpp`, `tests/net_host.cpp` | host tests of level 8: the rings' registers, the received frames and their buffers, a frame sent and its completion against a ring model; the 802.1X port's messages, the EAPOL frames, the frame queue and the keys' order |
+| `tests/rejoin_regdb_model_host.cpp` | standalone ASan/UBSan coverage of scan-first recovery and RX buffer accounting after involuntary loss, menu and wake join intent, firmware country and channel filtering, and scan/GET103 security fields |
+
+The offline rejoin suite uses synthetic firmware rules and an AP that changes channel across station generations. It models
+SET22 disassociate followed by SET19 OFF/ON and a fresh SET20 from the client's saved network after ON or wake. Multi-AP
+roaming, actual airportd auto-join and menu-row click verification remain **HOLD** for the device gate.
 
 Build: `tooling/k27/build-native-piano-wifi.sh` (the four host test programs, the `FatVolume.c` drift check, the objects, the
 import check) and `tooling/k27/build-native-piano-wifi-ethernet.sh` for the macOS side. Both are in

@@ -279,6 +279,12 @@ IOReturn AppleVideoToolboxParavirtualizationUserClient::message(uint64_t length,
     bool owned = checked.type == vtwire::cc("decs") || checked.type == vtwire::cc("encs");
     for (unsigned i = 0; i < uuidCount; ++i) if (!memcmp(uuids[i], checked.uuid, 16)) owned = true;
     if (!owned) { IOLog("PianoVideoVT V5c: send-event request %llu decision uuid-rejected status %08x\n",checked.request,kIOReturnNotPermitted);IOFree(bytes, length); return kIOReturnNotPermitted; }
+    uint32_t ids[MaxSurfaces];
+    unsigned surfaceCount = 0;
+    for (unsigned i = 0; i < count && i < MaxSurfaces && surfaces[i]; ++i) {
+        if (surfaces[i] > UINT32_MAX) { IOFree(bytes, length); return kIOReturnBadArgument; }
+        ids[surfaceCount++] = uint32_t(surfaces[i]);
+    }
     const uint32_t seq = droidvm_vtpv_messages;
     droidvm_vtpv_record &r = droidvm_vtpv_log[seq % LogEntries];
     r.seq = seq;
@@ -288,16 +294,14 @@ IOReturn AppleVideoToolboxParavirtualizationUserClient::message(uint64_t length,
     r.flags = big32(bytes + 12);
     memcpy(r.uuid, bytes + 16, sizeof r.uuid);
     r.request = big64(bytes + 32);
-    r.surface_count = 0;
-    for (unsigned i = 0; i < count && i < MaxSurfaces && surfaces[i]; ++i) r.surfaces[r.surface_count++] = uint32_t(surfaces[i]);
+    r.surface_count = surfaceCount;
+    for (unsigned i = 0; i < surfaceCount; ++i) r.surfaces[i] = ids[i];
     memset(r.payload, 0, sizeof r.payload);
     memcpy(r.payload, bytes + HeaderBytes, length - HeaderBytes < sizeof r.payload ? length - HeaderBytes : sizeof r.payload);
     captureMessage(bytes, uint32_t(length), 0);
     droidvm_vtpv_messages = seq + 1;
     IOLog("PianoVideo: vt message %c%c%c%c received count %u\n", char(r.type >> 24), char(r.type >> 16), char(r.type >> 8), char(r.type), droidvm_vtpv_messages);
-    uint32_t ids[MaxSurfaces];
-    for (unsigned i = 0; i < r.surface_count; ++i) ids[i] = r.surfaces[i];
-    const int rc = host ? droidvm_vthost_message(host, bytes, uint32_t(length), ids, r.surface_count) : -1;
+    const int rc = host ? droidvm_vthost_message(host, bytes, uint32_t(length), ids, surfaceCount) : -1;
     IOLog("PianoVideoVT V5c: send-event request %llu flags %u decision %s status %d\n",checked.request,checked.flags,host?(rc?"host-transport-rejected":"host-dispatched"):"host-closed",rc);
     IOFree(bytes, length);
     *status = uint64_t(int64_t(rc));
@@ -368,7 +372,7 @@ IOReturn AppleVideoToolboxParavirtualizationUserClient::externalMethod(uint32_t 
 IOReturn AppleVideoToolboxParavirtualizationUserClient::registerNotificationPort(mach_port_t port, UInt32 type, io_user_reference_t) {
     droidvm_vtpv_notify_calls = droidvm_vtpv_notify_calls + 1;
     droidvm_vtpv_notify_type = type;
-    if (type != 0) { droidvm_vtpv_notify_result = kIOReturnBadArgument; return kIOReturnBadArgument; }
+    if (type != 0) { droidvm_vtpv_notify_result = uint32_t(kIOReturnBadArgument); return kIOReturnBadArgument; }
     IOLockLock(lock);
     IOReturn result = kIOReturnNotReady;
     if (!queue) {

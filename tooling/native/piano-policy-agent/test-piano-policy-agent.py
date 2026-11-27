@@ -13,6 +13,7 @@ import os
 import shutil
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -24,6 +25,7 @@ BOOT = 1000000
 LPM, HPM = 'com.apple.system.lowpowermode', 'com.apple.system.highpowermode'
 TICK, SESSION = 'com.unixnu.piano.slim.tick', 'com.unixnu.piano.slim.session'
 SRC = 'com.apple.system.powersources.source'
+LID = 'com.apple.system.powermanagement.clamshellstate'
 FORBIDDEN = ('launchctl enable', 'launchctl disable', 'launchctl kickstart', 'mdutil', 'kill ', 'launchctl remove')
 
 LAUNCHCTL = r'''#!/usr/bin/env python3
@@ -81,7 +83,10 @@ def model(): return json.loads((m / 'model.json').read_text())
 def save(s): (m / 'model.json').write_text(json.dumps(s))
 def log(t):
     with (m / 'calls').open('a') as f: f.write(t + '\n')
-if a[0] == '-g': print('%s %s' % (a[1], model()['notify'].get(a[1], 0)))
+if a[0] == '-g':
+    s = model()
+    print('%s %s' % (a[1], s['notify'].get(a[1], 0)))
+    sys.exit(s['fail'].get('notify', {}).get(a[1], 0))
 elif a[0] == '-p': log('notifyutil -p ' + a[1])
 elif a[0] == '-w':
     log('notifyutil ' + ' '.join(a))
@@ -91,12 +96,17 @@ elif a[0] == '-w':
         except Exception: return -1
     for ev in model()['events']:
         s = model(); s.update(ev.get('set', {})); s['notify'].update(ev.get('notify', {})); save(s)
-        if 'clock' in ev: (m / 'clock').write_text(str(ev['clock']))
+        for name in ('clock', 'source', 'ioreg'):
+            if name in ev: (m / name).write_text(str(ev[name]))
         if 'key' not in ev: continue
-        want = seq() + (1 if ev.get('counted', True) else 0)
+        want = seq() + 1
         print(ev['key'], flush=True)
-        t = time.time()
-        while ev.get('counted', True) and seq() < want and time.time() - t < 15: time.sleep(0.05)
+        if not ev.get('counted', True): continue
+        deadline = time.monotonic() + 15
+        while seq() < want:
+            if time.monotonic() >= deadline: sys.exit('no state update for notification %s at seq %d' % (ev['key'], want))
+            time.sleep(0.01)
+        with (m / 'states').open('a') as f: f.write(state.read_text())
 '''
 SH_STUBS = {
     'sysctl': '''#!/bin/sh
@@ -145,6 +155,7 @@ class Rig:
         for d in (self.bin, self.m, self.root / 'System/Library/LaunchAgents', self.root / 'System/Library/LaunchDaemons',
                   self.root / 'Library/Logs/DiagnosticReports', self.root / 'Users/u/Library/Logs/DiagnosticReports'):
             d.mkdir(parents=True, exist_ok=True)
+        (self.bin / 'python3').symlink_to(sys.executable)
         for name, text in (('launchctl', LAUNCHCTL), ('taskpolicy', TASKPOLICY), ('notifyutil', NOTIFYUTIL), *SH_STUBS.items()):
             (self.bin / name).write_text(text); (self.bin / name).chmod(0o755)
         for label in ('com.apple.knowledge-agent', 'com.apple.tipsd'):
@@ -160,7 +171,7 @@ class Rig:
                      ('ioreg', '')):
             (self.m / k).write_text(v)
         self.env = {'PATH': '%s:/usr/bin:/bin:/usr/sbin:/sbin' % self.bin, 'PIANO_USERLAND_ROOT': str(self.root),
-                    'MODEL': str(self.m), 'LC_ALL': 'C', 'HOME': str(tmp)}
+                    'MODEL': str(self.m), 'LC_ALL': 'C', 'HOME': str(tmp), 'TMPDIR': str(tmp)}
         self.slim = self.root / 'private/var/db/piano-userland/slim'
 
     def save(self): (self.m / 'model.json').write_text(json.dumps(self.model))
@@ -169,10 +180,11 @@ class Rig:
     def notify(self, **kv):
         self.load(); self.model['notify'].update({LPM if k == 'lpm' else HPM: v for k, v in kv.items()}); self.save()
 
-    def run(self, *args, clock=None):
+    def run(self, *args, clock=None, expected=0, timeout=60):
         if clock is not None: self.put('clock', clock)
-        r = subprocess.run([self.shell, str(AGENT), *args], env=self.env, capture_output=True, text=True, timeout=60)
-        if r.returncode: raise AssertionError('agent %s rc %d: %s%s' % (args, r.returncode, r.stdout, r.stderr))
+        r = subprocess.run([self.shell, str(AGENT), *args], env=self.env, capture_output=True, text=True, timeout=timeout)
+        if r.returncode != expected:
+            raise AssertionError('agent %s rc %d (expected %d): %s%s' % (args, r.returncode, expected, r.stdout, r.stderr))
         return r
 
     def event(self, name, clock=None): return self.run('--event', name, clock=clock)
@@ -304,6 +316,150 @@ class AgentTests(unittest.TestCase):
             self.assertEqual(rig.state()['state'], 'save'); self.assertIn('taskpolicy -b -p 700', rig.calls())
         self.each(t)
 
+    def test_rapid_energy_modes(self):
+        def t(rig):
+            rig.run('--start')
+            # One notification can arrive after both flags have changed.
+            for lpm, hpm, event, writes in (
+                (1, 0, 'hpm', ('lpm=1', 'hpm=0')),
+                (0, 1, 'lpm', ('hpm=1', 'lpm=0')),
+                (1, 1, 'hpm', ('lpm=1', 'hpm=1')),
+                (0, 0, 'hpm', ('hpm=0', 'lpm=0')),
+                (2, -1, 'lpm', ('hpm=0', 'lpm=0')),
+            ):
+                rig.clear()
+                rig.notify(lpm=lpm, hpm=hpm)
+                rig.event(event)
+                self.assertEqual(
+                    [call for call in rig.calls().splitlines() if call.startswith('sysctl -w ')],
+                    ['sysctl -w machdep.piano_policy_' + write for write in writes],
+                )
+        self.each(t)
+
+    def test_lid_requires_explicit_lock_only(self):
+        def t(rig):
+            for state, sleeps, expected in (
+                ('Yes', 'Yes', False), ('No', 'No', False), ('Yes', '', False),
+                ('Yes', 'Unknown', False), ('Yes', 'No', True), ('No', 'No', False),
+            ):
+                rig.clear()
+                registry = '    "AppleClamshellState" = ' + state + '\n'
+                if sleeps:
+                    registry += '    "AppleClamshellCausesSleep" = ' + sleeps + '\n'
+                rig.put('ioreg', registry)
+                rig.event('lid')
+                self.assertEqual('pmset displaysleepnow' in rig.calls(), expected)
+        self.each(t)
+
+    def test_energy_read_failure(self):
+        def t(rig):
+            rig.into_save()
+            before = rig.state()
+            rig.notify(lpm=0, hpm=1)
+            rig.load(); rig.model['fail']['notify'] = {LPM: 1}; rig.save()
+            rig.clear(); rig.event('hpm', clock=240)
+            self.assertNotIn('sysctl -w ', rig.calls())
+            self.assertNotIn('taskpolicy -B', rig.calls())
+            self.assertEqual(rig.state(), before)
+            self.assertFalse((rig.slim / 'lock').exists())
+
+            # The kill switch still restores jobs while the mode read fails.
+            (rig.slim / 'off').touch()
+            rig.event('tick', clock=241)
+            self.assertEqual(rig.state()['state'], 'off')
+            self.assertEqual(rig.applied(), [])
+            (rig.slim / 'off').unlink()
+
+            rig.load(); rig.model['fail'].clear(); rig.save()
+            rig.event('hpm', clock=242)
+            self.assertIn('sysctl -w machdep.piano_policy_hpm=1', rig.calls())
+            self.assertIn('sysctl -w machdep.piano_policy_lpm=0', rig.calls())
+            self.assertEqual(rig.state()['state'], 'normal')
+        self.each(t)
+
+    def test_test_list_without_final_newline(self):
+        def t(rig):
+            rig.run('--start')
+            (rig.slim / 'test-pause').write_text(
+                'bg system com.apple.watchdogd watchdogd extra\n'
+                'bg gui com.apple.knowledge-agent knowledge-agent'
+            )
+            rig.notify(lpm=1); rig.event('lpm', clock=200); rig.event('tick', clock=230)
+            self.assertEqual([a[3] for a in rig.applied()], ['com.apple.knowledge-agent'])
+            self.assertIn('taskpolicy -b -p 700', rig.calls())
+            self.assertNotIn('taskpolicy -b -p 50', rig.calls())
+        self.each(t)
+
+    def test_corrupt_state_numbers(self):
+        def t(rig):
+            rig.run('--start'); rig.tests_on()
+            rig.notify(lpm=1)
+            state = rig.slim / 'state'
+            state.write_text('state=pending gen=0008 since=0200 seq=0008 due=0230\n')
+            rig.event('tick', clock=215)
+            s = rig.state()
+            self.assertEqual((s['state'], s['gen'], s['since'], s['seq'], s['due']), ('pending', '8', '200', '9', '230'))
+            self.assertEqual(rig.applied(), [])
+            self.assertFalse((rig.slim / 'lock').exists())
+
+            state.write_text('state=pending gen=8 since=18446744073709551616 seq=9 due=230\n')
+            rig.event('tick', clock=250)
+            self.assertEqual((rig.state()['state'], rig.state()['since']), ('pending', '250'))
+            self.assertEqual(rig.applied(), [])
+            rig.event('tick', clock=280)
+            self.assertEqual(rig.state()['state'], 'save')
+            self.assertEqual(len(rig.applied()), 3)
+        self.each(t)
+
+    def test_state_write_failure_releases_lock(self):
+        def t(rig):
+            rig.run('--start')
+            before = rig.state()
+            pending_file = rig.slim / 'state.new'
+            pending_file.mkdir()
+            rig.run('--start', expected=1)
+            self.assertEqual(rig.state(), before)
+            self.assertFalse((rig.slim / 'lock').exists())
+            pending_file.rmdir()
+            rig.run('--start')
+            self.assertEqual(int(rig.state()['gen']), int(before['gen']) + 1)
+        self.each(t)
+
+    def test_unavailable_boot_id_keeps_restore_records(self):
+        def t(rig):
+            rig.into_save()
+            before = rig.applied()
+            rig.put('boot', '')
+            rig.clear(); rig.run('--restore', expected=1)
+            self.assertEqual(rig.applied(), before)
+            self.assertNotIn('taskpolicy -B', rig.calls())
+            self.assertNotIn('launchctl bootstrap', rig.calls())
+            self.assertFalse((rig.slim / 'lock').exists())
+
+            rig.put('boot', before[0][0])
+            rig.run('--restore')
+            self.assertEqual(rig.applied(), [])
+            self.assertIn('taskpolicy -B -p 700', rig.calls())
+            self.assertIn('launchctl bootstrap system', rig.calls())
+        self.each(t)
+
+    def test_apply_requires_writable_ledger(self):
+        def t(rig):
+            rig.run('--start'); rig.tests_on()
+            rig.notify(lpm=1); rig.event('lpm', clock=200)
+            ledger = rig.slim / 'applied'
+            ledger.mkdir()
+            rig.clear(); rig.run('--event', 'tick', clock=230, expected=1)
+            self.assertNotIn('taskpolicy', rig.calls())
+            self.assertNotIn('launchctl bootout', rig.calls())
+            self.assertEqual(rig.state()['state'], 'pending')
+            self.assertFalse((rig.slim / 'lock').exists())
+            ledger.rmdir()
+            rig.event('tick', clock=231)
+            self.assertEqual(rig.state()['state'], 'save')
+            self.assertEqual(len(rig.applied()), 3)
+        self.each(t)
+
     def test_restart_restores_first(self):
         def t(rig):
             rig.into_save()
@@ -428,7 +584,7 @@ class AgentTests(unittest.TestCase):
             rig.load()
             rig.model['events'] = [{'notify': {LPM: 1}, 'clock': 200, 'key': LPM}, {'clock': 231, 'key': TICK},
                                    {'clock': 240, 'key': SESSION}, {'notify': {LPM: 0}, 'clock': 250, 'key': LPM},
-                                   {'clock': 260, 'key': 'com.apple.system.powermanagement.clamshellstate', 'counted': False},
+                                   {'clock': 260, 'key': LID, 'counted': False},
                                    {'clock': 261, 'key': SRC}]
             rig.save()
             rig.put('ioreg', '    "AppleClamshellState" = Yes\n    "AppleClamshellCausesSleep" = No\n')
@@ -442,6 +598,69 @@ class AgentTests(unittest.TestCase):
             s = rig.state(); self.assertEqual((s['state'], s['event']), ('normal', 'source'))
             lg = (rig.m / 'logger').read_text()
             self.assertIn('slim: start: Normal', lg); self.assertIn('notifyutil ended: exiting', lg)
+        self.each(t)
+
+    def test_daemon_power_churn(self):
+        def t(rig):
+            rig.slim.mkdir(parents=True)
+            (rig.slim / 'test-pause').write_text('bg gui com.apple.knowledge-agent knowledge-agent\n')
+            events = rig.model['events']
+            names = {SRC: 'source', LPM: 'lpm', HPM: 'hpm', TICK: 'tick'}
+            sources = {'ac': 'AC Power', 'battery': 'Battery Power'}
+            mode_write = 'sysctl -w machdep.piano_policy_'
+            expected_calls = [mode_write + 'hpm=0', mode_write + 'lpm=0']
+            expected_states = []
+
+            def add(clock, key, source, lpm, hpm, state, lid=None, since=None):
+                if lid is not None:
+                    closed, sleeps = lid
+                    registry = ('    "AppleClamshellState" = %s\n    "AppleClamshellCausesSleep" = %s\n' % (closed, sleeps))
+                    # Lid does not store state. The following power event acknowledges both notifications in FIFO order.
+                    events.append({'key': LID, 'counted': False, 'ioreg': registry, 'clock': clock})
+                    if lid == ('Yes', 'No'):
+                        expected_calls.append('pmset displaysleepnow')
+                events.append({'key': key, 'clock': clock, 'source': sources[source], 'notify': {LPM: lpm, HPM: hpm}})
+                if key in (LPM, HPM):
+                    writes = ('lpm=%d' % lpm, 'hpm=%d' % hpm)
+                    expected_calls.extend(mode_write + write for write in (writes if lpm else reversed(writes)))
+                expected_states.append(dict(
+                    state=state, want='normal' if state == 'normal' else 'save', event=names[key], source=source,
+                    lpm=str(lpm), hpm=str(hpm), seq=str(2 + len(expected_states)), up=str(clock), applied=str(int(state == 'save')),
+                    since=None if since is None else str(since),
+                ))
+
+            for start in range(200, 296, 8):
+                add(start,     SRC, 'battery', 0, 0, 'pending', ('No', 'Yes'), since=start)
+                add(start + 1, SRC, 'ac',      0, 0, 'normal',  ('Yes', 'No'))
+                add(start + 2, HPM, 'ac',     1, 0, 'pending', ('No', 'No'), since=start + 2)
+                add(start + 3, TICK, 'ac',    1, 0, 'pending', ('Yes', 'No'), since=start + 2)
+                add(start + 4, LPM, 'battery', 0, 1, 'normal', ('Yes', 'Yes'))
+                add(start + 5, HPM, 'battery', 1, 1, 'pending', ('No', 'Yes'), since=start + 5)
+                add(start + 6, LPM, 'ac',     0, 1, 'normal',  ('Yes', 'No'))
+                add(start + 7, HPM, 'ac',     0, 0, 'normal',  ('No', 'No'))
+            add(296, SRC, 'battery', 0, 0, 'pending', since=296)
+            add(325, TICK, 'battery', 0, 0, 'pending', since=296)
+            add(326, TICK, 'battery', 0, 0, 'save', since=296)
+            expected_calls.append('taskpolicy -b -p 700')
+            add(327, LPM, 'battery', 0, 1, 'normal')
+            expected_calls.append('taskpolicy -B -p 700')
+            rig.save()
+
+            r = rig.run(timeout=120)
+            self.assertEqual(r.stderr, '')
+            lines = (rig.m / 'states').read_text().splitlines()
+            self.assertEqual(len(lines), len(expected_states))
+            for line, expected in zip(lines, expected_states):
+                state = dict(x.split('=', 1) for x in line.split())
+                with self.subTest(seq=expected['seq'], event=expected['event']):
+                    fields = [key for key in expected if expected[key] is not None]
+                    self.assertEqual({key: state[key] for key in fields}, {key: expected[key] for key in fields})
+            calls = rig.calls().splitlines()
+            self.assertEqual([call for call in calls if call.startswith(('sysctl -w ', 'pmset ', 'taskpolicy ',
+                                                                         'launchctl bootout ', 'launchctl bootstrap '))],
+                             expected_calls)
+            self.assertEqual(rig.applied(), [])
+            self.assertFalse(rig.load()['bg']['700'])
         self.each(t)
 
     def test_status_and_usage(self):

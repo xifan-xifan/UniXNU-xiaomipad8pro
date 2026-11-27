@@ -83,7 +83,8 @@ Plan gPlan;
 // capture's description, and memory type 0 (the last capture's RAW10 frame, kRawCap bytes: the rear's 16 MiB frame buffer's worth).
 constexpr uint64_t kRawCap = 16ull << 20;
 IOLock *gServeLock;
-bool gRequestPending, gRequestDone, gServing;
+bool gRequestPending, gRequestDone, gRequestAbandoned, gServing;
+IOReturn gRequestResult;
 PianoCameraCaptureArgs gRequest;
 PianoCameraFrameInfo gInfo;
 IOBufferMemoryDescriptor *gRawMem;
@@ -111,6 +112,13 @@ void cancelLiveLocked()
   IOLockWakeup(gServeLock, &gLiveStatus, false);
 }
 
+bool suspended()
+{
+  IOLockLock(gServeLock);
+  const bool off = gSuspended;
+  IOLockUnlock(gServeLock);
+  return off;
+}
 
 uint32_t bootArg(const char *name, uint32_t fallback)
 {
@@ -538,11 +546,17 @@ class Lines {
     char item[120];
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(item, sizeof item, fmt, ap);
+    const int written = vsnprintf(item, sizeof item, fmt, ap);
     va_end(ap);
+    if (written < 0) return;
     const size_t len = strlen(item);
     if (n_ && n_ + 2 + len > kWidth) flush();
-    n_ += snprintf(line_ + n_, sizeof line_ - n_, "%s%s", n_ ? ", " : "", item);
+    if (n_) {
+      line_[n_++] = ',';
+      line_[n_++] = ' ';
+    }
+    memcpy(line_ + n_, item, len + 1);
+    n_ += len;
   }
   void flush()
   {
@@ -723,11 +737,17 @@ class Ops {
     VrmResult res;
     const int rc = vrmSend(gRsc, gRscIo, base, cmds, n, res);
     lockRelease(&sm8750_rpmh_drv2_owner);
-    char line[120];
-    int at = 0;
-    for (unsigned i = 0; i < n && at < int(sizeof line) - 24; ++i)
-      at += snprintf(line + at, sizeof line - at, "%s%s %u", i ? ", " : "",
-                     cmds[i].reg == kVrmVoltage ? "mV" : cmds[i].reg == kVrmEnable ? "enable" : "mode", cmds[i].value);
+    char line[120] = {};
+    size_t at = 0;
+    for (unsigned i = 0; i < n && at < sizeof line - 24; ++i) {
+      const int written = snprintf(line + at, sizeof line - at, "%s%s %u", i ? ", " : "",
+                                   cmds[i].reg == kVrmVoltage ? "mV" : cmds[i].reg == kVrmEnable ? "enable" : "mode", cmds[i].value);
+      if (written < 0) {
+        line[at] = 0;
+        break;
+      }
+      at += size_t(written);
+    }
     note("rsc: %s (%#x): %s through TCS %d %s after %u ms", kRails[rail].cmdDb, base, line, res.tcs,
          res.done ? "completed" : rc == -16 ? "NOT sent (no idle TCS)" : "NOT completed (left in flight, not used again)", res.waited);
     return rc;
@@ -913,7 +933,7 @@ class Ops {
   {
     const uint64_t n = uint64_t(r.stats.stride) * r.height;
     gKept = 0;
-    if (!gKeepFrame || !gRawBytes || !n || n > kRawCap) return;
+    if (!gKeepFrame || !gRawBytes || !n || n > r.frameBytes || n > kRawCap) return;
     memcpy(gRawBytes, buf, n);
     gKept = n;
   }
@@ -1045,14 +1065,14 @@ void fillInfo(const StreamResult &r)
   const ExposureFacts &f = rear ? kRearExposure : kFrontExposure;
   memset(&i, 0, sizeof i);
   i.version = kPianoCameraABIVersion;
-  i.status = gKept ? 0u : r.failedStep ? uint32_t(-r.failedStep) : 2u;
+  i.status = r.ok && gKept ? 0u : r.failedStep ? uint32_t(-r.failedStep) : 2u;
   i.sensor = rear ? kPianoCameraRear : kPianoCameraFront;
   i.width = r.width;
   i.height = r.height;
   i.stride = r.stats.stride;
   i.bayer = rear ? kPianoCameraGRBG : kPianoCameraBGGR;
   i.black = kRawBlack;
-  i.bytes = gKept;
+  i.bytes = i.status ? 0 : gKept;
   i.exposure = r.exposure;
   i.gain = r.gain;
   i.gainUnit = f.gUnit;
@@ -1162,6 +1182,9 @@ bool PianoCamera::start(IOService *provider)
   gServeLock = IOLockAlloc();
   thread_t t = nullptr;
   if (!gSequenceLock || !gServeLock || kernel_thread_start(&PianoCamera::thread, this, &t) != KERN_SUCCESS) {
+    if (gSequenceLock) IOLockFree(gSequenceLock);
+    if (gServeLock) IOLockFree(gServeLock);
+    gSequenceLock = gServeLock = nullptr;
     stage(-1, "no lock or no thread; nothing done");
     return true;
   }
@@ -1264,10 +1287,10 @@ void PianoCamera::run()
     const bool goesOn = sequence(verdict, sizeof verdict);
     snprintf(results[i], sizeof results[i], "%s", verdict);
     ++ran;
-    if (!goesOn && i + 1 < gPlan.count) {
+    if (!goesOn) {
+      stopped = true;
       note("plan: stopped after %s (its power-down was not complete, or its buffer was kept): %u of %u not run", p.name,
            gPlan.count - i - 1, gPlan.count);
-      stopped = true;
       break;
     }
   }
@@ -1329,13 +1352,29 @@ bool PianoCamera::sequence(char *verdict, size_t size)
     o.stopAt = gArgs.stop >= 300 ? int(gArgs.stop) : 0;
     stage(5, "level 3: RAW10 frames through CSIPHY, CSID-lite0 and TFE-lite0's RDI0 into memory");
     IOLockLock(gSequenceLock);
+    // PM may have acquired the sequence lock after the request was posted but before its worker got here.
+    if (suspended()) {
+      if (gKeepFrame) {
+        IOLockLock(gServeLock);
+        gRequestResult = kIOReturnOffline;
+        IOLockUnlock(gServeLock);
+      }
+      IOLockUnlock(gSequenceLock);
+      snprintf(verdict, size, "camera suspended");
+      return false;
+    }
     Session<Ops> &session = k.session.make(ops, po);
     Stream<Ops> &stream = k.stream.make(ops, session, o);
     const StreamResult &r = stream.run(w, gLoader, gPmic, so, s);
     IOLockUnlock(gSequenceLock);
     reportResult(r.sensor);
     reportStream(r);
-    if (gKeepFrame) fillInfo(r);   // after reportStream: the description carries its result line
+    if (gKeepFrame) {
+      IOLockLock(gServeLock);
+      fillInfo(r);   // after reportStream: the description carries its result line
+      if (!r.cleanOff) gHardwareUnsafe = true;
+      IOLockUnlock(gServeLock);
+    }
     setProperty("piano-camera-level3", gL3);
     stage(r.failedStep ? -6 : 6, r.ok ? "done (level 3)" : "done (level 3, see the lines above)");
     note("done: level 3 %s; %llu MMIO loads, %llu stores logged, %llu quiet stores, %u map failures", r.ok ? "ok" : "not ok",
@@ -1355,6 +1394,11 @@ bool PianoCamera::sequence(char *verdict, size_t size)
       if (!(gArgs.sensor & (1u << i)) || refused[i]) continue;
       note("cycle %u: %s %s", cycle + 1, kSensors[i].name, kSensors[i].part);
       IOLockLock(gSequenceLock);
+      if (suspended()) {
+        IOLockUnlock(gSequenceLock);
+        snprintf(verdict, size, "camera suspended");
+        return false;
+      }
       Session<Ops> &session = k.session.make(ops, po);   // a fresh session for each cycle, as before
       const SensorResult &r = session.run(w, gLoader, gPmic, so, s);
       IOLockUnlock(gSequenceLock);
@@ -1433,7 +1477,7 @@ void PianoCamera::serveLive(uint32_t sensor)
   }
   IOLockLock(gServeLock);
   gLiveStatus.cleanOff = !result || result->cleanOff;
-  gLiveStatus.failedStep = result ? result->failedStep : 0;
+  gLiveStatus.failedStep = result ? uint32_t(result->failedStep) : 0;
   gLiveStatus.guardFault = result && result->failure == StreamFailure::guard;
   gLiveStatus.smmuFault = result ? result->fault.fsr & iova::kFsrFaults : 0;
   gLiveStatus.aeSamples = result ? result->aeCount : 0;
@@ -1482,7 +1526,7 @@ void PianoCamera::serve()
   stage(7, "level 5: ready for captures (PianoCameraUserClient)");
   for (;;) {
     IOLockLock(gServeLock);
-    while (!gRequestPending && !gLiveActive) IOLockSleep(gServeLock, &gRequestPending, THREAD_UNINT);
+    while ((!gRequestPending || gRequestDone) && !gLiveActive) IOLockSleep(gServeLock, &gRequestPending, THREAD_UNINT);
     if (gLiveActive) {
       const uint32_t sensor = gLiveSensor;
       IOLockUnlock(gServeLock);
@@ -1512,8 +1556,8 @@ void PianoCamera::serve()
     note("level 5: capture %u: %s; %llu bytes kept (status %u)", gInfo.sequence, gInfo.verdict, (unsigned long long)gInfo.bytes,
          gInfo.status);
     IOLockLock(gServeLock);
-    gRequestPending = false;
     gRequestDone = true;
+    if (gRequestAbandoned) gRequestPending = false;
     IOLockWakeup(gServeLock, &gRequestDone, false);
     IOLockUnlock(gServeLock);
   }
@@ -1736,19 +1780,24 @@ static IOReturn capture(const PianoCameraCaptureArgs &args, PianoCameraFrameInfo
   }
   gRequest = args;
   gRequestDone = false;
+  gRequestAbandoned = false;
+  gRequestResult = kIOReturnSuccess;
   gRequestPending = true;
   IOLockWakeup(gServeLock, &gRequestPending, false);
   uint64_t deadline = 0;
   clock_interval_to_deadline(args.timeoutMs ? args.timeoutMs : 20000, kMillisecondScale, &deadline);
   while (!gRequestDone) {
     if (IOLockSleepDeadline(gServeLock, &gRequestDone, deadline, THREAD_UNINT) == THREAD_TIMED_OUT && !gRequestDone) {
+      gRequestAbandoned = true;
       IOLockUnlock(gServeLock);
       return kIOReturnTimeout;   // the capture goes on; a later info call reads its result
     }
   }
-  out = gInfo;
+  const IOReturn result = gRequestResult;
+  if (!result) out = gInfo;
+  gRequestPending = false;
   IOLockUnlock(gServeLock);
-  return kIOReturnSuccess;
+  return result;
 }
 
 IOReturn PianoCameraUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *a, IOExternalMethodDispatch *, OSObject *,

@@ -315,6 +315,18 @@ static void testFaults()
     CHECK(piano_wcn_rails_get(&bt.rails, PIANO_WCN_BT) == PianoWcnRailDropped && bt.rails.step == -PianoWcnStepCheck);
     CHECK(state == 0);
   }
+  {   // a failed rollback keeps its enable recorded so a later release can retry it
+    Model m;
+    m.reg("smpf5").lowerAfterVote = 30;
+    volatile uint32_t state = 0, lock = 0;
+    Radio bt(&m, &state, &lock, PianoWcnTagBt, false);
+    bt.onSleep = [&](uint32_t) { m.failOn = "ldof3"; };
+    CHECK(piano_wcn_rails_get(&bt.rails, PIANO_WCN_BT) == PianoWcnRailDropped);
+    CHECK(state == (1u << PIANO_WCN_ADDED_SHIFT) && m.reg("ldof3").enabled() && lock == 0);
+    m.failOn.clear();
+    CHECK(piano_wcn_rails_put(&bt.rails, PIANO_WCN_BT | PIANO_WCN_RELEASE) == 0);
+    CHECK(state == 0 && !m.reg("ldof3").enabled());
+  }
   {   // a rail that dropped while up is voted again; a re-vote that fails with an owner present withdraws nothing
     Model m;
     volatile uint32_t state = 0, lock = 0;
@@ -438,12 +450,32 @@ static void testThreads()
   CHECK(maxOwners != 0);
 }
 
+static void testTimedOutPutDuringGet()
+{
+  Model m;
+  volatile uint32_t state = 0, lock = 0;
+  Radio bt(&m, &state, &lock, PianoWcnTagBt, false), wifi(&m, &state, &lock, PianoWcnTagWifi, true);
+  CHECK(piano_wcn_rails_get(&bt.rails, PIANO_WCN_BT) == PianoWcnOk);
+  // A dropped rail makes Wi-Fi revote. Bluetooth times out putting its bit while Wi-Fi waits for the rails to settle.
+  m.reg("ldof2").appsEnable = false;
+  bt.rails.bound_ms = 1;
+  wifi.onSleep = [&](uint32_t) {
+    CHECK(piano_wcn_rails_put(&bt.rails, PIANO_WCN_BT | PIANO_WCN_RELEASE) == 0);
+    CHECK(bt.rails.busy == 1 && bt.rails.withdrawn == 0);
+  };
+  CHECK(piano_wcn_rails_get(&wifi.rails, PIANO_WCN_WLAN) == PianoWcnOk);
+  CHECK((state & PIANO_WCN_CLIENTS) == PIANO_WCN_WLAN);
+  CHECK(piano_wcn_rails_put(&wifi.rails, PIANO_WCN_WLAN | PIANO_WCN_RELEASE) == 0);
+  CHECK(state == 0 && lock == 0 && !m.reg("ldof2").enabled());
+}
+
 int main()
 {
   testReferenceCount();
   testVoltageRules();
   testFaults();
   testLock();
+  testTimedOutPutDuringGet();
   testThreads();
   if (failures) {
     std::printf("wcn_rails_host: %d failure(s)\n", failures);

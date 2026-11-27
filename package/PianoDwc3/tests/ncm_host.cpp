@@ -2,7 +2,7 @@
 // Host test of the network function's portable parts: NTB16 encode (Ncm.h NtbWriter) and decode (parseNtb16) against this file's
 // own reading of CDC NCM 1.0 section 3 (an independent encoder that puts the NDP first, a strict decoder), round trips, malformed
 // blocks; the NTB parameters; the frame queue; the TX FIFO plan with piano's measured core (T1 probe) and its failure cases.
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. ncm_host.cpp -o /tmp/ncm_host && /tmp/ncm_host
+//   c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=undefined -I.. ncm_host.cpp -o /tmp/ncm_host && /tmp/ncm_host
 #include "Ncm.h"
 #include "TxFifoPlan.h"
 #include <cstdio>
@@ -208,7 +208,7 @@ static void parserTests()
     const NtbResult r = decode(z, got);
     if (!r.error) std::printf("FAIL: %s accepted\n", x.what);
     CHECK(r.error != nullptr);
-    if (std::strcmp(x.what, "NDP points at itself") == 0) CHECK(got.size() == 3 * kMaxNdps);   // delivered until the cycle limit
+    if (std::strcmp(x.what, "NDP points at itself") == 0) CHECK(got == frames);   // a table's frames are delivered once
   }
   // Bad entries are skipped, the rest delivered: past the block, shorter than a header, longer than a frame, inside the NTH.
   {
@@ -358,6 +358,39 @@ static Bytes numberedFrame(unsigned length, uint32_t ordinal)
   return packet;
 }
 
+static void txCounterWrap()
+{
+  using Result = TxGate::Result;
+  constexpr unsigned frameBytes = 1022, ringBytes = 64 * 1024, capacity = 64;
+  Bytes storage(ringBytes);
+  FrameRing ring{storage.data(), ringBytes, UINT32_MAX - 2, UINT32_MAX - 2};
+  TxGate gate;
+  unsigned copies = 0;
+  // The first copy crosses the physical end. Failure on its second piece leaves the original head unpublished.
+  CHECK(gate.offer(ring, frameBytes, true, true, [&](uint8_t *, uint32_t, uint32_t) { return ++copies == 1; }) == Result::drop);
+  CHECK(copies == 2 && ring.head == UINT32_MAX - 2 && !ring.used() && !ring.peek() && !ring.frames);
+  auto offer = [&](unsigned ordinal) {
+    const Bytes packet = numberedFrame(frameBytes, ordinal);
+    return gate.offer(ring, packet.size(), true, true,
+        [&](uint8_t *dst, uint32_t off, uint32_t len) { std::memcpy(dst, packet.data() + off, len); return true; });
+  };
+  for (unsigned i = 0; i < capacity; ++i) CHECK(offer(i) == Result::queued);
+  CHECK(ring.head == ringBytes - 3 && ring.used() == ringBytes && ring.frames == capacity);
+  CHECK(offer(capacity) == Result::stall && !gate.needsService());
+  auto drain = [&](unsigned ordinal) {
+    Bytes packet(frameBytes);
+    CHECK(ring.get(packet.data(), frameBytes) == frameBytes && packet == numberedFrame(frameBytes, ordinal));
+  };
+  for (unsigned i = 0; i < capacity / 2; ++i) {
+    drain(i);
+    CHECK(gate.afterDrain(ring) == (i + 1 == capacity / 2));
+  }
+  CHECK(gate.takeRestart() && !gate.takeRestart() && ring.space() == ringBytes / 2);
+  CHECK(offer(capacity) == Result::queued);
+  for (unsigned i = capacity / 2; i <= capacity; ++i) drain(i);
+  CHECK(!ring.used() && !ring.frames && !gate.afterDrain(ring) && !gate.needsService());
+}
+
 static void txBurstTest(bool flow)
 {
   constexpr uint32_t burstBytes = 64 * 1024 * 1024;
@@ -463,6 +496,7 @@ int main()
   parserTests();
   parameterTests();
   ringTests();
+  txCounterWrap();
   txBurstTest(true);
   txBurstTest(false);
   txRestartTests();

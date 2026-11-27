@@ -21,8 +21,8 @@
 #include <kern/locks.h>
 #include <kern/thread.h>
 #include <miscfs/devfs/devfs.h>
+#include "BtUartRing.h"
 extern kern_return_t thread_terminate(thread_t);
-#define BT_TTY_FIFO 8192u
 #define BT_TTY_NAME "cu.BLTH"
 #define BT_LOG(fmt, ...) do { \
     if(qbt_bt_trace_enabled)printf(fmt " [uptime_ms=%llu]\n", ##__VA_ARGS__, qbt_bt_uptime_ms()); \
@@ -95,18 +95,6 @@ static void bt_tty_termios_default(void)
     /* The hardware line: 8N1, CREAD, RTS/CTS. */
     bt_tty.termios.cflag=0x300|0x800|0x8000|0x10000|0x20000;
     bt_tty.termios.ispeed=bt_tty.termios.ospeed=bt_tty.speed;
-}
-static void bt_tty_fifo_put(uint8_t *fifo,uint32_t head,uint32_t *len,const uint8_t *data,uint32_t n)
-{
-    uint32_t at=(head+*len)%BT_TTY_FIFO,first=MIN(n,BT_TTY_FIFO-at);
-    memcpy(fifo+at,data,first);memcpy(fifo,data+first,n-first);
-    *len+=n;
-}
-static void bt_tty_fifo_get(const uint8_t *fifo,uint32_t *head,uint32_t *len,uint8_t *data,uint32_t n)
-{
-    uint32_t first=MIN(n,BT_TTY_FIFO-*head);
-    memcpy(data,fifo+*head,first);memcpy(data+first,fifo,n-first);
-    *head=(*head+n)%BT_TTY_FIFO;*len-=n;
 }
 /* Called with the lock held: readers, then select and kqueue. */
 static void bt_tty_wake_readers(void)
@@ -473,13 +461,13 @@ static int bt_lerdy_sysctl SYSCTL_HANDLER_ARGS
 SYSCTL_DECL(_machdep);
 static struct sysctl_oid bt_boot_oid,bt_firmware_oid,bt_power_on_oid,bt_uptime_oid,bt_baseline_oid,bt_lemask_oid,bt_lerdy_oid;
 static bool bt_sysctls_registered;
-static void bt_tty_register_oid(struct sysctl_oid *oid,const char *name,int type,
+static void bt_tty_register_oid(struct sysctl_oid *oid,const char *name,unsigned type,
                                sysctl_handler_t handler,const char *format,const char *description)
 {
     bzero(oid,sizeof(*oid));
     oid->oid_parent=&sysctl__machdep_children;
     oid->oid_number=OID_AUTO;
-    oid->oid_kind=type|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_OID2;
+    oid->oid_kind=(int)(type | CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_OID2);
     oid->oid_name=name;
     oid->oid_handler=handler;
     oid->oid_fmt=format;

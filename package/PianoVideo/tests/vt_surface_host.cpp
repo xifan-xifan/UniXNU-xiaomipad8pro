@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Copyright (c) 2026 Leo Zhang.
+// c++ -std=c++20 -Wall -Wextra -Werror -I ../vt vt_surface_host.cpp -o /tmp/vt_surface_host && /tmp/vt_surface_host
 #include "PianoVideoVTSurface.h"
 #include <cassert>
 #include <cstdio>

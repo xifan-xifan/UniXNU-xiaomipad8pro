@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Leo Zhang.
 // Scripted firmware peer for the real persistent HFI state machine. These are
 // ownership/protocol checks, not evidence that any frame decoded on hardware.
+// c++ -std=c++20 -O2 -Wall -Wextra -Werror -I .. -I ../../include stream_host.cpp -o /tmp/stream_host && /tmp/stream_host
 #include <cstdio>
 #include <cstdlib>
 #include <cstdarg>
@@ -516,6 +517,33 @@ static void staleRetiredTests() {
   // valid; the frame ledger, not RAW FIFO order, controls identity.
   f.peer.output(73,2,0,out.index);CHECK(f.tx.pump()!=0&&f.tx.r.error);f.tx.shutdown();
 }
+static void outputCleanupTests() {
+  for(bool watchdog : {false,true}) {
+    Fixture f;f.start(51);f.peer.output(51,2);f.pump();
+    SelfTest<Peer>::OutputFrame out;CHECK(f.tx.popOutput(out));
+    CHECK(f.tx.streamSubmit(kAccessUnit,sizeof kAccessUnit,52)==0);
+    f.peer.output(52,2);f.pump();
+    const unsigned queued=f.peer.ftbs;
+    if(watchdog){f.peer.ops.watchdog=true;CHECK(f.tx.pump()==kErrWatchdog);}
+    CHECK(f.tx.releaseOutput(out.index,out.token)==0);
+    CHECK(f.peer.ftbs==queued+unsigned(!watchdog));
+    if(watchdog){
+      CHECK(f.tx.shutdown(true)==kErrWatchdog && !f.peer.stops && !f.peer.closes);
+    }else{
+      CHECK(f.tx.shutdown(true)==0 && f.tx.r.closed);
+      CHECK(f.tx.outputCount==0 && f.tx.ledger.loansEmpty() && f.tx.ledger.inputsEmpty());
+      CHECK(f.tx.ledger.pending==0 && f.tx.ledger.cancelled==1);
+    }
+  }
+}
+static void completionExtentTest() {
+  Fixture f;f.start(51);f.pump();
+  const unsigned index=f.peer.freeRaw();
+  auto b=f.peer.raws[index];
+  b[5]=kRawBytes-4096; b[7]=kRawBytes; b[8]=51;
+  f.peer.reply({Peer::packet(Buffers,0,2,5,b),Peer::packet(0x03000162,0,2,1,{2})});
+  CHECK(f.tx.pump()==kErrHfi && !f.tx.outputCount && f.tx.ledger.loansEmpty());
+}
 static void timeoutTests(bool ack) {
   Fixture f;f.start(71);f.peer.output(71,1);f.pump();f.releaseAll();
   f.peer.autoDrainAck=!ack;f.peer.autoDrainLast=ack;
@@ -648,6 +676,6 @@ int main() { preparedInputTests();productionWorkTests();nativeCleanupFailureTest
   profileAbiTests();
   ledgerTests();guestTests();ownerTests();persistentTests();firstPscTests();omittedPscTests();delayedGuestTests();drainPictureTests();noOutputTests();capacityTests();
   for(unsigned i=0;i<16;++i)negativeTests(i);
-  staleRetiredTests();timeoutTests(true);timeoutTests(false);cancelTests();idleTests();
+  staleRetiredTests();outputCleanupTests();completionExtentTest();timeoutTests(true);timeoutTests(false);cancelTests();idleTests();
   std::printf("V6 persistent host: %s (real HFI parser/ledger; scripted peer, never hardware evidence)\n",failures?"FAIL":"PASS");return failures?1:0;
 }

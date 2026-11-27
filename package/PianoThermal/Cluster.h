@@ -47,14 +47,17 @@ inline ThermalInput clusterThermal(const Monitor &m, unsigned cluster, const Clu
   ThermalInput in{false, -100000, -100000, critical};
   if (cluster > 1) return in;
   const Controller &k = kMap[cluster];
+  in.valid = true;
   for (unsigned s = k.cpuFirst; s <= k.cpuLast && s < k.count; ++s) {
-    if (!m.usable(cluster, s)) continue;
+    if (!m.fresh(cluster, s)) {
+      in.valid = false;
+      continue;
+    }
     const Sensor &sn = k.sensors[s];
     const int32_t d = m.deci(cluster, s);
     const int32_t hot = sensorHot(sn, t);
     const int32_t release = sensorRelease(sn, t);
     const int32_t cut = t.cutDeci ? t.cutDeci : sn.criticalDeci - t.marginDeci;
-    in.valid = true;
     if (d - hot > in.hotExcessDeci) in.hotExcessDeci = d - hot;
     if (d - release > in.releaseExcessDeci) in.releaseExcessDeci = d - release;
     if (d >= cut) in.cut = true;

@@ -62,6 +62,20 @@ static constexpr HevcVector hevcVectors[] = {
   {3840,2176,10,7680,2176,16711680,25067520,16818176,50135040,8355840,1766144,5960192},
 };
 static unsigned extraArenas = 0;
+static void invalidTableRangeTest() {
+  Layout layout;
+  CHECK(layout.init());
+  const unsigned count = vsmmu::sessionTablePages(layout.arenaBytes());
+  std::vector<uint64_t> words(count * 512), pages(layout.arenaBytes() / 4096), uc(vsmmu::kUcPages);
+  for (unsigned i = 0; i < uc.size(); ++i) uc[i] = kXnuDramBase + i * 4096;
+  for (unsigned i = 0; i < pages.size(); ++i) pages[i] = kXnuDramBase + 0x1000000 + i * 4096;
+  vsmmu::Tables t{words.data(), kXnuDramEnd - 4096, count};
+  const auto untouched = words;
+  CHECK(!vsmmu::build(t, uc.data(), unsigned(uc.size()), kXnuDramBase + 0x800000) && words == untouched);
+  words = untouched;
+  t.cpu = words.data();
+  CHECK(!buildArena(t, layout, pages.data()) && words == untouched);
+}
 static void verifyArena(const Layout &l) {
   const unsigned pageCount = l.arenaBytes() / 4096;
   const unsigned tableCount = vsmmu::sessionTablePages(l.arenaBytes());
@@ -290,6 +304,7 @@ int main() {
   CHECK(legacy.init(1920,1088) && legacy.init() && !legacy.general && legacy.bytes == 56623104);
   hevcTests();
   residentArenaTest();
+  invalidTableRangeTest();
   CHECK(extraArenas > 0);   // the RAM16G region0 backing was exercised
   std::printf("geometry: %s (%u failures, %u arenas also on region0 slabs)\n", failures ? "FAIL" : "PASS", failures, extraArenas);
   return failures ? EXIT_FAILURE : EXIT_SUCCESS;

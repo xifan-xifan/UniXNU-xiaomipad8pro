@@ -8,6 +8,16 @@ static uint32_t le32(const uint8_t *p) {return (uint32_t)le16(p) | (uint32_t)le1
 static uint64_t le64(const uint8_t *p) {return (uint64_t)le32(p) | (uint64_t)le32(p + 4) << 32;}
 static int fits(uint64_t at, uint64_t length, uint64_t size) {return at <= size && length <= size - at;}
 
+static int metadata_hash(const QcomMdtImage *image, uint64_t *offset)
+{
+    const QcomMdtSegment *hash = &image->segment[image->hash];
+    if (!fits(image->header_size, hash->file_size, image->file_size) ||
+        !fits(image->header_size, hash->file_size, SIZE_MAX)) return QcomMdtOutside;
+    /* A hash packed right behind the headers, or a hash segment inside a joined image. */
+    *offset = hash->file_size == image->file_size - image->header_size ? image->header_size : hash->file_offset;
+    return fits(*offset, hash->file_size, image->file_size) ? QcomMdtOk : QcomMdtOutside;
+}
+
 int qcom_mdt_parse(QcomMdtImage *image, uint64_t file_size, QcomMdtRead read, void *context)
 {
     uint8_t e[64];
@@ -58,6 +68,10 @@ int qcom_mdt_parse(QcomMdtImage *image, uint64_t file_size, QcomMdtRead read, vo
     /* The first program header (PT_NULL) covers the ELF header and the program headers themselves. */
     if (!image->header_size || !fits(0, image->header_size, file_size) || image->header_size < phoff + (uint64_t)phentsize * phnum)
         return QcomMdtBadHeaders;
+    if (hi > UINT64_MAX - 0xfff) return QcomMdtBadHeaders;
+    uint64_t hash_offset;
+    const int rc = metadata_hash(image, &hash_offset);
+    if (rc) return rc;
     image->min_address = lo;
     image->max_address = hi;
     return QcomMdtOk;
@@ -71,12 +85,10 @@ uint64_t qcom_mdt_metadata_size(const QcomMdtImage *image)
 int qcom_mdt_metadata(const QcomMdtImage *image, QcomMdtRead read, void *context, uint8_t *to, uint64_t capacity)
 {
     const QcomMdtSegment *hash = &image->segment[image->hash];
-    if (capacity < qcom_mdt_metadata_size(image)) return QcomMdtTooSmall;
     uint64_t hash_offset;
-    /* A hash packed right behind the headers (the split .mdt form) or a hash segment inside the file. */
-    if (image->header_size + hash->file_size == image->file_size) hash_offset = image->header_size;
-    else if (fits(hash->file_offset, hash->file_size, image->file_size)) hash_offset = hash->file_offset;
-    else return QcomMdtOutside;
+    const int rc = metadata_hash(image, &hash_offset);
+    if (rc) return rc;
+    if (capacity < qcom_mdt_metadata_size(image)) return QcomMdtTooSmall;
     if (read(context, 0, to, (size_t)image->header_size)) return QcomMdtReadError;
     if (read(context, hash_offset, to + image->header_size, (size_t)hash->file_size)) return QcomMdtReadError;
     return QcomMdtOk;

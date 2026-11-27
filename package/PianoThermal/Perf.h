@@ -26,6 +26,7 @@ constexpr int32_t kSkinWeight[kSkinInputs] = {500, 131, -9, 89, 232};   // per m
 constexpr int32_t kSkinWeightSum = 1000, kSkinWeightAll = 943;
 constexpr int32_t kSkinOffsetMilli = 1600;
 constexpr const char *kSkinChannel[kSkinInputs] = {"batt", "quiet", "charger", "wifi", "msm"};   // AdcChannels.h names
+constexpr uint32_t kSkinMask = (1u << kSkinInputs) - 1;
 
 struct Skin {
   bool valid = false;
@@ -33,16 +34,16 @@ struct Skin {
   uint32_t used = 0;   // bit i: input i was in the sum
 };
 
-// The stock sum: sum(weight x reading) / 1000 + 1.6 C (the weights add to 943, so it reads ~1.6 C under the mean). With an input
-// missing the present ones are scaled up to the full 943 (the missing one counted at their weighted mean). Valid only with the
-// battery and at least one of the two skin thermistors (quiet, msm): without them the number is not the stock sensor's.
-inline Skin virtualSkin(const int32_t milliC[kSkinInputs], uint32_t validMask)
+// The stock sum: sum(weight x reading) / 1000 + 1.6 C. Omit the charger input only when the DSP is known to be driving its
+// pin. Scale the remaining inputs to the stock weight in that case.
+inline Skin virtualSkin(const int32_t milliC[kSkinInputs], uint32_t validMask, bool chargerPinHeld = false)
 {
   Skin s;
-  if (!(validMask & (1u << kSkinBattery)) || !(validMask & ((1u << kSkinQuiet) | (1u << kSkinMsm)))) return s;
+  const uint32_t required = chargerPinHeld ? kSkinMask & ~(1u << kSkinCharger) : kSkinMask;
+  if ((validMask & required) != required) return s;
   int64_t sum = 0, w = 0;
   for (unsigned i = 0; i < kSkinInputs; ++i) {
-    if (!(validMask & (1u << i))) continue;
+    if (!(required & (1u << i))) continue;
     sum += int64_t(kSkinWeight[i]) * milliC[i];
     w += kSkinWeight[i];
     s.used |= 1u << i;
@@ -64,16 +65,17 @@ constexpr Step kCluster0[] = {{15000, 13000, 2745600}, {35000, 32000, 2745600}, 
 constexpr Step kCluster1[] = {{15000, 13000, 3072000}, {34000, 32000, 2649600}, {37000, 35000, 1958400}, {39000, 38000, 1958400},
                               {39500, 39000, 1689600}, {40000, 39500, 1401600}, {44000, 42000, 1017600}};
 constexpr unsigned kCluster0Steps = sizeof kCluster0 / sizeof kCluster0[0], kCluster1Steps = sizeof kCluster1 / sizeof kCluster1[0];
+inline uint32_t skinFaultCap(unsigned cluster) { return cluster ? kCluster1[kCluster1Steps - 1].khz : kCluster0[kCluster0Steps - 1].khz; }
 
 // One cluster's step: -1 below the first trigger (no cap), else the index of the step in force. Up as far as the triggers allow,
-// down only under the clear point of the step in force. Without a valid reading the step stays, and below the first trigger the
-// first step's cap applies (a missing skin reading is not "cold").
+// down only under the clear point of the step in force. A sensor fault applies the lowest cap without discarding hysteresis.
 class SkinCap {
  public:
   uint32_t update(const Step *t, unsigned n, bool valid, int32_t milliC)
   {
     if (!n) return 0;
-    if (!valid) return step_ < 0 ? t[0].khz : t[step_].khz;
+    if (step_ >= int(n)) reset();
+    if (!valid) return t[n - 1].khz;
     while (step_ + 1 < int(n) && milliC >= t[step_ + 1].trigMilli) ++step_;
     while (step_ >= 0 && milliC < t[step_].clrMilli) --step_;
     return step_ < 0 ? 0 : t[step_].khz;
@@ -100,9 +102,9 @@ class Burst {
   {
     const bool onset = wantsMore && !wanted_;
     wanted_ = wantsMore;
-    const bool hot = skinValid && skinMilli >= c.limitMilli;
-    if (open_ && (!allowed || hot || !c.khz || nowMs - startMs_ >= c.windowMs || !wantsMore)) close(nowMs);
-    if (!open_ && onset && allowed && !hot && c.khz && c.windowMs && (!ended_ || nowMs - endMs_ >= c.gapMs)) {
+    const bool eligible = allowed && skinValid && skinMilli < c.limitMilli && c.khz && c.windowMs;
+    if (open_ && (!eligible || nowMs - startMs_ >= c.windowMs || !wantsMore)) close(nowMs);
+    if (!open_ && onset && eligible && (!ended_ || nowMs - endMs_ >= c.gapMs)) {
       open_ = true;
       startMs_ = nowMs;
       ++windows_;

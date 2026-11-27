@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-#include "../ConcurrentDirect.h"
+#include "../DirectAsync.h"
 #include "../PowerHold.h"
 
 #include <array>
@@ -8,7 +8,9 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -58,6 +60,9 @@ struct Medium {
   std::map<const void *, uint64_t> active;
   std::vector<uint64_t> publications;
   uint64_t cuts = 0;
+  unsigned fuaWrites = 0, cachedWrites = 0;
+  bool partialFlush = false;
+  std::function<void(const Image &, const Image &)> recoverAtCut;
 
   static void valid(const Image &image, uint64_t pages = kPages) {
     for (const auto &entry : image) {
@@ -71,7 +76,10 @@ struct Medium {
           }
     }
   }
-  void cut() { if (checkCuts) { valid(durable, pages); ++cuts; } }
+  void cut() {
+    if (checkCuts) { valid(durable, pages); ++cuts; }
+    if (recoverAtCut) recoverAtCut(durable, cache);
+  }
   bool read(uint64_t block, uint32_t n, void *dst, bool &live) {
     std::unique_lock<std::mutex> lock(mutex);
     live = false;
@@ -87,7 +95,9 @@ struct Medium {
     for (unsigned i = 0; i < n; ++i) {
       auto *out = static_cast<uint8_t *>(dst) + i * kBlock;
       const auto pos = durable.find(block + i);
-      if (pos == durable.end()) memset(out, 0, kBlock);
+      const auto pending = cache.find(block + i);
+      if (pending != cache.end()) memcpy(out, pending->second.data(), kBlock);
+      else if (pos == durable.end()) memset(out, 0, kBlock);
       else memcpy(out, pos->second.data(), kBlock);
     }
     return true;
@@ -96,6 +106,7 @@ struct Medium {
     std::unique_lock<std::mutex> lock(mutex);
     live = false;
     const bool isData = block > persist::bitmapBlocks(pages);
+    if (fua) ++fuaWrites; else ++cachedWrites;
     cut();   // submission, possibly before any other completed command
     if (isData) {
       ++dataIn;
@@ -134,6 +145,8 @@ struct Medium {
         publications.push_back(block + i);
       }
       memcpy(out.data(), in, kBlock);
+      if (fua) cache.erase(block + i);
+      if (recoverAtCut) cut();   // any prefix of an atomic-per-block command
     }
     cut();   // command completed
     return true;
@@ -142,10 +155,15 @@ struct Medium {
     std::lock_guard<std::mutex> lock(mutex);
     assert(!dataIn && !bitmapIn && !readIn);
     ++syncs;
+    if (recoverAtCut) cut();
     if (!syncOk) return false;
-    durable.merge(cache);
-    for (const auto &entry : cache) durable[entry.first] = entry.second;
-    cache.clear();
+    while (!cache.empty()) {
+      const auto entry = cache.begin();
+      durable[entry->first] = entry->second;
+      cache.erase(entry);
+      if (recoverAtCut) cut();
+      if (partialFlush) return false;
+    }
     return true;
   }
   void veto(const char *) { ++vetoes; }
@@ -173,6 +191,13 @@ struct Store {
   bool write(uint64_t block, uint32_t n, const void *src) {
     if (state.failed()) return false;
     const bool ok = medium.write(block, n, src, liveDMA);
+    if (!ok) state.fail();
+    return ok;
+  }
+  bool writeCached(uint64_t block, uint32_t n, const void *src) {
+    if (state.failed()) return false;
+    state.markCached();
+    const bool ok = medium.write(block, n, src, liveDMA, false);
     if (!ok) state.fail();
     return ok;
   }
@@ -214,6 +239,7 @@ struct Disk {
   std::array<std::vector<uint8_t>, DirectAdmission::kDepth> stages;
   const uint8_t digest[32] = {1};
   std::atomic<unsigned> callbacks{0}, bitmapWrites{0};
+  bool writeBack = false;
 
   explicit Disk(unsigned depth = 8, uint64_t pages = kPages, bool startParallel = true)
     : medium(pages), bits(persist::bitmapBlocks(pages) * kBlock) {
@@ -225,34 +251,49 @@ struct Disk {
     medium.checkCuts = true;
   }
 
-  int64_t io(bool write, uint64_t offset, Buffer &buf, bool *failed = nullptr) {
-    DirectAdmission::Request request(offset, buf.data.size(), write);
+  int64_t io(bool write, uint64_t offset, Buffer &buf, bool *failed = nullptr, bool force = false) {
+    DirectAdmission::Request request(offset, buf.data.size(), write, writeBack && write && force);
     env.lock();
     const int slot = admission.take(env, request);
     if (slot == DirectAdmission::kOffline) { env.unlock(); return -1; }
+    const auto actual = serve(request, slot, offset, buf, failed);
+    env.unlock();
+    // A storage completion can reenter the driver.
+    env.lock();
+    ++callbacks;
+    env.unlock();
+    return actual;
+  }
+
+  uint64_t serve(DirectAdmission::Request &request, int slot, uint64_t offset, Buffer &buf, bool *failed = nullptr) {
+    const bool write = request.write;
     Store store{medium, state, write};
     bool error = false;
     uint64_t actual;
     if (slot == DirectAdmission::kSerial) {
-      actual = directDiskIO(seed, overlay, store, stages[0].data(), 32, write,
-                            offset, buf.data.size(), buf, &error);
+      CachedOverwrite<Store> cached{overlay, store};
+      if (request.exclusive && state.dirty()) state.flush(store);
+      if (writeBack && cached.eligible(request))
+        actual = directDiskIOWithPolicy(seed, overlay, store, stages[0].data(), 32, write,
+                                        offset, buf.data.size(), buf, &error, cached);
+      else
+        actual = directDiskIO(seed, overlay, store, stages[0].data(), 32, write,
+                              offset, buf.data.size(), buf, &error);
     } else if (slot >= 0) {
       env.unlock();
       auto *stage = stages[slot].data();
       ConcurrentDirect<Env, Store> path{overlay, commits, env, store, stage};
-      actual = directDiskIOWithPolicy(seed, overlay, store, stage, 32, write,
-                                      offset, buf.data.size(), buf, &error, path);
+      CachedOverwrite<Store> cached{overlay, store};
+      if (request.exclusive && state.dirty()) state.flush(store);
+      actual = writeBack && cached.eligible(request)
+        ? directDiskIOWithPolicy(seed, overlay, store, stage, 32, write, offset, buf.data.size(), buf, &error, cached)
+        : directDiskIOWithPolicy(seed, overlay, store, stage, 32, write, offset, buf.data.size(), buf, &error, path);
       env.lock();
       admission.give(env, slot, store.liveDMA);
     } else {
       actual = 0;
       error = true;
     }
-    env.unlock();
-    // A storage completion can reenter the driver.
-    env.lock();
-    ++callbacks;
-    env.unlock();
     bitmapWrites += store.publications;
     if (failed) *failed = error;
     return actual;
@@ -262,15 +303,27 @@ struct Disk {
     env.lock();
     if (!admission.beginFence(env)) { env.unlock(); return false; }
     bool ok = !state.failed();
+    if (!op && writeBack) ok = state.flush(medium);
     if (op == 1) {
+      struct SleepStore {
+        Disk &disk;
+        bool sync() {
+          return !disk.state.failed() && !disk.admission.quarantined &&
+            (disk.writeBack ? disk.state.flush(disk.medium) : disk.medium.sync());
+        }
+        void veto(const char *who) { disk.medium.veto(who); }
+      } store{*this};
       env.unlock();
       DataPowerHold power;
-      ok = power.off(medium, true);
+      ok = power.off(store, true);
       env.lock();
       admission.held = ok;
     }
-    if (op == 2) admission.parallel = false;
-    if (op == 3) admission.parallel = true;
+    if (op == 2 || op == 3) {
+      if (writeBack && state.dirty()) ok = state.flush(medium);
+      if (ok && !admission.quarantined) admission.parallel = op == 3;
+      else ok = false;
+    }
     admission.endFence(env);
     env.unlock();
     return ok;
@@ -433,9 +486,25 @@ static void overlap()
   disk.verifyReopen(2);
 }
 
+static Block filled(uint8_t value);
+static bool recovers(const Medium::Image &, const Seed &, const uint8_t *, const Medium::Image &,
+                     const Medium::Image &, const Medium::Image &, const Medium::Image &,
+                     const Medium::Image &intermediate = {});
+
 static void mergeAndCut(bool reverse)
 {
   Disk disk;
+  Medium::Image touches;
+  for (unsigned page : {0, 1, 2, 3, 4, 5, 6, 7})
+    touches[page] = filled(page + 1);
+  touches[kBoundary - 1] = touches[kBoundary] = filled(0x91);
+  for (const auto &entry : touches)
+    disk.medium.durable[persist::pageBlock(kPages, entry.first)] = filled(0xcc);
+  disk.writeBack = true;
+  disk.medium.recoverAtCut = [&](const Medium::Image &image, const Medium::Image &pending) {
+    assert(pending.empty());
+    assert(recovers(image, disk.seed, disk.digest, {}, touches, {}, touches));
+  };
   disk.medium.hold(disk.medium.holdBitmap, true);
   std::thread first([&] {
     Buffer page(kBlock, 1);
@@ -638,6 +707,352 @@ static void stress()
   disk.verifyReopen(pages);
 }
 
+static bool recovers(const Medium::Image &image, const Seed &seed, const uint8_t *digest,
+                     const Medium::Image &before, const Medium::Image &after,
+                     const Medium::Image &required, const Medium::Image &firstTouches,
+                     const Medium::Image &intermediate)
+{
+  const uint64_t pages = seed.bytes / kBlock;
+  Medium reboot(pages);
+  reboot.durable = image;
+  std::vector<uint8_t> bits(persist::bitmapBlocks(pages) * kBlock), stage(kBlock);
+  persist::Overlay overlay;
+  DirectWriteState state;
+  Store store{reboot, state, false};
+  if (overlay.open(store, pages, digest, true, bits.data(), false, 0, 1000) != persist::Open::Resumed ||
+      overlay.boundLba != 1000 || overlay.generation != 1) return false;
+  for (const auto &entry : after) {
+    const uint64_t page = entry.first;
+    const auto old = before.find(page), fenced = required.find(page), prior = intermediate.find(page);
+    if ((old != before.end() || fenced != required.end()) && !overlay.has(page)) return false;
+    Buffer out(kBlock);
+    bool error = false;
+    if (directDiskIO(seed, overlay, store, stage.data(), 1, false, page * kBlock, kBlock, out, &error) != kBlock || error)
+      return false;
+    const auto matches = [&](const Block &block) { return !memcmp(block.data(), out.data.data(), kBlock); };
+    if (!overlay.has(page)) {
+      Block zero{};
+      const auto *fallback = seed.find(page);
+      if (memcmp(fallback ? fallback : zero.data(), out.data.data(), kBlock)) return false;
+    } else if (fenced != required.end()) {
+      if (!matches(fenced->second)) return false;
+    } else if (!matches(entry.second) && (old == before.end() || !matches(old->second)) &&
+               (prior == intermediate.end() || !matches(prior->second))) {
+      return false;
+    }
+  }
+  // Presence may gain only known first touches. Old present bits may never disappear.
+  unsigned count = before.size();
+  for (const auto &entry : firstTouches) count += overlay.has(entry.first);
+  return count == overlay.present;
+}
+
+static Block filled(uint8_t value)
+{
+  Block block;
+  block.fill(value);
+  return block;
+}
+
+static void writeBackCuts(bool parallel)
+{
+  Disk disk(4, kPages, parallel);
+  disk.writeBack = true;
+  auto &medium = disk.medium;
+  const uint64_t first = kBoundary - 1, second = kBoundary, checkpoint = kBoundary + 1;
+  const auto lba = [](uint64_t page) { return persist::pageBlock(kPages, page); };
+  Medium::Image before{{2, filled(0x22)}, {3, filled(0x33)}},
+    firstTouches{{first, filled(0x44)}, {second, filled(0x44)}, {checkpoint, filled(0x55)}},
+    after = before, required, intermediate;
+  Buffer old2(kBlock, 0x22), old3(kBlock, 0x33);
+  assert(disk.io(true, 2 * kBlock, old2) == kBlock && disk.io(true, 3 * kBlock, old3) == kBlock);
+  after.insert(firstTouches.begin(), firstTouches.end());
+  after[2] = filled(0x66);
+  after[3] = filled(0x77);
+  for (const auto &entry : firstTouches) medium.durable[lba(entry.first)] = filled(0xcc);
+  const auto initial = medium.durable;
+  const auto header = medium.durable.at(0);
+  unsigned cuts = 0;
+  medium.recoverAtCut = [&](const Medium::Image &durable, const Medium::Image &pending) {
+    auto check = [&](const Medium::Image &candidate) {
+      ++cuts;
+      assert(candidate.at(0) == header);
+      assert(recovers(candidate, disk.seed, disk.digest, before, after, required, firstTouches, intermediate));
+    };
+    // Every subset can reach durable media first. Begin each branch with only the durable
+    // image, so reopening discards the cache, including on the empty-subset cut.
+    assert(pending.size() <= 2);
+    for (unsigned mask = 0; mask < (1U << pending.size()); ++mask) {
+      auto candidate = durable;
+      unsigned i = 0;
+      for (const auto &entry : pending)
+        if (mask & (1U << i++)) candidate[entry.first] = entry.second;
+      check(candidate);
+    }
+  };
+  const unsigned fua = medium.fuaWrites;
+  const unsigned syncs = medium.syncs;
+  Buffer newer(kBlock, 0x66);
+  assert(disk.io(true, 2 * kBlock, newer) == kBlock);
+  Buffer sector(512, 0x88), whole(kBlock);
+  assert(disk.io(false, 2 * kBlock, whole) == kBlock && whole.data == newer.data);
+  Buffer updated3(kBlock, 0x77);
+  assert(disk.io(true, 3 * kBlock, updated3) == kBlock);
+  intermediate.emplace(2, after[2]);
+  memset(after[2].data() + 512, 0x88, 512);
+  assert(disk.io(true, 2 * kBlock + 512, sector) == 512);
+  assert(disk.io(false, 2 * kBlock, whole) == kBlock && !memcmp(whole.data.data(), after[2].data(), kBlock));
+  assert(medium.fuaWrites == fua && medium.cachedWrites == 3 && disk.state.dirty());
+  Buffer newRun(2 * kBlock, 0x44);
+  assert(disk.io(true, first * kBlock, newRun) == 2 * kBlock && medium.fuaWrites == fua + 3);
+  assert(disk.fence(0) && !disk.state.dirty() && medium.syncs == syncs + 1);
+  required = {{2, after[2]}, {3, after[3]}, {first, after[first]}, {second, after[second]}};
+  medium.cut();   // acknowledge the barrier before permitting its dependent checkpoint
+  Buffer marker(kBlock, 0x55);
+  assert(disk.io(true, checkpoint * kBlock, marker, nullptr, true) == kBlock);
+  required[checkpoint] = after[checkpoint];
+  medium.cut();   // acknowledge the forced write
+  assert(cuts > 30 && medium.cache.empty());
+
+  // A forced write must preflush an unrelated cached overwrite before issuing
+  // its own FUA, even when the forced write targets an already-present page.
+  medium.recoverAtCut = {};
+  Buffer latest(kBlock, 0x99), forced(kBlock, 0xaa);
+  assert(disk.io(true, 2 * kBlock, latest) == kBlock && disk.state.dirty());
+  assert(disk.io(true, 3 * kBlock, forced, nullptr, true) == kBlock);
+  assert(!disk.state.dirty() && medium.syncs == syncs + 2);
+  assert(medium.durable.at(lba(2)) == filled(0x99) && medium.durable.at(lba(3)) == filled(0xaa));
+
+  // Reproduce both rejected policies with a plausible stale data block.
+  for (bool bitmapFua : {true, false}) {
+    Medium bad;
+    bad.durable = initial;
+    auto bitmap = initial.at(1);
+    bitmap[first / 8] |= 1U << (first % 8);
+    bool live;
+    assert(bad.write(lba(first), 1, after[first].data(), live, false));
+    assert(bad.write(1, 1, bitmap.data(), live, bitmapFua));
+    if (!bitmapFua) bad.durable[1] = bad.cache.at(1);
+    assert(!recovers(bad.durable, disk.seed, disk.digest, before, after, {}, firstTouches));
+  }
+  auto torn = initial;
+  memcpy(torn.at(lba(2)).data() + 512, after[2].data() + 512, 512);
+  assert(!recovers(torn, disk.seed, disk.digest, before, after, {}, firstTouches));
+}
+
+static void writeBackFailures()
+{
+  Disk disk;
+  Buffer data(2 * kBlock, 0xaa);
+  assert(disk.io(true, 2 * kBlock, data) == 2 * kBlock);
+  disk.writeBack = true;
+  const unsigned syncs = disk.medium.syncs;
+  assert(disk.io(true, 2 * kBlock, data) == 2 * kBlock);
+  disk.medium.partialFlush = true;
+  assert(!disk.fence(0) && disk.state.dirty() && disk.state.failed() && disk.medium.cache.size() == 1);
+  disk.medium.partialFlush = false;
+  assert(!disk.fence(0) && disk.medium.syncs == syncs + 1);
+  assert(!disk.fence(1) && !disk.admission.held && disk.medium.vetoes == 1);
+  assert(!disk.fence(2) && disk.admission.parallel);
+  assert(disk.io(true, 2 * kBlock, data) == 0);
+
+  Disk timeout;
+  assert(timeout.io(true, 2 * kBlock, data) == 2 * kBlock);
+  timeout.writeBack = true;
+  timeout.medium.lateBlock = persist::pageBlock(kPages, 2);
+  assert(timeout.io(true, 2 * kBlock, data) == 0);
+  assert(timeout.state.dirty() && timeout.state.failed() && timeout.admission.quarantined == 1);
+  assert(!timeout.fence(0));
+
+  // The first 128 KiB run is all present, but the following page is a first touch.
+  Disk mixed;
+  Buffer prefix(32 * kBlock, 0xba), entire(33 * kBlock, 0xbb);
+  assert(mixed.io(true, 0, prefix) == 32 * kBlock);
+  mixed.writeBack = true;
+  const unsigned fua = mixed.medium.fuaWrites;
+  assert(mixed.io(true, 0, entire) == 33 * kBlock);
+  assert(mixed.medium.cachedWrites == 0 && mixed.medium.fuaWrites == fua + 3);
+}
+
+struct AsyncDisk {
+  struct BufferRef : Buffer {
+    using Buffer::Buffer;
+    std::atomic<unsigned> refs{1};
+  };
+  using Callback = std::function<void(uint64_t)>;
+  using Queue = DirectAsync<BufferRef, Callback>;
+  Disk disk{4};
+  Queue queue;
+  std::vector<std::thread> threads;
+  const std::thread::id submitter = std::this_thread::get_id();
+  std::atomic<unsigned> accepted{0}, completed{0}, deviceRefs{1};
+  bool ending = false;
+
+  AsyncDisk() {
+    queue.initialize();
+    for (bool write : {false, false, true, true}) threads.emplace_back([this, write] { worker(write); });
+    threads.emplace_back([this] { callbacks(); });
+  }
+  bool submit(bool write, uint64_t offset, BufferRef &buffer, const Callback &callback) {
+    auto &env = disk.env;
+    auto &admission = disk.admission;
+    env.lock();
+    while (admission.online && admission.fenced) env.wait();
+    auto *record = admission.online ? queue.reserve(write) : nullptr;
+    if (record) {
+      ++buffer.refs;
+      ++deviceRefs;
+      static_cast<DirectAdmission::Request &>(*record) = {offset, buffer.data.size(), write};
+      record->buffer = &buffer;
+      record->offset = offset;
+      record->completion = callback;
+      ++accepted;
+      admission.accept(env, *record);
+    }
+    env.unlock();
+    return record != nullptr;
+  }
+  void worker(bool write) {
+    auto &env = disk.env;
+    env.lock();
+    while (!ending) {
+      DirectAdmission::Request *request;
+      const int slot = disk.admission.dispatch(env, write, write ? 0xc : 0x3, request);
+      if (!request) { env.wait(); continue; }
+      auto &record = *static_cast<Queue::Record *>(request);
+      record.actual = disk.serve(record, slot, record.offset, *record.buffer);
+      queue.complete(record);
+      env.wake();
+    }
+    env.unlock();
+  }
+  void callbacks() {
+    auto &env = disk.env;
+    env.lock();
+    for (;;) {
+      auto *record = queue.nextCompletion();
+      if (!record) {
+        if (ending) break;
+        env.wait();
+        continue;
+      }
+      env.unlock();
+      assert(std::this_thread::get_id() != submitter);
+      assert(record->buffer->refs > 1 && deviceRefs > 1);
+      record->completion(record->actual);
+      --record->buffer->refs;
+      --deviceRefs;
+      env.lock();
+      queue.reclaim(*record);
+      ++completed;
+    }
+    env.unlock();
+  }
+  void stop() {
+    auto &env = disk.env;
+    env.lock();
+    disk.admission.stop(env);
+    ending = true;
+    env.wake();
+    env.unlock();
+    for (auto &thread : threads) thread.join();
+    assert(accepted == completed && deviceRefs == 1);
+  }
+};
+
+static void asyncQueue()
+{
+  AsyncDisk test;
+  auto &disk = test.disk;
+  auto &medium = disk.medium;
+  Buffer seed(kBlock, 0xfe);
+  assert(disk.io(true, 6 * kBlock, seed) == kBlock);
+  disk.writeBack = true;
+  AsyncDisk::BufferRef writer(512, 0x23), older(512, 0x41), read(kBlock), overlap(512);
+  const auto sectorDone = [](uint64_t n) { assert(n == 512); };
+  medium.hold(medium.holdData, true);
+  assert(test.submit(true, 10 * kBlock, writer, sectorDone));
+  assert(test.submit(true, 11 * kBlock, writer, sectorDone));
+  until([&] { return medium.pending(medium.dataIn) == 2; });
+  assert(test.submit(true, 10 * kBlock + 512, older, sectorDone));
+  std::atomic<bool> overlapDone{false}, readDone{false};
+  assert(test.submit(false, 10 * kBlock + 512, overlap, [&](uint64_t n) {
+    assert(n == 512 && overlap.data == older.data);
+    overlapDone = true;
+  }));
+  for (unsigned i = 3; i < AsyncDisk::Queue::kRecordsPerDirection; ++i)
+    assert(test.submit(true, 10 * kBlock, writer, sectorDone));
+  assert(!test.submit(true, 12 * kBlock, writer, [](uint64_t) { assert(false); }));
+  AsyncDisk::Callback completion = [&](uint64_t n) {
+    assert(n == kBlock && read.data == seed.data);
+    readDone = true;
+  };
+  assert(test.submit(false, 6 * kBlock, read, completion));
+  completion = [](uint64_t) { assert(false); };  // the queued callback was copied
+  until([&] { return readDone.load(); });
+  assert(!overlapDone && medium.pending(medium.dataIn) == 2);
+
+  std::atomic<bool> fenced{false}, postFence{false};
+  std::thread sync([&] { assert(disk.fence(0)); fenced = true; });
+  until([&] { return disk.fenced(); });
+  const unsigned accepted = test.accepted;
+  std::thread later([&] {
+    assert(test.submit(false, 6 * kBlock, read, [&](uint64_t n) { assert(n == kBlock); postFence = true; }));
+  });
+  assert(test.accepted == accepted && !fenced);
+  medium.hold(medium.holdData, false);
+  sync.join();
+  later.join();
+  until([&] { return postFence.load() && test.accepted == test.completed; });
+  assert(fenced && overlapDone && !disk.state.dirty());
+
+  // Fill the read pool while two commands are held. A disjoint write still
+  // completes and can reenter the provider fence from its callback.
+  medium.hold(medium.holdRead, true);
+  std::vector<std::unique_ptr<AsyncDisk::BufferRef>> readers;
+  for (unsigned i = 0; i < AsyncDisk::Queue::kRecordsPerDirection; ++i)
+    readers.emplace_back(std::make_unique<AsyncDisk::BufferRef>(kBlock));
+  for (const auto &reader : readers)
+    assert(test.submit(false, 6 * kBlock, *reader, [](uint64_t n) { assert(n == kBlock); }));
+  until([&] { return medium.pending(medium.readIn) == 2; });
+  assert(!test.submit(false, 6 * kBlock, read, [](uint64_t) { assert(false); }));
+  std::atomic<bool> writerDone{false}, reentered{false}, resubmitted{false};
+  assert(test.submit(true, 12 * kBlock, writer, [&](uint64_t n) {
+    assert(n == 512);
+    writerDone = true;
+    assert(disk.fence(0));
+    // The read I/O drained, but its completion records are still occupied.
+    assert(!test.submit(false, 6 * kBlock, read, [](uint64_t) { assert(false); }));
+    reentered = true;
+  }));
+  until([&] { return writerDone.load() && disk.fenced(); });
+  assert(!reentered);
+  medium.hold(medium.holdRead, false);
+  until([&] { return test.accepted == test.completed; });
+  assert(reentered);
+  assert(test.submit(true, 12 * kBlock, writer, [&](uint64_t n) {
+    assert(n == 512);
+    assert(test.submit(false, 6 * kBlock, read, [&](uint64_t count) {
+      assert(count == kBlock && read.data == seed.data);
+      resubmitted = true;
+    }));
+  }));
+  until([&] { return resubmitted.load() && test.accepted == test.completed; });
+
+  // During stop, accepted work drains and new work is rejected without a callback.
+  medium.hold(medium.holdData, true);
+  assert(test.submit(true, 20 * kBlock, writer, sectorDone));
+  assert(test.submit(true, 20 * kBlock, writer, sectorDone));
+  until([&] { return medium.pending(medium.dataIn) == 1; });
+  std::thread stop([&] { test.stop(); });
+  until([&] { disk.env.lock(); bool off = !disk.admission.online; disk.env.unlock(); return off; });
+  assert(!test.submit(false, 6 * kBlock, read, [](uint64_t) { assert(false); }));
+  medium.hold(medium.holdData, false);
+  stop.join();
+  assert(read.refs == 1 && writer.refs == 1 && overlap.refs == 1 && older.refs == 1);
+  for (const auto &reader : readers) assert(reader->refs == 1);
+}
+
 int main()
 {
   Medium control;
@@ -654,11 +1069,15 @@ int main()
   mergeAndCut(true);
   drains();
   failure();
+  writeBackCuts(false);
+  writeBackCuts(true);
+  writeBackFailures();
+  asyncQueue();
   stress();
   assert(persist::bitmapBlocks(kLargePages) == 1600);
   Disk large(8, kLargePages);
   Buffer last(kBlock, 0x94);
   assert(large.io(true, (kLargePages - 1) * kBlock, last) == kBlock);
   large.verifyReopen(1);
-  puts("OK armed serial start/switch, depth/stop, shared/exclusive ranges and 512-byte RMW, merged bitmap FUA/cuts, drains/wake/veto, errors and quarantine");
+  puts("OK serial control, overlap/512-byte RMW, bitmap FUA, write-back cuts, queues/completions, drains/wake/veto and quarantine");
 }

@@ -472,6 +472,15 @@ struct Board {
     if (wmStopStuck && pa == kTfeLite0 + kWm0 + kWmCfg && !(value & kWmEnable)) return;
     if (pa == kTfeLite0 + kWm0 + kWmCfg && !(value & kWmEnable) && wmEnabled()) events.push_back("wm off");
     if (pa == kCsidLite0 + kCsidRdiCtrl && !(value & 1u) && (v(pa) & 1u)) events.push_back("rdi stop");
+    if (pa == kCsidLite0 + kCsidRstCmd) events.push_back("csid reset");
+    for (unsigned n : {1u, 4u}) {
+      if (pa != csiphyBase(n) + kCsiphyTableCommon + 5 * 4 || value || !v(pa)) continue;
+      events.push_back("phy off");
+      const auto &regs = (n == 1 ? rearSlave : frontSlave).reg;
+      const auto stream = regs.find(0x0100);
+      if (stream != regs.end() && (stream->second & 1) && sensorReady(n == 1))
+        violations.push_back("PHY disabled before sensor stream-off or sensor reset");
+    }
     if ((pa == kGcc + kGccCameraHfAxi || pa == kCamCc + kCcCamnocRtAxi) && !(value & kCbcrEnable) && (v(pa) & kCbcrEnable)) {
       events.push_back(pa == kGcc + kGccCameraHfAxi ? "hf axi off" : "camnoc off");
       if (wmEnabled()) violations.push_back("the camera NoC's clock off while the write master is enabled");
@@ -1068,9 +1077,14 @@ struct TestOps {
   void frameReady(const uint8_t *buf, const StreamResult &r) { kept.assign(buf, buf + uint64_t(r.stats.stride) * r.height); }
   unsigned liveFrames = 0, liveSkips = 0, liveLimit = 0;
   unsigned cancelDelayUs = 0;
+  int cancelStep = 0;
   uint64_t cancelAtUs = 0;
   uint64_t liveSequence = 0, liveSOF = 0;
-  bool liveCancelled() { return (liveLimit && liveFrames >= liveLimit) || (cancelAtUs && b.now >= cancelAtUs); }
+  bool liveCancelled()
+  {
+    return (liveLimit && liveFrames >= liveLimit) || (cancelAtUs && b.now >= cancelAtUs) ||
+           (cancelStep && !steps.empty() && steps.back() >= cancelStep);
+  }
   uint64_t hostTicks() { return b.now; }
   void livePaced(uint64_t missing) { liveSkips += 1 + missing; }
   void liveFrame(const uint8_t *, const StreamResult &, uint64_t seq, uint64_t sof, uint64_t missing)
@@ -1123,11 +1137,13 @@ struct TestOps {
     return 0;
   }
   std::vector<std::string> log;   // the steps and notes in their order
+  std::function<void(int)> stepHook;
   void step(int n, const char *)
   {
     steps.push_back(n);
     log.push_back("step " + std::to_string(n));
     if (n == kStepL3Stream && cancelDelayUs) cancelAtUs = b.now + cancelDelayUs;
+    if (stepHook) stepHook(n);
   }
   void note(const char *fmt, ...)
   {
@@ -1907,15 +1923,14 @@ static void testL3Variants()
     CHECK(res.stats.stride == 4080 && res.stats.ch[2].mean() == 302);
     CHECK(asFound(before, res, r.plan, r.b));
   }
-  // A bypass the boot chain left: physical addresses, no SMMU store at all.
+  // Bypass cannot contain a malformed frame. Refuse before allocating or arming hardware.
   {
     L3Rig r;
     r.b.r[kSmmu + 0x800 + 4 * 7] = 0x80000000u | kCamStream;
     r.b.r[kSmmu + 0xc00 + 4 * 7] = 1u << 16;
     const StreamResult res = r.run(Sensor::rear);
-    CHECK(res.ok && res.route == Route::bypass && res.busAddr == r.b.memPa && r.b.tableMem.empty());
-    CHECK(r.b.smmuStores == 0 && r.b.violations.empty());
-    checkBars(res, r.b);
+    CHECK(!res.ok && res.cleanOff && res.failure == StreamFailure::refused && res.route == Route::bypass);
+    CHECK(r.b.allocs == 0 && r.b.smmuStores == 0 && r.b.framesWritten == 0 && r.b.violations.empty());
   }
   // The stream's own exact group left faulting by the boot chain (redirected in place, then given back as found: its fault S2CR is
   // a configuration this SMMU has).
@@ -2046,7 +2061,9 @@ static void testL3Teardown()
     const Board &b = r.b;
     const long wm = b.lastEvent("wm off"), rdi = b.lastEvent("rdi stop"), sync = b.lastEvent("smmu sync"), camnoc = b.lastEvent("camnoc off"),
                hf = b.lastEvent("hf axi off"), mm1 = b.lastEvent("mm1 off"), titan = b.lastEvent("titan off"), mxc = b.lastEvent("mxc off");
-    CHECK(wm >= 0 && wm < rdi && rdi < sync && sync < camnoc && camnoc < hf && hf < mm1 && mm1 < titan && titan < mxc);
+    const long phy = b.lastEvent("phy off"), reset = b.lastEvent("csid reset");
+    CHECK(wm >= 0 && wm < rdi && rdi < phy && phy < reset && reset < sync);
+    CHECK(sync < camnoc && camnoc < hf && hf < mm1 && mm1 < titan && titan < mxc);
     const long id = r.ops.logIndex("rear S5KJN1: chip ID 0x38e1 (expected 0x38e1): OK over CCI0 master 1"),
                report = r.ops.logIndex("level 3 (before the power-down): rear S5KJN1 4080x3072 RAW10"), down = r.ops.logIndex("step 340"),
                kept = r.ops.logIndex("smmu: group 5's S2CR left at fault (00020000): the found 0300006e"),
@@ -2135,6 +2152,15 @@ static void testFrameStats()
   buf[frame + 10] = 0;
   frameStats(buf.data(), 4096, frame, w, h, s);
   CHECK(!s.guardIntact && s.guardFirstBad == 10);
+  uint8_t shortFrame[5] = {};
+  frameStats(shortFrame, sizeof shortFrame, sizeof shortFrame, 4, 1, s);
+  CHECK(s.done && s.stride == 5 && s.rowNonzero[1] == 0);
+  frameStats(shortFrame, sizeof shortFrame, sizeof shortFrame + 1, 4, 1, s);
+  CHECK(!s.done);
+  frameStats(shortFrame, sizeof shortFrame, sizeof shortFrame, 6, 1, s);
+  CHECK(!s.done);
+  frameStats(shortFrame, sizeof shortFrame, sizeof shortFrame, UINT32_MAX - 3, UINT32_MAX, s);
+  CHECK(!s.done);
 }
 
 // The exposure loop (CameraStream.h): on the model's lit scene (its value follows exposure x gain a frame late) both sensors reach
@@ -2220,16 +2246,88 @@ static void testExposureLoop()
   s.satPermille = 600;
   CHECK(aeRule(s, nullptr, 10, 0, 10, 100000, 160, next) == AeVerdict::bright);
   uint32_t e = 0, g = 0;
-  aeSplit(kFrontExposure, 2808, 1024ull * 7936, e, g);
+  CHECK(aeSplit(kFrontExposure, 2808, 1024ull * 7936, e, g));
   CHECK(e == 2808 && g >= 2893 && g <= 2895);   // the exposure first, at the lowest gain, then the gain
-  aeSplit(kRearExposure, 4266, 100ull * 32, e, g);
-  CHECK(e == 100 && g == 32);
+  CHECK(aeSplit(kRearExposure, 4266, 100ull * 32, e, g) && e == 100 && g == 32);
+  CHECK(aeSplit(kRearExposure, 4266, UINT64_MAX, e, g) && e == 4266 && g == kRearExposure.gMax);
+  CHECK(aeSplit(kRearExposure, 22, 22 * 32 + 11, e, g) && e == 22 && g == 33);
+  ExposureFacts invalid = kRearExposure;
+  invalid.gMin = 0;
+  CHECK(!aeSplit(invalid, 4266, 1000, e, g));
+  invalid = kRearExposure;
+  invalid.eMin = 0;
+  CHECK(!aeSplit(invalid, 0, 1000, e, g) && e == 22 && g == 33);
+
+  s = AeStep{};
+  CHECK(aeRule(s, nullptr, UINT64_MAX / 2, 0, 1, UINT64_MAX - 1, 160, next) == AeVerdict::none);
+  CHECK(next == UINT64_MAX - 1);
+  s.above = 20;
+  CHECK(aeRule(s, nullptr, UINT64_MAX / 2, 0, 1, UINT64_MAX, 160, next) == AeVerdict::none);
+  CHECK(next == UINT64_MAX);
+  s.above = 400;
+  CHECK(aeRule(s, nullptr, UINT64_MAX - 2, 0, 1, UINT64_MAX, 160, next) == AeVerdict::none);
+  CHECK(next == (UINT64_MAX - 2) / 5 * 2 + 1);
+  p = s;
+  const uint64_t unit = UINT64_MAX / 7;
+  CHECK(aeRule(s, &p, 7 * unit, 5 * unit, 1, UINT64_MAX, 160, next) == AeVerdict::noResponse);
+  CHECK(aeRule(s, &p, 7 * unit - 1, 5 * unit, 1, UINT64_MAX, 160, next) == AeVerdict::none);
+  s.above = UINT32_MAX;
+  CHECK(aeRule(s, nullptr, 1000, 0, 1, UINT64_MAX, UINT32_MAX, next) == AeVerdict::converged);
 }
 
 // Level 5's pieces off the tablet: the stream's last frame handed to ops.frameReady (the kernel copies it into memory type 0), and
 // the first software ISP (CameraIsp.h) on it and on a synthetic frame: the Bayer orders, grey world, the digital gain, the sizes.
 static void testIsp()
 {
+  CHECK(pianoSrgb8(NAN) == 0 && pianoSrgb8(-INFINITY) == 0 && pianoSrgb8(INFINITY) == 255);
+  {
+    const uint8_t raw[] = {0, 0, 255, 255, 0xf0, 0, 0, 255, 255, 0xf0};
+    uint8_t rgb[6] = {};
+    float work[6] = {};
+    PianoIspStats stats{};
+    CHECK(pianoIsp(raw, sizeof raw, 4, 2, 5, kPianoCameraRGGB, 1022, 1, work, 6, rgb, 6, &stats) == 0);
+    CHECK(stats.digital == 1.f && rgb[0] == 0 && rgb[3] == 255);
+  }
+  {
+    // Independent byte fixtures for R=125, G=(40,84), B=65. The two greens straddle black=64.
+    const uint8_t rows[4][2][5] = {
+      {{31, 10, 31, 10, 0x11}, {21, 16, 21, 16, 0x44}},
+      {{10, 31, 10, 31, 0x44}, {16, 21, 16, 21, 0x11}},
+      {{10, 16, 10, 16, 0x44}, {31, 21, 31, 21, 0x11}},
+      {{16, 10, 16, 10, 0x11}, {21, 31, 21, 31, 0x44}},
+    };
+    for (uint32_t bayer = 0; bayer < 4; ++bayer) {
+      // Odd height and unaligned, padded rows, with only packed bytes stored on the last row.
+      constexpr uint32_t stride = 7, h = 5;
+      uint8_t storage[1 + (h - 1) * stride + 5];
+      std::memset(storage, 0xff, sizeof storage);
+      uint8_t *raw = storage + 1;
+      for (uint32_t y = 0; y < 4; ++y) std::memcpy(raw + y * stride, rows[bayer][y % 2], 5);
+      float work[3] = {};
+      uint8_t rgb[3] = {};
+      PianoIspStats stats{};
+      CHECK(pianoBayerChannel(bayer, UINT32_MAX, 10) == pianoBayerChannel(bayer, 1, 0));
+      CHECK(pianoIsp(raw, sizeof storage - 2, 4, h, stride, bayer, 64, 2, work, 3, rgb, 3, &stats) == -1);
+      CHECK(pianoIsp(raw, sizeof storage - 1, 4, h, stride, bayer, 64, 2, work, 3, rgb, 3, &stats) == 0);
+      CHECK(stats.width == 1 && stats.height == 1);
+      CHECK(stats.mean[0] == 61.f && stats.mean[1] == 10.f && stats.mean[2] == 1.f);
+      CHECK(stats.gain[0] == 0.25f && stats.gain[1] == 1.f && stats.gain[2] == 4.f && stats.digital == 16.f);
+      CHECK(rgb[0] > rgb[1] && rgb[1] > rgb[2] && rgb[2] > 0);
+    }
+  }
+  {
+    uint8_t raw[10] = {}, rgb[18] = {};
+    float work[18] = {};
+    PianoIspStats stats{};
+    CHECK(pianoIsp(raw, sizeof raw, 6, 2, 5, kPianoCameraBGGR, 64, 1, work, 18, rgb, 18, &stats) == -1);
+    CHECK(pianoIsp(raw, sizeof raw, 4, 2, 5, kPianoCameraBGGR, 64, UINT32_MAX, work, 18, rgb, 18, &stats) == -1);
+    CHECK(pianoIsp(raw, sizeof raw, 4, 2, 5, kPianoCameraBGGR, 1023, 1, work, 18, rgb, 18, &stats) == -1);
+    CHECK(pianoIsp(raw, sizeof raw, 4, 2, 5, 4, 64, 1, work, 18, rgb, 18, &stats) == -1);
+    CHECK(pianoIsp(raw, sizeof raw - 1, 4, 2, 5, kPianoCameraBGGR, 64, 1, work, 18, rgb, 18, &stats) == -1);
+    CHECK(pianoIsp(raw, sizeof raw, 4, 2, 5, kPianoCameraBGGR, 64, 1, work, 5, rgb, 18, &stats) == -1);
+    CHECK(pianoIsp(raw, sizeof raw, 4, 2, 5, kPianoCameraBGGR, 64, 1, work, 18, rgb, 5, &stats) == -1);
+    CHECK(pianoIsp(raw, sizeof raw, 4, 2, 4, kPianoCameraBGGR, 64, 1, work, 18, rgb, 18, &stats) == -1);
+  }
   CHECK(pianoBayerChannel(kPianoCameraGRBG, 0, 0) == 1 && pianoBayerChannel(kPianoCameraGRBG, 0, 1) == 0 &&
         pianoBayerChannel(kPianoCameraGRBG, 1, 0) == 2 && pianoBayerChannel(kPianoCameraBGGR, 0, 0) == 2 &&
         pianoBayerChannel(kPianoCameraBGGR, 1, 1) == 0 && pianoBayerChannel(kPianoCameraRGGB, 0, 0) == 0);
@@ -2253,15 +2351,19 @@ static void testIsp()
     std::vector<float> work(ow * oh * 3);
     std::vector<uint8_t> rgb(ow * oh * 3);
     PianoIspStats st;
-    CHECK(pianoIsp(raw.data(), w, h, stride, kPianoCameraGRBG, 64, scale, work.data(), rgb.data(), &st) == 0);
+    CHECK(pianoIsp(raw.data(), raw.size(), w, h, stride, kPianoCameraGRBG, 64, scale,
+                   work.data(), work.size(), rgb.data(), rgb.size(), &st) == 0);
     CHECK(st.width == ow && st.height == oh && std::fabs(st.mean[0] - 400) < 0.5f && std::fabs(st.mean[1] - 200) < 0.5f &&
           std::fabs(st.mean[2] - 100) < 0.5f && std::fabs(st.gain[0] - 0.5f) < 0.01f && std::fabs(st.gain[2] - 2.f) < 0.01f);
     CHECK(rgb[0] == rgb[1] && rgb[1] == rgb[2] && rgb[0] > 200);   // grey after the balance, put near the top by the digital gain
   }
-  CHECK(pianoIsp(raw.data(), 2, 2, stride, 0, 64, 1, nullptr, nullptr, nullptr) == -1);
+  CHECK(pianoIsp(raw.data(), raw.size(), 2, 2, stride, 0, 64, 1, nullptr, 0, nullptr, 0, nullptr) == -1);
   uint8_t img[4 * 2 * 3] = {}, thumb[2 * 1 * 3] = {};
   for (unsigned i = 0; i < sizeof img; ++i) img[i] = uint8_t(i < 12 ? 10 : 200);   // the first row dark, the second bright
   pianoThumb(img, 4, 2, 2, 1, thumb);
+  CHECK(thumb[0] == 105 && thumb[3] == 105);
+  pianoThumb(img, UINT32_MAX, UINT32_MAX, 2, 1, thumb);
+  pianoThumb(img, 4, 2, UINT32_MAX, UINT32_MAX, thumb);
   CHECK(thumb[0] == 105 && thumb[3] == 105);
   // the model's front scene: the kept frame is the stream's last, the ISP reads it as BGGR
   L3Rig r;
@@ -2273,7 +2375,8 @@ static void testIsp()
     std::vector<float> work(ow * oh * 3);
     std::vector<uint8_t> rgb(ow * oh * 3);
     PianoIspStats st;
-    CHECK(pianoIsp(r.ops.kept.data(), res.width, res.height, res.stats.stride, kPianoCameraBGGR, 64, 4, work.data(), rgb.data(), &st) == 0);
+    CHECK(pianoIsp(r.ops.kept.data(), r.ops.kept.size(), res.width, res.height, res.stats.stride, kPianoCameraBGGR, 64, 4,
+                   work.data(), work.size(), rgb.data(), rgb.size(), &st) == 0);
     // the model's positions 0..3 (B G G R for BGGR) add 0..3 to the scene: R is the brightest, B the darkest
     CHECK(st.width == 408 && st.height == 229 && st.mean[0] > st.mean[1] && st.mean[1] > st.mean[2] && st.mean[1] > 100);
   }
@@ -2509,6 +2612,148 @@ static void testLiveDmaFence()
   }
 }
 
+static void testUnsafeDiagnosticStop()
+{
+  L3Rig r;
+  r.b.wmStopStuck = true;
+  const auto result = r.run(Sensor::rear);
+  CHECK(!result.ok && !result.cleanOff && !result.wmStopped && !result.bufferFreed);
+  CHECK(r.b.allocs == 1 && r.b.frees == 0 && r.b.violations.empty());
+  CHECK(r.b.titan() && r.b.cameraNocUp());
+  CHECK(r.b.v(kSmmu + iova::s2crOffset(r.plan.slot)) == kS2crFault);
+
+  L3Rig reset;
+  reset.ops.stepHook = [&](int step) {
+    if (step == kStepL3Stop) reset.b.csidResetStuck = true;
+  };
+  const auto unconfirmed = reset.run(Sensor::front);
+  CHECK(!unconfirmed.ok && unconfirmed.wmStopped && !unconfirmed.cleanOff && !unconfirmed.bufferFreed);
+  CHECK(unconfirmed.failure == StreamFailure::csidReset && reset.b.frees == 0 && reset.b.violations.empty());
+  CHECK(reset.b.v(kSmmu + iova::s2crOffset(reset.plan.slot)) == kS2crFault);
+
+  L3Rig bus;
+  bus.ops.stepHook = [&](int step) {
+    if (step == kStepL3Stop) bus.b.rearAbsent = true;
+  };
+  const auto offFailed = bus.run(Sensor::rear);
+  CHECK(!offFailed.ok && offFailed.failure == StreamFailure::table && offFailed.sensor.sensorWriteFailures);
+  CHECK(offFailed.cleanOff && offFailed.bufferFreed && bus.ops.kept.empty() && bus.b.violations.empty());
+}
+
+static void testInvalidWindow()
+{
+  uint64_t pages[1024] = {};
+  iova::Window window;
+  CHECK(!iova::buildWindow(window, pages, pages + 512, UINT64_MAX - 4095, 0, kIovaBlockBytes, kIovaWindowBase));
+  CHECK(!iova::buildWindow(window, pages, pages + 512, 0x1000, (1ull << 48) - kIovaBlockBytes,
+                           2 * kIovaBlockBytes, kIovaWindowBase));
+  CHECK(iova::buildWindow(window, pages, pages + 512, 0x1000, (1ull << 48) - kIovaBlockBytes,
+                          kIovaBlockBytes, iova::kWindowEnd - kIovaBlockBytes));
+  CHECK(iova::translate(window, iova::kWindowEnd - 1) == (1ull << 48) - 1);
+  CHECK(!iova::buildWindow(window, pages, pages + 512, 0x1000, kIovaBlockBytes,
+                           2 * kIovaBlockBytes, iova::kWindowEnd - kIovaBlockBytes));
+  CHECK(iova::translate(window, iova::kWindowEnd) == 0 && iova::busOf(window, window.bytes) == 0);
+  iova::Plan plan;
+  auto read = [](uint32_t) { return 0u; };
+  auto write = [](uint32_t, uint32_t) { CHECK(false); };
+  CHECK(iova::apply(plan, kCamStream, UINT64_MAX - 4095, read, write, [] { return true; }) != nullptr);
+}
+
+static void testModeLayouts()
+{
+  const struct Mode {
+    const char *sensor;
+    uint32_t width, height, stride, payload, arenaMiB;
+    bool daily;
+  } modes[] = {
+    {"s5kjn1", 8160, 6144, 10208, 62717952, 62, false},
+    {"ov32d40", 3264, 1836, 4080, 7490880, 8, true},
+    {"ov32d40", 6528, 4896, 8160, 39951360, 40, false},
+    {"s5kjn1", 4080, 3072, 5104, 15679488, 16, true},
+    {"ov32d40", 3264, 2448, 4080, 9987840, 10, false},
+  };
+  CHECK(sizeof modes / sizeof modes[0] == sizeof kCameraTableModes / sizeof kCameraTableModes[0]);
+  uint64_t pages[1024] = {};
+  iova::Window window;
+  constexpr uint64_t pa = 4ull << 30;
+  DmaReserve reserve;
+  Dma backing;
+  backing.bytes = kPianoCameraSlotBytes;
+  backing.cookie = &reserve;
+  backing.tables = pages;
+  reserve.install(backing);
+  for (const Mode &mode : modes) {
+    const auto *table = tableMode(mode.sensor, mode.width, mode.height);
+    CHECK(table && tableSection(mode.sensor, "mode", table->name));
+    CHECK(mode.daily == ((mode.width == kRearL3Width && mode.height == kRearL3Height) ||
+                         (mode.width == kFrontL3Width && mode.height == kFrontL3Height)));
+    FrameLayout layout;
+    CHECK(frameLayout(mode.width, mode.height, layout));
+    CHECK(layout.stride == mode.stride && layout.payload == mode.payload && layout.arena == (mode.arenaMiB << 20));
+    CHECK(!(layout.stride & 15u) && layout.arena - layout.payload >= (256u << 10));
+    CHECK(iova::buildWindow(window, pages, pages + 512, 0x1000, pa, layout.arena, kIovaWindowBase));
+    CHECK(iova::translate(window, kIovaWindowBase - 1) == 0);
+    CHECK(iova::translate(window, kIovaWindowBase) == pa);
+    CHECK(iova::translate(window, kIovaWindowBase + layout.arena - 1) == pa + layout.arena - 1);
+    CHECK(iova::translate(window, kIovaWindowBase + layout.arena) == 0);
+    Dma lease;
+    const bool fits = reserve.take(layout.arena, true, lease);
+    CHECK(fits == (mode.arenaMiB <= 16));
+    CHECK(fits == (layout.payload <= kPianoCameraSlotBytes));
+    if (fits) CHECK(reserve.giveBack(lease));
+
+    if (mode.daily) continue;
+    const uint32_t scale = 8;
+    PianoIspLayout isp{};
+    CHECK(pianoIspLayout(mode.width, mode.height, layout.stride, layout.payload, scale, &isp) == 0);
+    CHECK(isp.width == mode.width / 16 && isp.height == mode.height / 16);
+    std::vector<uint8_t> raw(layout.payload, 0xff), rgb(isp.samples);
+    std::vector<float> work(isp.samples);
+    PianoIspStats stats;
+    CHECK(pianoIsp(raw.data(), raw.size(), mode.width, mode.height, layout.stride, kPianoCameraBGGR, 64,
+                   scale, work.data(), work.size(), rgb.data(), rgb.size(), &stats) == 0);
+    CHECK(!rgb.empty() && stats.width == isp.width && stats.height == isp.height && stats.mean[0] == 959 &&
+          rgb.front() == 255 && rgb.back() == 255);
+  }
+  FrameLayout layout;
+  const uint32_t maxHeight = (iova::kWindowEnd - kIovaWindowBase - (256u << 10)) / 16;
+  CHECK(frameLayout(4, maxHeight, layout) && layout.arena == iova::kWindowEnd - kIovaWindowBase);
+  CHECK(!frameLayout(4, maxHeight + 1, layout) && !layout.arena);
+  CHECK(!frameLayout(UINT32_MAX - 3, UINT32_MAX, layout));
+  CHECK(!frameLayout(4096, 0, layout) && !frameLayout(0, 4096, layout));
+  CHECK(!frameLayout(3266, 1836, layout));
+  PianoIspLayout isp;
+  CHECK(pianoIspLayout(65536, 262144, 81920, SIZE_MAX, 1, &isp) == -1);
+}
+
+static void testStartUnwind()
+{
+  const uint64_t invalid[] = {0, UINT64_MAX & ~uint64_t(kIovaBlockBytes - 1), 1ull << 40, 1ull << 36};
+  for (uint64_t pa : invalid) {
+    L3Rig r;
+    r.b.memPa = pa;
+    r.b.r[kSmmu + iova::kIdr2] = 1u << 4 | iova::kIdr2Ptfs4k;
+    const auto result = r.run(Sensor::front);
+    CHECK(result.failure == StreamFailure::memory && result.cleanOff && result.bufferFreed);
+    CHECK(r.b.allocs == 1 && r.b.frees == 1 && !r.b.smmuStores && r.b.violations.empty());
+  }
+  L3Rig r;
+  r.ops.reserveDma();
+  StreamOptions live;
+  live.live = true;
+  for (int checkpoint : {kStepL3Memory, kStepL3Wm, kStepL3Csid, kStepL3Phy, kStepL3Sensor2}) {
+    r.ops.cancelStep = checkpoint;
+    const auto result = r.run(Sensor::front, live);
+    CHECK(result.ok && result.cleanOff && result.bufferFreed && !result.streamed && !r.ops.dmaReserve.busy());
+    CHECK(!r.b.windowLive() && !r.b.titan() && r.b.aupFifo.empty() && r.b.violations.empty());
+  }
+  r.ops.cancelStep = 0;
+  r.ops.liveLimit = 2;
+  const auto result = r.run(Sensor::rear, live);
+  CHECK(result.ok && result.cleanOff && result.bufferFreed && r.ops.liveFrames == 2 && !r.ops.dmaReserve.busy());
+  CHECK(r.b.allocs == 1 && r.b.frees == 0 && r.b.violations.empty());
+}
+
 // The plan (CameraPlan.h): the names parse to their images' arguments; on one board (c1's tablet) c3rp, c2fx, c3r, c3rs and c3f run
 // one after another, each from what the one before left (the SMMU words the release keeps, PLL0's configuration), each with its
 // power-down complete, the board as found after the last.
@@ -2571,6 +2816,10 @@ static void testPlan()
 
 int main()
 {
+  testInvalidWindow();
+  testUnsafeDiagnosticStop();
+  testModeLayouts();
+  testStartUnwind();
   testSurvey();
   testRearCci();
   testRearGpio();

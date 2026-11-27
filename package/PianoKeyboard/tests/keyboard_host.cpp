@@ -10,7 +10,7 @@
 // BitI2c.h against a bit-level I2C target model
 // (START/STOP, ACK/NACK, repeated START reads, clock stretching), CmdDb.h on a small database, and HidDescriptors.h (parsed item by
 // item: each report is as long as the driver sends it).
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. keyboard_host.cpp -o /tmp/keyboard_host && /tmp/keyboard_host [--no-firmware] [MCU_Upgrade.bin]
+// Build: c++ -std=c++20 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -I.. keyboard_host.cpp -o /tmp/keyboard_host && /tmp/keyboard_host [--no-firmware] [MCU_Upgrade.bin]
 #include "Wn8030Piano.h"
 #include "BitI2c.h"
 #include "CmdDb.h"
@@ -265,11 +265,22 @@ static void testFrames()
   v[21] = 0x38;
   v[22] = 0x80;
   v[23] = 0x24;
-  CHECK(unpackFrame(v, r, 24, &n) == Frame::reports && n == 2 && r[1].length == kFrameBytes - 19);
+  CHECK(unpackFrame(v, r, 24, &n) == Frame::reports && n == 2 && r[1].length == kFrameBytes - 1 - 19);
   CHECK(vendorKind(r[1], &attached) == Vendor::authRequest);
   CHECK(vendorKind(r[0], &attached) == Vendor::attach);
   Report key5 = {kIdKeyboard, 9, key};
   CHECK(vendorKind(key5, &attached) == Vendor::none);
+
+  // Eight mouse reports fill the body exactly. A nonzero checksum belongs to none of them.
+  uint8_t full[kFrameBytes] = {0x57, 0, 0x6c};
+  for (unsigned i = 0; i < 8; ++i) full[3 + i * kMouseBytes] = kIdMouse;
+  full[kFrameBytes - 1] = sum8(full + 2, kFrameBytes - 3);
+  CHECK(frameSumOk(full) && full[kFrameBytes - 1] != 0);
+  CHECK(unpackFrame(full, r, 24, &n) == Frame::reports && n == 8);
+  CHECK(unpackFrame(full, r, 1, &n) == Frame::reports && n == 1 && r[0].bytes == full + 3);
+  // A fixed report may fit the transport buffer but overrun the body by one byte.
+  full[3 + 7 * kMouseBytes] = kIdKeyboard;
+  CHECK(unpackFrame(full, r, 24, &n) == Frame::overrun && n == 7);
 }
 
 // A touchpad report: buttons and up to three {flags, id, x, y}.
@@ -494,7 +505,7 @@ static void testAuth()
   std::vector<uint8_t> challenge = vendor(0x24, 0x32, {}, 7);
   challenge.resize(40, 0x5a);
   pack(f, 4, {challenge});
-  CHECK(unpackFrame(f, r, 24, &n) == Frame::reports && n == 1 && r[0].length == kFrameBytes - 3);
+  CHECK(unpackFrame(f, r, 24, &n) == Frame::reports && n == 1 && r[0].length == kFrameBytes - 4);
   CHECK(authPayload(r[0]) && authReply(r[0], wire) == AuthStep::challenge);
   pack(f, 5, {vendor(0x23, 0x32, {}, 32)});
   CHECK(unpackFrame(f, r, 24, &n) == Frame::reports && authReply(r[0], wire) == AuthStep::tooShort);
@@ -900,6 +911,30 @@ static void testScrolling()
   CHECK(sum == 300);
 }
 
+static void testPalmDuringTouchpadGesture()
+{
+  constexpr uint8_t touch = 7, palm = 3;
+  uint8_t tp[kTouchpadBytes], out[2][kPointerBytes];
+  Pointer p;
+  touchpad(tp, 0, {{touch, 1, 1000, 1000}, {touch, 2, 1400, 1000}, {palm, 3, 2000, 1000}});
+  CHECK(p.touch(tp, 0, out) == 0);
+  touchpad(tp, 0, {{touch, 1, 1000, 940}, {touch, 2, 1400, 940}, {palm, 3, 2000, 1300}});
+  CHECK(p.touch(tp, 8, out) == 1 && out[0][5] == 8 && out[0][0] == 0);
+  touchpad(tp, 0, {{touch, 1, 1000, 940}, {palm, 2, 1400, 940}});
+  CHECK(p.touch(tp, 16, out) == 0);
+  touchpad(tp, 0, {});
+  CHECK(p.touch(tp, 24, out) == 0 && p.taps() == 0);
+
+  touchpad(tp, 0, {{touch, 1, 1000, 1000}});
+  CHECK(p.touch(tp, 1000, out) == 0);
+  touchpad(tp, 0, {{palm, 1, 1000, 1000}});
+  CHECK(p.touch(tp, 1020, out) == 0 && p.taps() == 0);
+  touchpad(tp, 0, {{touch, 2, 1400, 1000}, {palm, 1, 1000, 1000}});
+  CHECK(p.touch(tp, 1040, out) == 0);
+  touchpad(tp, 0, {{palm, 1, 1000, 1000}});
+  CHECK(p.touch(tp, 1080, out) == 2 && out[0][0] == 1 && out[1][0] == 0 && p.taps() == 1);
+}
+
 // Three-finger swipes: recognised once per touch, sent as Control + arrow only with gestures on.
 static Swipe swipeTouch(Pointer &p, uint64_t t0, int dx, int dy, unsigned *wheelReports, Swipe *logged)
 {
@@ -1285,7 +1320,8 @@ static void testCoverPower()
   using Step = CoverPower::Step;
   {   // off (the default): the MCU always runs, whatever the display or a sleep does
     CoverPower c;
-    CHECK(c.display(0, 0) == Step::none && c.sleep(true, 0) == Step::none && c.running());
+    CHECK(c.display(0, 0) == Step::none && c.sleep(true, 0) == Step::release && c.running());
+    CHECK(c.sleep(true, 0) == Step::none && c.asleep());
     CHECK(c.wakeRequest(true, 0) == Step::none && c.sleep(false, 0) == Step::none && c.running());
   }
   {   // on: the display's blank and unblank
@@ -1342,6 +1378,101 @@ static void testCoverPower()
     slept = 0;
     CHECK(ReadyWait::run([&] { return false; }, sleep) == ReadyWait::kMaxMs + 1 && slept == ReadyWait::kMaxMs);
   }
+}
+
+static void testCoverInputRelease()
+{
+  InputGate gate;
+  Pointer p;
+  Keys filter;
+  const auto pressed = keys(2, {0x04});
+  const auto rollover = keys(0, {1});
+  uint8_t tp[kTouchpadBytes], pointer[2][kPointerBytes], keyboard[kKeyboardBytes];
+  unsigned releases = 0;
+  const auto release = [&] {
+    Pointer::release(pointer[0]);
+    for (uint8_t b : pointer[0]) CHECK(b == 0);
+    p.reset();
+    filter.reset();
+    ++releases;
+  };
+  const auto holdInput = [&](uint64_t now) {
+    CHECK(gate.pass());
+    filter.filter(pressed.data(), keyboard);
+    CHECK(sentIs(keyboard, 2, {0x04}));
+    touchpad(tp, 1, {{7, 1, 1000, 1000}});
+    CHECK(p.touch(tp, now, pointer) == 1 && pointer[0][0] == 1);
+  };
+  const auto checkReleased = [&](uint64_t now) {
+    filter.filter(rollover.data(), keyboard);
+    CHECK(sentIs(keyboard, 0, {}));
+    touchpad(tp, 0, {});
+    CHECK(p.touch(tp, now, pointer) == 0 && p.takeSwipe() == Swipe::none);
+  };
+
+  CHECK(gate.pass() && !gate.attach(true));
+  for (unsigned i = 0; i < 4; ++i) {
+    const uint64_t now = 100 * i;
+    holdInput(now);
+    if (gate.attach(false)) release();
+    CHECK(!gate.pass() && !gate.attach(false));   // including later reports in the same frame
+    CHECK(!gate.attach(true) && gate.pass());
+    checkReleased(now + 10);
+  }
+  CHECK(releases == 4);
+
+  for (bool blank : {false, true}) {
+    CoverPower power;
+    power.configure(blank);
+    holdInput(1000);
+    if (CoverPower::releasesInput(power.display(0, 1010))) release();
+    CHECK(releases == (blank ? 6u : 4u));
+    if (CoverPower::releasesInput(power.sleep(true, 1020))) release();
+    CHECK(power.running() != blank);
+    CHECK(!CoverPower::releasesInput(power.sleep(false, 1050)));
+    CHECK(!CoverPower::releasesInput(power.display(1, 1060)));
+    checkReleased(1070);
+  }
+  CHECK(releases == 6);
+}
+
+static void testHallDebounce()
+{
+  HallDebounce h;
+  InputGate gate;
+  gate.configure(true);
+  int accepted = 1;
+  h.reset(accepted);
+  unsigned releases = 0;
+  const auto sample = [&](int level, bool edge, uint64_t now) {
+    if (!h.sample(accepted, level, edge, now)) return;
+    accepted = level;
+    if (gate.hall(level)) ++releases;
+  };
+  sample(0, true, 100);
+  CHECK(h.pending() && h.waitMs(100, 500) == HallDebounce::kConfirmMs && gate.pass());
+  sample(1, true, 103);
+  sample(0, true, 107);
+  sample(1, true, 110);
+  CHECK(!h.pending() && accepted == 1 && releases == 0);
+  sample(0, true, 112);
+  sample(0, true, 116);   // a new latched edge pushes back confirmation even if the sampled level is the same
+  const uint64_t confirm = 116 + HallDebounce::kConfirmMs;
+  sample(0, false, confirm - 1);
+  CHECK(accepted == 1 && releases == 0 && h.waitMs(confirm - 1, 500) == 1);
+  sample(0, false, confirm);
+  CHECK(accepted == 0 && releases == 1 && !gate.pass());
+  sample(0, true, 140);
+  CHECK(releases == 1);
+  sample(1, true, 150);
+  sample(1, false, 150 + HallDebounce::kConfirmMs);
+  CHECK(accepted == 1 && gate.pass());
+  sample(0, false, 650);   // no latch: two agreeing scheduled polls
+  sample(1, false, 1150);
+  sample(0, false, 1650);
+  CHECK(accepted == 1 && !h.pending() && releases == 1);
+  sample(0, false, 2150);
+  CHECK(accepted == 0 && releases == 2);
 }
 
 // HallSim.h (machdep.piano_keyboard_hall_sim) with a model of pollHall: the accepted level, what PianoPolicy would be told (the
@@ -1447,6 +1578,7 @@ int main(int argc, char **argv)
   testDescriptors();
   testTouchpadDescriptor();
   testScrolling();
+  testPalmDuringTouchpadGesture();
   testGestures();
   testTapsAndTyping();
   testRestingThumb();
@@ -1455,6 +1587,8 @@ int main(int argc, char **argv)
   testIrqWait();
   testBrightnessKeys();
   testCoverPower();
+  testCoverInputRelease();
+  testHallDebounce();
   testHallSim();
   if (failures) {
     std::printf("keyboard_host: %d failure(s)\n", failures);

@@ -2,7 +2,7 @@
 // Host test of level 7's join profile rules (WifiProfile.h), which the kext's sysctl and the tablet's piano-wifi-join both
 // apply: what a usable profile is, and that a wipe leaves nothing behind. The profiles here are made up for the test: no
 // network of anyone's.
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. profile_host.cpp -o /tmp/profile_host && /tmp/profile_host
+//   c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I.. profile_host.cpp -o /tmp/profile_host && /tmp/profile_host
 #include "WifiProfile.h"
 #include <cstdio>
 #include <cstring>

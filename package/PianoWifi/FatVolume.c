@@ -68,7 +68,10 @@ int fat_mount_prefix(FatVolume *v, uint64_t size, FatRead read, void *context)
     return mount_volume(v, size, read, context, 1);
 }
 
-static int valid(const FatVolume *v, uint32_t cluster) {return cluster >= 2 && cluster - 2 < v->clusters;}
+static int valid(const FatVolume *v, uint32_t cluster)
+{
+    return cluster >= 2 && cluster - 2 < v->clusters && cluster < (v->fat32 ? 0x0ffffff0u : 0xfff0u);
+}
 static uint64_t cluster_offset(const FatVolume *v, uint32_t cluster) {return v->data_offset + (uint64_t)(cluster - 2) * v->cluster_bytes;}
 
 /* The table entry of cluster (valid), through the one-sector cache. */
@@ -121,7 +124,7 @@ static void long_part(LongName *l, const uint8_t *d)
         l->valid = seq >= 1 && seq <= LFN_ENTRIES;
         l->count = (uint8_t)seq;
         l->sum = d[13];
-    } else if (!l->valid || seq != l->next - 1u || d[13] != l->sum) {
+    } else if (!l->valid || seq == 0 || seq != l->next - 1u || d[13] != l->sum) {
         l->valid = 0;
     }
     if (!l->valid) return;
@@ -152,7 +155,7 @@ static int find(FatVolume *v, uint32_t cluster, const char *name, size_t length,
     uint64_t left = fixed && !v->fat32 ? (uint64_t)v->root_entries * 32 : 0;
     for (uint32_t walked = 0;;) {
         if (!(fixed && !v->fat32)) {
-            if (!valid(v, cluster) || walked++ > v->clusters) return FatDamaged;
+            if (!valid(v, cluster) || walked++ >= v->clusters) return FatDamaged;
             at = cluster_offset(v, cluster);
             left = v->cluster_bytes;
         }
@@ -173,7 +176,7 @@ static int find(FatVolume *v, uint32_t cluster, const char *name, size_t length,
                     if (i == 10) same = 1;
                 }
                 if (!same) continue;
-                file->first_cluster = (uint32_t)le16(d + 26) | (v->fat32 ? (uint32_t)le16(d + 20) << 16 : 0);
+                file->first_cluster = (uint32_t)le16(d + 26) | (v->fat32 ? (uint32_t)(le16(d + 20) & 0x0fff) << 16 : 0);
                 file->size = le32(d + 28);
                 file->directory = (d[11] & 0x10) != 0;
                 return FatOk;
@@ -185,7 +188,7 @@ static int find(FatVolume *v, uint32_t cluster, const char *name, size_t length,
         uint32_t next;
         const int rc = next_cluster(v, cluster, &next);
         if (rc) return rc;
-        if (!valid(v, next)) return FatNotFound;  /* the end of the directory */
+        if (next >= (v->fat32 ? 0x0ffffff8u : 0xfff8u)) return FatNotFound;
         cluster = next;
     }
 }
@@ -202,6 +205,7 @@ int fat_open(FatVolume *v, const char *path, FatFile *file)
         if (!at.directory) return FatNotDirectory;
         const int rc = find(v, at.first_cluster, path, n, &at);
         if (rc) return rc;
+        if (at.directory && !valid(v, at.first_cluster)) return FatDamaged;
         path += n;
     }
     *file = at;

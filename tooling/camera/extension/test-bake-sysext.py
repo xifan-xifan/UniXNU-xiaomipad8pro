@@ -129,7 +129,18 @@ def main():
             pass
         else:
             raise AssertionError('seed database overwrite accepted')
+        blocked = root / 'blocked-seed' / bake.ROOT.lstrip('/')
+        blocked.mkdir(parents=True)
+        (blocked / '.staging').symlink_to(root / 'missing-staging')
+        try:
+            bake.seed(root / 'blocked-seed', prepared)
+        except SystemExit:
+            assert not (blocked / 'db.plist').exists()
+            assert {path.name for path in blocked.iterdir()} == {'.staging'}
+        else:
+            raise AssertionError('symlink in seed accepted')
         for label, mutate in [
+            ('non-record extension', lambda d: d.update(extensions=[17])),
             ('unknown header', lambda d: d.update(checksum='unexpected')),
             ('wrong version', lambda d: d.update(version=2)),
             ('developer mode', lambda d: d.update(developerMode=True)),
@@ -140,6 +151,10 @@ def main():
             ('incomplete hash', lambda d: d['extensions'][0].pop('stagedCdhashes') or d['extensions'][0].pop('stagedCdhash')),
             ('stale staged URL', lambda d: d['extensions'][0].update(stagedBundleURL='file:///wrong/')),
             ('wrong archive', lambda d: d['extensions'][0].update(additionalLaunchdPlistEntries=archive({'MachServices': {}}))),
+            ('malformed keyed archive', lambda d: d['extensions'][0].update(additionalLaunchdPlistEntries=
+                plistlib.dumps({'$archiver': 'NSKeyedArchiver', '$version': 100000}))),
+            ('invalid reference shape', lambda d: d['extensions'][0].update(references=[17])),
+            ('invalid staged UUID', lambda d: d['extensions'][0].update(uniqueID='invalid')),
         ]:
             bad = copy.deepcopy(db)
             mutate(bad)
@@ -152,7 +167,7 @@ def main():
                 pass
             else:
                 raise AssertionError('accepted ' + label)
-        print('PASS synthetic clone: sign/version rebasing, every unchanged field, deterministic output, modes, and 11 refusals')
+        print('PASS synthetic clone: sign/version rebasing, unchanged fields, deterministic output, modes, and malformed input refusals')
 
 
 if __name__ == '__main__':

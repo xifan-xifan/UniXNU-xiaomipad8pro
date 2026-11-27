@@ -24,7 +24,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 # PianoPower (package/PianoPower/PianoPower.cpp readRtcLine): "rtc: COUNT (DATE UTC, offset N from SOURCE), enabled E", also with
 # "[Ns] " before it, and "rtc: COUNT (+ offset N from SOURCE = ..." or "rtc: COUNT (no offset: ..." when there is no date.
-LINE = re.compile(r'PianoPower: (?:\[\d+s\] )?rtc: (\d+) \((.*?)\), enabled ([01])')
+LINE = re.compile(r'PianoPower: (?:\[\d+s\] )?rtc: ([0-9]{1,10}) \((.*?)\), enabled ([01])$')
 OFFSET = re.compile(r'offset (\d+) from (piano-rtc-offset|the SDAM cell)')
 UTC_MIN, UTC_MAX = 1767225600, 4102444800   # PmicRtc.h: a date in [2026-01-01, 2100-01-01)
 
@@ -43,8 +43,11 @@ def parse(lines):
             t = float(stamp)
         except ValueError:
             continue
+        count = int(m.group(1))
+        if not math.isfinite(t) or count >= 1 << 32:
+            continue
         o = OFFSET.search(m.group(2))
-        out.append((t, int(m.group(1)), int(o.group(1)) if o else None, o.group(2) if o else None, m.group(3) == '1'))
+        out.append((t, count, int(o.group(1)) if o else None, o.group(2) if o else None, m.group(3) == '1'))
     return out
 
 

@@ -78,6 +78,13 @@ constexpr uint64_t tableDesc(uint64_t pa) { return (pa & kOutMask) | kDescTable;
 // ---- the table: one level-1 page (4 entries of 1 GiB for a 32-bit input space) and one level-2 page (512 blocks of 2 MiB) ----
 constexpr unsigned kTablePages = 2, kL1Entries = 4, kL2Entries = 512;
 constexpr uint64_t kTableBytes = uint64_t(kTablePages) * 4096;
+constexpr uint32_t kWindowEnd = kL2Entries * kIovaBlockBytes;
+constexpr uint64_t kDescriptorPaLimit = 1ull << 48;
+
+inline bool fitsPhysical(uint64_t pa, uint64_t bytes, uint64_t limit)
+{
+  return pa < limit && bytes <= limit - pa;
+}
 
 struct Window {
   uint64_t tablePa = 0;        // the level-1 page (the level-2 page follows it)
@@ -91,12 +98,13 @@ struct Window {
 inline bool buildWindow(Window &w, uint64_t *l1, uint64_t *l2, uint64_t tablePa, uint64_t arenaPa, uint32_t arenaBytes,
                         uint32_t base)
 {
-  if (!l1 || !l2 || (tablePa & 0xfffu) || (arenaPa & (kIovaBlockBytes - 1)) || (base & (kIovaBlockBytes - 1)) || !arenaBytes)
+  if (!l1 || !l2 || l1 == l2 || !tablePa || (tablePa & 0xfffu) || (arenaPa & (kIovaBlockBytes - 1)) ||
+      (base & (kIovaBlockBytes - 1)) || !arenaBytes || arenaBytes % kIovaBlockBytes || base >= kWindowEnd ||
+      arenaBytes > kWindowEnd - base || !fitsPhysical(tablePa, kTableBytes, kDescriptorPaLimit) ||
+      !fitsPhysical(arenaPa, arenaBytes, kDescriptorPaLimit))
     return false;
   const uint32_t blocks = arenaBytes / kIovaBlockBytes;
-  if (!blocks || arenaBytes % kIovaBlockBytes) return false;
   const uint32_t first = base >> 21;
-  if ((base >> 30) != 0 || first + blocks > kL2Entries) return false;
   for (unsigned i = 0; i < kL1Entries; ++i) l1[i] = 0;
   for (unsigned i = 0; i < kL2Entries; ++i) l2[i] = 0;
   l1[0] = tableDesc(tablePa + 4096);
@@ -217,7 +225,8 @@ inline const char *apply(const Plan &p, uint16_t stream, uint64_t tablePa, Read 
 {
   if (p.error) return p.error;
   if (!tablePa || (tablePa & 0xfffu)) return "the table is not page aligned";
-  if ((tablePa + kTableBytes - 1) >> kPaBits[p.pasize]) return "the table lies outside the SMMU's output size";
+  if (p.pasize >= sizeof kPaBits / sizeof kPaBits[0] || !fitsPhysical(tablePa, kTableBytes, 1ull << kPaBits[p.pasize]))
+    return "the table lies outside the SMMU's output size";
   const uint32_t cb = p.cb;
   wr(cb + kCbSctlr, 0);                      // translation off while the bank is programmed
   wr(cba2rOffset(p.bank), 1);                // 64-bit descriptors

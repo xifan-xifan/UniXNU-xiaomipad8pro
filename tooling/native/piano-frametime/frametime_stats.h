@@ -19,5 +19,10 @@ typedef struct {
 
 // Timestamps can be unordered. Zero, negative, and nonfinite samples are missing.
 // Only distinct events within the half-open measurement window contribute intervals.
+// Returns false if the inputs or computed statistics cannot be represented.
 bool ft_analyze(const double *timestamps, size_t count, double start, double end,
                 double nominal_hz, FtStats *stats);
+
+// A complete capture needs an observed presentation interval and successful GPU completion.
+bool ft_capture_valid(const FtStats *presented, bool window_complete, bool stable_display,
+                      size_t submitted, size_t completed, size_t gpu_errors);

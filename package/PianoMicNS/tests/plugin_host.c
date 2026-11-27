@@ -12,11 +12,13 @@
 //   plugin_host BUNDLE              the bundle loads (CFBundle, as the helper's loader) and passes every check below
 //   plugin_host --refused BUNDLE    negative control: CFBundle must refuse to load the executable, and the same dlopen must fail
 //                                   with dyld's "need 'arm64e'" (the line the tablet's helper logged)
+// clang -arch arm64e -std=c11 -O1 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer plugin_host.c -framework CoreAudio -framework CoreFoundation -framework Security -o /tmp/plugin_host && /tmp/plugin_host "$(bash build-host-bundle.sh /tmp/plugin_host arm64e)" && /tmp/plugin_host --refused "$(bash build-host-bundle.sh /tmp/plugin_host arm64)"
 #include <CoreAudio/AudioServerPlugIn.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <Security/Security.h>
 #include <dlfcn.h>
 #include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -113,6 +115,8 @@ int main(int argc, char **argv)
         const char *at = strstr(dl, "(mach-o file");
         printf("PASS plugin refused: host %s, CFBundle %.10s, dlopen %.100s\n", kHostAbi, why, at ? at : dl);
         free(why);
+        CFRelease(plugin);
+        CFRelease(url);
         return 0;
     }
     if (!loaded) {fprintf(stderr, "FAIL plugin_host (host %s): the executable did not load: %s\n", kHostAbi, why); return 1;}
@@ -169,7 +173,14 @@ int main(int argc, char **argv)
     Boolean settable = false;
     const AudioObjectPropertyAddress fa = {kAudioStreamPropertyVirtualFormat, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
     CHECK((*drv)->IsPropertySettable(drv, 3, 0, &fa, &settable) == 0 && settable);
+    CHECK((*drv)->SetPropertyData(drv, 3, 0, &fa, 0, NULL, sizeof f, &f) == 0);
     f.mChannelsPerFrame = 2;
+    CHECK((*drv)->SetPropertyData(drv, 3, 0, &fa, 0, NULL, sizeof f, &f) == kAudioDeviceUnsupportedFormatError);
+    f.mChannelsPerFrame = 1;
+    f.mSampleRate = NAN;
+    CHECK((*drv)->SetPropertyData(drv, 3, 0, &fa, 0, NULL, sizeof f, &f) == kAudioDeviceUnsupportedFormatError);
+    f.mSampleRate = 48000;
+    f.mBytesPerFrame = 8;
     CHECK((*drv)->SetPropertyData(drv, 3, 0, &fa, 0, NULL, sizeof f, &f) == kAudioDeviceUnsupportedFormatError);
     // IO: only ReadInput; StartIO needs PianoAudio's tap, which this Mac does not have
     Boolean will = false, inplace = false;
@@ -179,5 +190,10 @@ int main(int argc, char **argv)
     CHECK(u32(2, kAudioDevicePropertyDeviceIsRunning, kAudioObjectPropertyScopeGlobal) == 0);
     printf("PASS plugin: %u checks in an %s host (signature valid, loaded, factory, interface, properties, StartIO without a tap refused)\n",
            checks, kHostAbi);
+    (*drv)->Release(drv);
+    (*unk)->Release(unk);
+    CFRelease(factories);
+    CFRelease(plugin);
+    CFRelease(url);
     return 0;
 }

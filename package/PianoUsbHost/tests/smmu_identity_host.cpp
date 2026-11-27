@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Copyright (c) 2026 Leo Zhang. Model observed apps-SMMU semantics, not ideal MMIO.
+//   c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I.. -I../../PianoDwc3 smmu_identity_host.cpp -o /tmp/smmu_identity_host && /tmp/smmu_identity_host
 #include "SmmuIdentity.h"
 #include "UsbDomain.h"
 #include "ControllerLoan.h"
@@ -33,6 +34,26 @@ struct Model {
 int main(){
   const uint64_t table=0x8e0efb000ull;const auto never=[] {return false;};
   unsigned audits=0;auto audit=[&](uint32_t,uint32_t,uint32_t,uint32_t){++audits;};
+  { // A short aperture may not even contain the identification registers.
+    Model m;
+    unsigned reads = 0;
+    auto rd = [&](uint32_t off) { ++reads; return m.r[off]; };
+    CHECK(planSmmuIdentity(0x40, 0x2b, rd).error && reads == 0);
+    m.r[0x20] = (m.r[0x20] & ~255u) | 129u;
+    CHECK(planSmmuIdentity(0x40, 0x100000, rd).error);
+    m.r[0x20]--;
+    CHECK(!planSmmuIdentity(0x40, 0x100000, rd).error);
+    CHECK(planSmmuIdentity(0x8040, 0x100000, rd).error);
+  }
+  { // Revalidation must cover the SID that was actually planned.
+    Model m;
+    const auto p = planSmmuIdentity(0x41, 0x100000, m.rd());
+    m.r[0x810] = 0x80000041;
+    IdentityTxn tx;
+    CHECK(!p.error && applySmmuIdentity(p, 0x41, table, m.rd(), m.wr(), never, tx,
+                                       [](uint32_t, uint32_t, uint32_t, uint32_t) {}));
+    CHECK(m.writes.empty());
+  }
   {
     Model m;auto p=planSmmuIdentity(0x40,0x100000,m.rd());IdentityTxn tx;
     CHECK(!p.error&&p.bank==81&&p.asid==81);
@@ -93,6 +114,20 @@ int main(){
   {ControllerLoan l;l.begin(1,10000,false);l.started();CHECK(l.end(2,false,true,true,false)==LoanEnd::relay);}
   {ControllerLoan l;l.begin(1,10000,false);l.started();CHECK(l.end(2,true,false,false,false)==LoanEnd::unplug);}
   {ControllerLoan l;l.begin(1,10000,false);l.started();CHECK(l.end(2,true,true,false,false)==LoanEnd::role);}
+  {
+    ControllerLoan l;
+    CHECK(l.begin(1, 10000, false));
+    l.started();
+    CHECK(l.end(2, true, true, true, true, true) == LoanEnd::failure);
+    l.disconnected();
+    CHECK(!l.canBegin() && l.returning());
+    l.returned(true, true, true);
+    CHECK(l.canBegin());
+    CHECK(l.begin(3, 10000, false) && l.returning());
+    l.returned(true, true, false);
+    l.disconnected();
+    CHECK(!l.canBegin());
+  }
   {ControllerLoan l;l.begin(1,10000,true);l.started();CHECK(l.end(2,false,false,false,true)==LoanEnd::none);
     CHECK(l.end(3,false,false,false,false)==LoanEnd::unplug);l.returning();l.returned(false,true,true);CHECK(l.phase==LoanPhase::held);}
   // A required field mismatch in any programmed word refuses routing.

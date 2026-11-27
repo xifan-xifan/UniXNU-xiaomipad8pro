@@ -23,23 +23,27 @@ for n in as-angle/libGLESv2.dylib as-other/libFamilyOther.dylib; do
 done
 M=$BUNDLE/Contents/MacOS
 run() {   # run LABEL ARGS...: family_host over the hostsim, its output in OUT/LABEL.txt
-  local label=$1; shift
+  local label=$1 status=0; shift
   DYLD_INSERT_LIBRARIES=$SHIM HOSTSIM_GPU=a830 HOSTSIM_PAGE_SIZE=4096 HOSTSIM_VA=16 MESA_LOG= \
     "$OUT/family_host" "$@" "$M/NativeAdrenoMetal" "$M/libvulkan_freedreno.dylib" "$OUT/cache" ${METALLIB:+"$METALLIB"} \
-    > "$OUT/$label.txt" 2> "$OUT/$label.err" && echo "$label: rc 0" || echo "$label: rc $?"
+    > "$OUT/$label.txt" 2> "$OUT/$label.err" || status=$?
+  echo "$label: rc $status"
+  if [ "$status" -ne 0 ]; then fail=1; fi
 }
 fail=0
-run as-angle --as "$OUT/as-angle/libGLESv2.dylib" --expect-mac2 || true
-run as-other --as "$OUT/as-other/libFamilyOther.dylib" --expect-no-mac2 || true
+run as-angle --as "$OUT/as-angle/libGLESv2.dylib" --expect-mac2
+run as-other --as "$OUT/as-other/libFamilyOther.dylib" --expect-no-mac2
 # The executable itself under an image's path (no library: the pad's way): ANGLE's name gets Mac2, WebGPU.framework's Apple4 (the
 # mechanism's known-positive, frontend familyForCaller before 0011).
 mkdir -p "$OUT/exe/as-angle" "$OUT/exe/WebGPU.framework"
 cp "$OUT/family_host" "$OUT/exe/as-angle/libGLESv2.dylib"; cp "$OUT/family_host" "$OUT/exe/WebGPU.framework/WebGPU"
 runexe() {   # runexe LABEL EXE ARGS...
-  local label=$1 exe=$2; shift 2
+  local label=$1 exe=$2 status=0; shift 2
   DYLD_INSERT_LIBRARIES=$SHIM HOSTSIM_GPU=a830 HOSTSIM_PAGE_SIZE=4096 HOSTSIM_VA=16 MESA_LOG= \
     "$exe" "$@" "$M/NativeAdrenoMetal" "$M/libvulkan_freedreno.dylib" "$OUT/cache" > "$OUT/$label.txt" 2> "$OUT/$label.err" \
-    && echo "$label: rc 0" || echo "$label: rc $?"
+    || status=$?
+  echo "$label: rc $status"
+  if [ "$status" -ne 0 ]; then fail=1; fi
 }
 runexe exe-angle "$OUT/exe/as-angle/libGLESv2.dylib" --expect-mac2
 runexe exe-webgpu "$OUT/exe/WebGPU.framework/WebGPU"
@@ -63,6 +67,7 @@ want "$OUT/exe-angle.txt" 'family Apple4 = 0'
 want "$OUT/exe-angle.txt" 'RESULT PASS'
 want "$OUT/exe-webgpu.txt" 'family Apple4 = 1'
 want "$OUT/exe-webgpu.txt" 'family Mac2 = 0'
+want "$OUT/exe-webgpu.txt" 'RESULT PASS'
 want "$OUT/exe-self.txt" 'family Mac2 = 0'
 want "$OUT/exe-self.txt" 'RESULT PASS'
 want "$OUT/as-other.txt" 'family Mac2 = 0'

@@ -403,11 +403,11 @@ inline unsigned ipcrPollRing(Ipcr &p, MhiContexts &contexts, const MhiIo &io, un
       // (IEOT) the chip names each; a longer walk means completions were merged, and only the named element's length is known:
       // the others are given back without being delivered.
       for (;;) {
-        const uint32_t at = r->rp;
-        const int index = r->slot[at];
-        r->slot[at] = kIpcrNoBuffer;
-        r->rp = (at + 1) % r->elements;
-        const bool named = at == uint32_t(slot);
+        const uint32_t completedSlot = r->rp;
+        const int index = r->slot[completedSlot];
+        r->slot[completedSlot] = kIpcrNoBuffer;
+        r->rp = (completedSlot + 1) % r->elements;
+        const bool named = completedSlot == uint32_t(slot);
         if (r == &p.in) {
           if (index >= 0 && uint32_t(index) < kIpcrRxBuffers) {
             IpcrBuffer &b = p.rx[index];

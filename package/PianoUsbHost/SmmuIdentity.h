@@ -24,6 +24,7 @@ template<class Put> void identityTable(Put put) {
 }
 struct IdentityPlan {
   unsigned groups=0,banks=0,pages=0,slot=~0u,bank=~0u,asid=0;
+  uint16_t stream=0;
   bool reuse=false;
   uint32_t smr=0,s2cr=0,idr0=0,idr1=0,idr2=0,scr0=0;
   uint32_t baseline[12]={};
@@ -46,7 +47,7 @@ template<class Read> const char *identityOwners(const IdentityPlan &p, Read rd, 
     if(i==p.slot) continue;
     const uint32_t smr=rd(0x800+4*i),s2cr=rd(0xc00+4*i);
     mix(smr);mix(s2cr);
-    if((smr&0x80000000u) && (identityCovers(smr,0x40) || (s2cr&kS2crFields)==p.bank))
+    if((smr&0x80000000u) && (identityCovers(smr,p.stream) || (s2cr&kS2crFields)==p.bank))
       return "SID or bank acquired another owner";
   }
   for(unsigned b=0;b<p.banks;++b) {
@@ -61,13 +62,15 @@ template<class Read> const char *identityOwners(const IdentityPlan &p, Read rd, 
 }
 template<class Read> IdentityPlan planSmmuIdentity(uint16_t stream,uint64_t bytes,Read rd) {
   IdentityPlan p;
+  if(bytes<0x2c || stream>0x7fff) {p.error="invalid SMMU aperture or stream ID";return p;}
+  p.stream=stream;
   p.scr0=rd(0);p.idr0=rd(0x20);p.idr1=rd(0x24);p.idr2=rd(0x28);
   if(!(p.idr0&(1u<<30)) || !(p.idr2&(1u<<12)) || (p.scr0&8)) {p.error="unsupported S1/4K/stream layout";return p;}
   // The entire 36-bit identity window must be reachable at input and output.
   if((p.idr2&15)<1 || ((p.idr2>>4)&15)<1 || ((p.idr2>>8)&15)<1) {p.error="identity window needs IAS/OAS/UBS >=36";return p;}
-  p.groups=p.idr0&255;if(p.groups>128)p.groups=128;
+  p.groups=p.idr0&255;
   p.banks=p.idr1&255;p.pages=1u<<(((p.idr1>>28)&7)+1);
-  if((p.idr1>>31)||!p.groups||p.banks<2||p.banks>128||p.pages>128||uint64_t(p.pages+p.banks)*4096>bytes) {
+  if((p.idr1>>31)||!p.groups||p.groups>128||p.banks<2||p.banks>128||p.pages>128||uint64_t(p.pages+p.banks)*4096>bytes) {
     p.error="unsupported SMMU geometry";return p;
   }
   uint64_t used[2]={};unsigned freeSlot=~0u,matches=0;
@@ -112,6 +115,7 @@ template<class Read,class Write,class Expired> bool identitySync(uint32_t invali
 template<class Read,class Write,class Expired,class Audit>
 const char *applySmmuIdentity(const IdentityPlan &p,uint16_t stream,uint64_t table,Read rd,Write wr,Expired expired,IdentityTxn &tx,Audit audit) {
   if(p.error)return p.error;
+  if(stream!=p.stream)return "stream ID differs from plan";
   if((table&4095)||!identityRange(table,4096))return "table outside identity DMA window";
   if(rd(0)!=p.scr0||rd(0x20)!=p.idr0||rd(0x24)!=p.idr1||rd(0x28)!=p.idr2||rd(0x800+4*p.slot)!=p.smr||rd(0xc00+4*p.slot)!=p.s2cr)
     return "geometry or route changed since plan";

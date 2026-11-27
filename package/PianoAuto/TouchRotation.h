@@ -94,10 +94,10 @@ static inline PatPoint pat_unrotate(uint32_t degrees, int32_t dx, int32_t dy, in
     return p;
 }
 
-/* The rotation PianoTouch's thread uses. requested is written by callPlatformFunction / setProperties (any thread, one aligned 32-bit
- * store), shown only by the frame thread: pat_latch at each contact's report, with down = 1 for the touch-down. */
+/* The rotation PianoTouch's thread uses. requested is shared by callPlatformFunction / setProperties and the frame thread.
+ * The frame thread alone updates shown and changes, latching the request when a new gesture begins. */
 typedef struct {
-    volatile uint32_t requested;
+    uint32_t requested;
     uint32_t shown;
     uint32_t changes;
 } PatRotation;
@@ -113,14 +113,14 @@ static inline void pat_init(PatRotation *r)
 static inline int pat_request(PatRotation *r, uint32_t degrees)
 {
     if (!pat_valid(degrees)) return 0;
-    r->requested = degrees;
+    __atomic_store_n(&r->requested, degrees, __ATOMIC_RELAXED);
     return 1;
 }
 
 static inline uint32_t pat_latch(PatRotation *r, int down)
 {
     if (down) {
-        const uint32_t want = r->requested;
+        const uint32_t want = __atomic_load_n(&r->requested, __ATOMIC_RELAXED);
         if (pat_valid(want) && want != r->shown) {
             r->shown = want;
             ++r->changes;

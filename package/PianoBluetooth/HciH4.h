@@ -204,6 +204,7 @@ class H4LeMaskPatcher {
     }
   }
   const Stats &stats() const { return stats_; }
+  void reset() { type_ = 0; }
 
  private:
   static size_t headerLength(uint8_t type)
@@ -316,7 +317,7 @@ class LeReadyAssist {
   // Group Type, Read Multiple; opcodes 0x02..0x12 even) or an SMP Pairing Request mean bluetoothd's link is ready.
   void onHostAcl(const uint8_t *acl, size_t len)
   {
-    if (len < 9) return;
+    if (len < 9 || le16(acl + 2) != len - 4 || le16(acl + 4) < len - 8) return;
     const uint16_t hf = le16(acl);
     if (((hf >> 12) & 0x3u) == 0x1u) return;   // a continuing fragment
     Slot *s = find(hf & 0xfffu);
@@ -355,6 +356,10 @@ class LeReadyAssist {
     return false;
   }
   const Stats &stats() const { return stats_; }
+  void reset()
+  {
+    for (Slot &s : slots_) s = Slot{};
+  }
 
  private:
   static constexpr uint16_t kFree = 0xffff;
@@ -473,7 +478,7 @@ class RadioRssi {
       } else if (sub == 0x0d) {
         size_t o = 4;
         for (unsigned i = 0; i < n; ++i) {
-          if (o + 24 > bytes) {
+          if (bytes - o < 24 || ev[o + 23] > bytes - o - 24) {
             ++stats_.malformed;
             return;
           }

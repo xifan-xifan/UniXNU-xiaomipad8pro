@@ -171,15 +171,20 @@ struct Tables {
   uint64_t pa = 0;           // of page 0; 4 KiB aligned, all table pages contiguous
   unsigned pageCount = kTablePages;
 };
+inline bool validTableStorage(const Tables &t)
+{
+  return t.cpu && t.pageCount >= kTablePages && t.pageCount <= kMaxSessionTablePages &&
+         !(t.pa & 0xfff) && t.pa >= kXnuDramBase && t.pa < kXnuDramEnd &&
+         uint64_t(t.pageCount) * 4096 <= kXnuDramEnd - t.pa;
+}
 // pages: the UC region's kUcPages physical 4 KiB pages; scratch: a zeroed 4 KiB page for the rest of the window. False when a page
 // is not a 4 KiB-aligned page of XNU's RAM.
 inline bool build(Tables &t, const uint64_t *pages, unsigned count, uint64_t scratch)
 {
-  if (!t.cpu || (t.pa & 0xfff) || count != kUcPages) return false;
+  if (!validTableStorage(t) || !pages || count != kUcPages) return false;
   for (unsigned i = 0; i < count; ++i)
     if ((pages[i] & 0xfff) || pages[i] < kXnuDramBase || pages[i] >= kXnuDramEnd) return false;
   if ((scratch & 0xfff) || scratch < kXnuDramBase || scratch >= kXnuDramEnd) return false;
-  if (t.pageCount < kTablePages || t.pageCount > kMaxSessionTablePages) return false;
   for (unsigned i = 0; i < t.pageCount * 512; ++i) t.cpu[i] = 0;
   uint64_t *l1 = t.cpu, *l2 = t.cpu + 512, *l3 = t.cpu + 1024;
   l1[kIovaBase >> 30] = tableDesc(t.pa + 4096);

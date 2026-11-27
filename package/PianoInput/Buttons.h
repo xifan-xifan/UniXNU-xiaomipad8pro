@@ -38,28 +38,43 @@ inline uint8_t decodeKeys(uint8_t pon, uint8_t gpio)
 // A key changes state after its new state has been read for kDebounceMs. A sample that could not be read counts as all keys up,
 // so a bus fault longer than the debounce releases everything instead of leaving a key stuck down. A key down in the first
 // stable state (held at start, or a level that reads as held when it is not) is reported only after it has been up once.
-struct Debounce {
-  uint8_t candidate = 0, stable = 0, armed = 0;
-  bool primed = false, settled = false;   // settled: `stable` holds a debounced state
-  uint64_t since = 0;
-
+class Debounce {
+ public:
   // Returns the keys to report as down after the sample taken at `ms` (milliseconds, any origin).
   uint8_t update(bool valid, uint8_t keys, uint64_t ms)
   {
-    keys = valid ? uint8_t(keys & kKeysAll) : 0;
-    if (!primed || keys != candidate || ms < since) {
-      candidate = keys;
-      since = ms;
-      primed = true;
-    } else if (ms - since >= kDebounceMs) {
-      stable = candidate;
-      settled = true;
+    uint8_t down = 0;
+    for (unsigned i = 0; i < sizeof kBits; ++i) {
+      Key &k = state_[i];
+      const bool pressed = valid && (keys & kBits[i]);
+      if (!k.primed || pressed != k.candidate || ms < k.since) {
+        k.candidate = pressed;
+        k.since = ms;
+        k.primed = true;
+      } else if (ms - k.since >= kDebounceMs) {
+        k.stable = pressed;
+        k.settled = true;
+        if (!pressed) k.armed = true;
+      }
+      if (k.stable && k.armed) down |= kBits[i];
     }
-    if (settled) armed |= uint8_t(~stable & kKeysAll);
-    return uint8_t(stable & armed);
+    return down;
   }
   // A key reads down, is held down, or a change is being debounced: poll fast.
-  bool busy() const { return candidate || stable || !settled; }
+  bool busy() const
+  {
+    for (const Key &k : state_)
+      if (k.candidate || k.stable || !k.settled) return true;
+    return false;
+  }
+
+ private:
+  static constexpr uint8_t kBits[] = {kKeyPower, kKeyVolumeUp, kKeyVolumeDown};
+  struct Key {
+    bool candidate = false, stable = false, armed = false, primed = false, settled = false;
+    uint64_t since = 0;
+  };
+  Key state_[sizeof kBits];
 };
 
 // The poll loop's period: kPollMs while the keys are busy and kActiveHoldMs after, then idleMs (piano-input-idle; 0, or anything

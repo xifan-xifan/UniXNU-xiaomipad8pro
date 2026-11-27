@@ -10,7 +10,7 @@
 //   sessions: the first open replays the retained log (or starts from now), a close remembers what had not reached the host, a
 //             reopen resumes there (once), the monitor's `log` and `live on`.
 //   small rings: the step-back limit scales with the ring.
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. log_cursor_host.cpp -o /tmp/log_cursor_host && /tmp/log_cursor_host
+//   c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=undefined -I.. log_cursor_host.cpp -o /tmp/log_cursor_host && /tmp/log_cursor_host
 #include "LogCursor.h"
 #include <cstdio>
 #include <cstring>
@@ -336,6 +336,17 @@ static void testSmallRing()
   CHECK(c.written == 4000 && c.backSteps == 1);
   c.sync(4000 + 1000, 6000);   // past the furthest again: forward by 1000 from 4000
   CHECK(c.written == 5000);
+
+  // The newer header wraps, then a late writer leaves it exactly one back limit behind.
+  c.init(5934, 5894, 2000, 0);
+  c.sync(40, 100);
+  CHECK(c.written == 2080 && c.index(c.written) == 40);
+  c.sync(c.cap + 40 - c.backLimit(), 200);
+  CHECK(c.written == 2080 && c.lastStart == 40 && c.backSteps == 1);
+  c.sync(60, 1500);
+  c.sync(60, 3000);
+  CHECK(c.written == 2100 && c.settled == 2100 && c.index(c.written) == 60);
+
   LogCursor none;
   none.init(0, 0, 0, 0);
   none.sync(10, 10);

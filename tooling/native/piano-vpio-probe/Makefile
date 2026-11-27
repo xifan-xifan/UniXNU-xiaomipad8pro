@@ -7,7 +7,7 @@ all: $(OUT)/piano-vpio-probe
 
 # arm64, macOS 14 (kAUVoiceIOProperty_OtherAudioDuckingConfiguration), ad-hoc signed with a fixed identifier; the embedded
 # Info.plist carries the microphone purpose string for a process that is its own TCC responsible process (a LaunchAgent).
-$(OUT)/piano-vpio-probe: piano-vpio-probe.m Info.plist
+$(OUT)/piano-vpio-probe: piano-vpio-probe.m Info.plist ../audio-cli.h ../audio-wav.h
 	mkdir -p $(OUT)
 	$(CC) -arch arm64 -mmacosx-version-min=14.0 $(CFLAGS) -fobjc-arc piano-vpio-probe.m -sectcreate __TEXT __info_plist Info.plist \
 	    -framework AudioToolbox -framework CoreAudio -framework AVFoundation -framework Foundation -o $@

@@ -18,7 +18,7 @@
 //            in the device role; then the gadget (Dwc3Gadget.h) replays the takeover to RUN_STOP on the same model. C6's own order
 //            is flagged (the check would have caught it).
 //   the arguments' parsing, the voted set point, the link watch's schedule, the reasons' text.
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. usb_cold_host.cpp -o /tmp/usb_cold_host && /tmp/usb_cold_host [v]
+//   c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=undefined -I.. usb_cold_host.cpp -o /tmp/usb_cold_host && /tmp/usb_cold_host [v]
 #include "UsbCold.h"
 #include "Dwc3Gadget.h"
 #include <cstdarg>
@@ -820,7 +820,10 @@ static void testHardFailures()
     m.branchStuck[kGccAggreUsb3Axi] = true;
     m.gccWord[kGccAggreUsb3Axi] &= ~kCbcrClkEnable;
     const Result r = coldStart(m, kStepsDefault);
-    CHECK(!r.ok() && r.failed == 1 && m.violations.empty());
+    CHECK(!r.ok() && r.failed == 1 && m.violations.empty() && m.votes == 0 && m.runStops == 0);
+    m.branchStuck[kGccAggreUsb3Axi] = false;
+    CHECK(coldStart(m, kStepsDefault).ok());
+    CHECK(replayTakeover(m) && m.runStops == 1 && m.violations.empty());
   }
   {   // a core that does not answer as a DWC3 (c2)
     Model m;

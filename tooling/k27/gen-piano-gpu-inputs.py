@@ -522,11 +522,14 @@ def render(boot, runtime, digest, runtime_digest, boot_pin):
     for i, bin_ in enumerate(bins):
         lines.append(f'#define PIANO_GPU_BIN{i}_COUNT {len(bin_["levels"])}u  // {bin_["name"]}')
         lines.append(f'#define PIANO_GPU_BIN{i}_LEVELS {c_levels(bin_["levels"])}')
-    lines.append(f'#define PIANO_GPU_BIN_SPEED {{{", ".join(f"{(x["speed_bin"] or 0):#x}u" for x in bins)}}}  // qcom,speed-bin (0: SKU bin)')
-    lines.append(f'#define PIANO_GPU_BIN_SKU_COUNT {{{", ".join(f"{len(x["skus"])}u" for x in bins)}}}  // qcom,sku-codes count')
+    speeds = ', '.join(f'{bin_["speed_bin"] or 0:#x}u' for bin_ in bins)
+    sku_counts = ', '.join(f'{len(bin_["skus"])}u' for bin_ in bins)
+    lines.append(f'#define PIANO_GPU_BIN_SPEED {{{speeds}}}  // qcom,speed-bin (0: SKU bin)')
+    lines.append(f'#define PIANO_GPU_BIN_SKU_COUNT {{{sku_counts}}}  // qcom,sku-codes count')
     lines.append('#define PIANO_GPU_BIN_SKU {' + ', '.join(
         '{' + ', '.join(f'{v}u' for v in (x['skus'] + [0] * MAX_SKUS)[:MAX_SKUS]) + '}' for x in bins) + '}  // qcom,sku-codes')
-    lines.append(f'#define PIANO_GPU_BIN_INITIAL {{{", ".join(f"{x["initial"]}u" for x in bins)}}}  // qcom,initial-pwrlevel')
+    initial_levels = ', '.join(f'{bin_["initial"]}u' for bin_ in bins)
+    lines.append(f'#define PIANO_GPU_BIN_INITIAL {{{initial_levels}}}  // qcom,initial-pwrlevel')
     common = common_levels(bins)
     lines.append(f'#define PIANO_GPU_COMMON_LEVEL_COUNT {len(common)}u  // the <= {common[-1]["khz"] // 1000} MHz levels every bin shares')
     lines.append(f'#define PIANO_GPU_COMMON_LEVELS {c_levels(common)}')

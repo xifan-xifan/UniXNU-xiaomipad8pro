@@ -1,7 +1,9 @@
 /* SPDX-License-Identifier: BSD-2-Clause-Patent */
 /* Host tests of bootflag.h: the codec over all 256 byte values, every writer request, and the selector decision over every input. */
 #include <stdio.h>
+#include <string.h>
 #include "bootflag.h"
+#include "selector_fdt.h"
 
 static int fails, checks;
 #define CHECK(c, ...) do { checks++; if (!(c)) { fails++; printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } while (0)
@@ -146,12 +148,95 @@ static void test_exhaustive(void)
 	}
 }
 
+static void fdt_word(unsigned char *p, unsigned value)
+{
+	p[0] = (unsigned char)(value >> 24);
+	p[1] = (unsigned char)(value >> 16);
+	p[2] = (unsigned char)(value >> 8);
+	p[3] = (unsigned char)value;
+}
+
+static unsigned fdt_fixture(unsigned char *fdt, const char *node, const char *args)
+{
+	const unsigned structure = 56, prop = structure + 20;
+	unsigned length = (unsigned)strlen(args) + 1;
+	unsigned end = prop + 12 + ((length + 3) & ~3u);
+	unsigned strings = end + 12;
+	unsigned total = strings + 9;
+
+	memset(fdt, 0, total);
+	fdt_word(fdt, 0xd00dfeedu);
+	fdt_word(fdt + 4, total);
+	fdt_word(fdt + 8, structure);
+	fdt_word(fdt + 12, strings);
+	fdt_word(fdt + 16, 40);
+	fdt_word(fdt + 20, 17);
+	fdt_word(fdt + 24, 16);
+	fdt_word(fdt + 32, 9);
+	fdt_word(fdt + 36, strings - structure);
+	fdt_word(fdt + structure, 1);	/* root */
+	fdt_word(fdt + structure + 8, 1);
+	memcpy(fdt + structure + 12, node, strlen(node));
+	fdt_word(fdt + prop, 3);
+	fdt_word(fdt + prop + 4, length);
+	memcpy(fdt + prop + 12, args, length);
+	fdt_word(fdt + end, 2);
+	fdt_word(fdt + end + 4, 2);
+	fdt_word(fdt + end + 8, 9);
+	memcpy(fdt + strings, "bootargs", 9);
+	return total;
+}
+
+static void test_fdt(void)
+{
+	static const char recovery[] = "bootmonitor.bootmode=recovery";
+	static const char charging[] = "bootmonitor.bootmode=poweroff_cg";
+	unsigned char fdt[256];
+	unsigned size = fdt_fixture(fdt, "chosen", "quiet\tbootmonitor.bootmode=recovery\tdebug");
+	CHECK(piano_fdt_has_bootarg(fdt, size, recovery, sizeof(recovery) - 1) == 1, "tab-delimited recovery");
+	for (unsigned i = 0; i < size; i++)
+		CHECK(piano_fdt_has_bootarg(fdt, i, recovery, sizeof(recovery) - 1) == -1, "truncated FDT at %u", i);
+	size = fdt_fixture(fdt, "chosen", charging);
+	CHECK(piano_fdt_has_bootarg(fdt, size, charging, sizeof(charging) - 1) == 1, "off-mode charging");
+	size = fdt_fixture(fdt, "chosen", "alias=bootmonitor.bootmode=recovery bootmonitor.bootmode=recovery-extra");
+	CHECK(piano_fdt_has_bootarg(fdt, size, recovery, sizeof(recovery) - 1) == 0, "only exact recovery tokens");
+	fdt_word(fdt + size - 13, 0);
+	CHECK(piano_fdt_has_bootarg(fdt, size, recovery, sizeof(recovery) - 1) == -1, "bad structure after bootargs takes stock");
+	size = fdt_fixture(fdt, "chosen", "quiet");
+	{
+		const unsigned end = size - 21;
+		memmove(fdt + end + 16, fdt + end, size - end);
+		memcpy(fdt + end, fdt + 76, 16);
+		fdt_word(fdt + end + 4, 4);
+		memcpy(fdt + end + 12, "a=b", 4);
+		fdt_word(fdt + 4, size + 16);
+		fdt_word(fdt + 12, size - 9 + 16);
+		fdt_word(fdt + 36, size - 9 + 16 - 56);
+		CHECK(piano_fdt_has_bootarg(fdt, size + 16, recovery, sizeof(recovery) - 1) == -1, "duplicate bootargs takes stock");
+	}
+	size = fdt_fixture(fdt, "other", recovery);
+	CHECK(piano_fdt_has_bootarg(fdt, size, recovery, sizeof(recovery) - 1) == 0, "recovery token outside /chosen");
+	size = fdt_fixture(fdt, "chosen", recovery);
+	fdt_word(fdt + 80, ~0u);
+	CHECK(piano_fdt_has_bootarg(fdt, size, recovery, sizeof(recovery) - 1) == -1, "oversized bootargs property");
+	size = fdt_fixture(fdt, "chosen", recovery);
+	fdt_word(fdt + 84, 9);
+	CHECK(piano_fdt_has_bootarg(fdt, size, recovery, sizeof(recovery) - 1) == -1, "out-of-range property name");
+	size = fdt_fixture(fdt, "chosen", recovery);
+	fdt[88 + strlen(recovery)] = 'X';
+	CHECK(piano_fdt_has_bootarg(fdt, size, recovery, sizeof(recovery) - 1) == -1, "unterminated bootargs");
+	fdt_word(fdt + 56, 9);
+	CHECK(piano_fdt_has_bootarg(fdt, size, recovery, sizeof(recovery) - 1) == -1, "missing FDT root");
+	CHECK(piano_fdt_has_bootarg(NULL, size, recovery, sizeof(recovery) - 1) == -1, "missing FDT");
+}
+
 int main(void)
 {
 	test_ours();
 	test_apply();
 	test_named();
 	test_exhaustive();
+	test_fdt();
 	printf("%s: %d checks, %d failures\n", fails ? "FAIL" : "PASS", checks, fails);
 	return fails != 0;
 }

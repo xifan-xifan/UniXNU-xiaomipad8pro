@@ -57,3 +57,37 @@ try:
 except ValueError:
     pass
 print('PASS: /chosen piano-extra-ram placeholder added (384 zero bytes), tree well formed, other nodes unchanged, second add and no /chosen refused')
+
+
+def refused(blob, message):
+    try:
+        x.ensure_extra_ram_placeholder(blob)
+    except ValueError as error:
+        assert message in str(error), error
+    else:
+        raise AssertionError(f'expected refusal: {message}')
+
+
+placeholder = prop(x.NAME, bytes(x.BYTES))
+root_name = prop('name', b'device-tree\0')
+chosen_name = prop('name', b'chosen\0')
+refused(out + b'\0', 'trailing bytes')
+refused(out[:7], 'node header')
+refused(out[:8 + 35], 'property header')
+refused(node([root_name], [node([chosen_name, placeholder])])[:-1], 'value or padding')
+refused(tree[:-1], 'value or padding')
+refused(node([root_name], [node([chosen_name, placeholder, placeholder])]), 'duplicate')
+refused(node([root_name], [node([chosen_name]), node([chosen_name])]), 'duplicate /chosen')
+refused(node([root_name, placeholder], [chosen]), 'outside /chosen')
+bad = bytearray(out)
+struct.pack_into('<I', bad, i + 32, 0x80000000 | x.BYTES)
+refused(bad, 'flagged length')
+
+# Image staging only accepts a zeroed placeholder. Published ranges belong to DarwinBoot.
+slab = 2 << 20
+record = struct.Struct('<QQII')
+misaligned = record.pack(4 * slab + 1, slab, 1, 1)
+overlapping = record.pack(4 * slab, 2 * slab, 1, 1) + record.pack(5 * slab, slab, 1, 1)
+for records in (misaligned, overlapping):
+    prefilled = prop(x.NAME, records.ljust(x.BYTES, b'\0'))
+    refused(node([root_name], [node([chosen_name, prefilled])]), 'zeroed placeholder')

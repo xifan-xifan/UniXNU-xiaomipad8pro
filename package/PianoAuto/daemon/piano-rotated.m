@@ -4,8 +4,8 @@
 // (com.unixnu.piano-rotated.plist: the login window's session and each user's, so it acts at the login window too) that
 //   reads    PianoSensors' "piano-sensors-edge" (its level 4: "top", "left", "bottom", "right", "none"; a number 0..3 is taken
 //            too) whenever its "piano-sensors-seq" moves, polled every 250 ms only while that can matter (PianoSensors at level 4,
-//            the cover not attached; every 5 s while the display sleeps): PianoSensors sets its properties without a notification
-//            (sensors.md section 5) and is found by class even unregistered; PianoKeyboard's "piano-keyboard-attached" (0/1) on each
+//            the cover permits rotation; every 5 s while the display sleeps): PianoSensors notifies on edge changes
+//            and is found by class even unregistered; PianoKeyboard's "piano-keyboard-attached" (0/1) on each
 //            kIOMessageServicePropertyChange it sends;
 //   decides  AutoRotate.c over SensorsPolicy's ps_rotation_step, the functions the host tests run;
 //   rotates  WindowServer's own rotation of the panel's display, the one System Settings > Displays > Rotation sets. No public API
@@ -34,6 +34,8 @@
 #include <IOKit/IOMessage.h>
 #include <dispatch/dispatch.h>
 #include <dlfcn.h>
+#include <errno.h>
+#include <math.h>
 #include <notify.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
@@ -92,20 +94,27 @@ static const char *bootArg(const char *name, char *out, size_t cap)
 {
     size_t length;
     const char *value = pianoBootArgValue(gBootArgs, name, &length);
-    if (!value || !cap) return NULL;
-    if (length >= cap) length = cap - 1;
+    if (!value || length >= cap) return NULL;
     memcpy(out, value, length);
     out[length] = 0;
     return out;
 }
 
+static int parseNumber(const char *value, int base, long *out)
+{
+    char *end;
+    errno = 0;
+    const long n = strtol(value, &end, base);
+    if (end == value || *end || errno == ERANGE) return 0;
+    *out = n;
+    return 1;
+}
+
 static long bootNumber(const char *name, long fallback, long lo, long hi)
 {
     char value[64];
-    if (!bootArg(name, value, sizeof value)) return fallback;
-    char *end = NULL;
-    const long n = strtol(value, &end, 0);
-    if (end == value) return fallback;
+    long n;
+    if (!bootArg(name, value, sizeof value) || !parseNumber(value, 0, &n)) return fallback;
     return n < lo ? lo : n > hi ? hi : n;
 }
 
@@ -116,8 +125,9 @@ static void configure(ParConfig *c)
     if (bootArg("piano-rotate-map", map, sizeof map)) {
         int d[4], k = 0;
         for (char *p = map, *end; k < 4; ++k, p = end + 1) {
-            d[k] = (int)strtol(p, &end, 10);
-            if (end == p || !par_valid_degrees(d[k]) || (k < 3 && *end != ',')) break;
+            const long angle = strtol(p, &end, 10);
+            if (end == p || *end != (k < 3 ? ',' : '\0') || angle < 0 || angle > 270 || !par_valid_degrees((int)angle)) break;
+            d[k] = (int)angle;
         }
         if (k == 4)
             for (int e = 0; e < 4; ++e) c->rot.degrees[e] = (uint16_t)d[e];
@@ -142,13 +152,15 @@ static CGDirectDisplayID panelDisplay(void)
     if (CGGetOnlineDisplayList(8, ids, &n) != kCGErrorSuccess) n = 0;
     for (uint32_t i = 0; i < n; ++i)
         if (CGDisplayVendorNumber(ids[i]) == kPanelVendor && CGDisplayModelNumber(ids[i]) == kPanelModel) return ids[i];
-    return n == 1 ? ids[0] : CGMainDisplayID();
+    return 0;
 }
 
 static int degreesShown(CGDirectDisplayID d)
 {
     if (!d) return -1;
-    const int deg = ((int)(CGDisplayRotation(d) + 0.5) % 360 + 360) % 360;
+    const double rotation = CGDisplayRotation(d);
+    if (!isfinite(rotation)) return -1;
+    const int deg = ((int)lround(fmod(rotation, 360.0)) + 360) % 360;
     return par_valid_degrees(deg) ? deg : -1;
 }
 
@@ -233,6 +245,10 @@ static int mpBool(id display, SEL sel, int fallback)
 
 static int applyRotation(CGDirectDisplayID d, int degrees, char *why, size_t cap)
 {
+    if (!d) {
+        snprintf(why, cap, "panel display is unavailable");
+        return 0;
+    }
     if (!gMp.ready) {
         snprintf(why, cap, "%s", gMp.why);
         return 0;
@@ -274,8 +290,6 @@ static int readNumber(io_service_t s, const char *key, long *out)
     return ok;
 }
 
-// PianoTouch told the rotation shown. Three failures in a row (no PianoTouch, or one without the property: kIOReturnUnsupported) end
-// the retries until the rotation changes again, so a missing driver costs no wake-ups.
 // PianoSensors' edge: its name (ps_edge_name) or, from an earlier draft, the number; anything else is none.
 static int readEdge(io_service_t s)
 {
@@ -312,27 +326,29 @@ static io_service_t findByClass(const char *cls)
     return found;
 }
 
+// Three failures at one angle end retries until the angle or the service changes.
+static int gTouchFailures;
+
 static int pushTouch(int degrees)
 {
-    static int failures, failedDegrees = -1;
-    if (degrees != failedDegrees) failures = 0;
     kern_return_t kr = KERN_FAILURE;
     if (gTouch.service) {
         CFNumberRef n = CFNumberCreate(NULL, kCFNumberIntType, &degrees);
-        kr = IORegistryEntrySetCFProperty(gTouch.service, CFSTR(PAT_PROPERTY), n);
-        CFRelease(n);
+        if (n) {
+            kr = IORegistryEntrySetCFProperty(gTouch.service, CFSTR(PAT_PROPERTY), n);
+            CFRelease(n);
+        }
     }
     if (kr == KERN_SUCCESS) {
         note("PianoTouch told %d degrees: taken", degrees);
-        failures = 0;
+        gTouchFailures = 0;
         return 1;
     }
-    failedDegrees = degrees;
-    if (++failures < 3) {
+    if (++gTouchFailures < 3) {
         note("PianoTouch told %d degrees: %s (%#x)", degrees, gTouch.service ? "REFUSED" : "not found", kr);
         return 0;
     }
-    if (failures == 3) note("PianoTouch did not take %d degrees three times: not told again until the rotation changes", degrees);
+    note("PianoTouch did not take %d degrees three times: waiting for a new angle or service", degrees);
     return 1;
 }
 
@@ -342,6 +358,7 @@ static long gSensorsSeq = -1;
 static unsigned gSensorsLookups;
 static int gInPolicy, gAgain, gLastShown = -2, gLastWant = -2, gLastEdge = -2, gLastCover = -2;
 static const char *gLastWhy;
+static void readInputs(int active);
 
 static const char *coverName(int c)
 {
@@ -363,23 +380,31 @@ static void runPolicy(void)
         return;
     }
     gInPolicy = 1;
-    for (int pass = 0; pass < 6; ++pass) {
+    int can = 0;
+    for (int pass = 0; pass < 6; ++pass) @autoreleasepool {
         gAgain = 0;
         const CGDirectDisplayID display = panelDisplay();
+        const int active = display && !CGDisplayIsAsleep(display) && onConsole();
         const int shown = degreesShown(display);
-        uint64_t now = nowMs();
         if (shown != gLastShown) {
             note("display %#x shows %d degrees", display, shown);
             gLastShown = shown;
+            gTouchFailures = 0;
         }
-        if (shown >= 0) par_observed(&gAgent, shown, now);
-        const int can = gLevel >= 2 && gMp.ready && display && !CGDisplayIsAsleep(display) && onConsole();
+        can = gLevel >= 2 && gMp.ready && active;
+        readInputs(active);
+        const uint64_t now = nowMs();
+        par_observed(&gAgent, active ? shown : -1, now);
         const ParDecision d = par_step(&gAgent, now, can);
         if (d.want != gLastWant || d.why != gLastWhy) {
             if (d.want >= 0) note("wants %d degrees: %s%s", d.want, d.why, d.apply < 0 && gLevel < 2 ? " (observing only)" : "");
             else note("%s", d.why);
             gLastWant = d.want;
             gLastWhy = d.why;
+        }
+        if (d.touch >= 0) {
+            par_touch_done(&gAgent, d.touch, gLevel >= 3 ? pushTouch(d.touch) : 1, nowMs());
+            continue;
         }
         if (d.apply >= 0) {
             char why[240];
@@ -388,27 +413,22 @@ static void runPolicy(void)
             par_applied(&gAgent, d.apply, ok, nowMs());
             continue;
         }
-        if (d.touch >= 0) {
-            par_touch_done(&gAgent, d.touch, gLevel >= 3 ? pushTouch(d.touch) : 1, nowMs());
-            continue;
-        }
         if (!gAgain) break;
     }
     gInPolicy = 0;
-    schedule(par_deadline(&gAgent, nowMs()));
+    schedule(par_deadline(&gAgent, nowMs(), can));
 }
 
-static void readInputs(void)
+static void readInputs(int active)
 {
     const uint64_t now = nowMs();
     long v = -1;
     int edge = PS_EDGE_NONE;
-    if (gTestEdges) {
-        CFPreferencesAppSynchronize(CFSTR(APP));
+    if (active && gTestEdges) {
         Boolean valid = false;
         const CFIndex e = CFPreferencesGetAppIntegerValue(CFSTR("TestEdge"), CFSTR(APP), &valid);
         edge = valid && e >= PS_EDGE_TOP && e <= PS_EDGE_RIGHT ? (int)e : PS_EDGE_NONE;
-    } else if (gSensors.service && readNumber(gSensors.service, SENSORS_LEVEL_PROPERTY, &v) && v >= 4) {
+    } else if (active && gSensors.service && readNumber(gSensors.service, SENSORS_LEVEL_PROPERTY, &v) && v >= 4) {
         edge = readEdge(gSensors.service);
     }
     int cover = PAR_COVER_UNKNOWN;
@@ -426,25 +446,26 @@ static void readInputs(void)
     par_edge(&gAgent, edge, now);
 }
 
-// PianoSensors' properties come without a notification: its sequence every 250 ms while an edge can matter (level 4, the cover not
-// attached, the display awake; every 5 s while it sleeps), never otherwise. Not found yet: looked for every 30 s, 20 times.
+static void takeService(Watched *w, io_service_t service);
+
+// Also poll PianoSensors' sequence while an edge can matter. Look for unregistered services every 30 s, up to 20 times.
 static void sensorsTick(void)
 {
     double next = 0;
     if (!gSensors.service && !gTestEdges && gSensorsLookups < 20) {
         ++gSensorsLookups;
-        if ((gSensors.service = findByClass(gSensors.cls))) note("found %s (not registered: by class)", gSensors.cls);
+        io_service_t service = findByClass(gSensors.cls);
+        if (service) takeService(&gSensors, service);
         else next = 30;
     }
     long level = 0, seq = -1;
     const int wanted = gRunning && !gTestEdges && gSensors.service && readNumber(gSensors.service, SENSORS_LEVEL_PROPERTY, &level) &&
-                       level >= 4 && gLastCover != PAR_COVER_ATTACHED;
+                       level >= 4 && (gLastCover != PAR_COVER_ATTACHED || gAgent.cfg.cover_lock == PAR_LOCK_IGNORE);
     if (wanted) {
         const CGDirectDisplayID d = panelDisplay();
         next = d && CGDisplayIsAsleep(d) ? 5 : 0.25;
         if (readNumber(gSensors.service, SEQ_PROPERTY, &seq) && seq != gSensorsSeq) {
             gSensorsSeq = seq;
-            readInputs();
             runPolicy();
         }
     }
@@ -462,9 +483,9 @@ static void reloadPrefs(void)
 
 static void interest(void *ctx, io_service_t service, natural_t type, void *argument)
 {
-    (void)service;
     (void)argument;
     Watched *w = ctx;
+    if (service != w->service) return;
     if (type == kIOMessageServiceIsTerminated) {
         note("%s went away", w->cls);
         if (w->interest) IOObjectRelease(w->interest);
@@ -472,9 +493,27 @@ static void interest(void *ctx, io_service_t service, natural_t type, void *argu
         w->interest = w->service = 0;
     }
     if (gRunning && (type == kIOMessageServicePropertyChange || type == kIOMessageServiceIsTerminated)) {
-        readInputs();
+        if (w == &gSensors && !w->service) {
+            gSensorsLookups = 0;
+            CFRunLoopTimerSetNextFireDate(gSensorsTimer, CFAbsoluteTimeGetCurrent());
+        }
         runPolicy();
     }
+}
+
+static void takeService(Watched *w, io_service_t service)
+{
+    w->service = service;
+    IOServiceAddInterestNotification(gPort, service, kIOGeneralInterest, interest, w, &w->interest);
+    if (w == &gSensors) {
+        gSensorsSeq = -1;
+        if (gSensorsTimer) CFRunLoopTimerSetNextFireDate(gSensorsTimer, CFAbsoluteTimeGetCurrent());
+    } else if (w == &gTouch) {
+        gTouchFailures = 0;
+        gAgent.touch = -1;
+        gAgent.touch_retry_at = 0;
+    }
+    note("found %s", w->cls);
 }
 
 static void matched(void *ctx, io_iterator_t iterator)
@@ -485,29 +524,16 @@ static void matched(void *ctx, io_iterator_t iterator)
             IOObjectRelease(s);
             continue;
         }
-        w->service = s;
-        if (w != &gTouch) IOServiceAddInterestNotification(gPort, s, kIOGeneralInterest, interest, w, &w->interest);
-        note("found %s", w->cls);
+        takeService(w, s);
     }
-    if (gRunning) {
-        readInputs();
-        runPolicy();
-    }
+    if (gRunning) runPolicy();
 }
 
 static void watch(Watched *w)
 {
     if (IOServiceAddMatchingNotification(gPort, kIOFirstMatchNotification, IOServiceMatching(w->cls), matched, w, &w->matching) ==
         KERN_SUCCESS) {
-        for (io_service_t s; (s = IOIteratorNext(w->matching));) {   // arms the notification and takes what is there now
-            if (w->service) {
-                IOObjectRelease(s);
-                continue;
-            }
-            w->service = s;
-            if (w != &gTouch) IOServiceAddInterestNotification(gPort, s, kIOGeneralInterest, interest, w, &w->interest);
-            note("found %s", w->cls);
-        }
+        matched(w, w->matching);   // arms the notification and takes what is there now
     }
 }
 
@@ -515,7 +541,7 @@ static void reconfigured(CGDirectDisplayID display, CGDisplayChangeSummaryFlags 
 {
     (void)display;
     (void)ctx;
-    if (!(flags & kCGDisplayBeginConfigurationFlag)) runPolicy();
+    if (!(flags & kCGDisplayBeginConfigurationFlag)) dispatch_async(dispatch_get_main_queue(), ^{ runPolicy(); });
 }
 
 // ------------------------------------------------------------------------------------------------------------- one-shot modes
@@ -570,7 +596,7 @@ static int setOnce(int degrees, int touch)
         shown = degreesShown(d);
     }
     printf("piano-rotated --set %d: display %#x %d -> %d degrees: %s\n", degrees, d, before, shown, shown == degrees ? "shown" : "NOT shown in 3 s");
-    if (touch) pushTouch(shown);
+    if (touch && shown == degrees) pushTouch(shown);
     return shown == degrees ? 0 : 1;
 }
 
@@ -581,11 +607,19 @@ int main(int argc, char **argv)
         gLog = os_log_create(APP, "agent");
         int doProbe = 0, set = -1, touch = 0, level = -1;
         for (int i = 1; i < argc; ++i) {
+            long number;
             if (!strcmp(argv[i], "--probe")) doProbe = 1;
-            else if (!strcmp(argv[i], "--set") && i + 1 < argc) set = atoi(argv[++i]);
-            else if (!strcmp(argv[i], "--touch")) touch = 1;
-            else if (!strcmp(argv[i], "--level") && i + 1 < argc) level = atoi(argv[++i]);
-            else if (!strcmp(argv[i], "--display") && i + 1 < argc) gDisplayOverride = (CGDirectDisplayID)strtoul(argv[++i], NULL, 0);
+            else if (!strcmp(argv[i], "--set") && i + 1 < argc) {
+                if (!parseNumber(argv[++i], 10, &number) || number < 0 || number > 270 || !par_valid_degrees((int)number)) {
+                    fprintf(stderr, "piano-rotated: --set takes 0, 90, 180 or 270\n");
+                    return 2;
+                }
+                set = (int)number;
+            } else if (!strcmp(argv[i], "--touch")) touch = 1;
+            else if (!strcmp(argv[i], "--level") && i + 1 < argc && parseNumber(argv[i + 1], 10, &number) && number >= 0) {
+                level = number > 3 ? 3 : (int)number;
+                ++i;
+            } else if (!strcmp(argv[i], "--display") && i + 1 < argc) gDisplayOverride = (CGDirectDisplayID)strtoul(argv[++i], NULL, 0);
             else if (!strcmp(argv[i], "--test-edges")) gTestEdges = 1;
             else if (!strcmp(argv[i], "--stderr")) gStderr = 1;
             else {
@@ -594,13 +628,22 @@ int main(int argc, char **argv)
             }
         }
         readBootArgs();
-        gLevel = level >= 0 ? (level > 3 ? 3 : level) : (int)bootNumber("piano-rotate", 0, 0, 3);
+        gLevel = level >= 0 ? level : (int)bootNumber("piano-rotate", 0, 0, 3);
+        if (!gLevel && !doProbe && set < 0) {
+            note("piano-rotate is 0 or absent: not running");
+            return 0;
+        }
         ParConfig config;
         configure(&config);
         par_init(&gAgent, &config);
         backendInit();
         gPort = IONotificationPortCreate(kIOMainPortDefault);
-        CFRunLoopAddSource(CFRunLoopGetMain(), IONotificationPortGetRunLoopSource(gPort), kCFRunLoopDefaultMode);
+        CFRunLoopSourceRef source = gPort ? IONotificationPortGetRunLoopSource(gPort) : NULL;
+        if (!source) {
+            note("IOKit notification source unavailable");
+            return 1;
+        }
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, kCFRunLoopDefaultMode);
         watch(&gSensors);
         watch(&gKeyboard);
         watch(&gTouch);
@@ -609,17 +652,7 @@ int main(int argc, char **argv)
             probe();
             return 0;
         }
-        if (set >= 0) {
-            if (!par_valid_degrees(set)) {
-                fprintf(stderr, "piano-rotated: --set takes 0, 90, 180 or 270\n");
-                return 2;
-            }
-            return setOnce(set, touch);
-        }
-        if (!gLevel) {
-            note("piano-rotate is 0 or absent: not running");
-            return 0;
-        }
+        if (set >= 0) return setOnce(set, touch);
         const CGDirectDisplayID d = panelDisplay();
         id display = mpDisplay(d);
         note("start: level %d (%s), map %u/%u/%u/%u, settle %u ms, interval %u ms, detach hold %u ms, cover %s; display %#x (vendor %#x "
@@ -644,7 +677,6 @@ int main(int argc, char **argv)
         dispatch_source_t hup = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL, SIGHUP, 0, dispatch_get_main_queue());
         dispatch_source_set_event_handler(hup, ^{
             reloadPrefs();
-            readInputs();
             runPolicy();
         });
         dispatch_resume(hup);
@@ -652,11 +684,9 @@ int main(int argc, char **argv)
         notify_register_dispatch(PREFS_NOTIFICATION, &token, dispatch_get_main_queue(), ^(int t) {
             (void)t;
             reloadPrefs();
-            readInputs();
             runPolicy();
         });
         gRunning = 1;
-        readInputs();
         runPolicy();
         sensorsTick();
         CFRunLoopRun();

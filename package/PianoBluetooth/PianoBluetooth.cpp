@@ -975,6 +975,7 @@ class PianoBluetooth : public IOService {
   void levels();
   bool publishRadio();
   void transportResult();
+  void resetTransportStream();
   void pump();
   void linkEvent(const uint8_t *event, size_t bytes);
   static void transportWake(void *);
@@ -1150,6 +1151,17 @@ namespace {
 uint8_t gStream[16384], gTransportTx[512];
 }
 
+void PianoBluetooth::resetTransportStream()
+{
+  gB.port.raw = nullptr;
+  gB.port.rawCap = gB.port.rawHave = 0;
+  fObserved = 0;
+  fTxDecoder.reset();
+  fRxDecoder.reset();
+  fLeMask.reset();
+  fLeReady.reset();
+}
+
 void PianoBluetooth::transportResult()
 {
   if (!fBootError) {
@@ -1302,6 +1314,7 @@ void PianoBluetooth::pump()
       fBootError = EIO;
       note("bt-path1: H4 TX failed (%d); endpoint unavailable", rc);
       safeOff(gB, gHw, bringupOptions(4, false));
+      resetTransportStream();
       qbt_transport_power_result(false, EIO, nullptr, kOperBaud);
       setProperty("piano-bt-host-ready", false);
       return;
@@ -1549,9 +1562,7 @@ void PianoBluetooth::quiesce(const char *why)
   IOLockLock(fLock);
   const bool wasUp = gB.up;
   safeOff(gB, gHw, bringupOptions(gArgs.level, false));
-  gB.port.raw = nullptr;
-  gB.port.rawHave = 0;
-  fObserved = 0;
+  resetTransportStream();
   fBootError = ENETDOWN;
   fSuspended = true;
   if (fTransport) qbt_transport_power_result(false, ENETDOWN, nullptr, kOperBaud);

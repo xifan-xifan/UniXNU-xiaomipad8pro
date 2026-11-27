@@ -41,6 +41,12 @@ uint64_t nowNs()
   absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
   return ns;
 }
+uint64_t sampleUs()
+{
+  uint64_t ns;
+  absolutetime_to_nanoseconds(mach_continuous_time(), &ns);
+  return ns / 1000;
+}
 uint64_t gStartNs;
 uint32_t upS() { return uint32_t((nowNs() - gStartNs) / 1000000000ull); }
 
@@ -126,7 +132,7 @@ void ioDelay(void *, uint32_t us)
   if (us >= 1000) IOSleep(us / 1000);
   else IODelay(us);
 }
-uint64_t ioNow(void *) { return nowNs() / 1000; }
+uint64_t ioNow(void *) { return sampleUs(); }
 const Io kIo = {nullptr, ioRd, ioWr, ioDelay, ioNow};
 
 // ------------------------------------------------------------------------------------------------------------- state
@@ -154,6 +160,7 @@ void publishSnapshot(const Snapshot &s)
   st(gSnap.periodMs, s.periodMs);
   st(gSnap.validMask, s.validMask);
   st(gSnap.disabledMask, s.disabledMask);
+  st(gSnap.pinHeldMask, s.pinHeldMask);
   for (unsigned i = 0; i < kChannelCount; ++i) {
     st(gSnap.milliC[i], s.milliC[i]);
     st(gSnap.atUs[i], s.atUs[i]);
@@ -171,6 +178,7 @@ bool readSnapshot(Snapshot &s)
     s.periodMs = ld(gSnap.periodMs);
     s.validMask = ld(gSnap.validMask);
     s.disabledMask = ld(gSnap.disabledMask);
+    s.pinHeldMask = ld(gSnap.pinHeldMask);
     for (unsigned i = 0; i < kChannelCount; ++i) {
       s.milliC[i] = ld(gSnap.milliC[i]);
       s.atUs[i] = ld(gSnap.atUs[i]);
@@ -418,22 +426,17 @@ uint32_t hookLevel()
   return v > 2 ? 2 : v;
 }
 
-bool hookSkin(int32_t milliC[perf::kSkinInputs], uint32_t &validMask)
+perf::Skin hookSkin(int32_t milliC[perf::kSkinInputs], uint32_t &validMask)
 {
   validMask = 0;
   Snapshot s;
-  if (!gHook.level || !readSnapshot(s) || s.state != PIANO_BOARD_TEMPS_RUNNING) return false;
-  const uint64_t nowUs = nowNs() / 1000;
-  for (unsigned i = 0; i < perf::kSkinInputs; ++i) {
-    milliC[i] = 0;
-    const int c = channelIndex(perf::kSkinChannel[i]);
-    if (c < 0 || !(s.validMask & (1u << c))) continue;
-    const uint64_t ageMs = nowUs > s.atUs[c] ? (nowUs - s.atUs[c]) / 1000 : 0;
-    if (ageMs > uint64_t(kFreshPeriods) * s.periodMs) continue;
-    milliC[i] = s.milliC[c];
-    validMask |= 1u << i;
-  }
-  return true;
+  if (!gHook.level || !readSnapshot(s)) return {};
+  piano_skin_temps t{};
+  t.version = PIANO_SKIN_TEMPS_VERSION;
+  fillSkinTemps(s, sampleUs(), &t, kFreshPeriods);
+  validMask = t.valid & perf::kSkinMask;
+  for (unsigned i = 0; i < perf::kSkinInputs; ++i) milliC[i] = validMask & (1u << i) ? t.milli_c[i] : 0;
+  return {t.virtual_valid != 0, t.virtual_milli_c, t.virtual_used};
 }
 
 void hookStart(IOService *svc, uint32_t level, uint32_t periodS, uint32_t delayS)
@@ -465,7 +468,7 @@ bool hookGpuTemps(void *param1)
 {
   Snapshot s;
   if (!readSnapshot(s)) s = Snapshot();
-  return fillGpuTemps(s, nowNs() / 1000, static_cast<piano_gpu_temps *>(param1));
+  return fillGpuTemps(s, sampleUs(), static_cast<piano_gpu_temps *>(param1));
 }
 // gpu/fullopp1: the virtual skin sensor's inputs, the XO thermistor and the virtual sensor itself (the CPU policy's virtualSkin over the
 // same five readings), for PianoA830's Android thermal table.
@@ -473,15 +476,7 @@ bool hookSkinTemps(void *param1)
 {
   Snapshot s;
   if (!readSnapshot(s)) s = Snapshot();
-  piano_skin_temps *t = static_cast<piano_skin_temps *>(param1);
-  if (!fillSkinTemps(s, nowNs() / 1000, t)) return false;
-  static_assert(int(PIANO_SKIN_BATTERY) == int(perf::kSkinBattery) && int(PIANO_SKIN_QUIET) == int(perf::kSkinQuiet) &&
-                    int(PIANO_SKIN_CHARGER) == int(perf::kSkinCharger) && int(PIANO_SKIN_WIFI) == int(perf::kSkinWifi) &&
-                    int(PIANO_SKIN_MSM) == int(perf::kSkinMsm),
-                "the skin API's first five are the virtual sensor's inputs in its order");
-  const perf::Skin v = perf::virtualSkin(t->milli_c, t->valid & ((1u << perf::kSkinInputs) - 1u));
-  t->virtual_milli_c = v.milliC; t->virtual_valid = v.valid ? 1u : 0u; t->virtual_used = v.used;
-  return true;
+  return fillSkinTemps(s, sampleUs(), static_cast<piano_skin_temps *>(param1));
 }
 
 }  // namespace pianothermal::adc
@@ -495,5 +490,5 @@ extern "C" int piano_thermal_board_temps(struct piano_board_temps *t)
     s = Snapshot();
     s.state = PIANO_BOARD_TEMPS_STARTING;
   }
-  return fillBoardTemps(s, nowNs() / 1000, t);
+  return fillBoardTemps(s, sampleUs(), t);
 }

@@ -30,6 +30,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import posixpath
 import plistlib
 import shutil
 import subprocess
@@ -117,7 +118,7 @@ def check_owners(pack):
     wrong = []
     with tarfile.open(pack, 'r:xz') as t:
         for m in t.getmembers():
-            if m.name.rstrip('/') in ROOT_DIRS and m.uid != 0:
+            if posixpath.normpath(m.name) in ROOT_DIRS and m.uid != 0:
                 wrong.append(f'{m.name} uid {m.uid}')
     if wrong:
         raise SystemExit(f'{pack}: not a pack collect made as root on the tablet ({", ".join(wrong[:4])}): extracting it at boot '
@@ -282,10 +283,12 @@ def cmd_build(a):
             raise SystemExit(f'{f}: missing')
     if a.out.resolve() in (a.seed.resolve().parent, a.trust.resolve().parent):
         raise SystemExit('--out is an input\'s directory: the inputs are only read')
+    filtered = a.out / 'warm.tar.xz'
+    if filtered.exists() and filtered.samefile(a.pack):
+        raise SystemExit(f'{filtered}: output is the same file as the input pack {a.pack}')
     a.out.mkdir(parents=True, exist_ok=True)
     if not a.test_pack:
         check_owners(a.pack)
-    filtered = a.out / 'warm.tar.xz'
     if a.all:
         shutil.copyfile(a.pack, filtered)
     elif not filter_pack(a.pack, filtered, a.include or DEFAULT_INCLUDE):

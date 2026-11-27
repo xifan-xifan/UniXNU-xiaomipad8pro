@@ -447,7 +447,8 @@ def test_tablet_sh(tmp):
     check(got.get('linux_rootfs') == 'sda35 448487424 123731968', 'map: linux_rootfs')
 
 
-def build_fake(tmp):
+def build_fake(tmp, fixtures=None):
+    fixtures = fixtures if fixtures is not None else common.DEVICE / 'out/persistent'
     root = tmp / 'tablet'
     root.mkdir()
     lun0 = root / 'lun0.img'
@@ -473,7 +474,7 @@ def build_fake(tmp):
     lun4 = root / 'lun4.img'
     with open(lun4, 'wb') as f:
         f.truncate(1 << 30)
-    ref = common.DEVICE / 'out/persistent/ref'   # slot A's current images (build-boot.py --verify / the zstd backups)
+    ref = fixtures / 'ref'   # slot A's current images (build-boot.py --verify / the zstd backups)
     for name, (_, off, size) in LUN4.items():
         source = {'boot_a': '13-boot_a', 'vendor_boot_a': '23-vendor_boot_a', 'init_boot_a': '28-init_boot_a'}.get(name)
         data = (ref / f'{source}.img').read_bytes() if source else os.urandom(size)
@@ -481,9 +482,8 @@ def build_fake(tmp):
         write_at(lun4, off, data)
     out = tmp / 'out'
     out.mkdir()
-    real = common.DEVICE / 'out/persistent'
     for name in ('gpt.json', 'gpt-head.bin', 'gpt-tail.bin'):
-        shutil.copyfile(real / name, out / name)
+        shutil.copyfile(fixtures / name, out / name)
     esp = out / 'esp-test.img'
     with open(esp, 'wb') as f:
         f.truncate(common.ESP_BLOCKS * B)

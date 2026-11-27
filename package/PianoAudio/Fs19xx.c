@@ -278,9 +278,11 @@ int fs19xx_start(Fs19xx *a, uint32_t rate, uint32_t bit_clock, unsigned gain, in
     if (!r) r = fs19xx_write(a, FS19XX_REG_VOLCTRL, (uint16_t)(g << 8 | 0x00c0u));
     if (!r && !muted) r = fs19xx_write(a, FS19XX_REG_DACCTRL, FS19XX_DACCTRL_UNMUTE);
     sleep_us(a, 10000);
-    uint16_t ts;
-    if (!r) r = fs19xx_read(a, FS19XX_REG_TSCTRL, &ts);
-    if (!r) r = fs19xx_write(a, FS19XX_REG_TSCTRL, (uint16_t)(ts | FS19XX_TSCTRL_TSEN));
+    if (!r) {
+        uint16_t ts;
+        r = fs19xx_read(a, FS19XX_REG_TSCTRL, &ts);
+        if (!r) r = fs19xx_write(a, FS19XX_REG_TSCTRL, (uint16_t)(ts | FS19XX_TSCTRL_TSEN));
+    }
     a->state = Fs19xxPlaying;
     if (r) {
         fs19xx_shutdown(a);

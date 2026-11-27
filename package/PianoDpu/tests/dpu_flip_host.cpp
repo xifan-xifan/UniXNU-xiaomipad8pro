@@ -13,7 +13,7 @@
 // a bank the boot loader translates, the four ladder steps, the flip service (windows, LRU, TLB invalidation, refusals, the clean
 // policy, the alpha bit, multirect), the safety reverts (missed latch, fault, underrun, the watch), the interrupt (service, misses),
 // the rate-limited summary.
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. dpu_flip_host.cpp -o /tmp/dpu_flip_host && /tmp/dpu_flip_host
+//   c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -I.. dpu_flip_host.cpp -o /tmp/dpu_flip_host && /tmp/dpu_flip_host
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -661,6 +661,19 @@ static void testTables()
   CHECK(sm::kTcrS1 == 0x00800020u && sm::tcr2S1(5) == 0x00038005u && sm::tcrS2(5) == 0x00050060u);
 }
 
+static void testSlotClockWrap()
+{
+  sm::Slots windows;
+  int keys[sm::kSlots] = {};
+  windows.clock = UINT64_MAX - 2;
+  for (unsigned i = 0; i < sm::kSlots; ++i)
+    windows.take(i, &keys[i], &keys[i], nullptr, 1);
+  windows.shown = 3;
+  windows.pending = 1;
+  CHECK(windows.clock == 1 && windows.victim() == 0);
+  CHECK(windows.find(&keys[0], &keys[0]) == 0 && windows.victim() == 2);
+}
+
 static void testPlan()
 {
   {   // the expected case: bank off, stage 1, VA64
@@ -1137,12 +1150,15 @@ static void testConditionalClean()
   CHECK(show(c) == kPianoDpuFlipShown && r.f.st.cleanInits == 5);
 
   r.f.cfg.forceFullClean = true;
+  r.hw.cleanEvents.clear();
   CHECK(show(c) == kPianoDpuFlipShown && r.f.st.cleanReasons[unsigned(CleanReason::forced)] == 1);
+  CHECK(std::count(r.hw.cleanEvents.begin(), r.hw.cleanEvents.end(), "clean") == 1);
+  CHECK(r.f.st.cleanSkips == 14 && !r.f.cleanEpochs[r.f.slots.shown].initialized);
   r.f.cfg.forceFullClean = false;
   CHECK(show(c) == kPianoDpuFlipShown && r.f.st.cleanInits == 6);
   r.hw.failCleanBytes = allocation;   // the required initial clean fails; the scanout-only fallback works
   CHECK(show(d) == kPianoDpuFlipShown && r.f.st.cleanReasons[unsigned(CleanReason::initialClean)] == 1);
-  CHECK(r.f.st.cleanFailures == 1 && r.f.st.cleanInits == 6);
+  CHECK(r.f.st.cleanFailures == 1 && r.f.st.cleanInits == 6 && r.f.st.cleanFull == 5);
   r.hw.failCleanBytes = UINT64_MAX;
   CHECK(show(e) == kPianoDpuFlipClean && r.f.st.cleanFailures == 3 && !r.f.st.uncleaned);
   CHECK(r.f.slots.slot[r.f.slots.shown].key == &d && r.f.st.cleanSkips == 14);
@@ -1162,7 +1178,10 @@ static void testConditionalClean()
   // The failed replacement invalidated e's old epoch. Initialize it again before testing a failed skip.
   CHECK(show(e) == kPianoDpuFlipShown && r.f.st.cleanInits == 11);
   r.dpu.latchNever = true;
-  CHECK(show(a) == kPianoDpuFlipLatch && r.f.st.cleanSkips == 14);
+  // A successful acquisition clean preceding a failed latch is a pass, but never a shown initialization.
+  c.cacheMode = kSurfaceWriteCombined;
+  CHECK(show(c) == kPianoDpuFlipLatch && r.f.st.cleanInits == 11 && r.f.st.cleanSkips == 14 && r.f.st.cleanFull == 5);
+  CHECK(r.f.st.flips + r.f.st.reshows == r.f.st.cleanInits + r.f.st.cleanSkips + r.f.st.cleanFull);
 }
 
 static void testVariants()
@@ -1281,12 +1300,13 @@ static void testSafety()
   {   // the watch: an underrun the handler cleared (sticky bits)
     Rig r;
     CHECK(r.ready());
+    r.f.cfg.cleanSkip = true;
     FakeSurface a(0x8d0000000ull, 2136ull * 12800);
     PianoDpuFlipRequest q = req(&a);
     CHECK(r.f.request(q) == kPianoDpuFlipShown);
     r.hw.sticky |= 1u << 28;
     r.f.watch();
-    CHECK(r.f.state == State::failed && r.hw.said("underrun"));
+    CHECK(r.f.state == State::failed && r.hw.said("underrun") && r.f.st.cleanUnderruns == 1);
   }
 }
 
@@ -1420,6 +1440,19 @@ static void testCadence()
   h.bands(band);
   CHECK(band[0] == 90 && band[1] == 0 && band[2] == 9 && band[3] == 0 && band[4] == 0 && band[5] == 1);
   CHECK(h.atMost(9500) == 90 && h.atMost(8250) == 0 && h.atMost(8333) == 90);
+  Hist edges;
+  for (uint64_t us : {0, 250, 251, 9500, 9501, 50000, 50001}) edges.add(us);
+  edges.bands(band);
+  CHECK(edges.atMost(250) == 2 && edges.atMost(50000) == 6 && edges.atMost(50001) == 7);
+  CHECK(edges.pct(1000) == 50001 && band[0] == 4 && band[1] == 1 && band[5] == 2);
+  Hist full;
+  full.b[0] = UINT32_MAX;
+  full.n = UINT32_MAX;
+  full.add(1);
+  full.add(UINT64_MAX);
+  full.add(251);
+  CHECK(full.atMost(250) == UINT32_MAX && full.n == uint64_t(UINT32_MAX) + 2 && full.sumUs == UINT64_MAX);
+  CHECK(full.pct(1000) == UINT64_MAX);
   Hist one;
   one.add(12);
   CHECK(one.pct(500) == 250 && one.pct(999) == 250);
@@ -1436,6 +1469,10 @@ static void testCadence()
       CHECK(ok && at == bytes);
     }
   CHECK(cleanBand(100, 3, 2, 64).end == 0 && cleanBand(100, 0, 0, 64).end == 0);
+  const Band large = cleanBand(UINT64_MAX, UINT32_MAX - 1, UINT32_MAX, 1);
+  CHECK(large.begin == UINT64_MAX - (uint64_t(UINT32_MAX) + 2) && large.end == UINT64_MAX);
+  const Band partial = cleanBand(UINT64_MAX, 7, 8, 64);
+  CHECK(partial.begin == (UINT64_MAX / 8 + 1) * 7 && partial.end == UINT64_MAX);
   // the flipper: two surfaces in turn, one flip per frame (8333 us), then one flip every 10 ms (each lands a frame later)
   Rig r;
   CHECK(r.ready());
@@ -1496,6 +1533,7 @@ int main(int argc, char **argv)
     return 0;
   }
   testTables();
+  testSlotClockWrap();
   testPlan();
   testEnable();
   testBankOn();

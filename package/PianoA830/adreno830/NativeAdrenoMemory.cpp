@@ -542,6 +542,7 @@ struct GpuTier {
     a830tier::Run runs[a830tier::kMaxRuns];
     unsigned mode=0,active=0,count=0;
     uint64_t refusals=0,allocations=0;
+    uint64_t requests[NativeAdrenoTierRequestCount]={};
     const char *state="off";
 };
 GpuTier gpuTier;
@@ -556,6 +557,12 @@ struct TierLocked {
     ~TierLocked() {IOLockUnlock(lock);}
 };
 #endif
+bool tierOwnsPhysical(uint64_t physical)
+{
+    // The qualified runs are immutable after publication, including when all slabs are allocated.
+    return physical>=a830tier::kRegionLo && physical<a830tier::kRegionHi &&
+        __atomic_load_n(&gpuTier.active,__ATOMIC_ACQUIRE) && gpuTier.slabs.owns(physical);
+}
 }
 
 a830tier::Parse NativeAdrenoMemory::configureTier(unsigned mode,const uint8_t *property,size_t length,
@@ -573,6 +580,7 @@ a830tier::Parse NativeAdrenoMemory::configureTier(unsigned mode,const uint8_t *p
     gpuTier.mode=mode;
     gpuTier.slabs=Tier();
     gpuTier.refusals=gpuTier.allocations=0;
+    for(auto &count:gpuTier.requests)__atomic_store_n(&count,0ull,__ATOMIC_RELAXED);
     const Parse result=loadRuns(property,length,xnuBase,xnuSize,gpuTier.runs,gpuTier.count);
     gpuTier.state=result!=Parse::ok?parseName(result):gpuTier.count?"pending":"empty";
     return result;
@@ -596,13 +604,13 @@ void NativeAdrenoMemory::qualifyTier(unsigned bits,bool wc,bool cached_coherent,
     TierLocked locked(tierLock);
     gpuTier.slabs=checked;
     gpuTier.state=checked.totalBytes()?"ready":"closed";
-    __atomic_store_n(&gpuTier.active,gpuTier.mode,__ATOMIC_RELEASE);
+    __atomic_store_n(&gpuTier.active,checked.totalBytes()?gpuTier.mode:0u,__ATOMIC_RELEASE);
 }
 
 NativeAdrenoTierStats NativeAdrenoMemory::tierStats()
 {
 #ifndef ADRENO830_HOST_TEST
-    if (!__atomic_load_n(&tierLock,__ATOMIC_ACQUIRE)) return {"off",0,0,0,0,0,0,0,0,0};
+    if (!__atomic_load_n(&tierLock,__ATOMIC_ACQUIRE)) return {"off",0,0,0,0,0,0,0,0,0,{}};
 #endif
     TierLocked locked(tierLock);
     unsigned passed=0,pass_mask=0;
@@ -613,8 +621,17 @@ NativeAdrenoTierStats NativeAdrenoMemory::tierStats()
         }
     }
     const uint64_t free=gpuTier.slabs.freeBytes();
-    return {gpuTier.state,gpuTier.mode,gpuTier.count,gpuTier.slabs.runs(),passed,pass_mask,free,
-        gpuTier.slabs.totalBytes()-free,gpuTier.refusals,gpuTier.allocations};
+    NativeAdrenoTierStats stats={gpuTier.state,gpuTier.mode,gpuTier.count,gpuTier.slabs.runs(),passed,pass_mask,free,
+        gpuTier.slabs.totalBytes()-free,gpuTier.refusals,gpuTier.allocations,{}};
+    for(unsigned i=0;i<NativeAdrenoTierRequestCount;++i)
+        stats.requests[i]=__atomic_load_n(&gpuTier.requests[i],__ATOMIC_RELAXED);
+    return stats;
+}
+
+void NativeAdrenoMemory::noteTierRequest(NativeAdrenoTierRequest request)
+{
+    if(__atomic_load_n(&gpuTier.active,__ATOMIC_RELAXED))
+        __atomic_fetch_add(&gpuTier.requests[request],1ull,__ATOMIC_RELAXED);
 }
 
 bool NativeAdrenoMemory::tierEligible(size_t bytes)
@@ -877,8 +894,6 @@ IOReturn NativeAdrenoMemory::importTask(void *task,uint64_t address,size_t bytes
     IOReturn status=NativeAdrenoQueryCpu4K(&cpu);
     if(status!=kIOReturnSuccess) {failure_={"import-cpu-abi",status};return status;}
     const uint64_t limit=UINT64_C(1)<<bits;
-    // Pinning a CPU view does not pin its slab. The owning BO's CPU lease controls that lifetime.
-    const bool tierActive=__atomic_load_n(&gpuTier.active,__ATOMIC_ACQUIRE)!=0;
     imported_=importRange(address,bytes,kIODirectionInOut,task);
     native_adreno_import_stage=14;
     failure_={"import-descriptor-create",kIOReturnNoMemory};
@@ -911,8 +926,9 @@ IOReturn NativeAdrenoMemory::importTask(void *task,uint64_t address,size_t bytes
     for(size_t offset=0;offset<bytes;offset+=4096) {
         IOByteCount length=0;
         addr64_t physical=imported_->getPhysicalSegment(offset,&length,kIOMemoryMapperNone);
-        if(!physical || (physical&4095) || length<4096 || physical>=limit || 4096>limit-physical ||
-           (tierActive && physical>=a830tier::kRegionLo && physical<a830tier::kRegionHi && gpuTier.slabs.owns(physical)))
+        const bool tierAlias=tierOwnsPhysical(physical);
+        if(tierAlias)noteTierRequest(NativeAdrenoTierImportDenied);
+        if(!physical || (physical&4095) || length<4096 || physical>=limit || 4096>limit-physical || tierAlias)
             {native_adreno_import_stage=18;native_adreno_import_fail_pa=physical;native_adreno_import_fail_offset=offset;
              status=kIOReturnUnsupported;goto failed;}
         if(span_count_ && physical==spans_[span_count_-1].physical+spans_[span_count_-1].bytes)
@@ -937,7 +953,9 @@ IOReturn NativeAdrenoMemory::importDevice(IOMemoryDescriptor *scanout,uint64_t o
     for(size_t at=0;at<bytes;at+=4096) {
         IOByteCount length=0;
         const addr64_t physical=scanout->getPhysicalSegment(offset+at,&length,kIOMemoryMapperNone);
-        if(!physical || (physical&4095) || length<4096 || physical>UINT64_MAX-4096) {
+        const bool tierAlias=tierOwnsPhysical(physical);
+        if(tierAlias)noteTierRequest(NativeAdrenoTierImportDenied);
+        if(!physical || (physical&4095) || length<4096 || physical>UINT64_MAX-4096 || tierAlias) {
             NativeAdrenoDeleteMeta(spans_,NativeAdrenoPhysicalSpan,span_capacity_);
             spans_=nullptr;span_count_=span_capacity_=0;
             return kIOReturnUnsupported;
@@ -1053,7 +1071,7 @@ IOReturn NativeAdrenoMemory::publishForDevice(size_t offset,size_t bytes,bool wr
 {
     if(!backed() || !prepared_ || quarantined_)return kIOReturnNotReady;
     if(!bytes || ((offset|bytes)&4095) || offset>bytes_ || bytes>bytes_-offset)return kIOReturnBadArgument;
-    if(device_ || tier_)return kIOReturnSuccess;   /* only uncached CPU views */
+    if(device_ || tier_)return kIOReturnSuccess;   /* Device views are uncached, and tier BOs have no CPU view. */
     if(imported_ || (unmapped_ && !write_combined_))return maintainImported(offset,bytes,writes?NativeAdrenoCleanInvalidate:NativeAdrenoClean);
     if(write_combined_)   /* no CPU mapping should cache these pages; if one does, reach its lines through the physical pages */
         return include_write_combined?maintainImported(offset,bytes,writes?NativeAdrenoCleanInvalidate:NativeAdrenoClean):kIOReturnSuccess;

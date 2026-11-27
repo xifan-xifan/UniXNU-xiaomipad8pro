@@ -46,6 +46,10 @@ inline const char *rtcSourceName(RtcOffsetSource s)
 inline RtcReading readRtc(const Io &io, const Arbiter &a, bool hasArg, uint32_t argOffset, const RtcReading *previous = nullptr)
 {
   RtcReading r;
+  if (!a.v7) {
+    r.why = "unsupported SPMI arbiter";
+    return r;
+  }
   if (previous && previous->rtc.apid >= 0) {
     r.rtc = previous->rtc;
     r.sdam = previous->sdam;

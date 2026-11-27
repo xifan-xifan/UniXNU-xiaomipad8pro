@@ -56,7 +56,7 @@ constexpr uint64_t expectedMilliHz(unsigned vtotal) { return vtotal ? 120000ull 
 inline bool rateOk(uint64_t milliHz, unsigned vtotal, uint32_t toleranceMilli)
 {
   const uint64_t e = expectedMilliHz(vtotal), tol = e * toleranceMilli / 1000;
-  return milliHz + tol >= e && milliHz <= e + tol;
+  return e && (milliHz >= e ? milliHz - e : e - milliHz) <= tol;
 }
 
 // Whether this path takes a VFP switch at all (read only).
@@ -158,6 +158,8 @@ const char *verify(Io &io, unsigned vtotal, const LivePath &p, const Options &o,
   if (!rateOk(s.rate.milliHz, vtotal, o.toleranceMilli)) return "the measured refresh is not the expected one";
   if (!s.rate.lockstep) return "INTF2 did not count the frames INTF1 counted (the halves are out of step)";
   if (s.underrun) return "an INTF underran";
+  for (unsigned i = 0; i < 2; ++i)
+    if (s.dsiTotal[i] != ((vtotal - 1) << 16 | (p.link[i].dsiTotal & 0xffffu))) return "a DSI TOTAL did not read back";
   return nullptr;
 }
 
@@ -175,6 +177,11 @@ Switch switchTo(Io &io, const LivePath &p, unsigned vtotal, const Options &o)
   }
   if (vtotal != kVtotal120 && vtotal != kVtotal60) {
     s.why = "not a total of the 120 Hz family";
+    return s;
+  }
+  LivePath checked = p;
+  if (!initCounters(io, checked).moving) {
+    s.why = "INTF counters not advancing in lockstep";
     return s;
   }
   if ((io.rd(kMdp + kTopIntrStatus) & kUnderrunBits) && !io.wr(kMdp + kTopIntrClear, kUnderrunBits)) ++s.refused;

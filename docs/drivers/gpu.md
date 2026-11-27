@@ -1,18 +1,45 @@
 # GPU: Adreno 830 (PianoA830 = Adreno830 + piano's board glue; Metal side = AdrenoMetal plugin + Turnip on ABI v2)
 
+## Daily status (2026-11-27)
+
+- **Installed v13.1y12q.** Adreno 830 runs WindowServer and Metal apps with the Android-aligned 14-level frequency curve
+  up to **1100 MHz** and the default docked skin-temperature table. The daily configuration uses **4 KiB paged GPU memory**
+  capped at **7168 MiB**, with no fixed pool, and **64 client windows of 4 GiB** in a 256 GiB aperture, with a 1 GiB per-object
+  limit. The November 26 installed v13.1y12l check recorded no GPU open refusals or page faults and passed **30/30** graded
+  ImageIO, Core Image on Metal, MetalKit texture and Quick Look paths, including the 4032-pixel JPEG and HEIC cases.
+  [Support status](../STATUS.md) · [Docked table default](../../package/PianoA830/board/PianoA830.cpp) · [November 26 Metal results](../results-2026-11-26.md#core-image-and-metal)
+- **Sustained Metal 3D on installed v13.1y12q, November 27.** The ten-minute Goal 12 run on `inst-y12q-obs4` completed
+  **35,985 frames at 59.98 fps**. The GPU sustained **967–1050 MHz** with **zero recoveries or faults**. Drawable
+  `presentedTime` was unavailable (`presented=0`), so FPS measures Metal completions.
+  [Full benchmark and SSH wrapper outcome](../results-2026-11-27.md#sustained-metal-3d-installed-v131y12q)
+- **Chrome on installed v13.1y12q, November 27.** With no GPU, WebGPU or sandbox flags, **6/6 WebGPU contexts** opened on
+  `qualcomm` / `adreno-8xx` with `fallback_adapter = false`, correct compute results and exact pixel readback. **WebGL 2 reached
+  37.89 fps** at 3200 × 1738 through ANGLE Metal. All 17 Chrome processes reported secure V8 sandbox mode.
+  [November 27 Chrome results](../results-2026-11-27.md#chrome)
+- **Extra RAM.** The daily system uses a 13 GiB memory window (13310 MiB). The November 26 RAM EFI audit released **0 MiB**
+  and awaits owner verification. Qualification of the extra-RAM GPU tier and driver pools is still pending.
+  [November 26 memory results](../results-2026-11-26.md#memory) · [EFI audit](../results-2026-11-26.md#efi-memory-battery-and-video) · [Extra-RAM GPU tier](ram-extra.md)
+
+Chrome on RAM boots remains pending.
+[November 27 results](../results-2026-11-27.md) · [Support status](../STATUS.md)
+
+## Historical bring-up notes
+
+The design, boot arguments, test plans and measurements below describe the builds under test at the time.
+
 Status 2026-11-11: `package/PianoA830` is in the native kext list (`configs/k27-native-kexts.txt`), inert unless `piano-gpu=N`.
 Late on 2026-11-11, built and host-tested, not run: the GPU's part of a system suspend (`piano-gpu-suspend=1`), the LLCC island slice
 (read at every GPU boot; `piano-llcc-island=1` programs it), one ceiling slot per caller (§8).
 On the tablet: the read-only survey (piano-gpu=1, 07:12), S1..S10 all ok on the first full run (`GPU RUN 160M`, 44-53 C), and with
 the NativeAdrenoMetal plugin (Turnip on ABI v2) in the seed **the macOS login screen composited by WindowServer on the A830**
-(camera, about 3.5 min into the boot). Plan: the local plan `gpu-native-plan.md` (not published).
+(camera, about 3.5 min into the boot).
 
-## 1. Purpose and gate
+### 1. Purpose and gate
 
 GPU-composited macOS desktop (WindowServer/Core Animation on Metal) on the real A830 instead of the VM's virtio tunnel. Gates
 **M5** (plan §5). Until then WindowServer composites in software into the GOP framebuffer (display.md, soft-metal.md).
 
-## 2. Hardware facts
+### 2. Hardware facts
 
 | Item | Value | Source | State |
 |---|---|---|---|
@@ -27,12 +54,12 @@ GPU-composited macOS desktop (WindowServer/Core Animation on Metal) on the real 
 | Power state at hand-over | GCC GPU_CFG_AHB on (0x88000003), GPLL0 locked, GPU votes clear; GPU_CC: CX GDSC collapsed (CX_GDSCR 0x0222f801), PLL0 off (L 0x440000), GMU/HUB RCGs off, AHB/CX_GMU/SMMU-vote branches off | survey | verified: GPU fully off, as the 13T's cold state |
 | Firmware | `gen80000_gmu.bin` (= 13T), `_sqe.fw`, `_aqe.fw` (piano builds), piano-signed `gen80000_zap.mbn`; pins in `board/piano-gpu-firmware.json` | stock vendor_a/odm_a copies | verified (S0 "FW ok") |
 
-## 3. Ubuntu as the specification
+### 3. Ubuntu as the specification
 
 Linux `drm/msm` (a8xx), KGSL and `clk/qcom` (GPL-2.0) are read as specification only; nothing is copied. Adreno830's `A830Regs.h` and
 the generated `A830HwInit.h` are register facts as upstream ships them. piano's two device trees are the board input (§7).
 
-## 4. UniXNU template to build on
+### 4. UniXNU template to build on
 
 **Adreno830** 1a13210 (MIT), the 13T's whole A830 kernel driver (S0-S10 and a GPU desktop under iPadOS on the same SoC and Gunyah),
 with **ArmSmmu4K** 3ba9245 (the revision it was tested with) and **AdrenoPM4**; board glue derived from **UniXNU-Pagani_SM8750**
@@ -52,7 +79,7 @@ macOS-27 deltas (compiled only with `-DADRENO830_MACOS`; host tests build both w
 - The BootProgress hooks are the kext's: the status rows, stage results and the register trace go through a line ring that a
   logger thread prints with IOLog (the driver calls them with interrupts off; printing there hung the first S1 run).
 
-## 5. IOKit family / ABI
+### 5. IOKit family / ABI
 
 `PianoA830 : IOService` on `IOPlatformExpertDevice` (probe declines without `piano-gpu`); `NativeAdrenoGpuPublished` (S9);
 `AGXAccelerator : IOAccelerator` (IOGraphicsFamily, vtable check 272 slots: 0 problems); user client `AGXDeviceUserClient`, open type
@@ -64,7 +91,7 @@ The userspace half is built: the VM's `NativeAdrenoMetal.bundle` with Turnip on 
 kernel stack and staged by `build-native-image.sh` when PianoA830 is linked. [gpu-userspace.md](gpu-userspace.md) §4 lists what the
 kernel side must provide (2026-11-11).
 
-## 6. Boot args
+### 6. Boot args
 
 | Argument | Default | Effect |
 |---|---|---|
@@ -102,7 +129,7 @@ kernel side must provide (2026-11-11).
 | `piano-metal-report=0/1/2` | 1 | the plugin's abort reporter: off / the desktop's system processes / every process that loads the plugin (userspace, read through kern.bootargs) |
 | `native-gop-display-gpu-fence=0/1` | 1 | NativeGopDisplay waits for the GPU's fence before a swap's copy (§8) |
 
-## 7. Kernel archive / component
+### 7. Kernel archive / component
 
 Native kext `com.unixnu.driver.PianoA830` (`tooling/k27/kext/PianoA830.json`, objects `@OUT@/native-kexts/PianoA830/objects.json`).
 Build: `tooling/k27/build-native-piano-a830.sh`: (1) `gen-piano-gpu-inputs.py --check` (board inputs from `out/inputs/piano-boot.dtb`,
@@ -114,7 +141,7 @@ ignored `out/native-kexts/PianoA830/firmware`, `.incbin` from there; firmware is
 import check. Image: `PIANO_EXTRA_KEXTS=$(tooling/k27/build-native-piano-a830.sh | tail -1) PIANO_EXTRA_ARGS="piano-gpu=1" tooling/k27/build-native-image.sh`;
 ladder: `tooling/k27/build-gpu-ladder.sh` (out/ram-gpu/s1..s9, full).
 
-## 8. Hardware test plan and results
+### 8. Hardware test plan and results
 
 1. **piano-gpu=1** (survey, read only; first tablet step). Look for, in order: `inputs:`, four `firmware ... = pin`, `board: SMEM socinfo
    id`, `adreno830_start: 0; stage 0 ... state 4` (stopped after S0), `S0 facts`, `GCC:`, `GPU_CC:` summary, SMMU/GMU lines or their
@@ -427,11 +454,11 @@ unfinished then is left undrawn and the ticks retry: `the GPU had not finished a
 once its own job is done (`native-gop-display-defer=2`), so a surface goes back to WindowServer only after the copy of the frame that
 replaced it.
 
-## 9. Fallback
+### 9. Fallback
 
 `piano-gpu` absent: software compositing (soft-metal.md). After S9 the accelerator exists; a failed stage publishes nothing.
 
-## 10. Open questions
+### 10. Open questions
 
 1. Does Gunyah on piano keep only ACTLR `0x303` (13T)? (S3 trace + survey after S1.)
 2. Does the SCM path (GPU_INIT_REGS, PAS 13 with piano's ZAP) work from XNU at EL1 on piano? (S2, S7.) Every SCM request and the
@@ -447,12 +474,12 @@ replaced it.
 7. Whether the GPU's lowered votes show in the RPMh counters while suspended (G1-G3): the keepalive BCMs (SH0/MC0 at x = y = 1, CN0)
    persist without a SLEEP set, and UFS/USB/PCIe have no kOff yet, so `cxsd`/`ddr` may stay still until those land.
 
-## 11. Licence note
+### 11. Licence note
 
 Adreno830, ArmSmmu4K, AdrenoPM4: MIT (their LICENSE files in `package/PianoA830`). Board glue and tooling: BSD-2-Clause-Patent
 (`package/PianoA830/LICENSE`). Linux/KGSL: specification only. Vendor firmware: never in this repository.
 
-### 607 MHz qualification (R3a)
+#### 607 MHz qualification (R3a)
 
 The exact combination `piano-gpu-maxlevel=7 piano-gpu-dcvs-max=607` selects C5 qualification. It requires profile 1,
 speedbin 0 (the 11 public levels), ACD off, HFI 0, host rails 1, boot/floor DDR 11, governor on, minimum 160 and idle 1.
@@ -486,7 +513,7 @@ restart failures, repeat faults, stopped heartbeat, transient hot samples, and s
 tables before permit and adjudicates normal/injected phases. Real high-frequency stability, benefit, temperatures and GUI
 recovery remain tablet gates. These operator limits are not OEM skin-safety certification or permission for 734 MHz.
 
-### User BO fallback without a lifetime kernel mapping (experimental)
+#### User BO fallback without a lifetime kernel mapping (experimental)
 
 `piano-gpu-user-vm=1` selects a prepared, wired named VM object for non-contiguous user BOs that cannot use the shared pool.
 Without it, the existing mapped fallback remains the control. Kernel ring, fence, firmware and SMMU objects, explicitly contiguous
@@ -528,7 +555,7 @@ In R3b with exit-test mode off, `piano-gpu-dcvs-min=607` selects the sustained-r
 floor follows the effective guard ceiling, including the initial 342 MHz cap. Its absolute 625-second permit includes
 time for the four guarded up-steps and at least 600 seconds of acknowledged level-7 residency when conditions allow.
 
-### Docked skin table, the binding limit and the Android-curve default (gpu/throttle1, 2026-11-24)
+#### Docked skin table, the binding limit and the Android-curve default (gpu/throttle1, 2026-11-24)
 
 - **Android-curve preset** (`package/include/PianoGpuAndroidPreset.h`): with `piano-gpu` >= 2 and none of the 15 GPU qualification
   arguments on the command line (`piano-gpu-r3b`, `-daily`, `-fullopp`, `-governor`, `-profile`, `-speedbin`, `-dcvs`, `-maxlevel`,
@@ -543,4 +570,3 @@ time for the four guarded up-steps and at least 600 seconds of acknowledged leve
   xo, skin-unknown, hard, startup, permit, knob, boostcap), `why=` (`demand` when the governor votes below the cap) and `tab=`; its
   `cap=` is `A830Dcvs::ceiling()` (it could not exceed 7 before). `machdep.piano_gpu_state` (read only, once a second): `at_us lvl mhz
   cap cap_mhz why bind want table band step ext skin_dC skin_ok raw_dC filt_dC xo_dC latched high`.
-- Analysis and the Android / Ubuntu / docked comparison: private host-check `20261124-gpu-throttle` (ANALYSIS.md, TABLE.md).

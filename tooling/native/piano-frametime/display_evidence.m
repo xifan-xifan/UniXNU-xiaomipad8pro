@@ -3,37 +3,86 @@
 
 #import <IOKit/IOKitLib.h>
 #include <errno.h>
-#include <inttypes.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/sysctl.h>
 
 static const char snapshotName[] = "machdep.piano_dpu_snapshot";
 
+static bool take(const char **cursor, const char *literal)
+{
+    const size_t len = strlen(literal);
+    if (strncmp(*cursor, literal, len) != 0)
+        return false;
+    *cursor += len;
+    return true;
+}
+
+static bool read_number(const char **cursor, int base, uint64_t *value)
+{
+    const char *digits = base == 10 ? "0123456789" : "0123456789abcdefABCDEF";
+    if (!**cursor || !strchr(digits, **cursor))
+        return false;
+    char *end;
+    errno = 0;
+    const uint64_t parsed = strtoull(*cursor, &end, base);
+    if (errno == ERANGE)
+        return false;
+    *cursor = end;
+    *value = parsed;
+    return true;
+}
+
+static bool read_decimal(const char **cursor, const char *prefix, uint64_t *value)
+{
+    return take(cursor, prefix) && read_number(cursor, 10, value);
+}
+
+static bool token_end(const char *cursor)
+{
+    return strchr(" \t\r;", *cursor) != NULL; // Also matches the terminating NUL.
+}
+
+static const char *line_text(NSString *line)
+{
+    const char *text = line.UTF8String;
+    return text && strlen(text) == [line lengthOfBytesUsingEncoding:NSUTF8StringEncoding] ? text : NULL;
+}
+
 static NSDictionary *snapshot(NSString *body)
 {
-    uint64_t serial = 0, time = 0;
-    unsigned mode = 0;
     NSMutableDictionary *result = [NSMutableDictionary dictionary];
     NSArray<NSString *> *lines = [body componentsSeparatedByString:@"\n"];
     for (NSString *line in lines) {
-        const char *s = line.UTF8String;
-        if (sscanf(s, "snapshot %" SCNu64 " at %" SCNu64 " us:", &serial, &time) == 2) {
+        const char *text = line_text(line);
+        if (!text)
+            continue;
+        const char *cursor = text;
+        uint64_t serial, time, mode, link, enabled, frame;
+        if (read_decimal(&cursor, "snapshot ", &serial) && read_decimal(&cursor, " at ", &time) &&
+            take(&cursor, " us:")) {
             result[@"serial"] = @(serial);
             result[@"time_us"] = @(time);
         }
-        if (sscanf(s, "mode: live %u Hz", &mode) == 1)
+        cursor = text;
+        if (read_decimal(&cursor, "mode: live ", &mode) && mode <= UINT32_MAX &&
+            take(&cursor, " Hz") && token_end(cursor))
             result[@"classified_mode_hz"] = @(mode);
-        unsigned link, enabled;
-        uint32_t frame;
-        const char *counters = strstr(s, "; counters en ");
-        if (counters && sscanf(s, "intf%u:", &link) == 1 && (link == 1 || link == 2) &&
-            sscanf(counters, "; counters en %x frame %" SCNu32, &enabled, &frame) == 2 &&
-            (enabled & 3) == 3) {
+
+        cursor = text;
+        if (!read_decimal(&cursor, "intf", &link) || (link != 1 && link != 2) || !take(&cursor, ":"))
+            continue;
+        cursor = strstr(cursor, "; counters en ");
+        if (cursor && take(&cursor, "; counters en ") && read_number(&cursor, 16, &enabled) &&
+            enabled <= UINT32_MAX && (enabled & 3) == 3 &&
+            read_decimal(&cursor, " frame ", &frame) && frame <= UINT32_MAX && token_end(cursor)) {
             result[link == 1 ? @"intf1_frame" : @"intf2_frame"] = @(frame);
         }
     }
-    result[@"status"] = serial && time && result[@"intf1_frame"] && result[@"intf2_frame"]
+    result[@"status"] = [result[@"serial"] unsignedLongLongValue] && [result[@"time_us"] unsignedLongLongValue] &&
+        result[@"intf1_frame"] && result[@"intf2_frame"]
         ? @"ok" : @"missing_snapshot_or_enabled_counters";
     return result;
 }
@@ -132,31 +181,58 @@ NSDictionary *ft_gop_properties(void)
     return result;
 }
 
+static NSDictionary *cadence_window(const char *cursor)
+{
+    uint64_t seq, window, flips, ignored, again, gaps, n, p50, p95, p99, max;
+    if (!read_decimal(&cursor, "cadence ", &seq) || !read_decimal(&cursor, ": ", &window) || !window ||
+        !read_decimal(&cursor, " ms: ", &flips) || !read_decimal(&cursor, " flips (", &ignored) ||
+        !read_decimal(&cursor, ".", &ignored) || !read_decimal(&cursor, "/s), ", &again) ||
+        !read_decimal(&cursor, " again, ", &gaps) || !read_decimal(&cursor, " gaps; iv n ", &n) ||
+        !read_decimal(&cursor, " p50 ", &p50) || !read_decimal(&cursor, " p95 ", &p95) ||
+        !read_decimal(&cursor, " p99 ", &p99) || !read_decimal(&cursor, " max ", &max))
+        return nil;
+    if (take(&cursor, " mean ") && !read_number(&cursor, 10, &ignored))
+        return nil;
+    if (!take(&cursor, " us") || !token_end(cursor))
+        return nil;
+    return @{@"sequence": @(seq), @"window_ms": @(window), @"new_surface_flips": @(flips),
+             @"same_surface": @(again), @"gaps_ge_100ms": @(gaps), @"new_surface_hz": @(1000.0 * flips / window),
+             @"intervals": @(n), @"p50_us": @(p50), @"p95_us": @(p95), @"p99_us": @(p99), @"max_us": @(max)};
+}
+
 static NSDictionary *log_evidence(NSString *body)
 {
+    static const char dpu_prefix[] = "PianoDpu: ";
     NSMutableArray *cadence = [NSMutableArray array];
     NSMutableArray *vbl = [NSMutableArray array];
     NSMutableArray *totals = [NSMutableArray array];
     NSUInteger positive = 0;
     for (NSString *line in [body componentsSeparatedByString:@"\n"]) {
-        const char *text = line.UTF8String;
-        const char *dpu = strstr(text, "PianoDpu: ");
+        const char *text = line_text(line);
+        if (!text)
+            continue;
+        const char *dpu = strstr(text, dpu_prefix);
+        if (dpu) {
+            dpu += sizeof(dpu_prefix) - 1;
+            NSDictionary *sample = cadence_window(dpu);
+            if (sample) {
+                positive += [sample[@"intervals"] unsignedLongLongValue] > 0 &&
+                    [sample[@"new_surface_flips"] unsignedLongLongValue] > 0;
+                [cadence addObject:sample];
+                continue;
+            }
+            uint64_t ignored, flips;
+            if (read_decimal(&dpu, "flips: ", &ignored) && read_decimal(&dpu, " in the last ", &ignored) &&
+                read_decimal(&dpu, " s (", &flips) && take(&dpu, " in all:")) {
+                [totals addObject:@(flips)];
+                continue;
+            }
+        }
         const char *gop = strstr(text, "NativeGopDisplay: period ");
-        uint64_t seq, window, flips, again, gaps, n, p50, p95, p99, max, ticks, idle;
-        if (dpu && sscanf(dpu, "PianoDpu: cadence %" SCNu64 ": %" SCNu64 " ms: %" SCNu64
-                          " flips (%*u.%*u/s), %" SCNu64 " again, %" SCNu64 " gaps; iv n %" SCNu64
-                          " p50 %" SCNu64 " p95 %" SCNu64 " p99 %" SCNu64 " max %" SCNu64 " us",
-                          &seq, &window, &flips, &again, &gaps, &n, &p50, &p95, &p99, &max) == 10 && window) {
-            positive += n > 0 && flips > 0;
-            [cadence addObject:@{@"sequence": @(seq), @"window_ms": @(window),
-                @"new_surface_flips": @(flips), @"same_surface": @(again), @"gaps_ge_100ms": @(gaps),
-                @"new_surface_hz": @(1000.0 * flips / window), @"intervals": @(n),
-                @"p50_us": @(p50), @"p95_us": @(p95), @"p99_us": @(p99), @"max_us": @(max)}];
-        } else if (dpu && sscanf(dpu, "PianoDpu: flips: %*u in the last %*u s (%" SCNu64 " in all:",
-                                 &flips) == 1) {
-            [totals addObject:@(flips)];
-        } else if (gop && sscanf(gop, "NativeGopDisplay: period %" SCNu64 " ms: %" SCNu64
-                                 " VBL ticks, %" SCNu64 " times the tick stopped", &window, &ticks, &idle) == 3) {
+        uint64_t window, ticks, idle;
+        if (gop && read_decimal(&gop, "NativeGopDisplay: period ", &window) &&
+            read_decimal(&gop, " ms: ", &ticks) && read_decimal(&gop, " VBL ticks, ", &idle) &&
+            take(&gop, " times the tick stopped") && token_end(gop)) {
             [vbl addObject:@{@"window_ms": @(window), @"software_ticks": @(ticks), @"idle_stops": @(idle)}];
         }
     }

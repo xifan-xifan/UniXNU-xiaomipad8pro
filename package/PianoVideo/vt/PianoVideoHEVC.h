@@ -181,7 +181,7 @@ inline bool addRps(Rps &r, int32_t delta, bool used, uint32_t maximum) {
       ((r.delta[at] < 0) == (delta < 0) && (delta < 0 ? r.delta[at] > delta : r.delta[at] < delta)))) ++at;
   if (at < r.count && r.delta[at] == delta) return false;
   for (uint32_t j = r.count; j > at; --j) r.delta[j] = r.delta[j - 1];
-  const uint16_t low = uint16_t((1u << at) - 1);
+  const uint32_t low = (1u << at) - 1;
   r.used = uint16_t((r.used & low) | ((r.used & ~low) << 1) | (uint32_t(used) << at));
   r.delta[at] = int16_t(delta); ++r.count; if (used) ++r.usedCount;
   return true;

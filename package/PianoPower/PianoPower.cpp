@@ -113,9 +113,9 @@ namespace {
 
 struct Args {
   uint32_t level, period, gauge, write, hv, b4pd, unsuspend, ps, psFloor, psInject, board, ucsi, pdoMca;
-  bool psGuard;
+  bool psGuard, psFields, psHealth;
   uint32_t policy, rp, health, healthStop, healthResume;
-  uint32_t ramp, rpMax, writeMs, kick;
+  uint32_t ramp, rpMax, writeMs, kick, ownBus;
   uint32_t wdog, chgen, chgfix, chgwatch;
   uint32_t hvOrder, hvCaps, qc, fvHot;   // charge/pd1 (charging-policy.md §21), each 0 by default
   uint32_t cp;                           // piano-power-cp=1: the SC8541 driver probes and may be armed (ChargePump.h)
@@ -165,7 +165,8 @@ void readArgs()
   gArgs.gauge = bootArg("piano-power-gauge", 1);
   gArgs.write = bootArg("piano-power-write", 1);
   gArgs.hv = bootArg("piano-power-hv", 0);
-  gArgs.b4pd = bootArg("piano-power-b4pd", 0);
+  if (gArgs.hv > 2) gArgs.hv = 0;
+  gArgs.b4pd = bootArg("piano-power-b4pd", 0) == 1;
   gArgs.policy = bootArg("piano-power-policy", 0);
   if (gArgs.b4pd) { gArgs.policy = 1; gArgs.hv = 2; }
   gArgs.unsuspend = bootArg("piano-power-unsuspend", 0);
@@ -183,6 +184,8 @@ void readArgs()
   gArgs.cp = bootArg("piano-power-cp", 0) == 1;     // the SC8541 pump: off by default; writes also need machdep.piano_power_cp_arm=1
   gArgs.mipps = bootArg("piano-power-mipps", 0) == 1;   // MiPPS: load the private key file (the engine runs only with it)
   gArgs.ps = bootArg("piano-power-ps", 0);            // the battery for macOS (PianoBattery.cpp)
+  gArgs.psFields = gArgs.ps && bootArg("piano-power-ps-fields", 0) == 1;  // read-only cycle, health and time reporting
+  gArgs.psHealth = gArgs.psFields && bootArg("piano-power-ps-health", 0) == 1; // 27.3 logical-pack health input
   gArgs.psFloor = bootArg("piano-power-ps-floor", 0); // the lowest percentage shown on battery (BatteryMap.h)
   if (gArgs.psFloor > 50) gArgs.psFloor = 50;
   gArgs.psInject = bootArg("piano-power-ps-inject", 0); // deterministic bad first publisher cycles for CHGUI A/B
@@ -204,6 +207,11 @@ void readArgs()
   // with the policy: the charging restart (ChargePolicy cfg.kick, charging-policy.md §17): 0x2003 = 0 then 1 when the packs stay at
   // 0 mA with input to spare; piano-power-kick=0 leaves it out
   gArgs.kick = bootArg("piano-power-kick", 1);
+  // with the policy (usb-host.md section 6.4, Q17; default 0): our own VBUS (the DSP's boost for a USB device on the port: UCSI says we
+  // are the provider, or the PMIC sees a sink's Rd and no Rp) is no source for ChargePolicy (decided as nothing attached) nor for the
+  // battery's power source (no "on power" from the bus voltage alone). Require a USB host level that can manage the port.
+  const uint32_t usbHostLevel = bootArg("piano-usbhost", 0);
+  gArgs.ownBus = usbHostLevel >= 3 && usbHostLevel <= 6 && bootArg("piano-power-own-bus", 0) == 1;
   // the charger PMIC's BARK/BITE watchdog (ChargerWdog.h, charging-policy.md §18): 0 read and log only, 1 pet it, 2 (default) pet it
   // and clear "a bite disables charging" (MISC +0x53 bit 7), as Linux's host driver for the SCHG family does
   gArgs.wdog = bootArg("piano-power-wdog", 2);
@@ -396,7 +404,7 @@ struct CpSession {
 };
 CpSession *gCpSess = nullptr;
 
-GaugeReading readBus(GaugeBus &b)
+GaugeReading readBus(GaugeBus &b, bool readTimes = false)
 {
   takePin(b.scl);
   takePin(b.sda);
@@ -404,7 +412,7 @@ GaugeReading readBus(GaugeBus &b)
   const I2cIo io = {&b, busSda, busScl, busReadSda, busReadScl, busDelay};
   I2cBus bus(io);
   if (&b == &gBuses[0] && gCpHook) bus.setHook(cpHookFn, gCpHook);
-  GaugeReading g = readGauge(bus);
+  GaugeReading g = readGauge(bus, readTimes);
   givePin(b.sda);
   givePin(b.scl);
   if (g.wordRereads)
@@ -513,7 +521,7 @@ class PianoPower : public IOService {
   void readRtcLine(char *line, size_t size);
   void surveyAdsp();
   void probeGauges();
-  void sampleGauges();
+  void sampleGauges(bool readTimes = false);
   void report();
   void startCharger();
   void serviceMca(uint64_t now);
@@ -537,6 +545,7 @@ class PianoPower : public IOService {
   // piano-power-policy=1 (ChargeLink.h): ChargePolicy decides the charger writes. All of it runs on the thread; setPowerState and
   // systemWillShutdown only raise the asks below and wait for (or are acknowledged by) the thread.
   bool fPolicyOn = false, fPolicyEnded = false;
+  bool fOwnBusLogged = false;   // the last decision's plan.own_bus as logged (piano-power-own-bus)
   ChargeLink fLink;
   uint64_t fPackMs = 0;                       // when the packs were last read (the decisions take them for 3 periods)
   uint32_t fPsPublishCycles = 0;              // publisher cycles, including deterministic ps-inject A/B cycles
@@ -637,7 +646,7 @@ bool PianoPower::start(IOService *provider)
                         "(-resume, 75 %), the higher pack's, with a charging hold against idle sleep below the stop"
                       : (gArgs.kick && gArgs.write ? " (battery health off: 0x2003 = 0 only within a charging restart)"
                                                    : " (battery health off: 0x2003 is never written 0)"),
-         gArgs.hv > 2 ? 2u : gArgs.hv, gArgs.hv ? " (9 V asked from a PD source 15 s after the attach)" : "");
+         gArgs.hv, gArgs.hv ? " (9 V asked from a PD source 15 s after the attach)" : "");
     if (gArgs.unsuspend) note("piano-power-unsuspend=1 is the built-in policy's: not used with piano-power-policy=1");
     note("piano-power-pdo-mca=%u: %s [PianoPdoFirmwareV1]", gArgs.pdoMca && gArgs.ucsi ? 1u : 0u,
          gArgs.pdoMca && gArgs.ucsi
@@ -648,6 +657,8 @@ bool PianoPower::start(IOService *provider)
          "(order: mode 1 the fixed 9 V PDO else an APDO, mode 2 the APDO else the PDO; caps: 9 V rows PD 1600/3000, PPS 2500/3500, "
          "QC3 1600/3500, QC2 1200/2600 mA, FCC <= 2 x ICL; qc: 0x2011 9 V for type 5-8 with a non-PD UCSI status; fv-hot: 4060 mV "
          "from 48 C, held at that float; all within the strict session's gates)", gArgs.hvOrder, gArgs.hvCaps, gArgs.qc, gArgs.fvHot);
+    if (gArgs.ownBus)
+      note("piano-power-own-bus=1: sourced VBUS is excluded from charging policy and AC reporting [PianoOwnBusGuardV1]");
   }
   if (gArgs.ps)
     note("piano-power-ps=1: the battery is published to macOS as AppleSmartBattery (IOPMPowerSource) from the gauges and the "
@@ -780,7 +791,7 @@ void PianoPower::publishCharge(uint64_t now, const piano_board_temps *board)
   n("Generation", c.generation); n("LinkGeneration", fMca.links); n("ContractSeq", c.seq);
   n("RawType", uint32_t(piano_mca_has(&fMca, McaType) ? fMca.value[McaType] : -1));
   n("EffectiveType", uint32_t(x.type)); n("Connector", c.connector); n("Connected", c.connected);
-  n("Sink", c.sink); n("PD", c.pd); n("ContractValid", piano_contract_fresh(&c, now));
+  n("Sink", c.sink); n("PD", c.pd); n("ContractValid", piano_contract_fresh(&c, now) != 0);
   n("ContractStatusValid", c.status_valid); n("RDO", c.rdo); n("Protocol", c.protocol); n("ContractMV", c.mv); n("ContractMA", c.ma);
   n("PackSampleMs", fPackMs); n("PackAgeMs", now >= fPackMs ? now - fPackMs : ~0u);
   n("SourceMA", c.source_ma); n("SourcePDOCount", c.pdos); n("UCSIVersion", c.version); n("CCI", c.cci);
@@ -804,6 +815,8 @@ void PianoPower::publishCharge(uint64_t now, const piano_board_temps *board)
   }
   n("RequestedVoltageProperty", s.volt_want_prop); n("RequestedVoltageValue", s.volt_want_value);
   n("AcknowledgedVoltageProperty", s.volt_set_prop); n("AcknowledgedVoltageValue", s.volt_set_value);
+  n("PPSAckPlanMs", s.pps_acked ? s.hv_asked_ms : 0); n("VirtualSkinValid", (x.valid & PIANO_CHG_IN_SKIN) != 0);
+  n("VirtualSkinDeciC", uint32_t(x.t_skin_dc));
   n("VoltagePending", s.contract_transition || (s.pending & (1u << PIANO_CHG_S_VOLT)));
   n("ModePending", s.contract_mode_change); n("RestoreRequired", s.volt_want_prop == PIANO_CHG_PD_FIXED && s.volt_want_value == 5000 && x.bus_mv >= 6000);
   n("ContractError", uint32_t(c.last_error)); n("ContractAgeMs", c.updated_ms && now >= c.updated_ms ? now - c.updated_ms : ~0u);
@@ -869,6 +882,11 @@ void PianoPower::publishCharge(uint64_t now, const piano_board_temps *board)
   n("MiPPSVersion", gMipps.version); n("MiPPSCleared", gMipps.cleared);
   for (unsigned i = 0; i < 7; ++i) {char key[20]; snprintf(key, sizeof key, "SourcePDO%u", i + 1); n(key, c.source_pdo[i]);}
   n("RpMA", x.rp_ma); n("TypeCSource", x.typec_source);
+  if (fLink.cfg.own_bus) {
+    n("OwnBusInput", (x.valid & PIANO_CHG_IN_OWN_BUS) ? 1u : 0u);
+    n("OwnBusGuard", fLink.cfg.own_bus);
+    n("OwnBus", p.own_bus);
+  }
   n("InputValid", x.valid); n("Safety", x.safety); n("SafetyValid", fSafetyValid);
   n("CPControl", fCpCtrl);
   if (const pianopower::Sc8541 *cp = gCpHook) {
@@ -876,7 +894,7 @@ void PianoPower::publishCharge(uint64_t now, const piano_board_temps *board)
     n("CPFaults", gCpFaults); n("CPBusOCP", cp->busOcpMa());
     n("CPKickAgeMs", cp->lastKickMs() && now >= cp->lastKickMs() ? now - cp->lastKickMs() : ~0u);
   }
-  n("LPDValid", piano_mca_has(&fMca, McaLpd)); n("LPD", uint32_t(fMca.value[McaLpd]));
+  n("LPDValid", piano_mca_has(&fMca, McaLpd) != 0); n("LPD", uint32_t(fMca.value[McaLpd]));
   n("DTPT", fAlerts.active()); n("SafetyAlarmMask", fAlerts.alarms);
   n("SafetyReobserved", fAlerts.retried); n("SafetyReobserveValid", fAlerts.retryValid); n("SafetyRereads", fAlerts.rereads);
   n("VBUS", uint32_t(x.bus_mv)); n("IBUS", uint32_t(x.ibus_ma));
@@ -1794,10 +1812,11 @@ void PianoPower::probeGauges()
   stage(3, "gauges");
 }
 
-void PianoPower::sampleGauges()
+void PianoPower::sampleGauges(bool readTimes)
 {
   if (!fGauges) return;
-  for (unsigned i = 0; i < 2; ++i) fPack[i] = gBuses[i].sda.page.va && gBuses[i].scl.page.va ? readBus(gBuses[i]) : GaugeReading();
+  for (unsigned i = 0; i < 2; ++i)
+    fPack[i] = gBuses[i].sda.page.va && gBuses[i].scl.page.va ? readBus(gBuses[i], readTimes) : GaugeReading();
   fPackMs = nowMs();
   fBattery = combinePacks(fPack, 2);
   piano_mca_battery_temperature(&fMca, fBattery.ok, fBattery.tempDeciC / 10);
@@ -1901,8 +1920,8 @@ void PianoPower::publishBattery(uint64_t t, const PortState *port)
   AdapterReal real;
   if (fPolicyOn && piano_contract_fresh(&fContract, nowMs())) {
     real.ok = real.pd = true;
-    real.mv = fContract.mv;
-    real.ma = fContract.ma;
+    real.mv = int32_t(fContract.mv);
+    real.ma = int32_t(fContract.ma);
   } else if (fPolicyOn && fLink.st.hv_qc && fLink.st.hv == PIANO_CHG_HV_ON && fLink.st.icl_set) {
     real.ok = true;   // cfg.qc at 9 V: the source's 9 V at the input limit in force (QC has no contract to show)
     real.mv = 9000;
@@ -1912,7 +1931,11 @@ void PianoPower::publishBattery(uint64_t t, const PortState *port)
   clock_usec_t usec = 0;
   clock_get_calendar_microtime(&sec, &usec);
   const uint32_t nowSec = sec > 1600000000 ? uint32_t(sec) : 0;   // before 2020: the calendar is not up yet
-  BatteryValues v = mapBattery(fPack, 2, published, port, gArgs.psFloor, &real, nowSec, gArgs.psGuard);
+  const bool ownBusNow = fPolicyOn && gArgs.ownBus && ownBus(&fContract, port, nowMs());
+  PortState sourcing;
+  sourcing.ok = true;   // a known port with no external source, even when the PMIC read failed
+  BatteryValues v = mapBattery(fPack, 2, published, ownBusNow ? &sourcing : port,
+                               gArgs.psFloor, &real, nowSec, gArgs.psGuard);
   if (fPolicyOn) {
     const PianoChargeState &s = fLink.st;
     v.healthEnabled = fLink.cfg.limit != 0; v.healthStop = fLink.cfg.stop_pct; v.healthResume = fLink.cfg.resume_pct;
@@ -1923,7 +1946,7 @@ void PianoPower::publishBattery(uint64_t t, const PortState *port)
     const bool ucsiPower = piano_contract_status_fresh(&fContract, now) &&
                            fContract.connected && fContract.sink;
     const bool busPower = piano_mca_has(&fMca, McaBusVoltage) && fMca.value[McaBusVoltage] >= 4000000;
-    if (ucsiPower || busPower) v.external = v.chargeCapable = true;
+    if (!ownBusNow && (ucsiPower || busPower)) v.external = v.chargeCapable = true;
     const bool enableKnown = piano_mca_has(&fMca, McaChargeEnable);
     const bool enable = enableKnown && fMca.value[McaChargeEnable] == 1;
     v.healthApplied = enableKnown && !s.pending && !fMca.queued && enable == (fLink.plan.charge != 0);
@@ -1942,6 +1965,8 @@ void PianoPower::publishBattery(uint64_t t, const PortState *port)
     note("[%llus] ps: no gauge reading: the power source is %s", t, pianoBatteryUpdate(this, v) ? "left as it was" : "not published yet");
     return;
   }
+  if (gArgs.psFields) mapGaugeBatteryFields(v, fPack);
+  v.packHealth = gArgs.psHealth;
   pianoBatteryUpdate(this, v);
   note("[%llus] ps: %u %%%s, %s, %u mV, %d mA (instant %d), %u/%u mAh (design %u), %u cycles, time remaining %u min%s%s", t,
        v.percent, v.clamped ? " (floor)" : "",
@@ -1954,7 +1979,7 @@ void PianoPower::publishBattery(uint64_t t, const PortState *port)
 void PianoPower::report()
 {
   const uint64_t t = (nowMs() - fStartMs) / 1000;
-  sampleGauges();
+  sampleGauges(gArgs.psFields);
   if (fGauges) {
     const PackReading &b = fBattery;
     if (b.ok)
@@ -1967,6 +1992,13 @@ void PianoPower::report()
     else
       note("[%llus] battery: no usable gauge sample (A: %s at %#x, B: %s at %#x)", t, i2cName(fPack[0].error),
            fPack[0].failedCommand, i2cName(fPack[1].error), fPack[1].failedCommand);
+    if (gArgs.psFields) {
+      const GaugeReading &a = fPack[0], &b = fPack[1];
+      note("[%llus] ps-fields: A ok=%u cycles=%d full/design=%d/%d status=%#x tte/ttf=%u/%u | "
+           "B ok=%u cycles=%d full/design=%d/%d status=%#x tte/ttf=%u/%u", t,
+           unsigned(a.ok), a.cycles, a.fullMah, a.designMah, unsigned(a.status), unsigned(a.timeToEmpty), unsigned(a.timeToFull),
+           unsigned(b.ok), b.cycles, b.fullMah, b.designMah, unsigned(b.status), unsigned(b.timeToEmpty), unsigned(b.timeToFull));
+    }
   }
   // The RTC from the first report after IOBSD is published: the kernel's calendar (k27 0060, IOKitInitializeTime) reads the same
   // observer channels earlier in bsd_init, and IOKitBSDInit publishes IOBSD after it, so the two never share a channel.
@@ -2125,6 +2157,7 @@ void PianoPower::startCharger()
     o.hvCaps = gArgs.hvCaps != 0;
     o.qc = gArgs.qc != 0;
     o.fvHot = gArgs.fvHot != 0;
+    o.ownBus = gArgs.ownBus != 0;
     fLink.configure(fMca, o);
     if (fLink.healthRefused)
       note("policy: piano-power-health-stop=%u / -resume=%u refused (stop 50..100, resume 40..stop - 1): battery health stays off",
@@ -2280,6 +2313,11 @@ void PianoPower::pumpMca(uint64_t now)
     fContractSeenGeneration = fContract.generation;
   }
   if (!fRequestDue) {
+    const uint64_t sendNow = nowMs();
+    if (fPolicyOn && piano_charge_pps_expired(&fLink.st, sendNow)) {
+      fLink.requestDecision();
+      stepPolicy(sendNow);
+    }
     const uint32_t n = piano_mca_next(&fMca, out);
     if (n) {
       if (piano_adsp_send(fChannel, out, n)) note("mca: send queue full");
@@ -2377,7 +2415,7 @@ void PianoPower::serviceMca(uint64_t now)
       note("mca: write %s (%#x) = %u: %s (%d)", piano_mca_property_name(fMca.last_property), fMca.last_property, fMca.last_value,
            fMca.last_result == 0 ? "ok" : "refused by the firmware", fMca.last_result);
       fMca.events &= ~uint32_t(McaEvWrite);
-      fLink.answered(fMca);
+      fLink.answered(fMca, now);
       cpAnswered();
     }
     if (r == McaLateWritten) {
@@ -2386,7 +2424,7 @@ void PianoPower::serviceMca(uint64_t now)
            piano_mca_property_name(fMca.last_property), fMca.last_property, fMca.last_value,
            fMca.last_result == 0 ? "ok" : "refused by the firmware", fMca.last_result, gArgs.writeMs, fMca.late_answers,
            fPolicyOn ? ": handed to the policy" : "");
-      if (fPolicyOn) {fLink.answered(fMca); cpAnswered();}
+      if (fPolicyOn) {fLink.answered(fMca, now, true); cpAnswered();}
     }
     if (r == McaIgnored && fMca.ignored_answers > fIgnoredSeen) {
       fIgnoredSeen = fMca.ignored_answers;
@@ -2657,9 +2695,19 @@ void PianoPower::logPolicy(const LinkOutcome &o, uint64_t now)
     note("policy: a source is attached: bus %d mV, type %s%s", in.bus_mv, (in.valid & PIANO_CHG_IN_TYPE) ? piano_mca_type_name(in.type) : "?", rp);
   }
   if (e & PIANO_CHG_EV_TYPE) note("policy: the source's type is now %s (%d)", piano_mca_type_name(in.type), in.type);
-  if (e & PIANO_CHG_EV_DETACH)
-    note("policy: the source is gone: the firmware's own input limit (100 mA) and charge current (500 mA) back where written, a "
-         "stop of ours lifted");
+  if ((e & PIANO_CHG_EV_DETACH) && !fLink.plan.own_bus)
+    note("policy: the source is gone: restoring firmware current limits (100 mA input, 500 mA charge) where written; %s",
+         fLink.st.hold ? "health inhibit stays active" : "any stop of ours is released");
+  // piano-power-own-bus=1: the decisions that took the bus as our own boost's, once per change
+  if (o.decided && (fLink.plan.own_bus != 0) != fOwnBusLogged) {
+    fOwnBusLogged = fLink.plan.own_bus != 0;
+    if (fOwnBusLogged)
+      note("policy: the bus is our own (%s; bus %d mV): no source for the policy, decided as nothing attached, nothing raised "
+           "[PianoOwnBusGuardV1]", piano_contract_status_fresh(&fContract, nowMs()) ? "UCSI: we are the provider" : "the PMIC: a sink's Rd, no Rp",
+           (in.valid & PIANO_CHG_IN_BUS) ? in.bus_mv : -1);
+    else
+      note("policy: our own bus is gone: the bus is decided as a source again [PianoOwnBusGuardV1]");
+  }
   if (e & PIANO_CHG_EV_HV_ASKED) note("policy: asking the PD source for 9 V (%s)", fLink.st.hv_pps ? "its PPS APDO" : "its fixed 9 V PDO");
   if (e & PIANO_CHG_EV_HV_ON) note("policy: the bus is at %d mV: 9 V on", in.bus_mv);
   if (e & PIANO_CHG_EV_HV_BLOCKED) note("policy: 9 V not reached, lost or refused: 5 V until the source is detached");
@@ -2812,6 +2860,7 @@ void PianoPower::stepPolicy(uint64_t now)
                    mippsEligibleNow();
   PortState port;
   piano_board_temps board;
+  piano_skin_temps skin{};
   if (reachable && fLink.due(fMca, v)) {
     if (!fHandover && !fShutdownSeen) sampleSafety(now);
     v.safetyFresh = fSafetyMs && now >= fSafetyMs && now - fSafetyMs <= 10000;
@@ -2824,6 +2873,11 @@ void PianoPower::stepPolicy(uint64_t now)
       v.port = &port;
     }
     if (boardTemps(board, now)) v.board = &board;
+    if (fThermal && fLink.cfg.hv) {
+      skin.version = PIANO_SKIN_TEMPS_VERSION;
+      if (fThermal->callPlatformFunction("piano-thermal-skin-temps", false, &skin, nullptr, nullptr, nullptr) == kIOReturnSuccess)
+        v.skin = &skin;
+    }
     if (v.board && (board.valid & (1u << PIANO_BOARD_TEMP_CHARGER)) && v.chargerPdUp && !ChargeLink::chargerReadingCounts(v) &&
         fPdUpMs != fChargerEarlyNotedMs) {
       fChargerEarlyNotedMs = fPdUpMs;
@@ -2836,6 +2890,10 @@ void PianoPower::stepPolicy(uint64_t now)
   if (reachable) fLink.step(fMca, v, o);
   else o.handoverReady = !fLink.st.disabled && !fLink.st.pending;
   if (o.decided) {
+    if ((o.events & PIANO_CHG_EV_DETACH) && v.port && v.port->ok && !v.port->sourceSeen &&
+        piano_contract_recover_detach(&fContract)) {
+      fContractRefresh = now;
+    }
     publishCharge(now, v.board);
     if (gArgs.ps) publishBattery((now - fStartMs) / 1000, v.port);
   }

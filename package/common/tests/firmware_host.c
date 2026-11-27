@@ -137,7 +137,9 @@ int main(int argc, char **argv)
     // the embedded path: the same check over the bytes in the kext
     CHECK(pfw_check(&piano_fw_pianotest_good_pin, piano_fw_pianotest_good, piano_fw_pianotest_good_size, &ops) == PIANO_FW_OK);
     CHECK(pfw_check(&piano_fw_pianotest_good_pin, piano_fw_pianotest_good, piano_fw_pianotest_good_size - 1, &ops) == PIANO_FW_SIZE);
-    CHECK(pfw_check(&piano_fw_pianotest_big_pin, piano_fw_pianotest_good, piano_fw_pianotest_big_pin.size, &ops) != PIANO_FW_OK);
+    p = piano_fw_pianotest_good_pin;
+    p.sha256[0] ^= 1;
+    CHECK(pfw_check(&p, piano_fw_pianotest_good, p.size, &ops) == PIANO_FW_HASH);
 
     // the addon
     size_t bytes = 0;
@@ -179,6 +181,9 @@ int main(int argc, char **argv)
     CHECK(pfw_addon_find(copy, bytes, good, &e) == PIANO_FW_DAMAGED);
     memcpy(copy, addon, bytes); put32(copy + 8, 1);   // fewer entries than the total covers
     CHECK(pfw_addon_find(copy, bytes, good, &e) == PIANO_FW_DAMAGED);
+    memcpy(copy, addon, bytes); put32(copy + 8, 2);   // a match before malformed trailing bytes
+    e = (PfwAddonEntry){0};
+    CHECK(pfw_addon_find(copy, bytes, good, &e) == PIANO_FW_DAMAGED && !e.packed);
     memcpy(copy, addon, bytes); put32(copy + 24, 1);   // a path of one byte
     CHECK(pfw_addon_find(copy, bytes, good, &e) == PIANO_FW_DAMAGED);
     memcpy(copy, addon, bytes); put32(copy + 24, 161);

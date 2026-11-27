@@ -203,10 +203,10 @@ static inline uint32_t piano_mm_bcm_vote(const uint32_t *needs, unsigned n)
         if (!needs[i]) continue;
         any = 1;
         x += piano_mm_bcm_x(needs[i]);
+        if (x > 0x3fffu) x = 0x3fffu;
         if (piano_mm_bcm_y(needs[i]) > y) y = piano_mm_bcm_y(needs[i]);
     }
     if (!any) return PIANO_MM_BCM_OFF;
-    if (x > 0x3fffu) x = 0x3fffu;
     return PIANO_MM_BCM_COMMIT | PIANO_MM_BCM_VALID | x << 14 | y;
 }
 

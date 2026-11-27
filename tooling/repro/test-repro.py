@@ -10,6 +10,7 @@
   - verify-root.py on a small synthetic root image: PASS, and FAIL on a changed window byte or a wrong manifest;
   - unit-profile.py on synthetic GPTs: the reference layout is SAME-LAYOUT, a moved partition DIFFERENT;
   - boot-dtb.py's v2 parser; fetch-and-build.sh --dry-run runs nothing.
+  - scripts/fetch-pins.py --dry-run plans the locked source checkouts without creating them.
 
   python3 tooling/repro/test-repro.py
 """
@@ -19,6 +20,7 @@ import io
 import json
 import os
 import re
+import shlex
 import socket
 import struct
 import subprocess
@@ -48,6 +50,7 @@ vm = load('volume_manifest', R / 'volume-manifest.py')
 vr = load('verify_root', R / 'verify-root.py')
 up = load('unit_profile', R / 'unit-profile.py')
 dtb = load('boot_dtb', R / 'boot-dtb.py')
+repo_manifest = load('repo_manifest', D / 'scripts/repo_manifest.py')
 
 
 class NoNetwork:
@@ -266,6 +269,20 @@ class VerifyRoot(unittest.TestCase):
                 vr.main([str(tmp), '--pins', str(pins), '--quick'])
             self.assertIn('block 0', out.getvalue())
 
+    def test_full_verification_checks_padding_against_recorded_image_hash(self):
+        with tempfile.TemporaryDirectory() as t:
+            tmp = Path(t)
+            pins = self.build(tmp)
+            with (tmp / 'root.img').open('r+b') as image:
+                image.seek(-1, os.SEEK_END)
+                image.write(b'\x01')
+            args = [str(tmp), '--pins', str(pins)]
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(vr.main([*args, '--quick']), 0)
+            with redirect_stdout(io.StringIO()) as out, self.assertRaises(SystemExit):
+                vr.main(args)
+            self.assertIn('root.json image_sha256', out.getvalue())
+
 
 def gpt_head(parts, blocks, lba=4096):
     """A protective MBR + GPT header + entries (6 blocks) with PARTS [(number, name, first, last)]."""
@@ -328,15 +345,62 @@ class Scripts(unittest.TestCase):
 
     def test_entry_dry_run_runs_nothing(self):
         with tempfile.TemporaryDirectory() as t:
-            env = dict(os.environ, K273_INPUTS=str(Path(t) / 'in'))
+            inputs = Path(t) / 'in'
+            env = dict(os.environ, K273_INPUTS=str(inputs), K273_ROOT_PART='linux_data', PIANO_GPU='2',
+                       PIANO_DATA_PERSIST='2', PIANO_RESET_AFTER='900')
             got = subprocess.run(['bash', str(R / 'fetch-and-build.sh'), '--dry-run', 'inputs', 'systemos', 'root', 'kernel', 'fd', 'image'],
                                  capture_output=True, text=True, env=env, timeout=120)
+            self.assertFalse(inputs.exists())
         self.assertEqual(got.returncode, 0, got.stderr[-500:])
         self.assertIn('dry run: nothing was fetched, built or written', got.stdout)
         self.assertNotIn('\nrun: ', got.stdout)
         for command in ('make-systemos.sh', 'make-root-image.sh', 'prepare-k27-tree.sh', 'build-fd.sh', 'build-k273-image.sh'):
             self.assertIn(command, got.stdout)
-        self.assertFalse((Path(t) / 'in').exists())
+        self.assertIn('K273_ROOT_PART=linux_data PIANO_GPU=2 PIANO_DATA_PERSIST=0 PIANO_RESET_AFTER=900', got.stdout)
+
+    def test_entry_dry_run_keeps_manifest_path_as_one_argument(self):
+        with tempfile.TemporaryDirectory() as t:
+            inputs = Path(t) / 'input files'
+            root = inputs / 'root'
+            root.mkdir(parents=True)
+            manifest = root / 'systemos.manifest.json'
+            manifest.write_text('{}\n')
+            env = dict(os.environ, K273_INPUTS=str(inputs), SUDO='sudo -A', REMOVE_AEA='0')
+            got = subprocess.run(['bash', str(R / 'fetch-and-build.sh'), '--dry-run', 'inputs', 'systemos', 'root'],
+                                 capture_output=True, text=True, env=env, timeout=30, check=True)
+            self.assertEqual(list(root.iterdir()), [manifest])
+        commands = [shlex.split(line[len('would run: '):]) for line in got.stdout.splitlines()
+                    if line.startswith('would run: ')]
+        self.assertIn(['python3', '-I', 'tooling/repro/verify-root.py', str(root), '--manifest-json', str(manifest)], commands)
+        self.assertTrue(any(cmd[:4] == ['sudo', '-A', 'python3', '-I'] for cmd in commands))
+        self.assertNotIn('AEA archives removed after decryption', got.stdout)
+
+    def test_fetch_pins_refuses_conflicting_modes(self):
+        for option in ('--verify', '--outdated'):
+            got = subprocess.run([sys.executable, str(D / 'scripts/fetch-pins.py'), '--dry-run', option],
+                                 capture_output=True, text=True, timeout=30)
+            self.assertEqual(got.returncode, 2, got.stderr)
+            self.assertIn('not allowed with argument --dry-run', got.stderr)
+
+    def test_fetch_pins_dry_run_plans_locked_checkouts(self):
+        with tempfile.TemporaryDirectory() as t:
+            research = Path(t) / 'unixnu-research'
+            env = dict(os.environ, UNIXNU_RESEARCH=str(research))
+            command = [sys.executable, str(D / 'scripts/fetch-pins.py'), '--dry-run']
+            got = subprocess.run(command, cwd=t, env=env, capture_output=True, text=True, timeout=30)
+            self.assertFalse(research.exists())
+            self.assertEqual(got.returncode, 0, got.stderr)
+            unknown = subprocess.run([*command, '--only', 'missing-pin'], cwd=t, env=env,
+                                     capture_output=True, text=True, timeout=30)
+            self.assertEqual(unknown.returncode, 2, unknown.stderr)
+            self.assertIn('unknown pin(s)', unknown.stderr)
+        pins = repo_manifest.load_manifest(D / 'unixnu.lock')['pin']
+        expected_checkouts = {'UniXNU': 'UniXNU', 'Mu-Silicium': 'Mu-Silicium-piano',
+                              'piano-uefi': 'piano-uefi-UniXNU-piano'}
+        for name, checkout in expected_checkouts.items():
+            self.assertIn(f'would fetch {name} -> {research / checkout} @ {pins[name]["commit"][:10]}', got.stdout)
+        self.assertIn(f'would fetch the k27 tree -> {research / "k27-tree"} @ '
+                      f'{pins["k27"]["commit"][:10]} + {pins["k27"]["patches"]}', got.stdout)
 
 
 if __name__ == '__main__':

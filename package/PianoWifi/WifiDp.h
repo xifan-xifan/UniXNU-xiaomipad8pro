@@ -615,7 +615,10 @@ inline uint32_t dpPoll(Dp &dp, const ChipIo &io, Deliver deliver)
         takeBack(info);
       }
     }
-    if (moved) write(dp, io, r.r2 + 4, r.ours * r.words);
+    if (moved) {
+      publishBarrier();
+      write(dp, io, r.r2 + 4, r.ours * r.words);
+    }
   }
   // ---- released receive buffers (ring 3, this chip's host's receive error ring)
   {

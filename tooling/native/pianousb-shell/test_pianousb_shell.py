@@ -10,8 +10,11 @@ while idle (its CPU time over a quiet second and a half).
     python3 tooling/native/pianousb-shell/test_pianousb_shell.py
 """
 import os
+import re
 import resource
 import select
+import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -22,6 +25,7 @@ import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+SANITIZERS = ('-g', '-fsanitize=address,undefined', '-fno-sanitize-recover=all')
 
 SHIM = r'''
 #include <poll.h>
@@ -65,6 +69,8 @@ int main(int argc, char **argv)
 GATE_PROBE = r'''
 #define main shellMain
 #define open gateOpen
+#define read probeRead
+#define write probeWrite
 #define sysctlbyname gateSysctl
 #include "pianousb-shell.c"
 #undef main
@@ -97,8 +103,57 @@ int gateSysctl(const char *name, void *answer, size_t *size, void *newValue, siz
   return 0;
 }
 
+static int readError, writeError, writes;
+static ssize_t readSize = 5;
+static char conveyed[5];
+static size_t conveyedSize;
+
+ssize_t probeRead(int fd, void *buf, size_t n)
+{
+  if (fd != 3 || n < sizeof conveyed) abort();
+  if (readSize > 0) memcpy(buf, "hello", sizeof conveyed);
+  errno = readError;
+  return readSize;
+}
+
+ssize_t probeWrite(int fd, const void *buf, size_t n)
+{
+  if (fd != 4) abort();
+  if (writeError == EIO) { errno = EIO; return -1; }
+  if (writeError == EPIPE) return 0;
+  switch (++writes) {
+    case 1: if (n == 5) n = 2; break;
+    case 2: errno = EINTR; return -1;
+    case 3: errno = EAGAIN; return -1;
+  }
+  if (n > sizeof conveyed - conveyedSize) abort();
+  memcpy(conveyed + conveyedSize, buf, n);
+  conveyedSize += n;
+  return (ssize_t)n;
+}
+
+static int relayProbe(void)
+{
+  if (copy(3, 4) != -1 || writes != 4 || conveyedSize != 5 || memcmp(conveyed, "hello", 5)) return 1;
+  writeError = EIO;
+  if (copy(3, 4) != 4) return 2;
+  writeError = EPIPE;   // the shim returns a zero-byte write
+  if (copy(3, 4) != 4) return 3;
+  readSize = 0;
+  if (copy(3, 4) != 3) return 4;
+  readSize = -1;
+  readError = EINTR;
+  if (copy(3, 4) != -1) return 5;
+  readError = EAGAIN;
+  if (copy(3, 4) != -1) return 6;
+  readError = EIO;
+  if (copy(3, 4) != 3) return 7;
+  return 0;
+}
+
 int main(int argc, char **argv)
 {
+  if (argc == 2 && !strcmp(argv[1], "--relay-probe")) return relayProbe();
   if (argc == 3) {
     size_t length;
     const char *value = pianoBootArgValue(argv[1], argv[2], &length);
@@ -126,15 +181,16 @@ class PianoUsbShellTest(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory(prefix='pianousb-shell-test-')
         d = Path(cls.tmp.name)
+        cls.directory = d
         cls.helper, cls.shim, cls.probe = d / 'pianousb-shell', d / 'shim.dylib', d / 'probe'
         cls.gate = d / 'gate'
-        cc(cls.helper, str(HERE / 'pianousb-shell.c'))
+        cc(cls.helper, *SANITIZERS, str(HERE / 'pianousb-shell.c'))
         (d / 'shim.c').write_text(SHIM)
         cc(cls.shim, '-dynamiclib', str(d / 'shim.c'))
         (d / 'probe.c').write_text(PROBE)
         cc(cls.probe, str(d / 'probe.c'))
         (d / 'gate.c').write_text(GATE_PROBE)
-        cc(cls.gate, '-I', str(HERE), str(d / 'gate.c'))
+        cc(cls.gate, *SANITIZERS, '-I', str(HERE), str(d / 'gate.c'))
 
     @classmethod
     def tearDownClass(cls):
@@ -151,26 +207,49 @@ class PianoUsbShellTest(unittest.TestCase):
         termios.tcsetattr(self.slave, termios.TCSANOW, attrs)
         self.env = dict(os.environ, DYLD_INSERT_LIBRARIES=str(self.shim), PIANOUSB_TEST_NO_KQUEUE=self.device)
         self.proc = None
+        self.addCleanup(os.close, self.slave)
+        self.addCleanup(lambda: os.close(self.master))
 
     def tearDown(self):
         if self.proc:
-            self.proc.kill()
-            self.proc.wait()
-            self.proc.stderr.close()
-        os.close(self.slave)
-        os.close(self.master)
+            if self.proc.poll() is None:
+                self.proc.terminate()
+            try:
+                _, stderr = self.proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                _, stderr = self.proc.communicate()
+                self.fail(f'helper did not stop: {stderr!r}')
+            self.assertNotIn(b'Sanitizer', stderr)
+            self.assertNotIn(b'runtime error', stderr)
 
-    def read_until(self, needle, seconds):
+    def start(self, device, close_stdin=False):
+        args = [str(self.helper), str(device), '/bin/sh']
+        if close_stdin:
+            args = ['/bin/sh', '-c', 'exec 0<&-; exec "$@"', 'sh', *args]
+        self.proc = subprocess.Popen(args, env=self.env, stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+    def read_until(self, needle, seconds, master=None):
+        if master is None:
+            master = self.master
         got, end = b'', time.monotonic() + seconds
         while needle not in got and time.monotonic() < end:
-            ready, _, _ = select.select([self.master], [], [], 0.1)
+            ready, _, _ = select.select([master], [], [], 0.1)
             if ready:
-                got += os.read(self.master, 4096)
+                data = os.read(master, 4096)
+                if not data:
+                    break
+                got += data
         return got
 
     def test_shim_answers_pollnval(self):
         out = subprocess.run([str(self.probe), self.device], env=self.env, capture_output=True, text=True, timeout=10).stdout.split()
         self.assertEqual(out, ['1', '%x' % select.POLLNVAL], 'the shim must answer poll() on the device as XNU did for /dev/pianousb')
+
+    def test_short_io_and_endpoint_errors(self):
+        result = subprocess.run([str(self.gate), '--relay-probe'], capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_launch_gate_reads_full_boot_arguments(self):
         switch = 'piano-usb-shell=1'
@@ -184,6 +263,13 @@ class PianoUsbShellTest(unittest.TestCase):
                 ('quiet\t' + switch, '', 42),
                 ('piano-usb-shell-extra=1 other=' + switch, '', 0),
                 ('piano-usb-shell=\t1', '', 0),
+                ('  \tpiano-usb-shell\t ', '', 42),
+                ('piano-usb-shell=0xffffffff', '', 42),
+                ('piano-usb-shell=0x100000000', '', 0),
+                ('piano-usb-shell=-1', '', 0),
+                ('piano-usb-shell=\r1', '', 0),
+                (switch + ' piano-usb-shell=1garbage', '', 0),
+                ('piano-usb-shell=' + '9' * 4079, switch, 0),
                 ('x' * 4096 + ' ' + switch, switch, 0),
                 ('EPERM', switch, 0),
                 (None, switch, 42),
@@ -207,8 +293,7 @@ class PianoUsbShellTest(unittest.TestCase):
                 self.assertEqual((result.returncode, result.stdout), (1, '') if expected is None else (0, expected))
 
     def test_relays_both_ways_without_spinning(self):
-        self.proc = subprocess.Popen([str(self.helper), self.device, '/bin/sh'], env=self.env, stdin=subprocess.DEVNULL,
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        self.start(self.device)
         self.assertIn(b'a new shell on the tablet', self.read_until(b'(exit starts another)', 10))
         os.write(self.master, b"printf 'piano%sok\\n' -relay-\n")   # the output, piano-relay-ok, is not the command's text
         self.assertIn(b'piano-relay-ok', self.read_until(b'piano-relay-ok', 10), 'no output of the command came back')
@@ -217,9 +302,54 @@ class PianoUsbShellTest(unittest.TestCase):
         self.assertIn(b'a new shell on the tablet', self.read_until(b'(exit starts another)', 10))
         self.assertIsNone(self.proc.poll(), 'the helper exited')
         before = child_cpu_seconds()
-        self.proc.kill()
-        self.proc.wait()
+        self.proc.terminate()
+        self.assertEqual(self.proc.wait(timeout=5), 0)
         self.assertLess(child_cpu_seconds() - before, 0.5, 'the helper spins while idle')
+
+    def test_device_can_reuse_closed_stdin(self):
+        self.start(self.device, close_stdin=True)
+        self.assertIn(b'a new shell', self.read_until(b'(exit starts another)', 5))
+        os.write(self.master, b"printf 'piano%sok\\n' -stdin-\n")
+        self.assertIn(b'piano-stdin-ok', self.read_until(b'piano-stdin-ok', 5))
+
+    def test_disconnect_reopens_with_a_fresh_shell(self):
+        with tempfile.TemporaryDirectory(dir=self.directory) as directory:
+            endpoint = Path(directory) / 'cable'
+            endpoint.symlink_to(self.device)
+            self.start(endpoint)
+            self.assertIn(b'a new shell', self.read_until(b'(exit starts another)', 5))
+            os.write(self.master, b"trap '' HUP; printf 'child:%s:end\\n' \"$$\"\n")
+            match = re.search(rb'child:(\d+):end', self.read_until(b':end\r\n', 5))
+            self.assertIsNotNone(match)
+            old_pid = int(match[1])
+
+            next_master, next_slave = os.openpty()
+            self.addCleanup(os.close, next_master)
+            self.addCleanup(os.close, next_slave)
+            tty.setraw(next_slave)
+            next_endpoint = endpoint.with_name('next')
+            next_endpoint.symlink_to(os.ttyname(next_slave))
+            next_endpoint.replace(endpoint)
+
+            # Closing the cable while a shell is active makes the old device readable at EOF.
+            old_master = self.master
+            self.master = os.dup(next_master)
+            os.close(old_master)
+            self.assertIn(b'a new shell', self.read_until(b'(exit starts another)', 8))
+            with self.assertRaises(ProcessLookupError):
+                os.kill(old_pid, 0)
+            fifo = Path(directory) / 'blocked'
+            os.mkfifo(fifo)
+            command = f"""trap '' HUP; printf 'child:%s:end\\n' "$$"; read value < {shlex.quote(str(fifo))}\n"""
+            os.write(self.master, command.encode())
+            match = re.search(rb'child:(\d+):end', self.read_until(b':end\r\n', 5))
+            self.assertIsNotNone(match)
+            new_pid = int(match[1])
+            self.assertNotEqual(old_pid, new_pid)
+            self.proc.send_signal(signal.SIGTERM)
+            self.assertEqual(self.proc.wait(timeout=5), 0)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(new_pid, 0)
 
 
 if __name__ == '__main__':

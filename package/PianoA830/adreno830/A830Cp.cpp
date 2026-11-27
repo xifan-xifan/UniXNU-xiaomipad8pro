@@ -439,7 +439,7 @@ IOReturn A830Cp::idleState(uint32_t target,bool *idle)
     if(!s)s=read(A830CpStepMeInit,A8XX_RBBM_INT_0_STATUS,&irq);
     if(s)return s;
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
-    const uint32_t shadow=ring_->memptrs()[A830_MEMPTRS_RPTR/4];
+    const uint32_t shadow=__atomic_load_n(&ring_->memptrs()[A830_MEMPTRS_RPTR/4],__ATOMIC_RELAXED);
     stall_.rptr=rptr;stall_.shadow_rptr=shadow;stall_.rbbm_status=status;stall_.int0_status=irq;
     *idle=rptr==target && shadow==target && !(status&A8XX_RBBM_STATUS_BUSY_MASK) && !(irq&A8XX_RBBM_INT_0_HANG_DETECT);
     return kIOReturnSuccess;
@@ -465,7 +465,8 @@ IOReturn A830Cp::idleAnnibale(uint32_t polls,uint16_t step)
         if(s)return s;
         __atomic_thread_fence(__ATOMIC_ACQUIRE);
         const volatile uint32_t *memptrs=ring_->memptrs();
-        const uint32_t shadow=memptrs[A830_MEMPTRS_RPTR/4],bvShadow=memptrs[A830_MEMPTRS_BV_RPTR/4];
+        const uint32_t shadow=__atomic_load_n(&memptrs[A830_MEMPTRS_RPTR/4],__ATOMIC_RELAXED);
+        const uint32_t bvShadow=__atomic_load_n(&memptrs[A830_MEMPTRS_BV_RPTR/4],__ATOMIC_RELAXED);
         stall_.rptr=rptr;stall_.bv_rptr=bv;stall_.shadow_rptr=shadow;stall_.shadow_bv_rptr=bvShadow;
         if(rptr>=words || shadow>=words)
             return fail(step,A830ReasonUnexpectedState,A8XX_CP_RB_RPTR,rptr|uint64_t(shadow)<<32,words,kIOReturnIOError);
@@ -602,7 +603,8 @@ void A830Cp::dumpLocked()
     }
     if(ring_->attached()) {
         __atomic_thread_fence(__ATOMIC_ACQUIRE);
-        d.shadow_rptr=ring_->memptrs()[A830_MEMPTRS_RPTR/4];d.shadow_bv_rptr=ring_->memptrs()[A830_MEMPTRS_BV_RPTR/4];
+        d.shadow_rptr=__atomic_load_n(&ring_->memptrs()[A830_MEMPTRS_RPTR/4],__ATOMIC_RELAXED);
+        d.shadow_bv_rptr=__atomic_load_n(&ring_->memptrs()[A830_MEMPTRS_BV_RPTR/4],__ATOMIC_RELAXED);
     }
     const uint32_t pipes[2]={A8XX_PIPE_BR,A8XX_PIPE_BV};
     for(unsigned p=0;p<2;++p) {
@@ -792,7 +794,7 @@ IOReturn A830Cp::readProgress(A830CpProgress *progress)
     *progress={};
     if(!attached_ || !ring_->attached())return kIOReturnNotReady;
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
-    progress->fence=ring_->memptrs()[A830_MEMPTRS_FENCE/4];
+    progress->fence=__atomic_load_n(&ring_->memptrs()[A830_MEMPTRS_FENCE/4],__ATOMIC_ACQUIRE);
     IOReturn s=read(A830CpStepNonctxt,A8XX_CP_RB_RPTR,&progress->rptr);
     if(!s)s=read(A830CpStepNonctxt,A8XX_CP_RB_RPTR_BV,&progress->bv_rptr);
     if(s)return s;

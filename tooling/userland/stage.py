@@ -74,8 +74,16 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import tomllib
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    try:
+        import tomli as tomllib
+    except ModuleNotFoundError:
+        # The macOS Python 3.9 distribution ships Tomli with pip.
+        from pip._vendor import tomli as tomllib
 
 D = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(D / 'tooling/persist'))
@@ -150,8 +158,8 @@ def load_manifest(path, on=(), off=()):
     """configs/userland.toml as a checked plan: {'staging', 'units': [{name, about, on, planned, files: [...]}]}. SystemExit with
     every problem found."""
     try:
-        doc = tomllib.loads(Path(path).read_text())
-    except (OSError, tomllib.TOMLDecodeError) as e:
+        doc = tomllib.loads(Path(path).read_text(encoding='utf-8'))
+    except (OSError, ValueError) as e:
         raise SystemExit(f'{path}: {e}')
     problems = []
     if doc.get('format') != 1:
@@ -177,17 +185,25 @@ def load_manifest(path, on=(), off=()):
                 'planned': u.get('status') == 'planned', 'files': []}
         for f in u.get('file', []):
             unit['files'].append(check_file(f, unit, problems))
-        if not unit['files']:
+        if not unit['files'] and not unit['planned']:
             problems.append(f'{where}: no files')
         jobs = [f for f in unit['files'] if f['kind'] != 'file']
         if len(jobs) > 1:
             problems.append(f'{where}: {len(jobs)} launchd jobs; one unit has at most one')
         if not jobs and not unit['default_on']:
             problems.append(f'{where}: default_on false needs a launchd job to turn off (a command-line tool is always installed)')
+        staged_entries = set()
         for f in unit['files']:
             if f['dest'] in dests:
                 problems.append(f'{where}: {f["dest"]} is also unit {dests[f["dest"]]}\'s')
             dests[f['dest']] = name
+            staged = f['staged'] or f'files/{name}/{f["name"]}'
+            if not isinstance(staged, str):
+                continue  # check_file has already diagnosed the invalid path.
+            key = staged.casefold()  # The staging volume can be case-insensitive.
+            if any(p == key or p.startswith(key + '/') or key.startswith(p + '/') for p in staged_entries):
+                problems.append(f'{where}: staging path conflicts with another file: {staged}')
+            staged_entries.add(key)
         units.append(unit)
     for name, value in [(n, True) for n in on] + [(n, False) for n in off]:
         match = [u for u in units if u['name'] == name]
@@ -249,8 +265,15 @@ def check_file(f, unit, problems):
             problems.append(f'{where}: build script needs command (a list), output and inputs')
     else:
         problems.append(f'{where}: build {build!r} (copy, cc or script)')
+    staged = f.get('staged')
+    prefix = f'files/{unit["name"]}/'
+    if staged is not None and (
+        not isinstance(staged, str) or not staged.startswith(prefix) or not WORD.fullmatch(staged)
+        or any(part in ('', '.', '..') for part in staged[len(prefix):].split('/'))
+    ):
+        problems.append(f'{where}: staged must be a relative path under {prefix}')
     return {'unit': unit['name'], 'dest': dest, 'name': base, 'kind': kind, 'owner': owner, 'mode': mode, 'build': build,
-            'staged': f.get('staged'),
+            'staged': staged,
             'sources': sources, 'arch': f.get('arch', 'arm64'), 'min_os': f.get('min_os', '14.0'), 'cflags': list(f.get('cflags', [])),
             'frameworks': list(f.get('frameworks', [])), 'command': list(f.get('command', [])), 'output': f.get('output'),
             'inputs': list(f.get('inputs', [])), 'trust': f.get('trust', True)}
@@ -599,24 +622,35 @@ def staging_tree(plan, built):
 def sync_tree(root, tree):
     """Make ROOT hold exactly TREE: files written only when their bytes differ, modes set, anything else under ROOT removed.
     Returns (written, removed) relative paths."""
+    if root.is_symlink():
+        raise SystemExit('staging directory must not be a symlink')
     root.mkdir(parents=True, exist_ok=True)
     written, removed = [], []
     for path in sorted(root.rglob('*'), key=lambda p: len(p.parts), reverse=True):
         name = path.relative_to(root).as_posix()
-        if path.is_symlink() or path.is_file():
-            if name not in tree:
-                path.unlink()
-                removed.append(name)
+        if path.is_symlink() or (path.is_file() and name not in tree):
+            path.unlink()
+            removed.append(name)
         elif path.is_dir() and not any(k.startswith(name + '/') for k in tree):
             shutil.rmtree(path)
             removed.append(name + '/')
     for name, (data, mode) in sorted(tree.items()):
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        if not (path.is_file() and path.read_bytes() == data):
-            path.write_bytes(data)
+        if not (path.is_file() and path.stat().st_nlink == 1 and path.read_bytes() == data):
+            # mkstemp creates the file with mode 0600 before it contains any bytes.
+            fd, temporary = tempfile.mkstemp(dir=path.parent)
+            try:
+                with os.fdopen(fd, 'wb') as handle:
+                    handle.write(data)
+                    handle.flush()
+                    os.fchmod(handle.fileno(), mode)
+                os.replace(temporary, path)
+            finally:
+                Path(temporary).unlink(missing_ok=True)
             written.append(name)
-        os.chmod(path, mode)
+        else:
+            os.chmod(path, mode)
     for path in [root, *[p for p in root.rglob('*') if p.is_dir()]]:
         os.chmod(path, 0o755)
     # the build Mac's com.apple.provenance tag (its sandboxed tools write it) is not carried into the tablet's volume
@@ -636,21 +670,32 @@ def boot_wifi_profile(tree, command):
     if not source:
         return command
     path = Path(source)
-    if path.is_symlink() or path.resolve().is_relative_to(D):
-        raise SystemExit('boot Wi-Fi profile must be an external private regular file')
-    st = path.stat()
-    if not path.is_file() or st.st_mode & 0o077 or st.st_size > 4096:
-        raise SystemExit('boot Wi-Fi profile must be private and at most 4 KiB')
-    data = path.read_bytes()
+    limit = 4096
+    try:
+        if path.resolve(strict=True).is_relative_to(D):
+            raise SystemExit('boot Wi-Fi profile must be outside the checkout')
+        # Check the opened file and bound the read even if it grows after fstat.
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as profile:
+            st = os.fstat(profile.fileno())
+            if not stat.S_ISREG(st.st_mode) or st.st_mode & 0o077 or st.st_size > limit:
+                raise SystemExit('boot Wi-Fi profile must be a private regular file of at most 4 KiB')
+            data = profile.read(limit + 1)
+    except (OSError, RuntimeError):
+        raise SystemExit('cannot open the external private boot Wi-Fi profile') from None
+    if len(data) > limit:
+        raise SystemExit('boot Wi-Fi profile exceeds 4 KiB')
     if not data or not data.endswith(b'\n'):
         raise SystemExit('boot Wi-Fi profile must be nonempty and newline terminated')
     tree['boot-wifi-profile'] = (data, 0o600)
-    staging = command.split('/install.sh', 1)[0].removeprefix('sh ')
-    return (f'umask 077; mkdir -p /private/var/db/piano-wifi; '
-            f'chown root:wheel /private/var/db/piano-wifi; chmod 700 /private/var/db/piano-wifi; '
-            f'cp {staging}/boot-wifi-profile /private/var/db/piano-wifi/profile; '
-            f'chown root:wheel /private/var/db/piano-wifi/profile; chmod 600 /private/var/db/piano-wifi/profile; '
-            f'rm -f {staging}/boot-wifi-profile; {command}')
+    staging = command.removeprefix('sh ').removesuffix('/install.sh --boot')
+    staged = shlex.quote(f'{staging}/boot-wifi-profile')
+    directory = '/private/var/db/piano-wifi'
+    dest = f'{directory}/profile'
+    return (f'if [ -f {staged} ] && [ ! -L {staged} ]; then (umask 077; '
+            f'[ ! -L {directory} ] && install -d -o root -g wheel -m 700 {directory} && '
+            f'[ ! -L {dest} ] && [ ! -d {dest} ] && '
+            f'install -S -o root -g wheel -m 600 {staged} {dest} && rm -f {staged}); fi; {command}')
 
 
 def seed_gpu_files(mount, staging, built):

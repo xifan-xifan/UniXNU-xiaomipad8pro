@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Host test of PianoGpuCeiling.h (docs/policy.md §5.3): one slot per caller, the lowest non-zero slot wins, clearing one leaves the
 // others in force, an unknown client changes nothing, a repeat changes nothing, the holder on a tie is the lowest id.
+// c++ -std=c++20 -O1 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I.. test_gpu_ceiling.cpp -o /tmp/test_gpu_ceiling && /tmp/test_gpu_ceiling
 #include "PianoGpuCeiling.h"
 #include <cstdio>
 #include <cstdlib>
@@ -29,6 +30,16 @@ int main()
   // An unknown client: refused, nothing changes.
   CHECK(!s.set(kCeilingClients, 100000, &changed) && !changed && s.effective == 222000);
   CHECK(!s.set(99, 0, nullptr) && s.effective == 222000);
+  if (sizeof(uintptr_t) > sizeof(uint32_t)) {
+    uintptr_t above32 = uint64_t(UINT32_MAX) + 1;
+    CHECK(!s.set(above32 + kCeilingThermal, 100000, &changed) && !changed && s.effective == 222000);
+    CHECK(!s.set(kCeilingThermal, above32, &changed) && !changed && s.effective == 222000);
+    CHECK(!boostArgumentsFit(342, above32, 0));
+  }
+  CHECK(boostArgumentsFit(342, 80, 967));
+  CHECK(boostArgumentsFit(UINT32_MAX / 1000u, UINT32_MAX, 0));
+  CHECK(!boostArgumentsFit(UINT32_MAX / 1000u + 1u, 80, 0));
+  CHECK(!boostArgumentsFit(342, 80, UINT32_MAX / 1000u + 1u));
   // A free slot (2) with the same value: the holder is the lowest id.
   CHECK(s.set(2, 222000, &changed) && !changed && s.holder() == kCeilingThermal);
   CHECK(s.set(kCeilingThermal, 0, &changed) && !changed && s.holder() == 2);

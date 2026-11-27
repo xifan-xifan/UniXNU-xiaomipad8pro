@@ -24,10 +24,13 @@ wait_s=${PIANO_USBNET_WAIT:-300} guard_s=${PIANO_USBNET_GUARD:-600} period=${PIA
 say() { printf 'piano-usbnet-address: %.230s\n' "$1" >> "$out" 2> /dev/null; }
 
 . "$(dirname "$0")/piano-bootargs.sh"
-case "$(piano_bootarg piano-usb-net)" in
-  [1-9]*) ;;
+value=$(piano_bootarg piano-usb-net) || exit 0
+case "$value" in
+  [0-9]*) ;;
   *) exit 0 ;;
 esac
+number=$(printf '%u' "$value" 2>/dev/null) || exit 0
+[ "${#number}" -le 10 ] && [ "$number" -gt 0 ] && [ "$number" -le 4294967295 ] || exit 0
 
 ifname= w=0
 has() { [ -n "$ifname" ] && ifconfig "$ifname" 2> /dev/null | grep -q "inet $fixed "; }

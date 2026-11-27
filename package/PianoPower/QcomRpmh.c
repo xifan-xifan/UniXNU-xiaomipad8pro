@@ -63,7 +63,7 @@ QcomRscLayout qcom_rsc_layout(uint32_t drv_id)
 unsigned qcom_rpmh_active_request(const QcomRscLayout *l, unsigned tcs, const uint32_t *addresses, const uint32_t *values, unsigned count,
                                   QcomRpmhWrite *w, unsigned capacity)
 {
-    if (!count || count > 4 || capacity < 3 * count + 6) return 0;
+    if (tcs >= 32 || !count || count > 4 || capacity < 3 * count + 6) return 0;
     const uint32_t base = l->tcs_stride * tcs;
     unsigned n = 0;
     /* The control register is cleared before the TCS is reprogrammed, then set to active mode and only after that triggered. */
@@ -85,7 +85,7 @@ unsigned qcom_rpmh_active_request(const QcomRscLayout *l, unsigned tcs, const ui
 
 unsigned qcom_rpmh_finish(const QcomRscLayout *l, unsigned tcs, QcomRpmhWrite *w, unsigned capacity)
 {
-    if (capacity < 3) return 0;
+    if (tcs >= 32 || capacity < 3) return 0;
     const uint32_t base = l->tcs_stride * tcs;
     w[0] = (QcomRpmhWrite){l->irq_clear, 1u << tcs};
     w[1] = (QcomRpmhWrite){base + l->control, 0};

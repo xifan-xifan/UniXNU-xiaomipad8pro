@@ -38,7 +38,7 @@ enum {kPlugIn = kAudioObjectPlugInObject, kDevice = 2, kInStream = 3};
 #define kDeviceName "Mic (noise reduced)"
 static const Float64 kRate = PIANO_TAP_RATE;
 static const UInt32 kZeroPeriod = 16384;          // frames between time stamps (more than a safety offset plus an IO cycle)
-static const UInt32 kRingFrames = 16384;          // the output ring, by sample time (a power of two)
+enum { kRingFrames = 16384, kProduceFrames = 4096 };  // output ring indexed by sample time, and the largest core read
 static const UInt32 kLatency = MICNS_RESERVE + 2 * MICNS_BLOCK;   // the FIFO's reserve, a block in RNNoise, a block of slack
 
 static AudioServerPlugInHostRef gHost;
@@ -46,7 +46,7 @@ static pthread_mutex_t gLock = PTHREAD_MUTEX_INITIALIZER;
 static atomic_uint gRefs = 1;
 static os_log_t gLog;
 static Float64 gHostTicksPerFrame;
-static UInt32 gIoUsers;
+static atomic_uint gIoUsers;
 static uint64_t gAnchorHost, gSeed;
 #ifndef PIANO_MICNS_TEST_TAP
 static io_connect_t gConnect;
@@ -56,8 +56,8 @@ static mach_vm_size_t gTapSize;
 static const PianoTapHeader *gTap;
 static MicNs gCore;
 static int gCoreReady;
-static float gRing[16384];
-static uint64_t gProducedEnd;
+static float gRing[kRingFrames + kProduceFrames - 1];  // extra space for a core read crossing the ring boundary
+static uint64_t gProducedStart, gProducedEnd;
 static int gProducedValid;
 static UInt64 gIoCycles, gNextTick;
 static uint64_t gStartHost;
@@ -84,6 +84,7 @@ static kern_return_t tapOpen(void) {
     kr = IOConnectMapMemory64(gConnect, PIANO_TAP_MEMORY, mach_task_self(), &gTapAddress, &gTapSize, kIOMapAnywhere | kIOMapReadOnly);
     if (kr != KERN_SUCCESS || gTapSize < PIANO_TAP_BYTES) {
         os_log_error(gLog, "PianoMicNS: tap: map 0x%x size %llu", kr, (unsigned long long)gTapSize);
+        if (kr == KERN_SUCCESS) IOConnectUnmapMemory64(gConnect, PIANO_TAP_MEMORY, mach_task_self(), gTapAddress);
         IOServiceClose(gConnect); gConnect = 0; return kr ? kr : kIOReturnNoSpace;
     }
     const PianoTapHeader *h = (const PianoTapHeader *)(uintptr_t)gTapAddress;
@@ -176,7 +177,7 @@ static OSStatus propertyData(AudioObjectID o, const AudioObjectPropertyAddress *
         case kAudioObjectPropertyOwnedObjects:
         case kAudioPlugInPropertyDeviceList: REPLY_LIST(1, kDevice);
         case kAudioPlugInPropertyTranslateUIDToDevice: {
-            CFStringRef uid = qs >= sizeof(CFStringRef) ? *(const CFStringRef *)q : NULL;
+            CFStringRef uid = q && qs >= sizeof(CFStringRef) ? *(const CFStringRef *)q : NULL;
             REPLY(AudioObjectID, uid && CFStringCompare(uid, CFSTR(kDeviceUID), 0) == kCFCompareEqualTo ? kDevice : kAudioObjectUnknown);
         }
         case kAudioPlugInPropertyResourceBundle: REPLY_STR("");
@@ -283,14 +284,14 @@ static OSStatus GetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
 }
 static OSStatus GetPropertyDataSize(AudioServerPlugInDriverRef d, AudioObjectID o, pid_t pid, const AudioObjectPropertyAddress *a,
                                     UInt32 qs, const void *q, UInt32 *size) {
-    UInt8 scratch[512];
+    _Alignas(AudioStreamRangedDescription) UInt8 scratch[512];
     UInt32 written = 0;
     const OSStatus r = GetPropertyData(d, o, pid, a, qs, q, sizeof scratch, &written, scratch);
     if (r == 0) *size = written;
     return r;
 }
 static Boolean HasProperty(AudioServerPlugInDriverRef d, AudioObjectID o, pid_t pid, const AudioObjectPropertyAddress *a) {
-    UInt8 scratch[512];
+    _Alignas(AudioStreamRangedDescription) UInt8 scratch[512];
     UInt32 written = 0;
     (void)d; (void)pid;
     return propertyData(o, a, 0, NULL, sizeof scratch, &written, scratch) == 0;
@@ -306,12 +307,15 @@ static OSStatus SetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
     (void)d; (void)pid; (void)qs; (void)q;
     if (o == kInStream && (a->mSelector == kAudioStreamPropertyVirtualFormat || a->mSelector == kAudioStreamPropertyPhysicalFormat)) {
         const AudioStreamBasicDescription *f = data;
-        return size >= sizeof *f && f->mSampleRate == kRate && f->mChannelsPerFrame == 1 && f->mFormatID == kAudioFormatLinearPCM &&
-               (f->mFormatFlags & kAudioFormatFlagIsFloat) && f->mBitsPerChannel == 32 ? 0 : kAudioDeviceUnsupportedFormatError;
+        const AudioStreamBasicDescription supported = format();
+        return f && size >= sizeof *f && f->mSampleRate == kRate && f->mChannelsPerFrame == 1 && f->mFormatID == kAudioFormatLinearPCM &&
+               (f->mFormatFlags & ~kAudioFormatFlagIsNonInterleaved) == supported.mFormatFlags && f->mBitsPerChannel == 32 &&
+               f->mBytesPerFrame == supported.mBytesPerFrame && f->mBytesPerPacket == supported.mBytesPerPacket &&
+               f->mFramesPerPacket == supported.mFramesPerPacket ? 0 : kAudioDeviceUnsupportedFormatError;
     }
     if (o == kDevice && a->mSelector == kAudioDevicePropertyNominalSampleRate)
-        return size >= sizeof(Float64) && *(const Float64 *)data == kRate ? 0 : kAudioDeviceUnsupportedFormatError;
-    if (o == kInStream && a->mSelector == kAudioStreamPropertyIsActive) return size >= sizeof(UInt32) ? 0 : kAudioHardwareBadPropertySizeError;
+        return data && size >= sizeof(Float64) && *(const Float64 *)data == kRate ? 0 : kAudioDeviceUnsupportedFormatError;
+    if (o == kInStream && a->mSelector == kAudioStreamPropertyIsActive) return data && size >= sizeof(UInt32) ? 0 : kAudioHardwareBadPropertySizeError;
     return kAudioHardwareUnknownPropertyError;
 }
 
@@ -325,8 +329,9 @@ static OSStatus StartIO(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 cl
         const kern_return_t kr = tapOpen();
         if (kr != KERN_SUCCESS) r = kAudioHardwareNotRunningError;
         else {
+            gCore.bypass = MICNS_BYPASS;
             if (micns_start(&gCore, gTap)) os_log_error(gLog, "PianoMicNS: start: RNNoise state NOT allocated: passthrough");
-            gProducedValid = 0; gProducedEnd = 0;
+            gProducedValid = 0; gProducedStart = gProducedEnd = 0;
             memset(gRing, 0, sizeof gRing);
             gIoCycles = 0;
             gNextTick = 0;
@@ -345,6 +350,7 @@ static OSStatus StopIO(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 cli
     pthread_mutex_lock(&gLock);
     if (gIoUsers && --gIoUsers == 0) {
         report("stop");
+        micns_free(&gCore);
         tapClose();
     }
     os_log_error(gLog, "PianoMicNS: stop: client %u users %u", client, gIoUsers);
@@ -374,28 +380,38 @@ static OSStatus BeginIOOperation(AudioServerPlugInDriverRef d, AudioObjectID o, 
 static void produce(uint64_t end) {
     while (gProducedEnd < end) {
         const uint32_t at = (uint32_t)gProducedEnd & (kRingFrames - 1);
-        uint64_t n = end - gProducedEnd;
-        if (n > kRingFrames - at) n = kRingFrames - at;
-        if (n > 4096) n = 4096;
-        (void)micns_read(&gCore, gRing + at, (uint32_t)n);
+        const uint64_t remaining = end - gProducedEnd;
+        const uint32_t n = remaining > kProduceFrames ? kProduceFrames : (uint32_t)remaining;
+        // Keep the core read whole so priming uses the full request when the cache wraps.
+        (void)micns_read(&gCore, gRing + at, n);
+        if (at + n > kRingFrames)
+            memcpy(gRing, gRing + kRingFrames, (at + n - kRingFrames) * sizeof *gRing);
         gProducedEnd += n;
     }
 }
 static OSStatus DoIOOperation(AudioServerPlugInDriverRef d, AudioObjectID o, AudioObjectID stream, UInt32 client, UInt32 op, UInt32 frames,
                               const AudioServerPlugInIOCycleInfo *info, void *main, void *secondary) {
     (void)d; (void)o; (void)client; (void)secondary;
-    if (op != kAudioServerPlugInIOOperationReadInput || stream != kInStream || !main) return 0;
+    if (op != kAudioServerPlugInIOOperationReadInput || stream != kInStream || !main || !frames) return 0;
+    if (frames > kRingFrames) return kAudioHardwareBadPropertySizeError;
     Float32 *dst = main;
-    if (!gTap) {memset(dst, 0, frames * sizeof *dst); return 0;}
+    if (!gTap || !info) {memset(dst, 0, frames * sizeof *dst); return 0;}
     const Float64 t = info->mInputTime.mSampleTime;
-    if (t < 0) {memset(dst, 0, frames * sizeof *dst); return 0;}
-    const uint64_t start = (uint64_t)t, end = start + frames;
+    if (!(t >= 0 && t < 0x1p64)) {memset(dst, 0, frames * sizeof *dst); return 0;}
+    const uint64_t start = (uint64_t)t;
+    if (start > UINT64_MAX - frames) {memset(dst, 0, frames * sizeof *dst); return 0;}
+    const uint64_t end = start + frames;
     // a first read, or one far from what was produced (the HAL skipped or went back): produce from here on
-    if (!gProducedValid || start > gProducedEnd + kRingFrames / 2 || end + kRingFrames / 2 < gProducedEnd) {gProducedEnd = start; gProducedValid = 1;}
+    if (!gProducedValid || (start > gProducedEnd && start - gProducedEnd > kRingFrames / 2) ||
+        (end < gProducedEnd && gProducedEnd - end > kRingFrames / 2)) {
+        gProducedStart = gProducedEnd = start;
+        gProducedValid = 1;
+    }
     if (end > gProducedEnd) produce(end);
+    if (gProducedEnd - gProducedStart > kRingFrames) gProducedStart = gProducedEnd - kRingFrames;
     for (UInt32 i = 0; i < frames; ++i) {
         const uint64_t s = start + i;
-        dst[i] = s + kRingFrames > gProducedEnd && s < gProducedEnd ? gRing[(uint32_t)s & (kRingFrames - 1)] : 0.0f;
+        dst[i] = s >= gProducedStart ? gRing[(uint32_t)s & (kRingFrames - 1)] : 0.0f;
     }
     ++gIoCycles;
     const uint64_t now = mach_absolute_time();

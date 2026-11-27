@@ -57,10 +57,10 @@ inline void frames(Text &t, const QcomGlink &g, const uint8_t *bytes, unsigned n
                       (unsigned long long)le64(d+8), atr32(d+16), atr32(d+20), (unsigned long long)le64(d+24), (unsigned long long)le64(d+32));
             } else if (cmd == 9 && named(c, "adsp_apps") && chunk >= 24) {
                 keep = 24;
-                const unsigned w0 = atr32(d), domains = atr32(d+4), header = ((w0 >> 4) & 15) * 4, size = w0 >> 8;
+                const unsigned w0 = atr32(d), domains = atr32(d+4), header = ((w0 >> 4) & 15) * 4, packetSize = w0 >> 8;
                 t.add("gpr version=%u header_bytes=%u size=%u src_domain=%u dst_domain=%u src_port=%#x dst_port=%#x token=%#x opcode=%#x valid=%u\n",
-                      w0 & 15, header, size, (domains >> 8) & 255, domains & 255, atr32(d+8), atr32(d+12), atr32(d+16), atr32(d+20),
-                      !(w0 & 15) && header >= 24 && size >= header && size <= chunk);
+                      w0 & 15, header, packetSize, (domains >> 8) & 255, domains & 255, atr32(d+8), atr32(d+12), atr32(d+16), atr32(d+20),
+                      !(w0 & 15) && header >= 24 && packetSize >= header && packetSize <= chunk);
             } else if (cmd == 9 && named(c, "IPCRTR") && chunk >= 32) {
                 keep = 32;
                 const AdspTraceHeader h = atrHeader(d, chunk, true, false);

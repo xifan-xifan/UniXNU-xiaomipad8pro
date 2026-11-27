@@ -162,6 +162,15 @@ static void testRouterPorts()
     CHECK(!qcom_qrtr_send_data(&q, PIANO_QRTR_FIRST_PORT, 5, 40, big, PIANO_QRTR_MAX_DATA) && sent.size() == 1);
     CHECK(sent[0].size() == 32 + PIANO_QRTR_MAX_DATA && sent[0].size() <= PIANO_ADSP_MAX_MESSAGE);
     CHECK(qcom_qrtr_send_data(&q, PIANO_QRTR_FIRST_PORT, 5, 40, big, PIANO_QRTR_MAX_DATA + 1) == -1);
+    CHECK(qcom_qrtr_send_data(&q, PIANO_QRTR_FIRST_PORT, 5, 40, big, UINT32_MAX) == -1 && sent.size() == 1);
+
+    uint8_t command[20] = {};
+    put32(command, QCOM_QRTR_BYE);
+    p = packet(QCOM_QRTR_HELLO, QCOM_QRTR_PORT_CTRL, QCOM_QRTR_PORT_CTRL, command, sizeof command);
+    CHECK(qcom_qrtr_receive(&q, p.data(), uint32_t(p.size())) == -1 && !q.hello_received);
+    put32(command, QCOM_QRTR_NEW_SERVER);
+    p = packet(QCOM_QRTR_NEW_SERVER, QCOM_QRTR_PORT_CTRL, QCOM_QRTR_PORT_CTRL, command, sizeof command - 1);
+    CHECK(qcom_qrtr_receive(&q, p.data(), uint32_t(p.size())) == -1 && !q.remote_count);
 }
 
 // The flow-control answer (PianoWifi's P21 change, ported): a data packet from the DSP's 5:0x4001 to our port 2 that asks for a

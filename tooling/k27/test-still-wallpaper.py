@@ -70,6 +70,8 @@ done
             'uid': ['501'], 'gid': ['20'], 'generateduid': [GUID], 'home': [str(home)],
         }
         (users / 'owner.plist').write_bytes(plistlib.dumps(record, fmt=plistlib.FMT_BINARY))
+        for name, guid in (('empty', ''), ('invalid', 'missing-uuid')):
+            (users / f'{name}.plist').write_bytes(plistlib.dumps({**record, 'generateduid': [guid]}))
         env = {
             **os.environ,
             'PATH': f'{fake_bin}:{os.environ["PATH"]}',
@@ -89,6 +91,8 @@ done
         out = boot()
         assert 'uid 501: login picture written, store written' in out
         assert (account / 'Wallpaper.png').read_bytes() == stock.read_bytes()
+        assert not (database / 'Wallpaper.png').exists()
+        assert not (database / 'MISSING-UUID').exists()
         assert (account / 'Metadata.plist').read_bytes() == (stage / 'Metadata.plist').read_bytes()
         assert store.read_bytes() == (stage / 'Index.plist').read_bytes()
         for identifier in (ROOT_ID, AGENT_ID):

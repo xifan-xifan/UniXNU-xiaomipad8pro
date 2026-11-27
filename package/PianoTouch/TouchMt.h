@@ -171,6 +171,7 @@ inline void mtUpdate(MtRouter &r, const Gesture &g, const GestureContact *all, u
       continue;
     }
     ++visible;
+    if (r.tapPossible && c.id != r.tapA && c.id != r.tapB) r.tapPossible = false;
     if (c.frames >= r.cfg.minFrames && nv < kMaxTracks) v[nv++] = &c;
   }
   auto tapCheck = [&]() {
@@ -254,10 +255,12 @@ inline void mtUpdate(MtRouter &r, const Gesture &g, const GestureContact *all, u
   unsigned k = 0;
   bool joined = false;
   unsigned left = 0;
+  // Each previously sent finger needs room for its move or lift. A new finger deferred to the next frame still needs a start then.
+  unsigned newSlots = kMtMaxFingers - r.count;
   for (unsigned i = 0; i < r.count; ++i) {
     bool still = false;
     for (unsigned j = 0; j < nv; ++j) still = still || v[j]->id == r.ids[i];
-    if (!still && fr.n < kMtMaxFingers) {
+    if (!still) {
       MtFinger f = r.last[i];
       mtLifted(f);
       fr.f[fr.n++] = f;
@@ -271,6 +274,8 @@ inline void mtUpdate(MtRouter &r, const Gesture &g, const GestureContact *all, u
       f = r.last[was];
       f.state = kMtStateTouching;
     } else {
+      if (!newSlots) continue;
+      --newSlots;
       // the lowest finger number and the first finger type not in use (this frame, or a finger still in it)
       for (uint8_t s = 1; s < 16; ++s) {
         bool used = false;
@@ -295,7 +300,7 @@ inline void mtUpdate(MtRouter &r, const Gesture &g, const GestureContact *all, u
     mtPlace(v[j]->x, v[j]->y, w, h, f);
     ids[k] = v[j]->id;
     sent[k++] = f;
-    if (fr.n < kMtMaxFingers) fr.f[fr.n++] = f;
+    fr.f[fr.n++] = f;
   }
   if (joined) {
     ++r.joins;

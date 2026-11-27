@@ -9,7 +9,7 @@
 //     partition downloaded into the model must pass the model's CRC check (byte-exact SRAM contents); nothing of an image is printed;
 //   - TouchMatrix.h on synthetic frames (type lock, median reference, line noise, centroid, Y flip, release) and the tip debounce;
 //   - TouchHid.h's descriptor (parsed: one 5-byte input report) and the report scaling; Se2Bus.h's clock decoding.
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. -I../../PianoDwc3 touch_host.cpp -o /tmp/touch_host && /tmp/touch_host [IMAGE.bin ...]
+// Build: c++ -std=c++20 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -I.. -I../../PianoDwc3 touch_host.cpp -o /tmp/touch_host && /tmp/touch_host [IMAGE.bin ...]
 #include "Nt36532.h"
 #include "TouchMatrix.h"
 #include "TouchTrack.h"
@@ -308,6 +308,14 @@ bool bringUp(Rig &r, const std::vector<uint8_t> &fw, const char *what)
 
 void testBringUpBytes()
 {
+  {   // The page select itself needs three TX bytes even when the transfer only writes one data byte.
+    Rig r(false);
+    r.c.txBytes = 2;
+    r.c.bus.maxWrite = 1;
+    CHECK(writeByte(r.c, kEngReset, 0x5a) == kErrParam && r.bb.maxLen == 0);
+    r.c.txBytes = 3;
+    CHECK(writeByte(r.c, kEngReset, 0x5a) == kOk && r.bb.maxLen == 3 && r.m.engResets == 1);
+  }
   for (unsigned table = 0; table < 3; ++table)
     for (bool casc : {false, true}) {
       Rig r(false);
@@ -474,6 +482,47 @@ void testMatrix()
   CHECK(tipUpdate(t, true, 10, 10) == TipEvent::none && tipUpdate(t, false, 0, 0) == TipEvent::none);   // one noisy frame: no click
   CHECK(tipUpdate(t, true, 10, 10) == TipEvent::none && tipUpdate(t, true, 10, 10) == TipEvent::down);
   CHECK(tipCancel(t) == TipEvent::up && tipCancel(t) == TipEvent::none && t.downs == 2 && t.ups == 2);
+}
+
+static void testPacketBounds()
+{
+  auto m = std::make_unique<Matrix>();
+  matrixReset(*m, MatrixConfig());
+  const auto good = packet(1, 0, nullptr);
+  constexpr unsigned matrixEnd = 64 + 40 * 60 * 2;
+  for (size_t n : {size_t(0), size_t(19), size_t(63), size_t(matrixEnd - 1), good.size() - 1}) {
+    const std::vector<uint8_t> shortPacket(good.begin(), good.begin() + n);
+    CHECK(packetChecksum(shortPacket.data(), uint32_t(n)) == -1);
+    const Feed expected = n < 64 ? Feed::skipped : Feed::badChecksum;
+    CHECK(matrixFeed(*m, shortPacket.data(), uint32_t(n)) == expected);
+  }
+  for (unsigned offset : {4u, 8u, 12u, 16u, 64u, matrixEnd - 1}) {
+    auto bad = good;
+    bad[offset] ^= 1;
+    CHECK(packetChecksum(bad.data(), uint32_t(bad.size())) == (offset < 20 ? -1 : 0));
+    CHECK(matrixFeed(*m, bad.data(), uint32_t(bad.size())) == Feed::badChecksum);
+  }
+  auto withChecksumEnd = [&](unsigned end, uint8_t rows, uint8_t cols) {
+    auto p = good;
+    p[48] = cols;
+    p[49] = rows;
+    const uint32_t words = (end - 20) / 4;
+    uint32_t sum = 0;
+    for (unsigned i = 20; i < end; i += 2) sum += le16(p.data() + i);
+    const uint16_t check = uint16_t(0u - sum);
+    put16(p.data() + 4, check);
+    put32(p.data() + 8, words);
+    put16(p.data() + 12, uint16_t(~check));
+    put32(p.data() + 16, ~words);
+    CHECK(packetChecksum(p.data(), uint32_t(p.size())) == 1);
+    return matrixFeed(*m, p.data(), uint32_t(p.size()));
+  };
+  CHECK(withChecksumEnd(24, 40, 60) == Feed::skipped);
+  CHECK(withChecksumEnd(matrixEnd - 4, 40, 60) == Feed::skipped);
+  CHECK(withChecksumEnd(matrixEnd, 0, 60) == Feed::skipped);
+  CHECK(withChecksumEnd(matrixEnd, 255, 255) == Feed::skipped);
+  CHECK(m->probeCount == 0 && m->refCount == 0);
+  CHECK(withChecksumEnd(matrixEnd, 40, 60) == Feed::learning && m->probeCount == 1);
 }
 
 // ------------------------------------------------------------------------------------------------------------- calibration
@@ -839,6 +888,15 @@ void testRotation()
     rotatedTabletReport(true, c.x, c.y, kPanelW, kPanelH, c.deg, b);
     CHECK(b[0] == 1 && le16(b + 1) == c.hx && le16(b + 3) == c.hy);
   }
+  const unsigned rotatedCorners[4][4] = {{0, 1, 2, 3}, {1, 3, 0, 2}, {3, 2, 1, 0}, {2, 0, 3, 1}};
+  for (unsigned turn = 0; turn < 4; ++turn) {
+    for (unsigned i = 0; i < 4; ++i) {
+      const int32_t x = i & 1 ? INT_MAX : INT_MIN, y = i & 2 ? INT_MAX : INT_MIN;
+      rotatedTabletReport(true, x, y, kPanelW, kPanelH, turn * 90, b);
+      CHECK(le16(b + 1) == (rotatedCorners[turn][i] & 1 ? kHidMax : 0));
+      CHECK(le16(b + 3) == (rotatedCorners[turn][i] & 2 ? kHidMax : 0));
+    }
+  }
   rotatedTabletReport(false, kPanelW / 2, kPanelH / 2, kPanelW, kPanelH, 90, b);   // the centre stays the centre (within 1.5 px)
   CHECK(le16(b + 1) + 16 >= kHidMax / 2 && le16(b + 1) <= kHidMax / 2 + 16 && le16(b + 3) + 16 >= kHidMax / 2 && le16(b + 3) <= kHidMax / 2 + 16);
   rotatedTabletReport(true, 100, 100, kPanelW, kPanelH, 45, b);                    // not a rotation: as 0
@@ -1063,6 +1121,30 @@ static void testPoints()
 // first-frame confirmation of a strong peak, palms (by size, by peaks, a finger that flattens, the remnant of a lifting palm).
 static void testTracker()
 {
+  {   // The matrix can yield twice as many points as the tracker has slots.
+    Tracker tr;
+    TrackConfig cfg;
+    trackerReset(tr, cfg);
+    MatrixPoint points[kMaxPoints] = {};
+    for (unsigned i = 0; i < kMaxPoints; ++i) {
+      points[i].x = int32_t(100 + 190 * i);
+      points[i].y = 500;
+      points[i].peak = 600;
+      points[i].area = 1;
+      points[i].strong = true;
+    }
+    for (unsigned t = 0; t < cfg.confirm; ++t) trackerUpdate(tr, points, kMaxPoints, 8 * t);
+    CHECK(trackerActive(tr, true) == kMaxTracks && tr.noSlot >= kMaxPoints - kMaxTracks);
+    uint8_t ids[kMaxTracks] = {};
+    for (unsigned i = 0; i < kMaxTracks; ++i) ids[i] = tr.t[i].id;
+    std::reverse(points, points + kMaxPoints);
+    trackerUpdate(tr, points, kMaxPoints, 32);
+    for (unsigned i = 0; i < kMaxTracks; ++i) CHECK(tr.t[i].id == ids[i] && ids[i] != 0);
+    trackerCancel(tr);
+    CHECK(trackerLive(tr) == 0 && tr.ups == kMaxTracks);
+    trackerUpdate(tr, points, kMaxPoints, 40);
+    CHECK(trackerLive(tr) == kMaxTracks && tr.t[0].id != ids[0]);
+  }
   {   // two fingers crossing in X on rows 200 px apart: each keeps its ID
     Pipeline p;
     p.step({finger(800, 900), finger(2400, 1100)});
@@ -1148,6 +1230,46 @@ static void testTracker()
     p.hold({Spot{nodeX(20), nodeY(20), 450, 1.3}, Spot{nodeX(17), nodeY(20), 450, 1.0}, Spot{nodeX(23), nodeY(20), 450, 1.0}}, 5);
     CHECK(p.m->pointCount >= 1 && p.m->points[0].blobPeaks >= 3 && trackerActive(p.tr, true) == 0);
   }
+}
+
+static void testSlopBoundary()
+{
+  const GestureConfig cfg;
+  CHECK(cfg.slopPx == 64 && cfg.dragDelayMs == 80);
+  for (int32_t dx : {63, 64, 65, 192, 193}) {
+    Gesture g;
+    gestureReset(g, cfg);
+    GestureContact c{1, false, 1000, 1000, cfg.minFrames};
+    GestureOut o;
+    gestureUpdate(g, &c, 1, 0, o);
+    c.x += dx;
+    gestureUpdate(g, &c, 1, 8, o);
+    CHECK(g.pending == (dx > 64 && dx <= 192));
+    CHECK(g.buttons == (dx > 192 ? kButtonLeft : 0));
+    const unsigned due = 8 + cfg.dragDelayMs;
+    gestureUpdate(g, &c, 1, due - 1, o);
+    CHECK(g.buttons == (dx > 192 ? kButtonLeft : 0));
+    gestureUpdate(g, &c, 1, due, o);
+    CHECK(g.buttons == (dx > 64 ? kButtonLeft : 0));
+    gestureUpdate(g, nullptr, 0, due + 8, o);
+    CHECK(g.buttons == 0 && gestureIdle(g) && g.taps == (dx <= 64 ? 1u : 0u));
+  }
+}
+
+static void testTwoTapReplacement()
+{
+  Gesture g;
+  gestureReset(g, GestureConfig());
+  GestureContact c[] = {{1, false, 1000, 1000, 2}, {2, false, 1200, 1000, 2}};
+  GestureOut o;
+  gestureUpdate(g, c, 2, 0, o);
+  gestureUpdate(g, c, 2, 8, o);
+  CHECK(g.mode == GestureMode::two);
+  gestureUpdate(g, c, 1, 16, o);
+  c[1].id = 3;
+  gestureUpdate(g, c, 2, 24, o);
+  gestureUpdate(g, nullptr, 0, 32, o);
+  CHECK(gestureIdle(g) && o.n == 0 && g.rights == 0);
 }
 
 // The gestures on synthetic frames, end to end (matrix, tracker, gestures).
@@ -1569,19 +1691,68 @@ static void testPower()
   CHECK(restartPlan(true, true, 0) == Restart::relearn && restartPlan(false, true, 0) == Restart::keep);
   CHECK(restartPlan(true, false, 0) == Restart::download && restartPlan(false, false, 1) == Restart::download);
   CHECK(restartPlan(true, false, kResumeDownloads) == Restart::giveUp);
-  // The gestures across a mute: a drag in progress is released, the next touch after the display's return starts afresh.
+  PanelPark park;
+  park.request();
+  CHECK(park.state() == PanelPark::requested && park.cancelRequest());
+  CHECK(!park.acknowledge() && park.state() == PanelPark::released);
+
+  // The panel worker waits for an acknowledgement. The serving loop drains the active drag before acknowledging.
   Pipeline g;
   g.hold({finger(800, 1000)}, 2);
   for (int k = 1; k <= 20; ++k) g.step({finger(800 + 10 * k, 1000)});
   CHECK(g.g.buttons == kButtonLeft);
-  g.lose();   // PianoTouch::lost at the mute: tracker and gestures cancelled
-  CHECK(g.clean() && g.g.buttons == 0);
+  TouchPower panel;
+  panel.followDisplay = false;
+  park.request();
+  CHECK(panel.step(false, 1, true) == PowerStep::mute);
+  g.lose();
+  CHECK(park.acknowledge() && park.state() == PanelPark::held && !park.cancelRequest());
+  CHECK(g.clean() && g.g.buttons == 0 && !g.sent.empty() && g.sent.back().r.buttons == 0);
+  Rig spi(false);
+  spi.c.eventBuf = spi.m.eventBuf();
+  spi.c.payload = spi.m.payload;
+  spi.m.produce(1, [](uint32_t, uint32_t) { return 0; });
+  std::vector<uint8_t> bytes(kMaxFrame);
+  auto readIfRunning = [&] {
+    if (park.state() != PanelPark::released || !panel.reading()) return false;
+    return readFrame(spi.c, bytes.data()) == kOk;
+  };
+  CHECK(!readIfRunning() && spi.bb.maxLen == 0);
+  CHECK(panel.step(true, 0, true) == PowerStep::suspend);
+  CHECK(!readIfRunning() && spi.bb.maxLen == 0);
+  park.release();
+  CHECK(!readIfRunning());
+  CHECK(panel.step(false, 1) == PowerStep::resume && panel.reporting());
+  CHECK(readIfRunning() && spi.bb.maxLen > 0);
+  CHECK(packetChecksum(bytes.data() + kTransportBytes, spi.c.payload) == 1);
   trackerReset(g.tr, TrackConfig());
   gestureReset(g.g, GestureConfig());
   g.sent.clear();
   g.hold({finger(1200, 700)}, 8);
   g.none();
   CHECK(g.clicks().size() == 1);
+}
+
+static void testCorruptFramesDuringContact()
+{
+  Pipeline g;
+  g.hold({finger(800, 1000)}, 2);
+  for (int k = 1; k <= 20; ++k) g.step({finger(800 + 10 * k, 1000)});
+  CHECK(g.g.buttons == kButtonLeft);
+  const uint64_t lastDecoded = g.now;
+  const auto corrupt = packet(1, 0, nullptr, true);
+  for (uint64_t t = 10; t <= kStallMs; t += 10) {
+    CHECK(matrixFeed(*g.m, corrupt.data(), uint32_t(corrupt.size())) == Feed::badChecksum);
+    const StallAction action = contactStall(!g.clean(), lastDecoded + t, lastDecoded, false);
+    CHECK(action == (t < kStallMs ? StallAction::none : StallAction::cancel));
+    if (action == StallAction::cancel) {
+      g.now = lastDecoded + t;
+      g.lose();
+    }
+  }
+  CHECK(g.clean() && g.g.buttons == 0 && g.g.taps == 0 && !g.sent.empty() && g.sent.back().r.buttons == 0);
+  CHECK(contactStall(true, lastDecoded + kStallMs, lastDecoded, true) == StallAction::lift);
+  CHECK(contactStall(false, lastDecoded + kStallMs, lastDecoded, false) == StallAction::none);
 }
 
 // The CPU latency hold of a read burst: taken at the first busy pass, kept through the burst and 1.5 s after, then released.
@@ -2061,16 +2232,20 @@ int main(int argc, char **argv)
   testBringUpBits();
   testRealImages(argc, argv);
   testMatrix();
+  testPacketBounds();
   testCalibration();
   testOrientation();
   testHid();
   testRotation();
   testPoints();
   testTracker();
+  testSlopBoundary();
+  testTwoTapReplacement();
   testGestures();
   testGestureRotation();
   testBurstHold();
   testPower();
+  testCorruptFramesDuringContact();
   testClock();
   testPace();
   testSettle();

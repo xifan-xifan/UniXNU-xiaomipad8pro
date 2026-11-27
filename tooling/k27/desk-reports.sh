@@ -30,11 +30,12 @@ tmp=${DESK_REPORTS_TMP:-/private/var/tmp/desk-reports.failing}
 jobs='watchdogd|mobileactivationd|xprotectd|PerfPowerServices|audiomxd|endpointsecurity|ReportCrash'
 say() { printf 'desk-reports: %.150s\n' "$1" >> "$out" 2> /dev/null; }
 each() {   # each PREFIX: every line of stdin as its own report line
-  while IFS= read -r line; do say "$1$line"; done
+  while IFS= read -r line || [ -n "$line" ]; do say "$1$line"; done
 }
 failing() {   # failing WHEN: the jobs whose last exit status is not 0, then each one's state lines
   say "failing ($1): PID STATUS LABEL"
-  launchctl list 2> /dev/null | awk 'NR > 1 && $2 != "0" && $2 != "-"' | head -n 40 > "$tmp"
+  launchctl list 2> /dev/null | awk 'NF == 3 && $1 ~ /^(-|[0-9]+)$/ && $2 ~ /^-?[0-9]+$/ && $2 + 0 != 0' \
+    | head -n 40 > "$tmp"
   each "failing ($1): " < "$tmp"
   awk '{print $3}' "$tmp" | head -n 12 | while IFS= read -r label; do
     launchctl print "system/$label" 2> /dev/null \

@@ -48,48 +48,20 @@ import shutil
 import struct
 import subprocess
 import sys
-import tarfile
-import urllib.request
 from pathlib import Path
 
 D = Path(__file__).resolve().parents[2]
 H = Path.home() / 'Downloads/XiaomiPad8Pro-Ubuntu/unixnu-research'
-# The kernel stack and hostsim: this repository's Adreno830 copy (package/PianoA830/adreno830, the code PianoA830 builds, upstream paths:
-# no ADRENO830_MACOS here; its hostsim has HOSTSIM_SLOT_REOPEN), else ADRENO830_TREE (e.g. unixnu-research/Adreno830 at 1a13210).
-A830 = Path(os.environ.get('ADRENO830_TREE', D / 'package/PianoA830/adreno830' if (D / 'package/PianoA830/adreno830').is_dir()
-                           else H / 'Adreno830'))
+PACKAGE = D / 'package/PianoA830'
+A830 = Path(os.environ.get('ADRENO830_TREE', PACKAGE / 'adreno830'))
 METAL = Path(os.environ.get('ADRENOMETAL_TREE', H / 'AdrenoMetal'))
 SIM = A830 / 'tests/hostsim'
-# The kits Adreno830 1a13210 is written against: ArmSmmu4K e923329 (ArmSmmu4KLiveArena still {mapping, capacity_pages}, with
-# ArmSmmu4KLiveMapContextBatchExclusive and ArmSmmu4KTlbPageLimit; the next commit, 48dbd6c, replaced the arena's pool by page
-# callbacks, which the standalone checkout in unixnu-research has) and AdrenoPM4 282606b (UniXNU components.toml's pin of that
-# week). Fetched once as GitHub archives into out/turnip-a830/kits; ARMSMMU4K_TREE / ADRENOPM4_TREE name other checkouts.
-KITS_PINNED = {'ArmSmmu4K': 'e923329e74f18b11e63c155e470c970ebad3b6e2', 'AdrenoPM4': '282606b528b2595bc4274ea7490b62b323f35a5f'}
+SMMU = Path(os.environ.get('ARMSMMU4K_TREE', PACKAGE / 'kits/ArmSmmu4K'))
+PM4 = Path(os.environ.get('ADRENOPM4_TREE', PACKAGE / 'kits/AdrenoPM4'))
 ARCH = ['-target', 'arm64e-apple-macos14.0']   # the bundle's Turnip is arm64e: so is every image of the test process
 CORE = ['NativeAdrenoMemory', 'NativeAdrenoSmmuMemory', 'NativeAdrenoVm', 'NativeAdrenoRing', 'NativeAdrenoSubmit',
         'NativeAdrenoUserClient', 'NativeAdrenoTimer', 'NativeAdrenoSmmuContext', 'NativeAdrenoGpuContext',
         'NativeAdrenoGmuContext', 'NativeAdrenoGmuMemory']
-
-
-def kit(name):
-    """The kit's source directory: KIT_TREE from the environment, else the pinned commit's GitHub archive under out/."""
-    override = os.environ.get(f'{name.upper()}_TREE')
-    if override:
-        return Path(override)
-    commit = KITS_PINNED[name]
-    where = D / 'out/turnip-a830/kits' / f'{name}-{commit}'
-    if not where.is_dir():
-        where.parent.mkdir(parents=True, exist_ok=True)
-        archive = where.parent / f'{name}-{commit}.tar.gz'
-        urllib.request.urlretrieve(f'https://github.com/UniXNU/{name}/archive/{commit}.tar.gz', archive)
-        with tarfile.open(archive) as tar:
-            tar.extractall(where.parent, filter='data')
-    return where
-
-
-SMMU, PM4 = kit('ArmSmmu4K'), kit('AdrenoPM4')
-KITS = [SMMU / f'{s}.c' for s in ['ArmSmmu4KContext', 'ArmSmmu4KProgram', 'ArmSmmu4KLive', 'ArmSmmu4KStreams', 'ArmSmmu4KMmio']] \
-    + [PM4 / 'AdrenoPM4.c']
 
 
 def run(command, **kw):
@@ -139,17 +111,22 @@ def smoke_shaders(out):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--library', type=Path, default=D / 'out/turnip-a830/NativeAdrenoMetal.bundle/Contents/MacOS/libvulkan_freedreno.dylib')
+    p.add_argument('--stage', type=Path, default=D / 'out/turnip-a830', help='staged bundle, ABI and Mesa headers')
+    p.add_argument('--library', type=Path)
     p.add_argument('--out', type=Path, default=D / 'out/turnip-a830/hostsim')
     p.add_argument('--no-plugin-smoke', action='store_true')
     a = p.parse_args()
-    library = a.library.resolve()
+    library = (a.library or a.stage / 'NativeAdrenoMetal.bundle/Contents/MacOS/libvulkan_freedreno.dylib').resolve()
     if not library.is_file():
         raise SystemExit(f'{library}: build it first (tooling/metal/build-turnip-a830.sh)')
     out = a.out
     out.mkdir(parents=True, exist_ok=True)
-    vulkan = D / 'out/turnip-a830/mesa/include'   # Khronos headers as Mesa ships them
-    abi = D / 'out/turnip-a830/abi'               # the ABI Turnip was built with (the kernel header + compat)
+    vulkan = a.stage / 'mesa/include'   # Khronos headers as Mesa ships them
+    abi = a.stage / 'abi'               # the ABI Turnip was built with (the kernel header + compat)
+    paged = PACKAGE / 'kits/ArmSmmu4K'
+    kit_sources = [SMMU / f'{s}.c' for s in ('ArmSmmu4KContext', 'ArmSmmu4KProgram', 'ArmSmmu4KLive',
+                                           'ArmSmmu4KStreams', 'ArmSmmu4KMmio', 'ArmSmmu4K')] + [
+        paged / 'ArmSmmu4KPaged.c', PM4 / 'AdrenoPM4.c']
 
     # Host doubles of the kernel headers, as Adreno830's tests/run-host-tests.py makes them.
     includes = out / 'host-include'
@@ -157,10 +134,11 @@ def main():
         (includes / name).parent.mkdir(parents=True, exist_ok=True)
         (includes / name).write_text('#include "XnuMemoryFixture.h"\n')
     (includes / 'kern/clock.h').write_text('#include "Adreno830HostClock.h"\n')
-    kernel_flags = ['-DADRENO830_HOST_TEST', '-I', includes, '-I', A830 / 'tests', '-I', A830, '-I', SMMU, '-I', PM4,
+    kernel_flags = ['-DADRENO830_HOST_TEST', '-I', includes, '-I', A830 / 'tests', '-I', A830, '-I', SMMU, '-I', paged, '-I', PM4,
                     '-I', A830 / 'platform/sm8750']
-    kits = [compile_one(s, out / f'{s.stem}.o', []) for s in KITS]
-    headers = sorted(A830.glob('*.h'))
+    kit_headers = sorted(set(SMMU.glob('*.h')) | set(paged.glob('*.h')) | set(PM4.glob('*.h')))
+    kits = [compile_one(s, out / f'{s.stem}.o', ['-I', SMMU], kit_headers) for s in kit_sources]
+    headers = sorted(A830.glob('*.h')) + kit_headers
     objects = kits + [compile_one(A830 / f'{n}.cpp', out / f'{n}.o', kernel_flags, headers) for n in CORE]
     objects.append(compile_one(SIM / 'host_gpu_service.cpp', out / 'host_gpu_service.o', kernel_flags, headers))
     # The same kernel core as piano's kext builds it (-DADRENO830_MACOS: macOS's per-object limit, window table and VM capacity), into
@@ -237,13 +215,14 @@ def main():
     check('deferred_bo-pressure', [deferred, library, 'pressure'], {'TU_DARWIN_RETIRE_TRACE': '1', 'TU_DARWIN_BO_CACHE': '0'},
           growth_verdict)
 
-    # Turnip 0009 (2026-11-12): a BoAlloc without memory waits for the other processes' caches and is tried again (made after a wait
-    # or two, refused after the whole series, refused at once within the next second), its line on stderr; a cached BO goes back to
-    # the kernel by the idle trim with no further call.
+    # Turnip 0009 logs BoAlloc's wait and outcome. Patch 0012 uses a common
+    # capacity recovery message for BoAlloc, imports and mappings.
     def reclaim_verdict(result):
         lines = [l for l in result.stdout.splitlines() if l.startswith('PASS:')]
-        made = [l for l in result.stderr.splitlines() if 'a BoAlloc found no memory' in l and ' made after ' in l]
-        none = [l for l in result.stderr.splitlines() if 'a BoAlloc found no memory' in l and 'still none after 5 waits' in l]
+        recovery = [l for l in result.stderr.splitlines() if 'a BoAlloc found no memory' in l
+                    or "capacity recovery requested every GPU process's idle memory" in l]
+        made = [l for l in recovery if ' made after ' in l]
+        none = [l for l in recovery if 'still none after 5 waits' in l]
         ok = result.returncode == 0 and bool(lines) and bool(made) and bool(none)
         return ok, (f'{lines[0]}; stderr: "{made[0].split("NativeAdreno: ", 1)[-1]}" and the series that failed' if ok
                     else (lines[0] if lines else 'no PASS line') + ('' if made else '; no "made after N waits" line') +

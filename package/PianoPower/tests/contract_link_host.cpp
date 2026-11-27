@@ -14,7 +14,7 @@ using namespace pianopower;
 static uint32_t fixedPdo(unsigned mv,unsigned ma) {return mv/50<<10 | ma/10;}
 static uint32_t fixedRdo(unsigned object,unsigned ma) {return object<<28 | ma/10<<10 | ma/10;}
 static uint32_t ppsPdo() {return 3u<<30 | 110u<<17 | 33u<<8 | 60u;}
-static uint32_t ppsRdo() {return 3u<<28 | 450u<<9 | 60u;}
+static uint32_t ppsRdo(uint32_t word) {return 3u<<28 | 450u<<9 | (word & 0xffff); }
 
 struct Integration {
   PianoChargeContract contract{};
@@ -28,7 +28,7 @@ struct Integration {
   std::vector<PianoChargeWrite> writes;
   unsigned voltageRequests=0;
   int32_t iclReadbackOverride=-1;
-  bool pd=true;
+  bool pd=true, provider=false;   // provider: UCSI says we source VBUS (a UFP partner: a USB device on the port)
   GaugeAlerts alerts;
 
   Integration() {
@@ -41,7 +41,7 @@ struct Integration {
     for(unsigned i=0;i<4;++i) board.milli_c[i]=30000;
     for(auto &g:packs) {g.ok=true;g.socPct=25;g.tempDeciC=300;g.voltageMv=3900;g.currentMa=300;}
   }
-  void fill() {
+  LinkView view() {
     auto put=[&](int field,int32_t value) {m.valid|=1u<<field;m.value[field]=value;};
     put(McaBusVoltage,int32_t(bus*1000));put(McaBusCurrent,int32_t(icl*1000));
     put(McaType,pd?PIANO_CHG_T_PD:PIANO_CHG_T_SDP);put(McaIcl,iclReadbackOverride<0?int32_t(icl):iclReadbackOverride);put(McaChargeEnable,int32_t(enable));
@@ -49,14 +49,17 @@ struct Integration {
     LinkView v;v.nowMs=now;v.chargerPdUp=true;v.chargerPdUpMs=1;
     v.contract=&contract;v.safetyFresh=true;v.cpOff=true;v.dtptValid=alerts.complete();v.dtpt=alerts.active();
     v.packs=packs;v.packsFresh=true;v.packsMs=now;v.board=&board;
-    ChargeLink::fill(link.in,m,v);
+    return v;
+  }
+  void fill() {
+    ChargeLink::fill(link.in,m,view(),link.cfg.own_bus != 0);
   }
   void decide() {
     fill();piano_charge_decide(&link.cfg,&link.in,&link.st,&link.plan);
     for(unsigned i=0;i<link.plan.writes;++i) {
       const auto w=link.plan.write[i];
       assert(piano_charge_write_allowed(&link.cfg,w.property,w.value,w.bytes));
-      if(w.property==PIANO_CHG_PD_FIXED || w.property==PIANO_CHG_PPS) {
+      if(w.property==PIANO_CHG_PD_FIXED || (w.property==PIANO_CHG_PPS && link.st.hv==PIANO_CHG_HV_ASKED)) {
         if (!(link.st.icl_set && link.st.icl_set<=link.st.transition_ma)) std::fprintf(stderr,"barrier now=%llu prop=%x value=%u hv=%u set=%u transition=%u read=%u pending=%u valid=%u observing=%u bus=%u rdo=%x\n",(unsigned long long)now,w.property,w.value,link.st.hv,link.st.icl_set,link.st.transition_ma,icl,link.st.pending,contract.valid,contract.notify_pending,bus,rdo);
         assert(link.st.icl_set && link.st.icl_set<=link.st.transition_ma);
         assert(link.st.fcc_set && link.st.fcc_set<=500);
@@ -70,7 +73,7 @@ struct Integration {
       case PIANO_CHG_FCC:fcc=w.value;break;
       case PIANO_CHG_ENABLE:enable=w.value;for(auto &g:packs)g.currentMa=enable?300:0;break;
       case PIANO_CHG_PD_FIXED:bus=w.value;rdo=fixedRdo(bus==9000?2:1,bus==9000?1600:3000);break;
-      case PIANO_CHG_PPS:bus=(w.value>>16)*20;rdo=ppsRdo();break;
+      case PIANO_CHG_PPS:bus=(w.value>>16)*20;rdo=ppsRdo(w.value);break;
       default:assert(false);
       }
       piano_charge_ack(&link.st,w.property,w.value,0);
@@ -94,7 +97,7 @@ struct Integration {
         const unsigned command=control&255;
         cci=command==1?1u<<27:command==4?1u<<29:1u<<31;
         if(command==6) {cci|=16u<<8;msg[0]=4;msg[4]=1;msg[5]=16;}
-        else if(command==0x12) {cci|=9u<<8;piano_contract_put32(msg,1u<<19|(pd?3u:1u)<<16);piano_contract_put32(msg+4,pd?rdo:0);}
+        else if(command==0x12) {cci|=9u<<8;piano_contract_put32(msg,1u<<19|(pd?3u:1u)<<16|(provider?(1u<<20|2u<<29):0u));piano_contract_put32(msg+4,pd?rdo:0);}
         else if(command==0x10) {cci|=12u<<8;for(unsigned i=0;i<3;++i)piano_contract_put32(msg+4*i,source[i]);}
       }
       piano_contract_put32(response+16,cci);
@@ -123,7 +126,76 @@ struct Integration {
   }
 };
 
+// ownBus (ChargeLink.h, piano-power-own-bus): an Rp always wins; a fresh UCSI status decides; without one, the PMIC's sink Rd.
+static void ownBusWitnesses() {
+  PortState p; PianoChargeContract c{};
+  assert(!ownBus(nullptr,nullptr,0) && !ownBus(&c,nullptr,0));          // nothing known: never ours
+  p.ok=true; p.attached=true; p.sinkSeen=true;
+  assert(ownBus(nullptr,&p,0) && ownBus(&c,&p,0));                      // the PMIC: a sink's Rd (no fresh UCSI status)
+  p.sourceSeen=true; assert(!ownBus(nullptr,&p,0));                     // a source's Rp: a charger, a computer, a dock
+  p.sourceSeen=false;
+  c.status_valid=1; c.updated_ms=100; c.connected=1; c.sink=1;
+  assert(!ownBus(&c,&p,200));                                           // fresh UCSI: we sink
+  c.sink=0; assert(ownBus(&c,&p,200) && ownBus(&c,nullptr,200));        // fresh UCSI: we are the provider
+  p.sourceSeen=true; assert(!ownBus(&c,&p,200)); p.sourceSeen=false;    // contradicted by an Rp: not ours
+  c.connected=0; assert(!ownBus(&c,&p,200) && !ownBus(&c,nullptr,200)); // fresh UCSI: nothing connected
+  c.connected=1; c.notify_pending=1; assert(ownBus(&c,&p,200) && !ownBus(&c,nullptr,200)); // a change pending: the PMIC decides
+  c.notify_pending=0; assert(!ownBus(&c,nullptr,100+PIANO_CONTRACT_FRESH_MS+1));          // stale: no UCSI witness
+}
+
 int main() {
+  ownBusWitnesses();
+  // UCSI says we are the provider (an OTG device, our boost's 5 V on the bus): the old rule attaches a source (SDP, 500 mA asked);
+  // piano-power-own-bus decides nothing attached, writes nothing, raises nothing.
+  for(int guard=0;guard<2;++guard) {
+    Integration o;o.pd=false;o.provider=true;o.link.cfg.own_bus=uint8_t(guard);o.observe();o.decide();
+    assert(o.contract.connected && !o.contract.sink);
+    assert(bool(o.link.in.valid & PIANO_CHG_IN_OWN_BUS) == bool(guard));
+    assert(!(o.link.in.valid & PIANO_CHG_IN_NONPD));
+    for(unsigned i=0;i<6;++i)o.tick();
+    if(guard) assert(o.link.plan.own_bus && !o.link.st.attached && o.icl==100 && o.fcc==500 && o.writes.empty() && !o.voltageRequests);
+    else assert(!o.link.plan.own_bus && o.link.st.attached && o.icl==500);
+  }
+  { Integration o;o.link.cfg.own_bus=1;o.observe();o.decide(); assert(!(o.link.in.valid & PIANO_CHG_IN_OWN_BUS)); }
+  { Integration o;o.pd=false;o.link.cfg.own_bus=1;o.observe();o.decide();
+    assert((o.link.in.valid & PIANO_CHG_IN_NONPD) && !(o.link.in.valid & PIANO_CHG_IN_OWN_BUS)); }
+  {
+    // An input rise and a PPS refresh can still be waiting in the codec queue at a role change.
+    Integration o;
+    o.pd=false;
+    o.provider=true;
+    o.link.cfg.own_bus=1;
+    o.link.cfg.hv=2;
+    o.link.syncPpsOption(o.m);
+    o.observe();
+    const uint32_t pps = piano_charge_pps_word(9000, 1600);
+    assert(piano_mca_queue(&o.m, PIANO_CHG_ICL, 1500, 4) == 0);
+    assert(piano_mca_queue(&o.m, PIANO_CHG_PPS, pps, 4) == 0);
+    o.link.st.started = 1;
+    o.link.st.generation = o.m.links;
+    o.link.st.attached = 1;
+    o.link.st.hv = PIANO_CHG_HV_ON;
+    o.link.st.hv_pps = o.link.st.pps_acked = 1;
+    o.link.st.volt_want_prop = PIANO_CHG_PPS;
+    o.link.st.volt_want_value = pps;
+    o.link.st.pending = (1u << PIANO_CHG_S_ICL) | (1u << PIANO_CHG_S_VOLT);
+    o.link.st.pending_ms[PIANO_CHG_S_ICL] = o.link.st.pending_ms[PIANO_CHG_S_VOLT] = o.now;
+    piano_skin_temps skin{};
+    skin.version = PIANO_SKIN_TEMPS_VERSION;
+    skin.virtual_valid = 1;
+    skin.virtual_milli_c = 35000;
+    LinkView view = o.view();
+    view.skin = &skin;
+    PianoChargeInput unguarded{};
+    ChargeLink::fill(unguarded, o.m, view);
+    assert((unguarded.valid & PIANO_CHG_IN_SKIN) && !(unguarded.valid & PIANO_CHG_IN_OWN_BUS));
+    o.link.requestDecision();
+    LinkOutcome outcome;
+    o.link.step(o.m, view, outcome);
+    assert(outcome.decided && o.link.plan.own_bus && !o.m.queued && !o.link.st.pending);
+    assert((o.link.in.valid & PIANO_CHG_IN_SKIN) && o.link.in.t_skin_dc == 350);
+    assert(!o.link.st.attached && !o.link.st.pps_acked && !o.link.st.volt_want_prop);
+  }
   Integration unknown; unknown.alerts.isc[1]=255;unknown.alerts.sampled(0x1e);
   unknown.observe();unknown.decide();
   for(unsigned i=0;i<12;++i)unknown.tick();

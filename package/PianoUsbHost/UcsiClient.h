@@ -127,26 +127,27 @@ class Client {
   void receive(const uint8_t *d, uint32_t length, uint64_t now)
   {
     if (phase == Phase::off || !d || length < kHeader || get32(d) != kOwner) return;
-    const uint32_t opcode = get32(d + 8) & 0xffu;
+    const uint32_t opcode = get32(d + 8);
     if (opcode == kOpNotify) {
+      if (length != kHeader + 12 || get32(d + 16) != 0) return;
       count.notifies++;
       events |= kEvNotify;
-      notify0 = length >= 16 ? get32(d + 12) : 0;
+      notify0 = get32(d + 12);
       if (phase == Phase::failed) return;
       if (storming && now >= stormEnd) storming = false;
       notifyPending = true;
     } else if (opcode == kOpRead) {
-      if (wire != Wire::read || outboxFull) {
+      if (wire != Wire::read || outboxFull || get32(d + 4) != kTypeRequest) {
         count.stale++;
         return;
       }
       wire = Wire::idle;
-      const uint32_t bytes = length - kHeader >= 4 ? length - kHeader - 4 : 0;
-      if (bytes < kMbMessageIn + 16) {
+      if (length != kHeader + kBufferV1 + 4 && length != kHeader + kBufferV2 + 4) {
         count.refusedReads++;
-        failNow(now, "a read answer too short for the mailbox");
+        failNow(now, "a read answer has an invalid mailbox size");
         return;
       }
+      const uint32_t bytes = length - kHeader - 4;
       const uint32_t ret = get32(d + kHeader + bytes);
       if (ret) {
         count.refusedReads++;
@@ -155,12 +156,16 @@ class Client {
       }
       onRead(d + kHeader, bytes, now);
     } else if (opcode == kOpWrite) {
-      if (wire != Wire::write || outboxFull) {
+      if (wire != Wire::write || outboxFull || get32(d + 4) != kTypeRequest) {
         count.stale++;
         return;
       }
       wire = Wire::idle;
-      if (length >= kHeader + 4 && get32(d + kHeader)) {
+      if (length != kHeader + 4) {
+        failNow(now, "a write answer has an invalid size");
+        return;
+      }
+      if (get32(d + kHeader)) {
         failNow(now, "the PPM refused a write (non-zero return code)");
         return;
       }
@@ -404,12 +409,16 @@ class Client {
     // again (the PPM keeps reporting it until the acknowledgement).
     if (!(cci & kCciBusy) && cciConnector(cci) && changesOn) {
       const unsigned n = cciConnector(cci);
-      if (cap.connectors && n > cap.connectors) {
+      if (n != kConnector) {
         count.bogus++;
         events |= kEvBogus;
       } else if (!(kind == Kind::sync && step == Step::change && n == changeHandled) &&
                  !(kind == Kind::ack && step == Step::change && n == changeHandled)) {
         changePending = n;
+        if (status.valid) {
+          status = ConnectorStatus();
+          events |= kEvStatus;
+        }
       }
     }
     switch (kind) {
@@ -448,8 +457,12 @@ class Client {
           resultError = !resultNotSupported && (cci & kCciError) != 0;
           if (resultNotSupported) count.notSupported++;
           if (resultError) count.errors++;
-          const uint32_t room = bytes > kMbMessageIn ? bytes - kMbMessageIn : 0, want = messageInBytes(version);
-          messageBytes = room < want ? room : want;
+          const uint32_t room = messageInBytes(bytes == kBufferV1 ? kV1_0 : kV2_0);
+          messageBytes = cciLength(cci);
+          if (messageBytes > room || messageBytes > messageInBytes(version)) {
+            failNow(now, "CCI length exceeds MESSAGE_IN");
+            return;
+          }
           for (uint32_t i = 0; i < messageBytes; ++i) messageIn[i] = mb[kMbMessageIn + i];
           // The acknowledgement: the command, and the connector change when this was a change's status and it went well.
           kind = Kind::ack;
@@ -577,6 +590,7 @@ class Client {
         return;
       case Step::connectorCapability:
         if (failed) return failStep(now, "GET_CONNECTOR_CAPABILITY was refused");
+        if (messageBytes < 2) return failStep(now, "GET_CONNECTOR_CAPABILITY: MESSAGE_IN too short");
         concap = decodeConnectorCapability(messageIn);
         step = Step::status;
         beginSync(now, kGetConnectorStatus | connectorNumber(kConnector), false);
@@ -584,6 +598,7 @@ class Client {
       case Step::status:
         if (failed) return failStep(now, "GET_CONNECTOR_STATUS was refused");
         status = decodeStatus(messageIn, messageBytes, version);
+        if (!status.valid) return failStep(now, "GET_CONNECTOR_STATUS: MESSAGE_IN too short");
         events |= kEvStatus;
         step = Step::enableAll;
         enabled = supportedNotifications(version, cap.features);
@@ -604,8 +619,9 @@ class Client {
       case Step::change:
         changeHandled = 0;
         step = Step::none;
-        if (failed) {
-          failure = "GET_CONNECTOR_STATUS after a change was refused";
+        status = failed ? ConnectorStatus() : decodeStatus(messageIn, messageBytes, version);
+        if (!status.valid) {
+          failure = failed ? "GET_CONNECTOR_STATUS after a change was refused" : "GET_CONNECTOR_STATUS: MESSAGE_IN too short";
           failedStep = Step::change;
           failedCci = cci;
           events |= kEvFailed;

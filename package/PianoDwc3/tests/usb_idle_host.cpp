@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Host test of UsbIdle.h: the USB thread's tier and period for every state of the link, and the wake-ups a second each gives.
+//   c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=undefined -I.. usb_idle_host.cpp -o /tmp/usb_idle_host && /tmp/usb_idle_host
 #include "UsbIdle.h"
 #include <cstdio>
 

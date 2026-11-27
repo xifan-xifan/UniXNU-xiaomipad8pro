@@ -20,6 +20,7 @@
 //   piano-dpu-panel=1                    the panel's light sleep with display sleep (NativeGopDisplay calls PianoDpuPanel)
 //   piano-dpu-panel-engines=0            DCS only: the timing engines keep running
 //   piano-dpu-panel-hs=1                 DCS in high speed (default: low power, the panel's MIPI_DSI_MODE_LPM)
+//   piano-dpu-panel-video-only=1         clear CMD_MODE_EN when restoring video after a successful stopped-host wake
 //   piano-dpu-panel-test=N               standalone level-1 DCS test, 5 s asleep and 5 s awake each
 // Platform functions (IOService::callPlatformFunction on the PianoDpu service, registered when a slice is on; no link dependency):
 //   "PianoDpuSwap"          no parameters: a frame was shown
@@ -50,7 +51,7 @@
 #include <pexpert/pexpert.h>
 #include <stdarg.h>
 #include <string.h>
-#include "DpuRefresh.h"
+#include "DpuSliceArgs.h"
 #include "DpuPcc.h"
 #include "DpuNightShift.h"
 #include "DpuPanel.h"
@@ -73,87 +74,16 @@ bool dpuSlicesPlatformFunction(const OSSymbol *name, void *p1, void *p2, void *p
 
 namespace {
 
-constexpr unsigned kRefreshOff = 0, kRefreshAuto = 1, kRefreshPlan = 2;
-
-struct SliceArgs {
-  unsigned level = 0;
-  unsigned refresh = kRefreshOff, refreshDb = 1, refreshTest = 0;
-  unsigned modeHz = 0;
-  refresh::PolicyConfig policy;
-  unsigned pcc = 0, pccEncode = 1, pccNegative = 0;
-  bool nightShift = false;
-  bool pccTest = false;
-  int32_t pccTestMilli[3] = {1000, 1000, 1000};
-  unsigned panel = 0, panelEngines = 1, panelHs = 0, panelTest = 0;
-  bool panelTrace = false;
-  unsigned ahbVote = 0;   // piano-dpu-ahb-vote: 1 = the gate's Linux rule for GCC's display AHB (DpuAhbVote.h)
-};
 SliceArgs gA;
 // The M5 trace ring, allocated once at the argument read when piano-dpu-panel=1: the 2048-row ring is ~131 KB, and in __DATA PianoDpu
 // no longer fits the kext collection's native-kext data gaps (the y12o KC link: no room for a 0x432b0-byte __DATA, largest gap 0x29f9c).
 panel::TraceRing *gPanelTrace = nullptr;
 bool gArgsRead;
 
-bool modesEnabled() { return gA.modeHz && !gA.refresh && gA.refreshDb; }
-
-uint32_t argNumber(const char *name, uint32_t fallback, uint32_t lo, uint32_t hi)
-{
-  uint32_t v = fallback;
-  if (!PE_parse_boot_argn(name, &v, sizeof v)) v = fallback;
-  return v < lo ? lo : v > hi ? hi : v;
-}
-
 void readSliceArgs()
 {
   if (gArgsRead) return;
-  gA.level = argNumber("piano-dpu", 0, 0, 100);
-  char s[32] = {};
-  if (PE_parse_boot_arg_str("piano-dpu-refresh", s, sizeof s)) {
-    if (!strcmp(s, "auto")) gA.refresh = kRefreshAuto;
-    else if (!strcmp(s, "plan")) gA.refresh = kRefreshPlan;
-    else if (!strcmp(s, "60")) gA.refresh = 60;
-    else if (!strcmp(s, "120")) gA.refresh = 120;
-  }
-  gA.refreshDb = argNumber("piano-dpu-refresh-db", 1, 0, 2);
-  gA.modeHz = modes::bootModeHz(argNumber("piano-dpu-modes", 0, 0, UINT32_MAX));
-  gA.refreshTest = argNumber("piano-dpu-refresh-test", 0, 0, 1000);
-  gA.policy.idleMs = argNumber("piano-dpu-refresh-idle", 1000, 100, 60000);
-  gA.policy.burstSwaps = argNumber("piano-dpu-refresh-burst", 2, 1, 8);
-  gA.policy.burstWindowMs = argNumber("piano-dpu-refresh-window", 250, 20, 5000);
-  gA.policy.dwellMs = argNumber("piano-dpu-refresh-dwell", 200, 50, 60000);
-  gA.pcc = argNumber("piano-dpu-pcc", 0, 0, 2);
-  uint32_t nightShift = 0;
-  PE_parse_boot_argn("native-gop-display-night-shift", &nightShift, sizeof nightShift);
-  gA.nightShift = nightShift == 1;
-  if (gA.nightShift) gA.pcc = 0;   // the two experiments share one PCC
-  gA.ahbVote = argNumber("piano-dpu-ahb-vote", (gA.nightShift || modesEnabled()) && gA.level >= 2 ? 1 : 0, 0, 2);
-  gA.pccEncode = argNumber("piano-dpu-pcc-encode", 1, 0, 1);
-  gA.pccNegative = argNumber("piano-dpu-pcc-negative", 0, 0, 1);
-  memset(s, 0, sizeof s);
-  if (PE_parse_boot_arg_str("piano-dpu-pcc-test", s, sizeof s)) {
-    unsigned k = 0, v = 0;
-    bool digit = false, ok = true;
-    for (const char *c = s;; ++c) {
-      if (*c >= '0' && *c <= '9') {
-        v = v * 10 + unsigned(*c - '0');
-        digit = true;
-        ok &= v <= 4000;
-      } else if (*c == ',' || !*c) {
-        ok &= digit && k < 3;
-        if (ok) gA.pccTestMilli[k++] = int32_t(v);
-        v = 0;
-        digit = false;
-        if (!*c) break;
-      } else {
-        ok = false;
-        break;
-      }
-    }
-    gA.pccTest = ok && k == 3;
-  }
-  const unsigned panelArg = argNumber("piano-dpu-panel", 0, 0, UINT32_MAX);
-  gA.panel = panelArg != 0;
-  gA.panelTrace = panelArg == 1;
+  gA = readStartupArgs(PE_parse_boot_argn, PE_parse_boot_arg_str);
   if (gA.panelTrace && !gPanelTrace) {   // zero-filled = an empty ring (total 0)
     gPanelTrace = static_cast<panel::TraceRing *>(IOMallocZero(sizeof(panel::TraceRing)));
     if (!gPanelTrace) {
@@ -161,9 +91,6 @@ void readSliceArgs()
       IOLog("PianoDpu: m5: the trace ring (%lu bytes) could not be allocated: tracing off\n", (unsigned long)sizeof(panel::TraceRing));
     }
   }
-  gA.panelEngines = argNumber("piano-dpu-panel-engines", 1, 0, 1);
-  gA.panelHs = argNumber("piano-dpu-panel-hs", 0, 0, 1);
-  gA.panelTest = argNumber("piano-dpu-panel-test", 0, 0, 1000);
   gArgsRead = true;
 }
 
@@ -272,8 +199,8 @@ bool voteDisplayBandwidth(const Mode &mode)
   note("mode: MM0 AB/IB %u/%u kB/s, aux %u/%u vcd %u, cmd %#x=%#x, RPMh %d step %u slot %u status %#x",
        modes::scanoutAvgKBps(mode), modes::kMm0PeakKBps, unit, unsigned(width), unsigned(vcd), addr, cmd.data,
        rc, result.step, result.tcs, result.command[0]);
-  // Keep an acknowledged vote until reboot. The resource's inherited DRV-2
-  // value is unavailable, so a rollback cannot put it back.
+  // Keep an acknowledged vote until reboot, including after a timing rollback.
+  // This transaction does not save the inherited DRV-2 vote.
   return rc == Sm8750RpmhOk;
 }
 
@@ -281,7 +208,7 @@ struct KernelIo {
   bool voteModeBandwidth(const Mode &mode) { return voteDisplayBandwidth(mode); }
   uint32_t rd(uint64_t pa)
   {
-    const uintptr_t va = pageVa(pa);
+    const uintptr_t va = pa & 3u ? 0 : pageVa(pa);
     if (!va) {
       ++gMapFailures;
       return 0xffffffffu;
@@ -291,7 +218,7 @@ struct KernelIo {
   }
   bool wr(uint64_t pa, uint32_t v, int panelCtl = -1)
   {
-    if (!storeAllowed(pa, v, modesEnabled(), gA.panel && gA.panelEngines ? panelCtl : -1)) {
+    if (!storeAllowed(pa, v, gA.modesEnabled(), gA.panel && gA.panelEngines ? panelCtl : -1)) {
       if (++gRefused <= 8) note("REFUSED store %#llx = %08x (not a register of the slices)", (unsigned long long)pa, v);
       return false;
     }
@@ -429,7 +356,7 @@ bool reread(const char *after)
     return false;
   }
   gPath = p;
-  if (!modesEnabled()) gHz = p.link[0].vtotal == kVtotal60 ? 60 : 120;
+  if (!gA.modesEnabled()) gHz = p.link[0].vtotal == kVtotal60 ? 60 : 120;
   return true;
 }
 
@@ -771,7 +698,8 @@ void publishPanelTrace()
            count, gPanelTrace->total - count);
   emit();
   if (report.on) {
-    snprintf(line, sizeof line, "m5 %u pre-reset status=%08x/%08x", report.serial, report.dsiBeforeReset[0], report.dsiBeforeReset[1]);
+    snprintf(line, sizeof line, "m5 %u pre-reset status=%08x/%08x video-only=%u", report.serial, report.dsiBeforeReset[0],
+             report.dsiBeforeReset[1], unsigned(gPanelOptions.videoOnly));
     emit();
   }
   for (const panel::Sent &s : report.dcs) {
@@ -790,10 +718,21 @@ void publishPanelTrace()
   }
   for (unsigned i = 0; i < count; ++i) {
     const panel::TraceSample &s = gPanelTrace->at(i);
-    const panel::TraceLink &a = s.link[0], &b = s.link[1];
-    snprintf(line, sizeof line, "m5 %u %u %llu %s %c %08x/%08x/%08x/%08x %08x/%08x/%08x/%08x %08x/%08x/%08x/%08x",
-             report.serial, gPanelTrace->total - count + i, (unsigned long long)s.us, panel::traceStepName(s.step), s.boundary ? 'B' : 'P',
-             a.en, a.status, a.frame, a.line, b.en, b.status, b.frame, b.line, s.top, s.active, s.flush, s.intfFlush);
+    const unsigned row = gPanelTrace->total - count + i;
+    const char *step = panel::traceStepName(s.step);
+    if (panel::isHostTraceStep(s.step)) {
+      const panel::TraceHost &a = s.host[0], &b = s.host[1];
+      snprintf(line, sizeof line,
+               "m5 %u host %s row=%u us=%llu ctrl=%08x/%08x status=%08x/%08x fifo=%08x/%08x lane=%08x/%08x clk=%08x/%08x",
+               report.serial, step, row, (unsigned long long)s.us,
+               a.ctrl, b.ctrl, a.status, b.status, a.fifo, b.fifo, a.lane, b.lane, a.clk, b.clk);
+    } else {
+      const panel::TraceTiming &t = s.timing;
+      const panel::TraceLink &a = t.link[0], &b = t.link[1];
+      snprintf(line, sizeof line, "m5 %u %u %llu %s %c %08x/%08x/%08x/%08x %08x/%08x/%08x/%08x %08x/%08x/%08x/%08x",
+               report.serial, row, (unsigned long long)s.us, step, s.boundary ? 'B' : 'P',
+               a.en, a.status, a.frame, a.line, b.en, b.status, b.frame, b.line, t.top, t.active, t.flush, t.intfFlush);
+    }
     emit();
   }
   if (!complete || !gService->setProperty("piano-dpu-panel-trace", dump))
@@ -865,6 +804,7 @@ void panelStart()
 {
   gPanelOptions.lowPower = !gA.panelHs;
   gPanelOptions.engines = gA.panelEngines != 0;
+  gPanelOptions.videoOnly = gA.panelVideoOnly;
   for (unsigned l = 0; l < 2; ++l) {
     const uint32_t trig = gIo.rd(dsiReg(l, kDsiTrigCtrl));
     note("panel: dsi%u command path: ctrl %08x status %08x fifo %08x cmd-dma %08x dma1 %08x length %08x trig %08x (dma trigger %u%s, %s) "
@@ -999,7 +939,7 @@ void serve()
       IOLockLock(gLock);
       const uint64_t swaps = gS.policy.swaps();
       const uint32_t mc = gS.matrixCalls, gc = gS.gammaCalls, pc = gS.panelCalls;
-      const bool refreshOff = modesEnabled() ? !gS.modeReady || gModeFailure != kIOReturnSuccess : gRefreshBroken;
+      const bool refreshOff = gA.modesEnabled() ? !gS.modeReady || gModeFailure != kIOReturnSuccess : gRefreshBroken;
       IOLockUnlock(gLock);
       note("slices: alive: refresh %u Hz%s (%u switches, %u failed, %llu swaps); pcc %u applies (%u failed, %u matrix calls, %u gamma "
            "calls); panel %s (%u sleeps, %u calls); %llu loads %llu stores %u refused %u map failures",
@@ -1014,7 +954,7 @@ void worker(void *, wait_result_t)
   thread_set_thread_name(current_thread(), "piano-dpu-slices");
   piano_dpu_slices_stage = 1;
   // The survey first (<= 120 s): its stages 1..5; B1b (piano-dpu=2) goes on with 6..8 (negative when a flip step failed: not ours).
-  const int readyStage = (gA.panel || modesEnabled()) && gA.level >= 2 ? 8 : 5;
+  const int readyStage = (gA.panel || gA.modesEnabled()) && gA.level >= 2 ? 8 : 5;
   for (unsigned i = 0; i < 1200 && piano_dpu_stage >= 0 && piano_dpu_stage < readyStage; ++i) IOSleep(100);
   if ((piano_dpu_stage >= 0 && piano_dpu_stage < readyStage) || (piano_dpu_stage < 0 && piano_dpu_stage > -6)) {
     piano_dpu_slices_stage = -1;
@@ -1040,7 +980,7 @@ void worker(void *, wait_result_t)
   gPath = p;
   gHz = p.link[0].vtotal == kVtotal60 ? 60 : 120;
   bool modeReady = false;
-  if (modesEnabled()) {
+  if (gA.modesEnabled()) {
     const uint32_t id = gIo.rd(kTlmm + uint64_t(kPanelIdGpio) * kTlmmStride + 4);
     if (id != UINT32_MAX) {
       const modes::LinkLive live[] = {modes::readTiming(gIo, gPath.link[0], 0), modes::readTiming(gIo, gPath.link[1], 1)};
@@ -1115,7 +1055,7 @@ void dpuSlicesReadArgs() { readSliceArgs(); }
 
 bool dpuSlicesWanted()
 {
-  return gA.refresh || modesEnabled() || gA.pcc || gA.panel || gA.nightShift;
+  return gA.wanted();
 }
 
 void dpuSlicesStart(IOService *dpu)
@@ -1141,7 +1081,7 @@ bool dpuSlicesPlatformFunction(const OSSymbol *name, void *p1, void *p2, void *p
 {
   if (name && name->isEqualTo("PianoDpuMode")) {
     const uintptr_t hz = uintptr_t(p1);
-    if (!modesEnabled() || hz != gA.modeHz) *result = kIOReturnUnsupported;
+    if (!gA.modesEnabled() || hz != gA.modeHz) *result = kIOReturnUnsupported;
     else if (!gLock) *result = kIOReturnNotReady;
     else {
       IOLockLock(gLock);

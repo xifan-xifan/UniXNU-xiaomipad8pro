@@ -20,7 +20,7 @@ constexpr uint32_t kNtbMinIn = 2048;   // the smallest NTB input size a host may
 constexpr uint16_t kDivisor = 4, kRemainder = 0, kNdpAlign = 4;   // datagram and NDP alignment, both directions
 constexpr uint16_t kMaxFrame = 1514, kMinFrame = 14;              // an Ethernet frame without FCS; at least its header
 constexpr unsigned kMaxDatagrams = 32;                            // per NTB this side sends
-constexpr unsigned kMaxNdps = 8;                                  // per NTB this side parses (a cycle ends there)
+constexpr unsigned kMaxNdps = 8;                                  // per NTB this side parses
 
 // Class requests to the communications interface (CDC 1.2 / ECM 1.2 / NCM 1.0, bRequest)
 enum : uint8_t {
@@ -114,6 +114,7 @@ private:
 };
 
 struct NtbResult {
+  uint32_t blockBytes = 0;       // bytes consumed from the transfer if the NTH16 length is valid
   unsigned datagrams = 0;        // passed to the sink
   unsigned bad = 0;              // entries outside the block or of an impossible length (skipped)
   const char *error = nullptr;   // the NTB as a whole refused there (datagrams before it were delivered)
@@ -130,10 +131,15 @@ template <class Sink> NtbResult parseNtb16(const uint8_t *b, uint32_t got, Sink 
   uint32_t block = rd16(b + 8);
   if (!block) block = got;
   if (block > got) { r.error = "block longer than the transfer"; return r; }
+  r.blockBytes = block;
   uint32_t ndp = rd16(b + 10);
   if (!ndp) { r.error = "no NDP"; return r; }
+  uint16_t visited[kMaxNdps];
   for (unsigned n = 0; ndp; ++n) {
     if (n == kMaxNdps) { r.error = "too many NDPs"; return r; }
+    for (unsigned i = 0; i < n; ++i)
+      if (visited[i] == ndp) { r.error = "NDP cycle"; return r; }
+    visited[n] = uint16_t(ndp);
     if (ndp % 4 || ndp < kNth16Bytes || ndp + kNdp16Min > block) { r.error = "NDP outside the block"; return r; }
     const uint32_t signature = rd32(b + ndp), length = rd16(b + ndp + 4);
     if (signature != kNdp16) { r.error = signature == kNdp16Crc ? "NDP with CRC" : "no NDP16 signature"; return r; }

@@ -1,31 +1,67 @@
 # Userland: what this repository installs on the tablet's macOS, and how
 
-Status 2026-11-11: **built and host-tested offline** (`tooling/userland/test-stage.py`: 125 checks, among them a 64 MiB APFS seed
-made with hdiutil, the real units' builds, the installer under `/bin/sh` and `/bin/dash`); staged once into a copy of the Turnip
-stage's seed. **Nothing has run on the tablet**, and the installed system has none of it. Section 9 is the batched tablet list.
+## Installed baseline (2026-11-27)
 
-Facts are marked as in `power.md`: **verified** (read from source, a binary, a log, or run here), **inferred**, **needs-boot**.
+**v13.1y12q** booted with the owner's Data store and the daily userland layer. The manifest records staged files and job
+defaults. Staging uses the `/bin/sh -c 'exec "$0" "$@"'` launcher to give Background Task Management a stable executable path.
+[Userland manifest](../configs/userland.toml) · [Background Task Management](#3a-background-task-management-why-jobs-start-through-binsh-2026-11-25) ·
+[November 27 results](results-2026-11-27.md)
 
-Before this, several userland pieces existed with no way onto the tablet but hand-written `stage-soft-metal.py --file/--boot-run`
-lines: PianoPolicy's agent, PianoAuto's rotation agent, the USB root shell, the torch tool, and the pmset policy of `policy.md` §7.
-Now there is one manifest, one staging tool, and one installer on the tablet.
+- **Login and debug.** `piano-lw-quiet` holds `audiomxd` until login, removing the roughly 1.3-core retry loop at the login
+  window. Kernel 0076 exposes the full merged arguments through `kern.piano_bootargs` for the USB shell, USB network address,
+  rotation and brightness sync helpers. [Support status](STATUS.md) · [November 26 results](results-2026-11-26.md#v131y12o-installed)
+- **Chrome and Metal.** Kernel 0074's read-only App cryptex bindfs view exposes the GPU plug-in through the path used by
+  Chrome's GPU sandbox. On v13.1y12q, Chrome ran without GPU, WebGPU or sandbox flags. WebGPU opened 6/6 contexts on Adreno
+  with correct compute and pixel readback. All 17 Chrome processes reported secure V8 sandbox mode with a 1152 GB reservation
+  on the 47-bit user address space from patch 0075. [27.3 kernel and profile](k273-line.md#current-line-2026-11-27) ·
+  [Installed Chrome results](results-2026-11-27.md#chrome)
+- **Bluetooth runtime.** Installed `piano-bt=5` reached `BT_PREFLIGHT READY`, 32/32 checks after 48 s. All four runtime hashes
+  verified. `bluetoothd` was running, LE event mask bits 6 and 11 were set, and the controller published and reported power on.
+  Keyboard and mouse pairing remain attended checks. [Bluetooth preflight](results-2026-11-27.md#bluetooth-preflight)
+- **Audio inputs.** The installed line exposes raw `Mic` as the default and `Mic (noise reduced)` through RNNoise. The latest
+  installed audio check confirmed the daily timing and readiness read-only. Active duplex testing is pending. [Support status](STATUS.md) ·
+  [Audio duplex baseline](results-2026-11-27.md#audio-duplex-baseline)
+- **Rotation.** The `piano-rotated` LaunchAgent is staged by default and exits without a `piano-rotate` opt-in. RAM qualification
+  passed the accelerometer stream and the boot-argument read past 1024 bytes. Daily auto-rotation stays off.
+  [RAM qualification](results-2026-11-27.md#ram-qualification) · [Support status](STATUS.md)
+
+### Historical first staging (2026-11-11)
+
+The first offline staging run passed 125 host checks, including a 64 MiB APFS seed and installer runs under `/bin/sh` and
+`/bin/dash`. It replaced hand-written `stage-soft-metal.py --file/--boot-run` entries with a manifest, a staging tool and an
+installer. The original tablet test matrix is preserved in §9.
 
 ## 1. The pieces (`configs/userland.toml`)
 
-| Unit | Installed files (all root:wheel) | Installed profile | Inert unless | Trust cache |
+This table describes the manifest's defaults. The installed observations above have their own test evidence.
+[Userland manifest](../configs/userland.toml)
+
+| Unit | Installed files (all root:wheel) | Manifest default | Activation or role | Trust cache |
 |---|---|---|---|---|
 | `pianousb-shell` | `/usr/local/libexec/pianousb-shell` 0755, `/Library/LaunchDaemons/com.unixnu.pianousb-shell.plist` 0644 | on | `piano-usb-shell=1` (without it, it exits at once with status 0 and launchd leaves it stopped) | its CDHash |
-| `piano-data-concurrent` | `/usr/local/libexec/piano-data-concurrent` 0755 (shell script), `/Library/LaunchDaemons/com.unixnu.piano-data-concurrent.plist` 0644 (once per load) | on | With Data mounted in single-gate mode and `machdep.piano_data_io` reporting live `store_state=2`, writes `machdep.piano_data_concurrent=1`. Remove `PIANO_DATA_CONCURRENT_AT_BOOT` from the plist to disable ([data-store.md](data-store.md), "Concurrent mode at boot"). | none (a script) |
+| `piano-lw-quiet` | `/usr/local/libexec/piano-lw-quiet` 0755, `/Library/LaunchDaemons/com.unixnu.piano-lw-quiet.plist` 0644 | on | Stops `audiomxd` with `SIGSTOP` while logged out and continues it at login. `piano-lw-quiet=0` opts out. | none (a script) |
+| `piano-data-concurrent` | `/usr/local/libexec/piano-data-concurrent` 0755 (shell script), `/Library/LaunchDaemons/com.unixnu.piano-data-concurrent.plist` 0644 (once per load) | on | Switches a mounted, resumed Data store from single-gate mode to concurrent admission. [Concurrent mode at boot](data-store.md#concurrent-mode-at-boot-piano-data-concurrent-2026-11-26) | none (a script) |
 | `piano-policy-agent` | `/usr/local/libexec/piano-policy-agent` 0755 (the shell script), `/Library/LaunchDaemons/com.unixnu.piano-policy-agent.plist` 0644 | on | PianoPolicy (`piano-policy=N`) for the sysctl; the clamshell state for display sleep. One idle `notifyutil -w`, no polling | none (a script) |
 | `piano-rotated` | `/usr/local/libexec/piano-rotated` 0755, `/Library/LaunchAgents/com.unixnu.piano-rotated.plist` 0644 | on | `piano-rotate=N` (exits 0 without it; `KeepAlive SuccessfulExit false`) | its CDHash |
 | `piano-torch` | `/usr/local/bin/piano-torch` 0755 | installed (a command) | PianoTorch at `piano-torch=2` | its CDHash |
 | `piano-pmset-defaults` | `/usr/local/libexec/piano-pmset-defaults` 0755, `/Library/LaunchDaemons/com.unixnu.piano-pmset-defaults.plist` 0644 (one-shot) | on | sets each power source's timers once, unless the owner set them first (section 6) | none |
 | `piano-keyboard-type` | `/usr/local/libexec/piano-keyboard-type` 0755, `/Library/LaunchDaemons/com.unixnu.piano-keyboard-type.plist` 0644 (one-shot) | on | nothing: once a boot it adds the missing keys of loginwindow's `/Library/Preferences/com.apple.keyboardtype.plist` for the keyboard cover (20555), the touch screen (20564), the USB debug keyboard (20565) and 4178 (VendorID 6900, CountryCode 0) as 40 (ANSI), with `defaults`; an existing key keeps its value. Without them a fresh Data store (a RAM image, a reinstall from the seed) opened Keyboard Setup Assistant when the cover was attached (2026-11-21) | none (a script) |
 | `piano-still-wallpaper` | `/usr/local/libexec/piano-still-wallpaper` 0755 (`tooling/k27/still-wallpaper.sh`), its three files in `/usr/local/share/piano/wallpaper/` 0644 (`still.png`, `Metadata.plist`, `Index.plist`: `tooling/k27/still-wallpaper.py`), `/Library/LaunchDaemons/com.unixnu.piano-still-wallpaper.plist` 0644 (one run a boot) | on | nothing: once a boot it converts the system volume's stock `DefaultDesktop.heic` (one-colour fallback) for the login window and desktop; it writes absent choices and replaces only our earlier `UniXNU Still` or generated choices, never the user's (`drivers/gpu-userspace.md`, the test images' still wallpaper; added 2026-11-12 for the installed system, whose seed is never restaged) | none (a script and data) |
-| `piano-usbnet-address` | `/usr/local/libexec/piano-usbnet-address` 0755 (shell script), `/Library/LaunchDaemons/com.unixnu.piano-usbnet-address.plist` 0644 (once per boot) | on | `piano-usb-net=N` (exits 0 without; with it: the USB network's 169.254.80.2 set as the interface's SystemConfiguration service, Manual, and re-checked for 600 s: [drivers/usb-device-debug.md](drivers/usb-device-debug.md) §14.9) | — |
+| `piano-usbnet-address` | `/usr/local/libexec/piano-usbnet-address` 0755, `/usr/local/libexec/piano-bootargs.sh` 0644, `/Library/LaunchDaemons/com.unixnu.piano-usbnet-address.plist` 0644 | on | With `piano-usb-net`, keeps the USB network's link-local address through `configd` configuration and rechecks it for 600 s. | none (scripts) |
 | `piano-wifi` | `/usr/local/bin/piano-wifi` | planned | the CLI of `drivers/wifi.md` §13.1 (not written: `status = "planned"`, listed and skipped) | — |
 | `piano-passd-policy` | `/usr/local/libexec/piano-passd-policy` 0755, `/Library/LaunchAgents/com.unixnu.piano-passd-policy.plist` 0644 | on, UID 501 only | disables and unloads `com.apple.passd`; restores the original effective override on removal (below) | none (shell) |
-| `piano-brightness-sync` | `/usr/local/libexec/piano-brightness-sync` 0755, `/Library/LaunchDaemons/com.unixnu.piano-brightness-sync.plist` 0644 | on | `piano-backlight-native=1` and `piano-backlight-auto=1` (exits 0 without them): CoreBrightness and PianoBacklight's automatic mode agree: the Control Center slider shows the panel's real brightness, and only CoreBrightness's own level changes (the user's) end automatic mode ([drivers/backlight.md](drivers/backlight.md), "CoreBrightness follows the automatic level"); `--check` reads both levels | its CDHash |
+| `piano-brightness-sync` | `/usr/local/libexec/piano-brightness-sync` 0755, `/Library/LaunchDaemons/com.unixnu.piano-brightness-sync.plist` 0644 | on | Native automatic brightness. Reports user moves to PianoBacklight and syncs CoreBrightness to the settled automatic level. | its CDHash |
+
+The manifest also defines these units. It records each destination, owner, mode and build recipe.
+[Userland manifest](../configs/userland.toml)
+
+| Area | Units and defaults |
+| --- | --- |
+| Core Image | `piano-coreimage-compat` off. `piano-coreimage-restore` on to remove the retired legacy policy at Aqua login. |
+| Camera | `piano-camera-default` on to choose the front camera while preserving an existing choice. `piano-camera-runtime` is an installed CDHash-check command. `piano-camera-grab` is staged by default and its boot job requires the camera and capture boot arguments. |
+| Session | `piano-login-front` and `piano-slim-session` on. `piano-login-readiness` is the installed secure-field readiness helper. |
+| Wi-Fi | `piano-wifi-controls`, `piano-wifi-supplicant`, `piano-wifi-join` and `piano-airportd-kick` on. |
+| Charging | `piano-charge-config` is an installed admin command for the saved charging thresholds and buck mode. |
 
 Two changes to existing pieces came with this. `pianousb-shell` now exits at once (status 0) on `/dev/pianousb` when the kernel
 argument `piano-usb-shell` is missing, and its job is `KeepAlive SuccessfulExit false`. Before, it retried the open every 2 s
@@ -36,7 +72,7 @@ read ([drivers/usb-device-debug.md](drivers/usb-device-debug.md) §6). Its host 
 
 ## 2. The manifest
 
-### passd policy (2026-11-18; tablet qualification pending)
+### Historical passd policy investigation (2026-11-18)
 
 **Confirmed from the decoded 27.3 binaries and earlier tablet samples:** Safari's synchronous Apple Pay availability query can
 reach `passd` before its payment coordinator is initialized. Piano lacks the AppleKeyStore unlock contract needed by that
@@ -76,8 +112,8 @@ expose that API, the result is an unqualified context, requiring a trusted local
 `configs/userland.toml` (format 1; its header documents every key):
 
 - `staging = "/private/var/piano/userland"`: where the files are carried on Data.
-- `[[unit]]` has `name`, `about`, `default_on`, and optionally `status = "planned"`. A unit has at most one launchd job. A unit
-  without a job is a command-line tool and is always installed.
+- `[[unit]]` has `name`, `about`, `default_on`, and optionally `status = "planned"`. A planned unit may omit its files.
+  A unit has at most one launchd job. A ready unit without a job is a command-line tool and is always installed.
 - `[[unit.file]]` has `dest`, `owner` (default `root:wheel`), `mode`, and `build`:
   - `copy`
   - `cc`: `xcrun clang -arch arm64|arm64e -mmacosx-version-min=14.0 -O2 -Wall -Wextra -Werror`, with `cflags` and `frameworks`. The
@@ -139,7 +175,9 @@ Idempotent:
 - A restage always starts from the input seed. Its result has the same files, the same trust cache and the command once.
 - The input seed and trust cache are only read, and `--out` over them is refused.
 
-Measured on a copy of `out/turnip-a830/stage` (2026-11-11 23:29, 12 s):
+### Historical staging measurements (2026-11-11)
+
+Measured on a copy of `out/turnip-a830/stage` (23:29, 12 s):
 
 - input identity `8f3331104e03c970`, output `2b6eb91fab2d8a9f`;
 - 9 files;
@@ -157,7 +195,9 @@ The trust cache modules:
 | On piano every module loads: `attempting to load 5 external trust cache modules`, `loaded external trust cache module: 0` … `4`, and never `skipping engineering trust cache module`, in 37 native boots | verified (logs) | `logs/native-runs/*/xnu-console.txt` |
 | A sixth module (ours first, the Turnip module second, the OS's after) is therefore loaded the same way | inferred; needs-boot (U1) | — |
 
-Seed mode also places GPU bundle files at their final `/Library/GPUBundles` paths before packing. WindowServer may load Metal
+### GPU files in fresh seeds
+
+Seed mode can place GPU bundle files at their final `/Library/GPUBundles` paths before packing. WindowServer may load Metal
 before the independent boot installer runs; replacing the executable later with `install -S` leaves that process using its old
 mapping. The staged and final copies share APFS extents, and `userland.json` lists these files under `seed_gpu_files`. A delta
 bundle preserves omitted backend files. Other userland files still use the boot installer; live layers keep the existing rollback
@@ -172,12 +212,12 @@ plist's sha256 and modification date and the executable's path and modification 
 modified" in the daemon's log), is stored as "not notified", and `BackgroundTaskManagementAgent` then shows "Background Items Added"
 for it. Our jobs have no Team ID and are grouped under "Unknown Developer".
 
-Every layer update replaces the programs it rebuilt. Before this change, each update therefore announced every job whose program
-changed again. `stage.py` now rewrites, in the staged copy only, each job whose program is a file of the manifest:
+Layer updates replace the programs they rebuild. Before the launcher change, this could announce each affected job again.
+`stage.py` rewrites the staged copy of each job whose program is a file of the manifest:
 
     ProgramArguments = /bin/sh -c 'exec "$0" "$@"' PROGRAM ARG...
 
-The executable BTM records is `/bin/sh`, which lives on the sealed system volume and never changes with our layer. `exec` replaces
+The executable BTM records is `/bin/sh`, which lives on the sealed system volume. `exec` replaces
 the shell with the program, so the pid, argv (argv[0] is the program's path), exit status and KeepAlive behaviour stay the same.
 Jobs whose executable is already a system program (`/bin/sh SCRIPT`, `/usr/bin/notifyutil`) are left as they are. The pinned
 Bluetooth runtime's job file is also left alone: it is staged exactly as its build report records it.
@@ -229,14 +269,10 @@ the same script with `--live`, and `--check` changes nothing.
     plist's `Disabled`.
   - Verified on macOS 26.6 with a test agent: a plist with `Disabled` is refused by `launchctl bootstrap` and never loaded;
     without it, it loads. The override's precedence is stock launchd behaviour, needs-boot (U9).
-- **Apple's own jobs** (2026-11-12, `power.md` §1.2): the installer neither stops nor starts them. Two of them spin a core in every
-  native boot (PerfPowerServices, audiomxd). To keep one from running: on the installed system the owner's `launchctl disable
-  system/<label>` and `launchctl bootout system/<label>` (kept in the store's override database; undone with `launchctl enable` and
-  a reboot); in a test image's seed `tooling/k27/stage-boot-run.py --disable-job <label>` (the same database, written into a copy
-  of the seed, so `data-persist=0`); by kernel argument `PIANO_DENY_EXEC` / `build-esp.py --deny-exec PATH` (k27-deny-exec: no
-  seed change; launchd retries the spawn every ~10 s). None is a default yet. The desktop images (`tooling/k27/build-desktop-images.sh`,
-  [attended-desktop.md](attended-desktop.md) §2) disable watchdogd, mobileactivationd, xprotectd and PerfPowerServices in their
-  seed's override database (and audiomxd in `quiet`), and write the keyboard type of our two keyboards from the boot job.
+- **Historical job experiments (2026-11-12).** The desktop test images recorded launchd overrides in a copy of the seed,
+  including an `audiomxd` override in the `quiet` image. The historical record also compares those overrides with the
+  kernel's deny-exec path and its respawn retries. The installed `piano-lw-quiet` job holds `audiomxd` only at the login
+  window. [Desktop bring-up](attended-desktop.md#2-changes-2026-11-12-this-branch) · [Support status](STATUS.md)
 - **Removal**: `/private/var/db/piano-userland/receipt.tsv` lists what the installer put in place. A file the manifest no longer
   has is removed, its job booted out, when it is unchanged since. Anything else is left (host-tested).
 - **Files it did not put there** (2026-11-12, for the system layer of `data-store.md` §9): before the installer first takes over
@@ -262,15 +298,19 @@ settled. Its state is `/private/var/db/piano-userland/pmset-defaults`.
   `System Sleep Timer` or `Display Sleep Timer` that the script did not write. The files' sha256 after its own writes is kept.
   Such a source is never touched, then or later. That includes a change the owner makes after a partial run (host-tested).
   Verified on a Mac (macOS 26.6): powerd keeps the settings in those files, with exactly those key names per source.
-- **A source pmset does not offer** (no `Battery Power:` section in `pmset -g custom`) is tried again at the next boot. That is
-  the daily profile today: it has no `piano-power-ps=1`, so no battery is published.
+- **A source pmset does not offer** is tried again at the next boot. The early RAM recipe in §9 expected the `Battery Power:`
+  section to be absent. The installed daily system shows battery percentage and power state. [Support status](STATUS.md)
 - **A key not listed for the source** is left out and named. Applying each key on its own means one unsupported key cannot fail
   the rest.
-- System sleep stays impossible until the kernel allows it: the ADT keeps `sleep-disabled`, and only k27 0062's `piano-sleep=1`
-  overrides that (`power.md` §3). On today's profiles the sleep timer is inert, and only display sleep acts (2 min on battery,
-  10 on AC). Display sleep and wake on NativeGopDisplay have not been exercised natively (U10).
+- The daily line arms the cover and power-key sleep policy. Suspend-to-idle, timer wake and simulated lid and power-key
+  events passed in RAM qualification. The physical cover and key actions remain on the attended checklist.
+  [Sleep status](STATUS.md) · [RAM qualification](results-2026-11-27.md#ram-qualification)
 
-## 7. Live update (design; its bundle is built and host-tested)
+## 7. Live update
+
+The installed line has used both ESP-only and layer updates. An ESP-only update leaves the layer in place. Use the
+daily rollback guidance when an update also changes Data-side files or requires new CDHashes.
+[November 26 results](results-2026-11-26.md) · [Daily update and rollback](install-esp-v3.md#daily-update-and-rollback)
 
 ### 7.1 What can change without a reboot
 
@@ -333,6 +373,10 @@ line with the installed seed.
 
 ### 7.4 The procedure
 
+The commands in steps 1–3 record the original 27.0.1 layer procedure. Use the current 27.3 ESP and install references for
+the installed line. The ordering still applies when the layer requires new CDHashes.
+[Daily update and rollback](install-esp-v3.md#daily-update-and-rollback) · [27.3 line](k273-line.md#current-line-2026-11-27)
+
 1. Run `python3 tooling/userland/stage.py --live out/userland/live --installed-trust <the installed ESP's trust cache>`. That is
    the pinned base's, `"$(python3 tooling/persist/base-seed.py path trust)"` (`data-store.md` §9). Add `--gpu-bundle
    out/turnip-a830/NativeAdrenoMetal.bundle` when the plugin changed.
@@ -353,10 +397,10 @@ line with the installed seed.
    had taken over put back from `/private/var/db/piano-userland/prev/`), which gives the base's Metal plugin back byte for byte
    (host-tested: `test-stage.py` part 7).
 
-### 7.5 The first time, on the owner's installed system
+### 7.5 Historical first-install rehearsal (2026-11-12)
 
-The daily profile has none of the transports yet: no `piano-usb-shell`, no `piano-usb-net`, and no `pianousb-shell` on Data. The
-first update therefore needs the owner once, with the owner's own password:
+The early 27.0.1 profile lacked both USB transports and the installed shell. The rehearsal called for the owner to apply the
+first layer from Terminal. The current daily build has the USB console, root shell and SSH over the cable. [Support status](STATUS.md)
 
 1. Build an ESP with the installed seed, the trust cache of 7.4 step 2, and the daily profile's arguments plus
    `piano-usb-net=1`. It changes only arguments and the trust cache: the same seed, so no Data consequence. Or, without a new ESP,
@@ -370,13 +414,13 @@ first update therefore needs the owner once, with the owner's own password:
 The alternative is a fresh Data from `out/userland/stage`'s seed (`build-esp.py --replace-data <installed 8 hex>`): everything is
 installed at its first boot, and the owner's Data changes are lost. It is not recommended.
 
-### 7.6 Still to build
+### 7.6 Historical transport work list (2026-11-12)
 
 - A host step that pushes the bundle through the user pipe (`usb-console.py --port 1` with a file mode, and the here-document
   above), with a read-back of the sha256.
 - A host step that runs 7.4 end to end over NCM.
 
-## 8. Host tests
+## 8. Historical host-test record (2026-11-11/12)
 
 ```sh
 python3 tooling/userland/test-stage.py            # 125 checks, about 2 minutes (hdiutil, the real units' builds)
@@ -419,7 +463,7 @@ The parts:
    - the same with a plugin bundle over a base's plugin, then the empty layer (`configs/userland-none.toml`): every unit out,
      every job booted out, the base's plugin back byte for byte.
 
-## 9. Batched tablet test list (RAM boots; Data volatile; the owner's store untouched)
+## 9. Historical tablet test list (2026-11-11/12, volatile RAM boots)
 
 Build, on the Mac, from a checkout with these commits:
 
@@ -460,7 +504,7 @@ Image L: the same build with `piano-usb-net=1` added to `PIANO_EXTRA_ARGS`, once
 
 Then the owner's system: section 7.5, with the owner present.
 
-## 10. Risks
+## 10. Historical design risks (2026-11-11/12)
 
 1. **The boot job is the only root hook on a seed.** If a seed's boot job is not the expected shape, `stage.py` refuses: it does
    not write a new plist, which would be uid 99 and refused by launchd. The installer runs after `settime.sh`, before any later
@@ -482,7 +526,7 @@ Then the owner's system: section 7.5, with the owner present.
    The installer runs early in the boot job, which in the native boots starts well before WindowServer, so this is a corner case.
 8. **The live path has no host step for the user pipe yet** (7.6). Its first use on the owner's system needs the owner's password
    (7.5).
-9. **The planned `piano-wifi`**: its entry is ready, its source is not. `stage.py` skips it until `status = "planned"` is removed.
+9. **The planned `piano-wifi`** can be staged once its source and file entry are added and `status = "planned"` is removed.
 
 ## 11. Files
 

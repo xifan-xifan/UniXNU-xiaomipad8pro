@@ -73,6 +73,13 @@ class Estimate(unittest.TestCase):
 
 
 class Parse(unittest.TestCase):
+    def test_ignores_nonfinite_stamps_and_invalid_counter(self):
+        valid = line(1794355200, 85432100)
+        _, body = valid.split('\t')
+        invalid = [f'{stamp}\t{body}' for stamp in ('nan', '+inf', '-inf', '1e999')]
+        invalid += [line(1794355200, 1 << 32), valid.replace('enabled 1', 'enabled 10')]
+        self.assertEqual(ro.parse(invalid + [valid]), ro.parse([valid]))
+
     def test_formats(self):
         text = [
             line(1794355200.120, 85432100),

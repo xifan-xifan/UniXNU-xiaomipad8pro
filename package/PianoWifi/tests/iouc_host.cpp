@@ -2,7 +2,7 @@
 // Host contract test for the IOUserClient OOL structure path. The kernel
 // receives an IOExternalMethodArguments block whose large input/output sides
 // are descriptors; this fake keeps the same readBytes/writeBytes contract.
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. iouc_host.cpp -o /tmp/iouc_host && /tmp/iouc_host
+//   c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I.. iouc_host.cpp -o /tmp/iouc_host && /tmp/iouc_host
 #include "PianoWifiUcTransport.h"
 #include <cassert>
 #include <cstring>

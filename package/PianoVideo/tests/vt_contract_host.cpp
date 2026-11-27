@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Copyright (c) 2026 Leo Zhang.
+// c++ -std=c++20 -O2 -Wall -Wextra -Werror -I ../vt vt_contract_host.cpp -o /tmp/vt_contract_host && /tmp/vt_contract_host
 #include "PianoVideoVTContract.h"
 #include "HEVCFixture.h"
 #include <cstdio>

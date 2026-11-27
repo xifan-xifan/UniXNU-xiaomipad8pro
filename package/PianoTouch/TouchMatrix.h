@@ -261,8 +261,10 @@ inline Feed matrixFeed(Matrix &m, const uint8_t *p, uint32_t len)
   using namespace detail;
   if (len < 64) { ++m.skipped; return Feed::skipped; }
   if (packetChecksum(p, len) <= 0) { ++m.badChecksum; return Feed::badChecksum; }
+  const uint32_t coveredEnd = 20 + le32(p + 8) * 4;   // bounded by len in packetChecksum
+  if (coveredEnd < 64) { ++m.skipped; return Feed::skipped; }
   const uint32_t type = p[56], cols = p[48], rows = p[49], nodes = rows * cols;
-  if (!nodes || nodes > kMaxNodes || 64 + uint64_t(nodes) * 2 > len || rows > 256 || cols > 256) { ++m.skipped; return Feed::skipped; }
+  if (!nodes || nodes > kMaxNodes || 64 + nodes * 2 > coveredEnd) { ++m.skipped; return Feed::skipped; }
   m.lastFrameNo = le16(p + 28);
   if (m.refType < 0) {
     if (type == 6 || type == 7 || type == 9 || type == 0x1d) return Feed::learning;

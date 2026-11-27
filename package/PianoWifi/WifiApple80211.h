@@ -14,6 +14,7 @@
 #include "WifiHw.h"   // kScanEntriesMax, kSsidMax
 #include "WifiAssocSnapshot.h"
 #include "WifiProfile.h"
+#include "WifiWmi.h"
 
 namespace pianowifi {
 namespace a80211 {
@@ -154,6 +155,8 @@ struct Power {
 };
 static_assert(sizeof(Power) == 24, "power");
 
+inline Power powerRecord(bool on) { return {1, 1, {on ? 1u : 0u, 0, 0, 0}}; }
+
 // DRIVER_AVAILABLE (BSD event 55). 27.3 airportd's _bsd_80211_event_callback (0x1000723f0) reads the u32 at +8 as `available` (flags at
 // +4, reason at +0x10, subreason at +0x14) into its device node's isDriverAvailable byte; __allowAutoJoinWithTrigger refuses every
 // auto-join ("driver not available", DriverUnavailable) while it is 0, and a node found through interfaceAdded starts at 0 (owner
@@ -168,6 +171,18 @@ static_assert(sizeof(DriverAvailability) == 0xf8 && __builtin_offsetof(DriverAva
 static_assert(kBsdEventHeaderSize + kBsdEventNameSize + sizeof(DriverAvailability) <= kBsdEventMaxSize,
               "driver availability kernel event fits");
 
+inline DriverAvailability driverAvailabilityRecord(bool available)
+{
+  DriverAvailability record = {};
+  record.available = available ? 1u : 0u;
+  return record;
+}
+
+inline bool driverAvailabilityEventRequired(bool adopted, int posted, bool usable, bool force)
+{
+  return adopted && (force || posted != int(usable));
+}
+
 inline BsdEventPayload bsdEventPayload(uint32_t code, const LinkEvent &link, bool scanStatus, const Power *power = nullptr,
                                        const DriverAvailability *availability = nullptr)
 {
@@ -178,6 +193,29 @@ inline BsdEventPayload bsdEventPayload(uint32_t code, const LinkEvent &link, boo
   if (code == kEvDriverAvailable && availability) return {availability, sizeof *availability};
   if (code == kEvScanDone && scanStatus) return {kBsdScanDoneStatus, sizeof kBsdScanDoneStatus};
   return {nullptr, 0};
+}
+
+// Guard start() and take() with the request lock. The delayed callback posts
+// one completion per accepted scan, including scans overtaken by power-off.
+struct ScanCompletions {
+  bool start() { return pending_++ == 0; }
+  uint32_t take() {
+    const uint32_t pending = pending_;
+    pending_ = 0;
+    return pending;
+  }
+
+ private:
+  uint32_t pending_ = 0;
+};
+
+template <typename Post>
+inline void postScanCompletions(uint32_t pending, bool power, Post post)
+{
+  while (pending--) {
+    if (power) post(kEvScanCacheUpdated);
+    post(kEvScanDone);
+  }
 }
 
 // SET 20 carries one of two fixed association records.  The field meanings and offsets are
@@ -364,6 +402,18 @@ static_assert(sizeof(Rssi) == 52, "rssi");
 constexpr uint32_t kVersionBytes = 384;
 // STATUS_DEV_NAME: not asked by 27.3's bind; answered like the versions (a string from offset 0), its layout not re-read.
 // COUNTRY_CODE: 3 bytes, a C string (27.3, as sheng's).
+inline bool validCountryCode(uint8_t a, uint8_t b)
+{
+  return a >= 'A' && a <= 'Z' && b >= 'A' && b <= 'Z';
+}
+
+inline void setRegulatoryCountry(char (&out)[3], const char *text, uint32_t length)
+{
+  const bool valid = text && length == 2 && validCountryCode(uint8_t(text[0]), uint8_t(text[1]));
+  out[0] = valid ? text[0] : 'X';
+  out[1] = valid ? text[1] : 'X';
+  out[2] = 0;
+}
 
 // SCAN_REQ (the parts read; 5528 bytes on 27.3, SCAN_REQ_MULTIPLE 5352): version, BSS type, BSSID, the SSID's length at 16 and
 // its bytes at 20, the scan type at 0x34 (27.3, as sheng's). Type 3 asks for the results already held: sheng answers it at once
@@ -415,10 +465,17 @@ inline bool parseBssid(const char *text, uint8_t out[6])
 
 inline uint32_t channelOfFreq(uint32_t mhz)
 {
-  if (mhz == 2484) return 14;
-  if (mhz >= 2412 && mhz < 2484) return (mhz - 2407) / 5;
-  if (mhz >= 5000 && mhz < 5900) return (mhz - 5000) / 5;
-  return 0;
+  return dot11ChannelOfFreq(mhz);
+}
+
+inline uint32_t rsnElementBytes(const Bss &b)
+{
+  if (b.rsnLength < 4 || b.rsnLength > sizeof b.rsn || b.rsn[0] != kDot11ElementRsn ||
+      uint32_t(b.rsn[1]) + 2 != b.rsnLength)
+    return 0;
+  ScanSecurity security;
+  wmiParseRsn(security, b.rsn + 2, b.rsn[1]);
+  return security.truncated ? 0 : b.rsnLength;
 }
 
 inline void fillChannel(Channel &c, uint32_t mhz, uint32_t channel)
@@ -431,7 +488,7 @@ inline void fillChannel(Channel &c, uint32_t mhz, uint32_t channel)
 // The elements of a scan result, rebuilt from what the list keeps (the list does not keep the frame's elements): SSID (0), the
 // supported rates (1, at most 8), the DS parameter set (3, 2.4 GHz), the extended rates (50, the rest) and the RSN element (48)
 // as the frame carried it. Enough for the menu: the name, the band, the security. Returns the bytes written.
-inline uint32_t buildElements(const Bss &b, uint8_t *out, uint32_t capacity)
+inline uint32_t buildElements(const Bss &b, uint8_t *out, uint32_t capacity, bool *hasRsn = nullptr)
 {
   uint32_t n = 0;
   auto put = [&](uint8_t id, const uint8_t *body, uint32_t length) {
@@ -448,9 +505,9 @@ inline uint32_t buildElements(const Bss &b, uint8_t *out, uint32_t capacity)
     put(3, &ch, 1);
   }
   if (rates > 8) put(50, b.rates + 8, rates - 8);
-  if (b.rsnLength >= 2 && b.rsn[0] == 48 && uint32_t(b.rsn[1]) + 2 <= b.rsnLength && n + b.rsn[1] + 2u <= capacity) {
-    for (uint32_t i = 0; i < uint32_t(b.rsn[1]) + 2; ++i) out[n++] = b.rsn[i];
-  }
+  const uint32_t rsnBytes = rsnElementBytes(b);
+  if (hasRsn) *hasRsn = rsnBytes != 0;
+  if (rsnBytes) put(kDot11ElementRsn, b.rsn + 2, rsnBytes - 2);
   return n;
 }
 
@@ -476,8 +533,6 @@ inline void fillScanResult(ScanResult &r, const Bss &b)
   r.rssi = int16_t(b.rssi);
   r.snr = int16_t(b.rssi > -95 ? b.rssi + 95 : 0);
   r.beaconInterval = b.beaconInterval ? b.beaconInterval : 100;
-  // ESS (bit 0); privacy (bit 4) whenever the network has an RSN element, should the list predate the capability field
-  r.capability = uint16_t(b.capability ? b.capability : (0x1 | (b.rsnLength ? 0x10 : 0)));
   for (unsigned i = 0; i < 6; ++i) r.bssid[i] = b.bssid[i];
   const uint32_t rates = b.rateCount < 15 ? b.rateCount : 15;
   r.rateCount = uint8_t(rates);
@@ -485,7 +540,10 @@ inline void fillScanResult(ScanResult &r, const Bss &b)
   r.ssidLength = b.ssidLength <= kSsidMax ? b.ssidLength : kSsidMax;
   for (uint32_t i = 0; i < r.ssidLength; ++i) r.ssid[i] = b.ssid[i];
   r.ageMs = 0;
-  r.elementsLength = uint16_t(buildElements(b, r.elements, sizeof r.elements));
+  bool hasRsn = false;
+  r.elementsLength = uint16_t(buildElements(b, r.elements, sizeof r.elements, &hasRsn));
+  // Legacy scan entries omit capabilities. Infer ESS and privacy from the RSN.
+  r.capability = uint16_t(b.capability ? b.capability : (0x1 | (hasRsn ? 0x10 : 0)));
 }
 
 // ----------------------------------------------------------------------------------------------------------- the handler
@@ -554,6 +612,41 @@ struct Association {
   uint32_t state = kStateInit;
 };
 
+inline Association associationFromSnapshot(const struct piano_wifi_assoc_snapshot &raw)
+{
+  Association next;
+  next.associated = raw.associated != 0;
+  next.authorized = raw.authorized != 0;
+  next.ssidLength = raw.ssid_length <= kSsidMax ? raw.ssid_length : kSsidMax;
+  for (unsigned i = 0; i < next.ssidLength; ++i) next.ssid[i] = raw.ssid[i];
+  for (unsigned i = 0; i < sizeof next.bssid; ++i) next.bssid[i] = raw.bssid[i];
+  next.channel = raw.channel;
+  next.frequency = raw.frequency_mhz;
+  next.rssi = raw.rssi_dbm;
+  next.noise = raw.noise_dbm;
+  next.rate = raw.rate_mbps;
+  next.authType = raw.auth_type;
+  next.cipher = raw.cipher;
+  next.opMode = raw.op_mode ? raw.op_mode : kOpModeStation;
+  next.result = raw.associate_result;
+  next.generation = raw.join_generation;
+  next.state = raw.state;
+  return next;
+}
+
+constexpr unsigned kAssociateWaitMs = 8000, kAssociateWaitStepMs = 20;
+
+inline const char *associateWaitOutcome(const struct piano_wifi_assoc_snapshot &raw, uint32_t generation, uint64_t elapsedNs)
+{
+  if (raw.join_generation != generation) return "superseded";
+  if (!raw.power) return "power off";
+  if (raw.authorized) return "authorized";
+  if (raw.associate_result == 2) return "failed";
+  if (raw.associate_result == 9) return "timed out";
+  if (elapsedNs >= uint64_t(kAssociateWaitMs) * 1000000ull) return raw.associated ? "associated, not yet authorized" : "timeout";
+  return nullptr;
+}
+
 // Event ordering shared by the kernel front end and its host contract.  The
 // custom 802.1X path reports ASSOC_DONE as soon as 802.11 association is
 // complete, while SSID/BSSID/LINK-up wait for the private port's AUTHORIZE.
@@ -615,6 +708,9 @@ struct State {
   bool power = true;              // requested power; the worker owns physical off/on
   Association association;        // current GET state
   Association eventAssociation;   // last notified state: GET polling never consumes an event
+  uint16_t associationCapability = 0;
+  uint8_t associationRsnLength = 0;
+  uint8_t associationRsn[PIANO_WIFI_ASSOC_RSN_MAX] = {};
   bool eventPower = true;
   LinkEvent linkEvent = {};        // event4 and GET156 agree, including a voluntary leave
   uint32_t cursor = 0;            // the next SCAN_RESULT
@@ -644,8 +740,19 @@ inline Association observeAssociation(State &s, const Association &next, bool po
 {
   const Association old = s.eventAssociation;
   s.association = next;
+  s.associationCapability = 0;
+  s.associationRsnLength = 0;
   s.power = power;
   if (emit) { s.eventAssociation = next; s.eventPower = power; }
+  return old;
+}
+
+inline Association observeAssociation(State &s, const struct piano_wifi_assoc_snapshot &raw, bool emit)
+{
+  const auto old = observeAssociation(s, associationFromSnapshot(raw), raw.power != 0, emit);
+  s.associationCapability = raw.capability;
+  s.associationRsnLength = raw.rsn_length <= sizeof raw.rsn ? raw.rsn_length : 0;
+  for (unsigned i = 0; i < s.associationRsnLength; ++i) s.associationRsn[i] = raw.rsn[i];
   return old;
 }
 
@@ -971,8 +1078,7 @@ inline Answer handle(State &s, const Identity &id, bool set, Req &rq, const User
       uint8_t country[8];
       if (rq.length != sizeof country) { a.error = kErrInval; return a; }
       if ((a.error = copyIn(rq, io, country, sizeof country))) return a;
-      if (country[0] != 1 || country[1] || country[2] || country[3] || country[4] < 'A' || country[4] > 'Z' ||
-          country[5] < 'A' || country[5] > 'Z' || country[6]) {
+      if (country[0] != 1 || country[1] || country[2] || country[3] || !validCountryCode(country[4], country[5]) || country[6]) {
         a.error = kErrInval;
         return a;
       }
@@ -1058,11 +1164,8 @@ inline Answer handle(State &s, const Identity &id, bool set, Req &rq, const User
     return a;
   }
   case kPower: {
-    Power *p = reinterpret_cast<Power *>(scratch);
-    p->version = 1;
-    p->radios = 1;
-    p->state[0] = s.power ? 1 : 0;
-    a.error = copyOut(rq, io, p, sizeof *p, a);
+    const Power p = powerRecord(s.power);
+    a.error = copyOut(rq, io, &p, sizeof p, a);
     return a;
   }
   case kLinkChangedEventData:
@@ -1127,7 +1230,18 @@ inline Answer handle(State &s, const Identity &id, bool set, Req &rq, const User
       for (unsigned i = 0; i < 6; ++i) b.bssid[i] = s.association.bssid[i];
       b.ssidLength = s.association.ssidLength; for (unsigned i = 0; i < b.ssidLength; ++i) b.ssid[i] = s.association.ssid[i];
       b.channel = s.association.channel; b.freq = s.association.frequency; b.rssi = s.association.rssi;
-      if (s.association.authType == 2) b.capability |= 0x11; // ESS + privacy even after cache clear
+      // The selected network can come from a newer scan than the front end's
+      // snapshot, or the user can clear that snapshot during association.
+      if (s.associationCapability) b.capability = s.associationCapability;
+      if (s.associationRsnLength && s.associationRsnLength <= sizeof b.rsn) {
+        b.rsnLength = s.associationRsnLength;
+        for (unsigned i = 0; i < b.rsnLength; ++i) b.rsn[i] = s.associationRsn[i];
+      }
+      if (s.association.authType == 2) b.capability |= kDot11CapEss | kDot11CapPrivacy;
+      if (s.association.authType == 1) {
+        b.capability = uint16_t((b.capability | 0x1) & ~0x10u);
+        b.rsnLength = 0;
+      }
       if (!b.rateCount) {
         b.rateCount = 1;
         b.rates[0] = uint8_t(s.association.rate > 63 ? 126 : s.association.rate * 2);

@@ -76,6 +76,13 @@ inline bool parseSize(const char *s, uint32_t &w, uint32_t &h)
   return true;
 }
 
+constexpr uint32_t kFakeMinRefreshHz = 24, kFakeMaxRefreshHz = 120;
+
+constexpr bool validFakeRaster(uint32_t width, uint32_t height)
+{
+  return width >= 640 && width <= 3840 && !(width & 1u) && height >= 480 && height <= 2160;
+}
+
 inline FakeConfig fakeConfig(const FakeArgs &a)
 {
   FakeConfig c;
@@ -107,7 +114,7 @@ inline FakeConfig fakeConfig(const FakeArgs &a)
   if (!c.unplugS) c.cycles = 1;
   uint32_t w = 0, h = 0, hz = 0;
   if (a.mode) {
-    if (parseMode(a.mode, w, h, hz) && w >= 640 && w <= 3840 && !(w & 1u) && h >= 480 && h <= 2160 && hz >= 24 && hz <= 120) {
+    if (parseMode(a.mode, w, h, hz) && validFakeRaster(w, h) && hz >= kFakeMinRefreshHz && hz <= kFakeMaxRefreshHz) {
       c.width = w;
       c.height = h;
       c.hz = hz;

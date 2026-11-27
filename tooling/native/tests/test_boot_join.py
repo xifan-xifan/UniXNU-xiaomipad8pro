@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: BSD-2-Clause-Patent
 # Copyright (c) 2026, Leo Zhang. All rights reserved.
 """Offline acceptance of the actual boot transaction and SET22 owner latch."""
+import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
 W = Path(__file__).resolve().parents[3]
+HOST_FLAGS = ['-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined', '-fno-sanitize-recover=all']
 
 class BootJoinTests(unittest.TestCase):
     def test_airportd_kick_starts_fallback_once(self):
@@ -239,7 +241,7 @@ int main(void) {
         with tempfile.TemporaryDirectory() as d:
             path = Path(d)
             (path / 'test.m').write_text(source)
-            subprocess.run(['xcrun', 'clang', '-Wall', '-Wextra', '-Werror', '-fobjc-arc', '-I', str(W),
+            subprocess.run(['xcrun', 'clang', *HOST_FLAGS, '-fobjc-arc', '-I', str(W),
                             str(path / 'test.m'), '-framework', 'Foundation', '-framework', 'CoreWLAN',
                             '-framework', 'Security', '-framework', 'CoreLocation', '-o', str(path / 'test')],
                            check=True, capture_output=True)
@@ -281,7 +283,7 @@ int main() {
 '''
         with tempfile.TemporaryDirectory() as d:
             path=Path(d); (path/'test.cpp').write_text(source)
-            subprocess.run(['c++','-std=c++17','-Wall','-Wextra','-Werror','-I',str(W),str(path/'test.cpp'),'-o',str(path/'test')],check=True,capture_output=True)
+            subprocess.run(['c++','-std=c++17',*HOST_FLAGS,'-I',str(W),str(path/'test.cpp'),'-o',str(path/'test')],check=True,capture_output=True)
             subprocess.run([str(path/'test')],check=True,capture_output=True)
 
     def test_actual_profile_safety(self):
@@ -316,7 +318,7 @@ int main(int argc,char **argv) {
  assert(!kick_completed(argv[2],boot) && !kick_completed(argv[3],boot));
  chmod(argv[1],0644); assert(!kick_completed(argv[1],boot)); chmod(argv[1],0600);
  chmod(argv[1],0644); assert(safe_open(argv[1])<0); chmod(argv[1],0600);
- assert(safe_open(argv[2])==-2); assert(safe_open(argv[3])<0);
+ assert(safe_open(argv[2])==-2); assert(safe_open(argv[3])<0); assert(safe_open(argv[4])<0);
  struct piano_wifi_profile p; const char *good="ssid=fixture\nsecurity=wpa2-psk\npsk=fixture-only\n";
  assert(!piano_wifi_profile_parse((const uint8_t*)good,(uint32_t)strlen(good),&p)); piano_wifi_profile_wipe(&p);
  assert(piano_wifi_profile_parse((const uint8_t*)good,(uint32_t)strlen(good)-1,&p)); piano_wifi_profile_wipe(&p);
@@ -325,10 +327,11 @@ int main(int argc,char **argv) {
         with tempfile.TemporaryDirectory() as d:
             path=Path(d); path.chmod(0o700); profile=path/'profile';profile.write_text('fixture\n');profile.chmod(0o600)
             (path/'link').symlink_to(profile);(path/'test.m').write_text(source)
-            subprocess.run(['xcrun','clang','-fobjc-arc','-I',str(W),str(path/'test.m'),'-framework','Foundation',
+            os.mkfifo(path / 'fifo', 0o600)
+            subprocess.run(['xcrun','clang',*HOST_FLAGS,'-fobjc-arc','-I',str(W),str(path/'test.m'),'-framework','Foundation',
                             '-framework','CoreWLAN','-framework','Security','-framework','CoreLocation',
                             '-o',str(path/'test')],check=True,capture_output=True)
-            subprocess.run([str(path/'test'),str(profile),str(path/'missing'),str(path/'link')],check=True,capture_output=True)
+            subprocess.run([str(path/'test'),str(profile),str(path/'missing'),str(path/'link'),str(path/'fifo')],check=True,timeout=15,capture_output=True)
 
     def test_fallback_receipt_sequences(self):
         source = r'''
@@ -340,10 +343,14 @@ int main(int argc,char **argv) {
 #include <time.h>
 #include "package/PianoWifi/WifiProfile.h"
 static uint64_t seconds;
-static unsigned accesses, scans, associations, rawGeneration;
+static unsigned accesses, scans, associations, pauses, rawGeneration;
+static const char *rawReply;
+static size_t rawSize;
 static uint64_t currentGeneration;
+static size_t currentSize = sizeof currentGeneration;
 static int currentError = ENOENT;
 static BOOL powered = YES, cachedName, scanMatch, requestedDuringScan;
+static BOOL powerOffDuringScan, publishRawOnAssociate = YES, publishCurrentOnAssociate = YES;
 static const uint8_t fixtureName[7];
 
 @interface FixtureNetwork : NSObject
@@ -370,13 +377,15 @@ static const uint8_t fixtureName[7];
   assert(ssid.length == sizeof fixtureName && error);
   ++scans;
   if (requestedDuringScan) currentGeneration = ++rawGeneration;
+  if (powerOffDuringScan) powered = NO;
   if (scanMatch) return [NSSet setWithObject:(CWNetwork *)[FixtureNetwork new]];
   return [NSSet set];
 }
 - (BOOL)associateToNetwork:(CWNetwork *)network password:(NSString *)password error:(NSError **)error {
   assert(network && !password && error);
   ++associations;
-  currentGeneration = ++rawGeneration;
+  if (publishRawOnAssociate) ++rawGeneration;
+  if (publishCurrentOnAssociate) currentGeneration = rawGeneration;
   return YES;
 }
 @end
@@ -390,12 +399,15 @@ static int fixture_sysctl(const char *name, void *old, size_t *len, void *new, s
     if (currentError) { errno = currentError; return -1; }
     assert(*len == sizeof currentGeneration);
     memcpy(old, &currentGeneration, *len);
+    *len = currentSize;
     return 0;
   }
   assert(!strcmp(name, PIANO_WIFI_PROFILE_SYSCTL));
-  const int written = rawGeneration ? snprintf(old, *len, "set (generation %u): source apple-set20", rawGeneration)
-                                    : snprintf(old, *len, "not set");
+  const int written = rawReply ? snprintf(old, *len, "%s", rawReply) :
+      rawGeneration ? snprintf(old, *len, "set (generation %u): source apple-set20", rawGeneration) :
+                      snprintf(old, *len, "not set");
   assert(written > 0 && (size_t)written < *len);
+  *len = rawSize ? rawSize : (size_t)written + 1;
   return 0;
 }
 #define CWWiFiClient FixtureClient
@@ -405,19 +417,37 @@ static int fixture_sysctl(const char *name, void *old, size_t *len, void *new, s
 #include "tooling/native/piano-wifi-join/piano-wifi-join.m"
 #undef main
 
-static void unexpected_pause(void *context) { (void)context; assert(0); }
+static void fixture_pause(void *context) { (void)context; ++pauses; }
 
 int main(void) {
   @autoreleasepool {
     struct piano_wifi_profile profile = { .ssid_len = sizeof fixtureName };
     struct apple_join a = { .profile = &profile, .kick_time = 100, .location_passed = 1 };
-    struct piano_boot_join_transport transport = { &a, ready, receipt, associate, unexpected_pause };
+    struct piano_boot_join_transport transport = { &a, ready, receipt, associate, fixture_pause };
+    rawReply = "set (generation 4294967295): source apple-set20";
+    assert(receipt(NULL) == UINT32_MAX);
+    rawSize = strlen(rawReply); // success with a short reply missing its terminator
+    assert(!receipt(NULL));
+    rawSize = 0;
+    const char *bad[] = {
+      "set (generation 9: source apple-set20",
+      "set (generation 4294967297): source apple-set20",
+      "set (generation +9): source apple-set20",
+      "set (generation 9): source apple-set20-truncated",
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof *bad; ++i) {
+      rawReply = bad[i];
+      assert(!receipt(NULL));
+    }
+    rawReply = NULL;
     seconds = 134;
     assert(ready(&a) == 0 && accesses == 0 && scans == 0);
     seconds = 135;
     assert(ready(&a) == 0 && accesses == 1 && scans == 1);
-    rawGeneration = 9; // Default-off still treats any Apple SET20 receipt as sufficient.
-    assert(ready(&a) == -1 && scans == 1);
+    // With the opt-in OID absent, the historical receipt still suppresses a
+    // duplicate before any CoreWLAN or location work, including after OFF/ON.
+    rawGeneration = 9;
+    assert(ready(&a) == -1 && accesses == 1 && scans == 1);
     rawGeneration = 0;
     cachedName = YES;
     assert(ready(&a) == -1 && scans == 1);
@@ -442,22 +472,52 @@ int main(void) {
 
     currentGeneration = 0; // reported link loss on the same radio pass
     assert(piano_boot_join(&transport, 1) == 0 && associations == 3 && rawGeneration == 3);
-    assert(piano_boot_join(&transport, 1) == PianoBootJoinSkipped && associations == 3); // PS change or retained wake
+    assert(piano_boot_join(&transport, 1) == PianoBootJoinSkipped && associations == 3); // PS-only write
+    assert(piano_boot_join(&transport, 1) == PianoBootJoinSkipped && associations == 3); // radio retained across sleep
     currentGeneration = 0; // wake after sleep parked the radio
     assert(piano_boot_join(&transport, 1) == 0 && associations == 4 && rawGeneration == 4);
 
     currentGeneration = 0;
     requestedDuringScan = YES; // airportd publishes SET20 during the helper's scan
     assert(piano_boot_join(&transport, 1) == PianoBootJoinSkipped && associations == 4 && rawGeneration == 5);
+    requestedDuringScan = NO;
+    currentGeneration = 0;
+    powerOffDuringScan = YES;
+    assert(piano_boot_join(&transport, 1) == PianoBootJoinSkipped && associations == 4 && rawGeneration == 5);
+    powerOffDuringScan = NO;
+    powered = YES;
+    assert(pauses == 0);
+
+    // The current generation suppresses duplicates. Confirmation of a helper
+    // request uses a fresh raw generation, even if the receipt expired again.
+    publishRawOnAssociate = NO;
+    assert(piano_boot_join(&transport, 1) == 3 && associations == 5 && rawGeneration == 5);
+    assert(currentGeneration == 5 && pauses == 30);
+    publishRawOnAssociate = YES;
+    publishCurrentOnAssociate = NO;
+    currentGeneration = 0;
+    assert(piano_boot_join(&transport, 1) == 0 && associations == 6 && rawGeneration == 6);
+    assert(currentGeneration == 0 && pauses == 30);
+
+    const unsigned previousAccesses = accesses;
+    rawGeneration = 0;
+    cachedName = NO;
+    currentSize = sizeof(uint32_t);
+    assert(piano_boot_join(&transport, 1) == PianoBootJoinSkipped && accesses == previousAccesses);
+    currentSize = sizeof currentGeneration;
+    currentGeneration = (uint64_t)UINT32_MAX + 1;
+    assert(piano_boot_join(&transport, 1) == PianoBootJoinSkipped && accesses == previousAccesses);
+    currentGeneration = 0;
     currentError = EIO;
-    assert(piano_boot_join(&transport, 1) == PianoBootJoinSkipped && associations == 4);
+    assert(piano_boot_join(&transport, 1) == PianoBootJoinSkipped && accesses == previousAccesses);
+    assert(associations == 6 && pauses == 30);
   }
 }
 '''
         with tempfile.TemporaryDirectory() as d:
             path = Path(d)
             (path / 'test.m').write_text(source)
-            subprocess.run(['xcrun', 'clang', '-Wall', '-Wextra', '-Werror', '-fobjc-arc', '-I', str(W),
+            subprocess.run(['xcrun', 'clang', *HOST_FLAGS, '-fobjc-arc', '-I', str(W),
                             str(path / 'test.m'), '-framework', 'Foundation', '-framework', 'CoreWLAN',
                             '-framework', 'Security', '-framework', 'CoreLocation', '-o', str(path / 'test')],
                            check=True, capture_output=True)

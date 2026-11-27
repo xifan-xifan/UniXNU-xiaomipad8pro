@@ -141,6 +141,14 @@ int main()
     const PackReading pg = combinePacks(good, 2);
     CHECK(mapBattery(good, 2, pg, nullptr, 0).known);
   }
+  {
+    const GaugeReading g[2] = {pack(4300, -1, -1, 90, 3600, 4000, 4600, 230, 0xffff, 0xffff),
+                              pack(4300, -1, -1, 90, 3600, 4000, 4600, 230, kGaugeFc, 115)};
+    const PackReading p = combinePacks(g, 2);
+    const PortState port = source(0x2);
+    const BatteryValues v = mapBattery(g, 2, p, &port, 0);
+    CHECK(v.known && v.external && !v.full && v.cycles == 115 && v.amperageMa == -2);
+  }
   // The adapter from the firmware's PD contract (level 2): the bus voltage it reports and the offer in force, not a fixed 5 V.
   {
     const GaugeReading g[2] = {pack(4339, 579, 563, 90, 3890, 4317, 4600, 413, 0, 115), pack(4340, 581, 565, 90, 3896, 4317, 4600, 405, 0, 115)};

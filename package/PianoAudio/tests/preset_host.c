@@ -2,9 +2,10 @@
 // Host tests of level 5's preset source (AudioPreset.c over FatVolume.c, AudioAmps.c's verdict) on a FAT32 image made by mtools the
 // way build-esp.py makes the ESP (4096-byte sectors, one per cluster), holding a synthetic container (synthetic_fsm.h: made-up data)
 // at EFI/UniXNU/piano-fs19xx.fsm, an empty file and one too big:
-//   preset_host --write DIR     writes those three files into DIR (tooling/k27/build-native-piano-audio.sh copies them in)
+//   preset_host --write DIR     writes those three files into DIR (run-audio-host.sh copies them in)
 //   preset_host IMAGE           the loader and the verdict on the image
 //   preset_host                 the verdict alone (no mtools)
+#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

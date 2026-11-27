@@ -5,10 +5,12 @@ import os
 import shutil
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'scripts'))
+from repo_manifest import load_manifest
+
 PACKAGE = ROOT / 'package/PianoA830'
 KITS = ('ArmSmmu4K', 'AdrenoPM4', 'AdrenoFirmware')
 
@@ -18,7 +20,7 @@ def main():
     unixnu = scratch / 'UniXNU'
     kits = unixnu / 'kits'
     lock = ROOT / 'unixnu.lock'
-    pins = tomllib.loads(lock.read_text())['pin']
+    pins = load_manifest(lock)['pin']
     fetch = subprocess.run([sys.executable, ROOT / 'scripts/fetch-pins.py', '--only', ','.join(KITS)],
                            env=dict(os.environ, UNIXNU_RESEARCH=str(kits), GIT_TERMINAL_PROMPT='0'))
     if fetch.returncode:

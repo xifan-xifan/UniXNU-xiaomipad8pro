@@ -15,6 +15,7 @@ import plistlib
 import re
 import uuid
 from pathlib import Path
+from xml.parsers.expat import ExpatError
 
 TEAM = 'VAELT5D9YC'
 HOST = 'com.unixnu.PianoCamera'
@@ -40,17 +41,29 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def read_plist(data, label):
+    try:
+        return plistlib.loads(data)
+    except (ValueError, OverflowError, plistlib.InvalidFileException, RecursionError, ExpatError):
+        raise SystemExit('camera approval: invalid ' + label) from None
+
+
 def unarchive(data):
     """Decode only the dictionary/string/Boolean graph used by CMIO launch extras."""
-    a = plistlib.loads(data)
-    require(a.get('$archiver') == 'NSKeyedArchiver' and a.get('$version') == 100000, 'unknown launch archive')
-    objects = a['$objects']
+    require(isinstance(data, bytes), 'invalid launch archive data')
+    a = read_plist(data, 'launch archive')
+    require(isinstance(a, dict) and a.get('$archiver') == 'NSKeyedArchiver' and a.get('$version') == 100000,
+            'unknown launch archive')
+    objects, top = a.get('$objects'), a.get('$top')
+    require(isinstance(objects, list) and isinstance(top, dict) and set(top) == {'root'}, 'invalid archive root')
 
-    def resolve(value, active=()):
+    def resolve(value, active=(), depth=0):
+        require(depth < 32, 'launch archive nesting exceeds CMIO schema')
         index = value.data if isinstance(value, plistlib.UID) else value.get('CF$UID') if isinstance(value, dict) else None
         if index is not None:
+            require(not isinstance(value, dict) or set(value) == {'CF$UID'}, 'invalid archive reference object')
             require(type(index) is int and 0 <= index < len(objects) and index not in active, 'invalid archive reference')
-            return resolve(objects[index], (*active, index))
+            return resolve(objects[index], (*active, index), depth + 1)
         if isinstance(value, dict):
             require(set(value) == {'$class', 'NS.keys', 'NS.objects'}, 'unknown launch archive object')
             cls = value['$class']
@@ -58,18 +71,20 @@ def unarchive(data):
             require(type(class_index) is int and 0 <= class_index < len(objects) and objects[class_index] == {
                 '$classes': ['NSDictionary', 'NSObject'], '$classname': 'NSDictionary'}, 'unknown archive dictionary class')
             keys, values = value['NS.keys'], value['NS.objects']
-            require(len(keys) == len(values), 'archive dictionary lengths differ')
-            pairs = [(resolve(k, active), resolve(v, active)) for k, v in zip(keys, values)]
+            require(isinstance(keys, list) and isinstance(values, list) and len(keys) == len(values),
+                    'invalid archive dictionary arrays')
+            pairs = [(resolve(k, active, depth + 1), resolve(v, active, depth + 1)) for k, v in zip(keys, values)]
             require(all(isinstance(k, str) for k, _ in pairs) and len(dict(pairs)) == len(pairs), 'archive keys invalid')
             return dict(pairs)
         require(type(value) in (str, bool), 'unknown launch archive value')
         return value
 
-    return resolve(a['$top']['root'])
+    return resolve(top['root'])
 
 
 def expected_extras(info):
-    service = info['CMIOExtension']['CMIOExtensionMachServiceName']
+    require(isinstance(info, dict) and isinstance(info.get('CMIOExtension'), dict), 'missing signed CMIO metadata')
+    service = info['CMIOExtension'].get('CMIOExtensionMachServiceName')
     require(service == TEAM + '.' + EXT + '.service', 'signed Mach service differs')
     return {'LaunchEvents': {'com.apple.cmio.registerassistantservice.system-extensions.matching': {
                 EXT: {'CMIOExtensionBundleIdentifier': EXT}}},
@@ -80,39 +95,50 @@ def load_capture(folder):
     """Every key is retained; unfamiliar schema or incomplete capture fails closed."""
     folder = Path(folder)
     evidence = {}
+    captured = {}
     for name, positive in [('sysext-db.xml', b'<plist'), ('sysext-staged-tree.txt', b'staged tree capture complete'),
                            ('sysext-changed-files.txt', b'post-approval changes capture complete'),
                            ('sysext-marker.txt', b'sysext marker ready'), ('sysext-before.txt', b'SystemExtensions')]:
         data = (folder / name).read_bytes()
         require(positive in data, 'incomplete capture: ' + name)
         evidence[name] = digest(data)
-    db = plistlib.loads((folder / 'sysext-db.xml').read_bytes())
+        captured[name] = data
+    db = read_plist(captured['sysext-db.xml'], 'database plist')
     require(isinstance(db, dict) and set(db) <= HEADER_KEYS, 'unknown database header keys')
     require(type(db.get('version')) is int and db['version'] == 1, 'database version is not 1')
     require(db.get('developerMode') is False, 'capture used developer mode')
     require(db.get('extensionPolicies', []) == [], 'capture contains MDM policies')
-    require(len(db.get('extensions', [])) == 1, 'capture must contain only this camera extension')
-    e = db['extensions'][0]
-    require(set(e) <= ENTRY_KEYS, 'unknown extension keys')
+    extensions = db.get('extensions')
+    require(isinstance(extensions, list) and len(extensions) == 1, 'capture must contain only this camera extension')
+    e = extensions[0]
+    require(isinstance(e, dict) and set(e) <= ENTRY_KEYS, 'invalid extension record')
     required = {'uniqueID', 'teamID', 'identifier', 'bundleVersion', 'categories', 'originPath', 'state',
                 'references', 'stagedBundleURL', 'additionalLaunchdPlistEntries'}
     require(required <= set(e), 'incomplete extension record')
     require(e['teamID'] == TEAM and e['identifier'] == EXT and e['state'] == 'activated_enabled', 'capture is not approved B-TC')
     require(e['categories'] == ['com.apple.system_extension.cmio'], 'unexpected category')
     require(e['originPath'] == ORIGIN, 'origin path differs')
-    require(set(e['bundleVersion']) == {'CFBundleShortVersionString', 'CFBundleVersion'}, 'unknown version fields')
+    version = e['bundleVersion']
+    require(isinstance(version, dict) and set(version) == {'CFBundleShortVersionString', 'CFBundleVersion'} and
+            all(isinstance(value, str) and value for value in version.values()), 'invalid version fields')
     if 'container' in e:
         require(e['container'] == {'bundlePath': APP}, 'unknown container fields')
     if 'containingAppPath' in e:
         require(e['containingAppPath'] == APP, 'legacy container path differs')
     require('container' in e or 'containingAppPath' in e, 'no container app')
     require('relatedKernelExtension' not in e, 'capture has a related kernel extension')
-    require(len(e['references']) == 1, 'expected one containing-app reference')
-    ref = e['references'][0]
-    require(set(ref) <= {'appRef', 'teamID', 'appIdentifier'} and {'teamID', 'appIdentifier'} <= set(ref), 'unknown reference fields')
+    refs = e['references']
+    require(isinstance(refs, list) and len(refs) == 1, 'expected one containing-app reference')
+    ref = refs[0]
+    require(isinstance(ref, dict) and set(ref) <= {'appRef', 'teamID', 'appIdentifier'} and
+            {'teamID', 'appIdentifier'} <= set(ref), 'invalid reference fields')
     require(ref['teamID'] == TEAM and ref['appIdentifier'] == HOST, 'reference identity differs')
     require('appRef' not in ref or isinstance(ref['appRef'], str) and ref['appRef'].startswith('file:///'), 'unknown app reference')
-    old_id = str(uuid.UUID(e['uniqueID'])).upper()
+    require(isinstance(e['uniqueID'], str), 'invalid staged UUID')
+    try:
+        old_id = str(uuid.UUID(e['uniqueID'])).upper()
+    except ValueError:
+        raise SystemExit('camera approval: invalid staged UUID') from None
     # PropertyListEncoder uses URL's keyed Codable form (JSONEncoder's URL
     # string special case is different). Absolute file URLs have no base key.
     old_path = ROOT + '/' + old_id + '/' + EXTNAME
@@ -120,18 +146,23 @@ def load_capture(folder):
     require(isinstance(staged_url, dict) and set(staged_url) == {'relative'} and
             staged_url['relative'] in ('file://' + old_path, 'file://' + old_path + '/'), 'staged URL and UUID disagree')
     hashes = e.get('stagedCdhashes', {})
+    require(isinstance(hashes, dict), 'invalid staged CDHash records')
     if hashes:
-        require(isinstance(hashes, dict) and len(hashes) == 1, 'expected one architecture')
+        require(len(hashes) == 1, 'expected one architecture')
         old_hash, arch = next(iter(hashes.items()))
         require(HEX.fullmatch(old_hash) and arch == {'cputype': 16777228, 'cpusubtype': 0}, 'expected arm64 hash record')
     else:
         old_hash = e.get('stagedCdhash', '')
-        require(HEX.fullmatch(old_hash), 'no staged CDHash')
+        require(isinstance(old_hash, str) and HEX.fullmatch(old_hash), 'no staged CDHash')
     require('stagedCdhash' not in e or e['stagedCdhash'] == old_hash, 'legacy and per-arch hashes disagree')
-    text = (folder / 'sysext-staged-tree.txt').read_text()
+    try:
+        texts = {name: data.decode() for name, data in captured.items() if name.endswith('.txt')}
+    except UnicodeDecodeError:
+        raise SystemExit('camera approval: invalid capture text') from None
+    text = texts['sysext-staged-tree.txt']
     boots = []
     for name in ('sysext-marker.txt', 'sysext-staged-tree.txt', 'sysext-changed-files.txt'):
-        ids = re.findall(r'^[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$', (folder / name).read_text(), re.M)
+        ids = re.findall(r'^[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$', texts[name], re.M)
         require(len(ids) == 1, 'missing/ambiguous boot identity: ' + name)
         boots.append(ids[0].upper())
     require(len(set(boots)) == 1, 'capture spans different boots')
@@ -173,24 +204,28 @@ def differences(before, after, path=''):
 def prepare(folder, package, package_record):
     db, old_path, metadata, sums, evidence = load_capture(folder)
     bundle = Path(package) / ORIGIN.removeprefix('/Applications/')
-    info = plistlib.loads((bundle / 'Contents/Info.plist').read_bytes())
+    info = read_plist((bundle / 'Contents/Info.plist').read_bytes(), 'signed Info.plist')
+    extras = expected_extras(info)
+    require(info.get('CFBundleExecutable', EXT) == EXT, 'unexpected signed executable name')
+    version_keys = ('CFBundleShortVersionString', 'CFBundleVersion')
+    require(all(isinstance(info.get(key), str) and info[key] for key in version_keys), 'invalid signed bundle version')
     binaries = {e['identifier']: e for e in package_record['executables']}
     require(binaries[EXT]['team'] == TEAM and binaries[HOST]['team'] == TEAM, 'final package signer differs')
     require(binaries[EXT]['arch'] == 'arm64', 'final extension architecture differs')
     cdhash = binaries[EXT]['cdhash']
     require(HEX.fullmatch(cdhash), 'invalid final CDHash')
-    executable = bundle / 'Contents/MacOS' / info.get('CFBundleExecutable', EXT)
+    executable = bundle / 'Contents/MacOS' / EXT
     require(digest(executable.read_bytes()) == binaries[EXT]['sha256'], 'final executable differs from signed package record')
     original = copy.deepcopy(db)
     e = db['extensions'][0]
-    require(unarchive(e['additionalLaunchdPlistEntries']) == expected_extras(info), 'launch archive differs from signed package')
+    require(unarchive(e['additionalLaunchdPlistEntries']) == extras, 'launch archive differs from signed package')
     # Identity changes allocate a new staging directory. The paired fields always move together.
     new_id = str(uuid.uuid5(uuid.NAMESPACE_URL, 'unixnu-piano-camera:' + cdhash + ':' + binaries[HOST]['cdhash'])).upper()
     new_path = ROOT + '/' + new_id + '/' + EXTNAME
     e['uniqueID'] = new_id
     slash = '/' if e['stagedBundleURL']['relative'].endswith('/') else ''
     e['stagedBundleURL'] = {'relative': 'file://' + new_path + slash}
-    e['bundleVersion'] = {k: info[k] for k in ('CFBundleShortVersionString', 'CFBundleVersion')}
+    e['bundleVersion'] = {key: info[key] for key in version_keys}
     if 'stagedCdhashes' in e:
         e['stagedCdhashes'] = {cdhash: {'cputype': 16777228, 'cpusubtype': 0}}
     if 'stagedCdhash' in e:
@@ -210,11 +245,12 @@ def prepare(folder, package, package_record):
     files = {p.relative_to(bundle).as_posix(): p for p in bundle.rglob('*') if p.is_file()}
     require(set(files) == set(captured_files), 'final bundle tree differs from genuine staged layout')
     root_modes = {}
+    old_parent = old_path.rsplit('/', 1)[0]
     for path, meta in metadata.items():
         if path == ROOT or path == ROOT + '/.staging':
             root_modes[path] = meta['mode']
-        elif path.startswith(ROOT + '/' + original['extensions'][0]['uniqueID'].upper()):
-            dest = path.replace(ROOT + '/' + original['extensions'][0]['uniqueID'].upper(), ROOT + '/' + new_id, 1)
+        elif path == old_parent or path == old_path or path.startswith(old_path + '/'):
+            dest = ROOT + '/' + new_id + path.removeprefix(old_parent)
             root_modes[dest] = meta['mode']
     for inside, path in files.items():
         require(not path.is_symlink(), 'symlink in signed bundle')
@@ -232,21 +268,33 @@ def prepare(folder, package, package_record):
 
 def seed(mount, prepared):
     mount = Path(mount)
-    base = mount / ROOT.lstrip('/')
-    require(not (base / 'db.plist').exists(), 'input seed already has a system-extension database')
-    for path, (data, mode) in prepared['tree'].items():
+    database = ROOT + '/db.plist'
+    for path in prepared['tree'].keys() | prepared['modes'].keys():
         dest = mount / path.lstrip('/')
         require(not any(p.is_symlink() for p in (dest, *dest.parents) if p.is_relative_to(mount)), 'symlink in seed destination')
+        if path in prepared['tree']:
+            require(not dest.exists(), 'seed file already exists: ' + path)
+        else:
+            require(not dest.exists() or dest.is_dir(), 'expected seed directory: ' + path)
+
+    def write(path):
+        data, mode = prepared['tree'][path]
+        dest = mount / path.lstrip('/')
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(data)
+        with dest.open('xb') as file:
+            file.write(data)
         os.chmod(dest, mode)
         require(digest(dest.read_bytes()) == digest(data), 'seed write differs: ' + path)
+
+    for path in prepared['tree']:
+        if path != database:
+            write(path)
     for path, mode in prepared['modes'].items():
         dest = mount / path.lstrip('/')
-        require(not dest.is_symlink(), 'symlink in seed SystemExtensions')
         if path not in prepared['tree']:
             dest.mkdir(parents=True, exist_ok=True)
         os.chmod(dest, mode)
+    write(database)
     return prepared['record']
 
 

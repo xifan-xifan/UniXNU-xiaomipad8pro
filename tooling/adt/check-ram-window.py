@@ -31,28 +31,52 @@ def load(name, path):
 
 def chosen(adt_path):
     adt = load('adt_dump', DEVICE / 'tooling/adt/adt-dump.py')
-    (_, children), _ = adt.parse(Path(adt_path).read_bytes())
+    _, children = adt.parse_tree(Path(adt_path).read_bytes())
+    keys = ('dram-base', 'dram-size', 'darwinboot-memory-size')
     for props, _ in children:
         named = dict(props)
         if named.get('name', b'').rstrip(b'\0') == b'chosen':
-            return {k: struct.unpack('<Q', v)[0] for k, v in named.items() if len(v) == 8 and k in
-                    ('dram-base', 'dram-size', 'darwinboot-memory-size')}
-    raise SystemExit(f'{adt_path}: no /chosen')
+            values = {k: named[k] for k in keys if k in named}
+            if not all(k in values for k in keys[:2]) or any(len(v) != 8 for v in values.values()):
+                raise ValueError(f'{adt_path}: missing or invalid /chosen DRAM window properties')
+            return {k: struct.unpack('<Q', v)[0] for k, v in values.items()}
+    raise ValueError(f'{adt_path}: no /chosen')
 
 
 def kc_span(kc_path):
-    data = Path(kc_path).read_bytes()[:1 << 20]
-    magic, _, _, _, count = struct.unpack_from('<5I', data)
-    if magic != 0xfeedfacf:
-        raise SystemExit(f'{kc_path}: not a 64-bit Mach-O')
-    offset, segments = 32, []
-    for _ in range(count):
-        cmd, size = struct.unpack_from('<II', data, offset)
-        if cmd == 0x19:
-            vmaddr, vmsize = struct.unpack_from('<QQ', data, offset + 24)
-            if vmsize:
-                segments.append((vmaddr, vmaddr + vmsize))
-        offset += size
+    segments = []
+    with Path(kc_path).open('rb') as stream:
+        header = stream.read(32)
+        if len(header) != 32:
+            raise ValueError(f'{kc_path}: truncated Mach-O header')
+        magic, count, commands_size = struct.unpack('<I12xII8x', header)
+        if magic != 0xfeedfacf:
+            raise ValueError(f'{kc_path}: expected a 64-bit Mach-O')
+        offset, end = 32, 32 + commands_size
+        if end > stream.seek(0, 2) or count > commands_size // 8:
+            raise ValueError(f'{kc_path}: truncated Mach-O load commands')
+        for _ in range(count):
+            stream.seek(offset)
+            command = stream.read(8)
+            if len(command) != 8 or end - offset < 8:
+                raise ValueError(f'{kc_path}: truncated Mach-O load command header')
+            cmd, size = struct.unpack('<II', command)
+            if size < 8 or size % 8 or size > end - offset:
+                raise ValueError(f'{kc_path}: invalid Mach-O load command size')
+            if cmd == 0x19:
+                segment = stream.read(64) if size >= 72 else b''
+                if len(segment) != 64:
+                    raise ValueError(f'{kc_path}: short LC_SEGMENT_64')
+                vmaddr, vmsize = struct.unpack_from('<QQ', segment, 16)
+                if vmaddr + vmsize >= 1 << 64:
+                    raise ValueError(f'{kc_path}: LC_SEGMENT_64 address overflow')
+                if vmsize:
+                    segments.append((vmaddr, vmaddr + vmsize))
+            offset += size
+    if offset != end:
+        raise ValueError(f'{kc_path}: Mach-O load commands do not fill the declared size')
+    if not segments:
+        raise ValueError(f'{kc_path}: no nonempty LC_SEGMENT_64')
     return min(s for s, _ in segments), max(e for _, e in segments)
 
 
@@ -62,8 +86,11 @@ def main():
     p.add_argument('--kc', type=Path, required=True)
     p.add_argument('--fd', type=Path)
     a = p.parse_args()
-    c = chosen(a.adt)
-    base, end = kc_span(a.kc)
+    try:
+        c = chosen(a.adt)
+        base, end = kc_span(a.kc)
+    except (OSError, ValueError) as error:
+        sys.exit(str(error))
     request = c.get('darwinboot-memory-size', 0x10000000)
     dram = (c['dram-base'], c['dram-base'] + c['dram-size'])
     start = (RUN[0] + BLOCK - 1) // BLOCK * BLOCK + (base & (BLOCK - 1))

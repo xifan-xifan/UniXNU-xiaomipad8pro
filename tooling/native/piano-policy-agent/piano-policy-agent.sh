@@ -55,30 +55,50 @@ NEVER='com.apple.watchdogd com.apple.security.xprotectd com.apple.mobileactivati
 
 say() { logger -t piano-policy-agent "$*" 2>/dev/null; slog "$*"; }
 
-lpm() {
-  s=$(notifyutil -g "$LPM" | awk '{print $2}')
-  case "$s" in 0|1) ;; *) s=0 ;; esac
-  if sysctl -w machdep.piano_policy_lpm="$s" > /dev/null 2>&1; then
-    say "Low Power Mode $s: machdep.piano_policy_lpm=$s"
+mode_value() {
+  local value
+  value=$(notifyutil -g "$1") || return 1
+  value=$(printf '%s\n' "$value" | awk -v key="$1" '$1 == key && NF == 2 {print $2}')
+  [ -n "$value" ] || return 1
+  case "$value" in 1) echo 1 ;; *) echo 0 ;; esac
+}
+
+read_modes() {
+  lpmv=$(mode_value "$LPM") || lpmv=unknown
+  hpmv=$(mode_value "$HPM") || hpmv=unknown
+  [ "$lpmv" != unknown ] && [ "$hpmv" != unknown ]
+}
+
+write_mode() {   # suffix, label, value
+  if sysctl -w "machdep.piano_policy_$1=$3" > /dev/null 2>&1; then
+    say "$2 $3: machdep.piano_policy_$1=$3"
   else
-    say "Low Power Mode $s: machdep.piano_policy_lpm not there (PianoPolicy inert: boot with piano-policy=N)"
+    say "$2 $3: machdep.piano_policy_$1 unavailable"
   fi
 }
 
-hpm() {
-  s=$(notifyutil -g "$HPM" | awk '{print $2}')
-  case "$s" in 0|1) ;; *) s=0 ;; esac
-  if sysctl -w machdep.piano_policy_hpm="$s" > /dev/null 2>&1; then
-    say "High Power Mode $s: machdep.piano_policy_hpm=$s"
+energy_modes() {
+  local lpmv hpmv
+  read_modes || { say "Energy Mode read failed: skipping sysctl writes"; return; }
+  # Either notification may arrive after both values changed. Low Power takes precedence during the two writes.
+  if [ "$lpmv" = 1 ]; then
+    write_mode lpm "Low Power Mode" "$lpmv"
+    write_mode hpm "High Power Mode" "$hpmv"
   else
-    say "High Power Mode $s: machdep.piano_policy_hpm not there (a kernel before Energy Mode, or PianoPolicy inert)"
+    write_mode hpm "High Power Mode" "$hpmv"
+    write_mode lpm "Low Power Mode" "$lpmv"
   fi
 }
 
 lid() {
-  r=$(ioreg -r -c IOPMrootDomain -d 1 | grep -E '"AppleClamshell(State|CausesSleep)"')
-  case "$r" in *'"AppleClamshellState" = Yes'*) ;; *) return ;; esac
-  case "$r" in *'"AppleClamshellCausesSleep" = Yes'*) say "cover closed: the system sleeps"; return ;; esac
+  local r
+  r=$(ioreg -r -c IOPMrootDomain -d 1) || return 0
+  printf '%s\n' "$r" | grep -Eq '^[[:space:]]*"AppleClamshellState" = Yes[[:space:]]*$' || return 0
+  if printf '%s\n' "$r" | grep -Eq '^[[:space:]]*"AppleClamshellCausesSleep" = Yes[[:space:]]*$'; then
+    say "cover closed: the system sleeps"
+    return
+  fi
+  printf '%s\n' "$r" | grep -Eq '^[[:space:]]*"AppleClamshellCausesSleep" = No[[:space:]]*$' || return 0
   pmset displaysleepnow && say "cover closed without sleep: display sleep (the screen locks)"
 }
 
@@ -91,7 +111,12 @@ up() {   # uptime in s (boot time moves with a clock set, so the difference stay
   case "$n" in ''|*[!0-9]*) echo 0; return ;; esac
   echo $((n - b))
 }
-bootid() { local u; u=$(sysctl -n kern.bootsessionuuid 2>/dev/null | tr -dc 'A-Fa-f0-9-'); echo "${u:-unknown}"; }
+bootid() {
+  local u
+  u=$(sysctl -n kern.bootsessionuuid 2>/dev/null) || return 1
+  case "$u" in ''|*[!A-Fa-f0-9-]*) return 1 ;; esac
+  printf '%s\n' "$u"
+}
 console() { local u; u=$(stat -f %u /dev/console 2>/dev/null); case "$u" in ''|*[!0-9]*) u=0 ;; esac; echo "$u"; }
 slog() {
   local n
@@ -116,38 +141,54 @@ lock() {
   done
   echo $$ > "$SLIM/lock/pid"
 }
-unlock() { rm -rf "$SLIM/lock"; }
-num() { case "$1" in ''|*[!0-9]*) echo 0 ;; *) echo "$1" ;; esac; }
+unlock() { rm -rf "$SLIM/lock" && return "${1:-0}"; }
+num() {
+  local v
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  v=${1#"${1%%[!0]*}"}   # shell arithmetic treats a leading zero as octal
+  [ "${#v}" -le 18 ] || return 1   # leave room for arithmetic on 64-bit counters and times
+  printf '%s\n' "${v:-0}"
+}
 load() {
   local kv
-  st=normal gen=0 since=0 seq=0 due=0
+  st=normal gen=0 since= seq=0 due=0
   if [ -f "$SLIM/state" ]; then
     for kv in $(head -1 "$SLIM/state"); do
       case "$kv" in
-        state=*) st=${kv#state=} ;; gen=*) gen=$(num "${kv#gen=}") ;; since=*) since=$(num "${kv#since=}") ;;
-        seq=*) seq=$(num "${kv#seq=}") ;; due=*) due=$(num "${kv#due=}") ;;
+        state=*) st=${kv#state=} ;;
+        gen=*) gen=$(num "${kv#gen=}") || gen=0 ;;
+        since=*) since=$(num "${kv#since=}") ;;
+        seq=*) seq=$(num "${kv#seq=}") || seq=0 ;;
+        due=*) due=$(num "${kv#due=}") || due=0 ;;
       esac
     done
   fi
   case "$st" in normal|pending|save|off) ;; *) st=normal ;; esac
+  if [ -z "$since" ]; then
+    if [ "$st" = pending ]; then st=normal; due=0; fi   # a pending Save needs a valid start time
+    since=0
+  fi
 }
 store() {   # EVENT
   local na nb
   na=0; [ -f "$SLIM/applied" ] && na=$(grep -c . "$SLIM/applied")
   nb=0; [ -f "$SLIM/broken.tsv" ] && nb=$(grep -c . "$SLIM/broken.tsv")
-  printf 'state=%s gen=%s since=%s seq=%s due=%s want=%s event=%s lpm=%s hpm=%s source=%s console=%s applied=%s broken=%s test=%s boot=%s up=%s\n' \
+  if [ ! -d "$SLIM/state" ] && printf 'state=%s gen=%s since=%s seq=%s due=%s want=%s event=%s lpm=%s hpm=%s source=%s console=%s applied=%s broken=%s test=%s boot=%s up=%s\n' \
     "$st" "$gen" "$since" "$seq" "$due" "${want:-normal}" "$1" "${lpmv:-0}" "${hpmv:-0}" "${srcv:-unknown}" "$(console)" "$na" "$nb" \
-    "$([ -f "$SLIM/test-pause" ] && echo on || echo off)" "$(bootid)" "$(up)" > "$SLIM/state.new" && mv -f "$SLIM/state.new" "$SLIM/state"
+    "$([ -f "$SLIM/test-pause" ] && echo on || echo off)" "$(bootid || echo unknown)" "$(up)" > "$SLIM/state.new" &&
+    mv -f "$SLIM/state.new" "$SLIM/state"; then return 0; fi
+  say "slim: could not update $SLIM/state for event $1"
+  return 1
 }
 readpower() {   # lpmv, hpmv, srcv and want (normal, save, off)
   local p
-  lpmv=$(notifyutil -g "$LPM" | awk '{print $2}'); case "$lpmv" in 0|1) ;; *) lpmv=0 ;; esac
-  hpmv=$(notifyutil -g "$HPM" | awk '{print $2}'); case "$hpmv" in 0|1) ;; *) hpmv=0 ;; esac
+  read_modes || slog "slim: Energy Mode read failed"
   p=$(pmset -g ps 2>/dev/null | head -1)
   case "$p" in
     *"'Battery Power'"*) srcv=battery ;; *"'AC Power'"*) srcv=ac ;; *"'UPS Power'"*) srcv=ups ;; *) srcv=unknown ;;
   esac
   if [ -e "$SLIM/off" ]; then want=off
+  elif [ "$lpmv" = unknown ] || [ "$hpmv" = unknown ]; then want=unknown; return 1
   elif [ "$lpmv" = 1 ] || { [ "$srcv" = battery ] && [ "$hpmv" = 0 ]; }; then want=save
   else want=normal; fi
 }
@@ -162,7 +203,7 @@ entries() {   # VERBOSE: the class-C list and the test list (behind its flag fil
 }
 addents() {   # FILE TAG VERBOSE
   local m d l p x why
-  while read -r m d l p x; do
+  while read -r m d l p x || [ -n "$m$d$l$p$x" ]; do
     case "$m" in ''|'#'*) continue ;; esac
     why=''
     case "$m" in bg|unload) ;; *) why="mode $m" ;; esac
@@ -177,18 +218,19 @@ addents() {   # FILE TAG VERBOSE
     echo "$m $d $l $p $2"
   done < "$1"
 }
-watch() {   # LABEL PROCESS: its crash reports count for WATCH s from now
-  mkdir -p "$SLIM/watch" && echo "$(bootid) $(up) $2" > "$SLIM/watch/$1"
+watch() {   # LABEL PROCESS BOOT: its crash reports count for WATCH s from now
+  mkdir -p "$SLIM/watch" && echo "$3 $(up) $2" > "$SLIM/watch/$1"
 }
 crashcheck() {
   local f l b t p n bid now
   [ -d "$SLIM/watch" ] || return 0
-  bid=$(bootid); now=$(up)
+  bid=$(bootid) || return 0
+  now=$(up)
   for f in "$SLIM"/watch/*; do
     [ -f "$f" ] || continue
     l=${f##*/}
     read -r b t p < "$f" || { rm -f "$f"; continue; }
-    t=$(num "$t")
+    t=$(num "$t") || { rm -f "$f"; continue; }
     if [ "$b" != "$bid" ] || [ $((now - t)) -gt "$WATCH" ]; then rm -f "$f"; continue; fi
     n=$(find "$R/Library/Logs/DiagnosticReports" "$R"/Users/*/Library/Logs/DiagnosticReports -maxdepth 1 -type f \
           -name "${p}[-_]*.ips" -newer "$f" 2>/dev/null | wc -l | tr -dc 0-9)
@@ -198,7 +240,8 @@ crashcheck() {
 failed() {   # LABEL REASON: one failure; the second marks the label broken
   local n
   n=$(awk -v l="$1" '$1 == l {print $2}' "$SLIM/fail.tsv" 2>/dev/null | tail -1)
-  n=$(( $(num "$n") + 1 ))
+  n=$(num "$n") || n=0
+  n=$((n + 1))
   { [ -f "$SLIM/fail.tsv" ] && awk -v l="$1" '$1 != l' "$SLIM/fail.tsv"; printf '%s %s\n' "$1" "$n"; } > "$SLIM/fail.tsv.new" &&
     mv -f "$SLIM/fail.tsv.new" "$SLIM/fail.tsv"
   say "FAIL $1: $2 (failure $n of 2)"
@@ -211,9 +254,13 @@ broken() {   # LABEL REASON
 }
 apply() {   # VERBOSE: Save for every entry (idempotent: a bg entry follows its job's new pid)
   local bid cu m d l p tag dom pid rc
-  bid=$(bootid); cu=$(console)
-  entries "$1" > "$SLIM/entries"
-  touch "$SLIM/applied"; prune
+  bid=$(bootid) || { slog "slim: Save deferred: boot session unavailable"; return 0; }
+  cu=$(console)
+  entries "$1" > "$SLIM/entries" || return 1
+  if ! printf '' >> "$SLIM/applied" || ! prune; then
+    say "slim: Save deferred: could not update $SLIM/applied"
+    return 1
+  fi
   while read -r m d l p tag; do
     if [ "$d" = gui ]; then
       if [ "$cu" -lt 501 ]; then [ "$1" = verbose ] && slog "save $l: no console session (gui entries wait for a login)"; continue; fi
@@ -227,7 +274,7 @@ apply() {   # VERBOSE: Save for every entry (idempotent: a bg entry follows its 
         taskpolicy -b -p "$pid" < /dev/null > /dev/null 2>&1; rc=$?
         if [ "$rc" = 0 ]; then
           echo "$bid bg $dom $l $pid $p $tag" >> "$SLIM/applied"
-          watch "$l" "$p"; say "save $l ($tag): taskpolicy -b -p $pid (darwin background)"
+          watch "$l" "$p" "$bid"; say "save $l ($tag): taskpolicy -b -p $pid (darwin background)"
         else failed "$l" "taskpolicy -b -p $pid rc $rc"; fi ;;
       unload)
         awk -v d="$dom" -v l="$l" '$2 == "unload" && $3 == d && $4 == l {f = 1} END {exit !f}' "$SLIM/applied" && continue
@@ -235,29 +282,32 @@ apply() {   # VERBOSE: Save for every entry (idempotent: a bg entry follows its 
         launchctl bootout "$dom/$l" < /dev/null > /dev/null 2>&1; rc=$?
         if [ "$rc" = 0 ] || ! loaded "$dom/$l"; then
           echo "$bid unload $dom $l - $p $tag" >> "$SLIM/applied"
-          watch "$l" "$p"; say "save $l ($tag): launchctl bootout $dom/$l (rc $rc)"
+          watch "$l" "$p" "$bid"; say "save $l ($tag): launchctl bootout $dom/$l (rc $rc)"
         else failed "$l" "launchctl bootout $dom/$l rc $rc"; fi ;;
     esac
   done < "$SLIM/entries"
 }
 restore() {   # [LABEL]: undo this boot's actions (all, or one label's); an undo that can be retried stays recorded
-  local bid b m dom l pid p tag rc rc2
+  local bid b m dom l pid p tag rc rc2 IN_RESTORE=1
   [ -s "$SLIM/applied" ] || return 0
-  IN_RESTORE=1
-  bid=$(bootid)
-  : > "$SLIM/applied.keep"
+  [ -f "$SLIM/applied" ] || return 1
+  bid=$(bootid) || { say "slim: restore deferred: boot session unavailable"; return 1; }
+  printf '' > "$SLIM/applied.keep" || return 1
   while read -r b m dom l pid p tag; do
     [ -n "$l" ] || continue
-    if [ -n "${1:-}" ] && [ "$l" != "$1" ]; then echo "$b $m $dom $l $pid $p $tag" >> "$SLIM/applied.keep"; continue; fi
+    if [ -n "${1:-}" ] && [ "$l" != "$1" ]; then
+      echo "$b $m $dom $l $pid $p $tag" >> "$SLIM/applied.keep" || return 1
+      continue
+    fi
     if [ "$b" != "$bid" ]; then slog "normal $l: recorded on another boot: dropped (every boot starts Normal)"; continue; fi
     case "$m" in
       bg)
         if [ "$(jobpid "$dom/$l")" = "$pid" ]; then
           taskpolicy -B -p "$pid" < /dev/null > /dev/null 2>&1; rc=$?
-          if [ "$rc" = 0 ]; then watch "$l" "$p"; say "normal $l: taskpolicy -B -p $pid"
+          if [ "$rc" = 0 ]; then watch "$l" "$p" "$bid"; say "normal $l: taskpolicy -B -p $pid"
           else
             failed "$l" "taskpolicy -B -p $pid rc $rc"
-            inlist "$l" "$SLIM/broken.tsv" || echo "$b $m $dom $l $pid $p $tag" >> "$SLIM/applied.keep"
+            inlist "$l" "$SLIM/broken.tsv" || echo "$b $m $dom $l $pid $p $tag" >> "$SLIM/applied.keep" || return 1
           fi
         else slog "normal $l: pid $pid gone (its successor runs unthrottled): nothing to undo"; fi ;;
       unload)
@@ -268,25 +318,24 @@ restore() {   # [LABEL]: undo this boot's actions (all, or one label's); an undo
           sleep 2
           launchctl bootstrap "$dom" "$(plist "${dom%%/*}" "$l")" < /dev/null > /dev/null 2>&1; rc2=$?
         fi
-        if loaded "$dom/$l"; then watch "$l" "$p"; say "normal $l: launchctl bootstrap $dom (rc $rc/$rc2)"
+        if loaded "$dom/$l"; then watch "$l" "$p" "$bid"; say "normal $l: launchctl bootstrap $dom (rc $rc/$rc2)"
         else broken "$l" "launchctl bootstrap $dom failed twice (rc $rc, $rc2): it loads at the next login or boot"; fi ;;
     esac
-  done < "$SLIM/applied"
+  done < "$SLIM/applied" || return 1
   mv -f "$SLIM/applied.keep" "$SLIM/applied"
-  IN_RESTORE=0
 }
 prune() {   # records whose action no longer holds are dropped: the job loaded again (a new session, by hand), the process gone
   local b m dom l pid p tag
   [ -s "$SLIM/applied" ] || return 0
-  : > "$SLIM/applied.new"
+  printf '' > "$SLIM/applied.new" || return 1
   while read -r b m dom l pid p tag; do
     [ -n "$l" ] || continue
     case "$m" in
       bg) if [ "$(jobpid "$dom/$l")" != "$pid" ]; then slog "save $l: pid $pid gone: record dropped"; continue; fi ;;
       unload) if loaded "$dom/$l"; then slog "save $l: loaded again (a new session, or by hand): record dropped"; continue; fi ;;
     esac
-    echo "$b $m $dom $l $pid $p $tag" >> "$SLIM/applied.new"
-  done < "$SLIM/applied"
+    echo "$b $m $dom $l $pid $p $tag" >> "$SLIM/applied.new" || return 1
+  done < "$SLIM/applied" || return 1
   mv -f "$SLIM/applied.new" "$SLIM/applied"
 }
 schedule() {   # UPTIME: one tick then (a sleeping child posts it)
@@ -301,26 +350,30 @@ slim() {   # EVENT
   local now
   sdir || { say "slim: no state folder $SLIM: event $1 ignored"; return 0; }
   lock || { say "slim: $SLIM/lock held: event $1 ignored"; return 0; }
-  load; seq=$((seq + 1)); readpower; now=$(up)
+  load; seq=$((seq + 1))
+  readpower || { unlock; return; }
+  now=$(up)
   crashcheck
   case "$want" in
     off)
       if [ "$st" != off ] || [ -s "$SLIM/applied" ]; then
-        restore; gen=$((gen + 1))
+        restore || { unlock; return 1; }
+        gen=$((gen + 1))
         [ "$st" = off ] || say "slim: kill switch $SLIM/off: every action undone, nothing applied (gen $gen)"
         st=off
       fi ;;
     normal)
       if [ "$st" = pending ]; then gen=$((gen + 1)); say "slim: Save cancelled after $((now - since)) s (event $1: lpm=$lpmv hpm=$hpmv source=$srcv; gen $gen)"; st=normal
       elif [ "$st" != normal ]; then
-        restore; gen=$((gen + 1))
+        restore || { unlock; return 1; }
+        gen=$((gen + 1))
         say "slim: Normal (event $1: lpm=$lpmv hpm=$hpmv source=$srcv; was $st; gen $gen)"; st=normal
         schedule $((now + CHECK))
-      elif [ -s "$SLIM/applied" ]; then restore
+      elif [ -s "$SLIM/applied" ]; then restore || { unlock; return 1; }
       fi ;;
     save)
       case "$st" in
-        save) apply quiet ;;
+        save) apply quiet || { unlock; return 1; } ;;
         normal|off)
           st=pending; since=$now; gen=$((gen + 1))
           say "slim: Save wanted (event $1: lpm=$lpmv hpm=$hpmv source=$srcv): applied once stable for $DEBOUNCE s at uptime >= $MIN_UP (gen $gen)"
@@ -329,25 +382,25 @@ slim() {   # EVENT
           if [ $((now - since)) -ge "$DEBOUNCE" ] && [ "$now" -ge "$MIN_UP" ]; then
             st=save; gen=$((gen + 1))
             say "slim: Save (stable $((now - since)) s; lpm=$lpmv hpm=$hpmv source=$srcv; gen $gen)"
-            apply verbose
+            apply verbose || { unlock; return 1; }
             schedule $((now + CHECK))
           else schedule "$(max $((since + DEBOUNCE)) "$MIN_UP")"; fi ;;
       esac ;;
   esac
-  store "$1"; unlock
+  store "$1"; unlock "$?"
 }
 slim_start() {   # every boot starts Normal; after a restart of this agent its own actions are undone first
   local n
   sdir || { say "slim: no state folder $SLIM"; return 1; }
   lock || { say "slim: $SLIM/lock held at start"; return 1; }
-  load; readpower
+  load; readpower || :
   if [ -s "$SLIM/applied" ]; then
     n=$(awk -v b="$(bootid)" '$1 == b' "$SLIM/applied" | grep -c .)
-    restore
+    restore || { unlock; return 1; }
     say "slim: start: restore first ($n action(s) of this boot undone; other boots' records dropped)"
   fi
   st=normal; since=0; due=0; gen=$((gen + 1))
-  store start; unlock
+  store start; unlock "$?" || return 1
   say "slim: start: Normal (gen $gen; class-C entries: $(printf '%s\n' "$PAUSE" | grep -c '[^[:space:]]'), test list $([ -f "$SLIM/test-pause" ] && echo on || echo off))"
 }
 
@@ -358,27 +411,28 @@ case "${1:-}" in
     echo "== log"; tail -n "${2:-40}" "$SLIM/log" 2>/dev/null; exit 0 ;;
   --restore)
     sdir && lock || exit 1
-    load; readpower; restore; st=normal; since=0; gen=$((gen + 1)); store restore; unlock
+    load; readpower || :
+    restore || { unlock; exit 1; }
+    st=normal; since=0; gen=$((gen + 1)); store restore; unlock "$?" || exit 1
     say "slim: restore by hand: every action of this boot undone (Normal; $SLIM/off keeps it so)"; exit 0 ;;
   --start) slim_start; exit $? ;;
   --event)
     case "${2:-}" in
-      lpm) lpm; slim lpm ;; hpm) hpm; slim hpm ;; lid) lid ;; source|session|tick) slim "$2" ;;
+      lpm|hpm) energy_modes; slim "$2" ;; lid) lid; exit 0 ;; source|session|tick) slim "$2" ;;
       *) echo 'usage: piano-policy-agent --event lpm|hpm|lid|source|session|tick' >&2; exit 2 ;;
     esac
-    exit 0 ;;
+    exit $? ;;
   *) echo 'usage: piano-policy-agent [--status [N] | --restore | --start | --event NAME]' >&2; exit 2 ;;
 esac
 
 say "started (pid $$): Low Power Mode -> machdep.piano_policy_lpm; High Power Mode -> machdep.piano_policy_hpm; a cover closed without sleep -> display sleep; the power state of background services (slim)"
-lpm
-hpm
-slim_start
+energy_modes
+slim_start || exit 1
 slim start
 notifyutil -w "$LPM" -w "$HPM" -w "$LID" -w "$SRC" -w "$SESSION" -w "$TICK" | while read -r key _; do
   case "$key" in
-    "$LPM") lpm; slim lpm ;;
-    "$HPM") hpm; slim hpm ;;
+    "$LPM") energy_modes; slim lpm ;;
+    "$HPM") energy_modes; slim hpm ;;
     "$LID") lid ;;
     "$SRC") slim source ;;
     "$SESSION") slim session ;;

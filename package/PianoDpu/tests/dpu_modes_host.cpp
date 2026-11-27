@@ -192,6 +192,31 @@ void testProgFetch()
   LinkLive bad = liveY12k();
   bad.progFetch = 1000 * 576 + 1;   // inside the active lines
   check(!geometry(bad).ok, "a fetch start inside the active lines is refused");
+  l.progFetch = (4620 - 69) * 576 + 1;
+  l.period = 4620 * 576;
+  const Geometry longFetch = geometry(l);
+  check(longFetch.ok && longFetch.fetchLines == 69, "the long 60 Hz porch admits 69 fetch lines");
+  checkEq(plan(longFetch, *modeByHz(144)).hz, 0, "the short 144 Hz porch cannot fit 69 fetch lines");
+  l.progFetch = (4620 - 68) * 576 + 480 + 1;
+  checkEq(plan(geometry(l), *modeByHz(144)).hz, 0, "a fetch offset beyond the short line cannot be preserved");
+}
+
+void testPlanLimits()
+{
+  const Geometry live = geometry(liveY12k());
+  Mode mode = *modeByHz(120);
+  mode.hfp = 2 * (UINT16_MAX - live.dsiHend);
+  checkEq(plan(live, mode).htotal, UINT16_MAX, "the largest HSYNC_CTL line length fits");
+  mode.hfp += 2;
+  checkEq(plan(live, mode).hz, 0, "an oversized HSYNC_CTL line length is refused");
+  mode = *modeByHz(120);
+  mode.vfp = UINT16_MAX + 1 - (live.vsync + live.vbp + live.vactive);
+  checkEq(plan(live, mode).dsiTotal >> 16, UINT16_MAX, "DSI TOTAL encodes the maximum frame length minus one");
+  ++mode.vfp;
+  checkEq(plan(live, mode).hz, 0, "an oversized DSI frame is refused");
+  Geometry skewed = live;
+  skewed.skew = UINT32_MAX;
+  checkEq(plan(skewed, *modeByHz(120)).hz, 0, "the display end clock cannot wrap");
 }
 
 void testRateGroup()
@@ -221,6 +246,7 @@ int main()
   testChangedWords();
   testClassifyOthers();
   testProgFetch();
+  testPlanLimits();
   testRateGroup();
   if (gFailures) {
     std::printf("PianoDpu modes host tests: %u of %u checks FAILED\n", gFailures, gChecks);

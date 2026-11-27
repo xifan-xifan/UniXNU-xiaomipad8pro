@@ -801,21 +801,6 @@ void AGXDeviceUserClient::free()
     if(lock_) {IOLockFree(lock_);lock_=nullptr;}
     IOUserClient::free();
 }
-/* The normal Physical64 factory cannot constrain the cache bits that IOKit accepts from
- * IOConnectMapMemory64. Use the same designated initializer for tier views and force WC
- * when a mapping reaches the pager. Keep default-cache lookup usable for IOConnectUnmapMemory64. */
-class NativeAdrenoTierView final : public IOGeneralMemoryDescriptor {
-    OSDeclareDefaultStructors(NativeAdrenoTierView)
-protected:
-    IOReturn doMap(vm_map_t map,IOVirtualAddress *address,IOOptionBits options,IOByteCount offset,IOByteCount length) override
-    {
-        const auto cache=options&kIOMapCacheMask;
-        if(cache!=kIOMapDefaultCache && cache!=kIOMapWriteCombineCache)return kIOReturnUnsupported;
-        return IOGeneralMemoryDescriptor::doMap(map,address,(options&~kIOMapCacheMask)|kIOMapWriteCombineCache,offset,length);
-    }
-};
-OSDefineMetaClassAndStructors(NativeAdrenoTierView,IOGeneralMemoryDescriptor)
-
 IOReturn AGXDeviceUserClient::clientMemoryForType(UInt32 type,IOOptionBits *options,IOMemoryDescriptor **memory)
 {
     if(memory)*memory=nullptr;
@@ -857,7 +842,7 @@ IOReturn AGXDeviceUserClient::clientMemoryForType(UInt32 type,IOOptionBits *opti
     if(v && v->descriptor && v->token==type) {
         v->descriptor->retain();*memory=v->descriptor;*options=kIOMapAnywhere|cache;
         if(NativeAdrenoMemory *b=live_?box_->core.memoryForToken(type):nullptr)
-            if(b->unmapped() || b->tier())*options=kIOMapAnywhere|(b->writeCombined()?kIOMapWriteCombineCache:kIOMapDefaultCache);
+            if(b->unmapped())*options=kIOMapAnywhere|(b->writeCombined()?kIOMapWriteCombineCache:kIOMapDefaultCache);
         native_adreno_view_diag[2]=native_adreno_view_diag[2]+1;
         IOLockUnlock(lock_);
         return kIOReturnSuccess;
@@ -890,13 +875,7 @@ IOReturn AGXDeviceUserClient::clientMemoryForType(UInt32 type,IOOptionBits *opti
             else {
                 for(size_t i=0;i<count;++i)ranges[i]={backing->spans()[i].physical,backing->spans()[i].bytes};
                 const IOOptionBits physical=static_cast<IOOptionBits>(kIODirectionInOut)|static_cast<IOOptionBits>(kIOMemoryTypePhysical64);
-                IOMemoryDescriptor *descriptor=nullptr;
-                if(backing->tier()) {
-                    auto *view=new NativeAdrenoTierView;
-                    if(view && view->initWithOptions(ranges,(UInt32)count,0,nullptr,physical|kIOMemoryMapperNone,nullptr))
-                        descriptor=view;
-                    else if(view)view->release();
-                } else descriptor=IOMemoryDescriptor::withAddressRanges(ranges,(UInt32)count,physical,nullptr);
+                IOMemoryDescriptor *descriptor=IOMemoryDescriptor::withAddressRanges(ranges,(UInt32)count,physical,nullptr);
                 IODeleteData(ranges,IOAddressRange,count);
                 if(!descriptor)status=kIOReturnNoMemory;
                 else if(!v || v->descriptor) {
@@ -906,7 +885,7 @@ IOReturn AGXDeviceUserClient::clientMemoryForType(UInt32 type,IOOptionBits *opti
                 } else {
                     v->token=type;v->descriptor=descriptor;descriptor->retain();
                     *memory=descriptor;
-                    *options=kIOMapAnywhere|(backing->tier()?kIOMapWriteCombineCache:cache);
+                    *options=kIOMapAnywhere|cache;
                     native_adreno_view_diag[1]=native_adreno_view_diag[1]+1;
                     status=kIOReturnSuccess;
                 }
@@ -2176,10 +2155,11 @@ extern "C" bool native_adreno_fences(uint32_t *submitted,uint32_t *retired)
     if(!submitted || !retired)return false;
     *submitted=*retired=0;
     if(!__atomic_load_n(&g.published,__ATOMIC_ACQUIRE) || !g.ring || lost())return false;
-    const uint32_t handed=g.ring->lastSubmitted(),recorded=g.ring->completedFence();
+    const uint32_t recorded=g.ring->completedFence();
     const volatile uint32_t *memptrs=g.ring->memptrs();
-    const uint32_t written=memptrs?memptrs[1]:recorded;   /* +4: the completed fence the CP writes (struct msm_rbmemptrs) */
-    *submitted=handed;
+    const uint32_t written=memptrs?__atomic_load_n(&memptrs[1],__ATOMIC_ACQUIRE):recorded;
+    /* Read the issued bound after sampling the completion a concurrent reset may have published. */
+    *submitted=g.ring->lastSubmitted();
     *retired=int32_t(written-recorded)>=0?written:recorded;
     return true;
 }

@@ -22,6 +22,24 @@ namespace pianotouch {
 constexpr unsigned kResumeDownloads = 2;
 constexpr uint32_t kDisplayPollMs = 250;   // how often the frame thread reads piano-display-power
 
+// The panel worker requests a park before sending panel sleep commands. The frame thread acknowledges only once SPI is idle.
+class PanelPark {
+ public:
+  enum State : uint32_t { released, requested, held };
+  State state() const { return State(__atomic_load_n(&state_, __ATOMIC_ACQUIRE)); }
+  void request() { transition(released, requested); }
+  bool acknowledge() { return transition(requested, held); }
+  bool cancelRequest() { return transition(requested, released); }
+  void release() { __atomic_store_n(&state_, released, __ATOMIC_RELEASE); }
+
+ private:
+  bool transition(uint32_t from, State to)
+  {
+    return __atomic_compare_exchange_n(&state_, &from, to, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+  }
+  uint32_t state_ = released;
+};
+
 enum class PowerMode : uint8_t { on, displayOff, suspended };
 enum class PowerStep : uint8_t { none, suspend, resume, mute, unmute };
 

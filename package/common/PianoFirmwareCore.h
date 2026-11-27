@@ -47,7 +47,7 @@ int pfw_check(const PianoFirmwarePin *pin, const uint8_t *data, uint64_t bytes, 
 /* The pin's file from the mounted volume, at PIANO_FW_DIR/path: *data = allocated, checked bytes (pin->size of them). */
 int pfw_from_fat(FatVolume *v, const PianoFirmwarePin *pin, const PianoFwOps *ops, uint8_t **data);
 /* The addon entry named PATH (exactly, case included). PIANO_FW_OK, PIANO_FW_NOT_FOUND or PIANO_FW_DAMAGED (the whole container is
- * walked bounds checked first, so a damaged one is refused even when the entry comes before the damage). */
+ * walked with bounds checks first, and *entry is set only on success). */
 int pfw_addon_find(const uint8_t *addon, uint64_t bytes, const char *path, PfwAddonEntry *entry);
 /* The pin's file from the addon: *data = allocated, inflated, checked bytes. */
 int pfw_from_addon(const uint8_t *addon, uint64_t bytes, const PianoFirmwarePin *pin, const PianoFwOps *ops, uint8_t **data);

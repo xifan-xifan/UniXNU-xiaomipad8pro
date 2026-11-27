@@ -301,6 +301,63 @@ static void dynamic_limits(void)
     close_intents(&f);CHECK(!f.g.dynamic_bytes && !c->intent_count);
     CHECK(allocations==freed);
 }
+static void framing(void)
+{
+    Fixture f;
+    QcomGlinkChannel *c = setup(&f, 1, 1);
+    const unsigned before = deliveries;
+    f.rt = f.rh = sizeof f.rx - 16;
+    data(&f, QCOM_GLINK_TX_DATA, 1, "lux!", 4, 0);
+    const uint32_t padded_head = f.rh;
+    f.rh -= 4;
+    const uint32_t tail = f.rt;
+    CHECK(qcom_glink_poll(&f.g) == 0 && f.rt == tail && deliveries == before);
+    f.rh = padded_head;
+    CHECK(qcom_glink_poll(&f.g) == 1 && f.rt == f.rh && deliveries == before + 1);
+
+    c = setup(&f, 1, 1);
+    const char name[] = "IPCRTR";
+    remote(&f, QCOM_GLINK_OPEN, 8, sizeof name, (const uint8_t *)name, sizeof name);
+    --f.rh;
+    CHECK(qcom_glink_poll(&f.g) == 0 && f.rt == 0 && c->rcid == 7);
+    ++f.rh;
+    CHECK(qcom_glink_poll(&f.g) == 1 && f.rt == f.rh && c->rcid == 8);
+
+    c = setup(&f, 1, 1);
+    uint8_t payload[8] = {0};
+    put32(payload, sizeof f.rx - 16);
+    remote(&f, QCOM_GLINK_TX_DATA, 7, 1, payload, sizeof payload);
+    CHECK(qcom_glink_poll(&f.g) == QcomGlinkCorrupt && f.rt == 0);
+
+    c = setup(&f, 1, 1);
+    CHECK(qcom_glink_send(&f.g, c, "lux!", UINT32_MAX) == QcomGlinkTooBig);
+    CHECK(f.th == 0 && !c->intent_asked);
+}
+
+static void ownership_under_pressure(void)
+{
+    Fixture f;
+    QcomGlinkChannel *c = setup(&f, 1, 1);
+    const unsigned before = deliveries;
+    f.th = sizeof f.tx - 24;
+    data(&f, QCOM_GLINK_TX_DATA, 1, "lux!", 4, 0);
+    data(&f, QCOM_GLINK_TX_DATA, 1, "lux!", 4, 0);
+    CHECK(qcom_glink_poll(&f.g) == 2 && deliveries == before + 1 && f.g.dropped == 1);
+    CHECK(c->local[0].busy && c->local[0].done_due && f.g.done_deferred == 1);
+    f.tt = f.th;
+    qcom_glink_poll(&f.g);
+    CHECK(take(&f, QCOM_GLINK_RX_DONE_W_REUSE, 1) == 1);
+
+    c = setup(&f, 1, 1);
+    f.th = sizeof f.tx - 32;  /* Only one ordinary command fits. */
+    remote(&f, QCOM_GLINK_CLOSE, 7, 0, NULL, 0);
+    CHECK(qcom_glink_poll(&f.g) == 0 && c->up && f.rt == 0);
+    f.tt = sizeof f.tx - 32;
+    CHECK(take(&f, QCOM_GLINK_CLOSE_ACK, 0) == 0);
+    CHECK(qcom_glink_poll(&f.g) == 1 && !c->up && f.rt == f.rh);
+    CHECK(take(&f, QCOM_GLINK_CLOSE_ACK, 0) == 1);
+}
+
 int main(void)
 {
     for(int reuse=0;reuse<=1;++reuse)for(int frag=0;frag<=1;++frag)completion(reuse,frag,1);
@@ -311,6 +368,8 @@ int main(void)
     pmic_channel_returns(0);pmic_channel_returns(1);
     intent_counts();dynamic_pressure(0);dynamic_pressure(16);
     dynamic_capacity(0);dynamic_capacity(1);dynamic_limits();
+    framing();
+    ownership_under_pressure();
     printf("glink_return_host: %u checks, %u failures, %u delivered, %u kicks\n",checks,failures,deliveries,kicks);
     return failures?1:0;
 }

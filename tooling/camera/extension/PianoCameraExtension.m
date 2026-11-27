@@ -29,6 +29,7 @@ static os_log_t gLog;
   dispatch_source_t _timer;
   dispatch_semaphore_t _timerCancelled;
   dispatch_queue_t _outputQueue, _captureQueue;
+  NSObject *_lifecycleLock;
   int32_t _nativeWidth, _nativeHeight;
   uint32_t _sensor;
   atomic_bool _running;
@@ -73,12 +74,17 @@ static BOOL validDuration(NSUInteger index, CMTime time)
 - (instancetype)initWithWidth:(int32_t)width height:(int32_t)height sensor:(uint32_t)sensor
 {
   if (!(self = [super init])) return nil;
+  if (width <= 0 || height <= 0 || width > 1280 || height > 768 ||
+      (sensor == kPianoCameraFront && (width != 816 || height != 459)) ||
+      (sensor == kPianoCameraRear && (width != 1020 || height != 768)) ||
+      (sensor && sensor != kPianoCameraFront && sensor != kPianoCameraRear)) return nil;
   _nativeWidth = width;
   _nativeHeight = height;
   _sensor = sensor;
   _duration = _maxDuration = CMTimeMake(1, kPianoNativeFps);
   atomic_init(&_running, false);
   atomic_init(&_captureDropped, 0);
+  _lifecycleLock = [NSObject new];
   _outputQueue = dispatch_queue_create("com.unixnu.PianoCamera.output", DISPATCH_QUEUE_SERIAL);
   _captureQueue = dispatch_queue_create("com.unixnu.PianoCamera.capture", DISPATCH_QUEUE_SERIAL);
   NSDictionary *color = @{
@@ -165,10 +171,12 @@ static BOOL validDuration(NSUInteger index, CMTime time)
   __block BOOL accepted = NO;
   __block NSDictionary *changed;
   dispatch_sync(_outputQueue, ^{
-    NSUInteger next = index ? index.unsignedIntegerValue : self->_activeFormat;
+    NSUInteger next = self->_activeFormat;
+    if ([index isEqualToNumber:@0]) next = 0;
+    else if ([index isEqualToNumber:@1]) next = 1;
+    else if (index) return;
     CMTime duration = requested ? CMTimeMakeFromDictionary((__bridge CFDictionaryRef)requested) : self->_duration;
     CMTime maximum = requestedMax ? CMTimeMakeFromDictionary((__bridge CFDictionaryRef)requestedMax) : self->_maxDuration;
-    if (next > 1 || (index && index.doubleValue != (double)next)) return;
     // A format-only transition chooses a valid duration before notifying the client.
     if (!requested && !validDuration(next, duration)) duration = CMTimeMake(1, kPianoNativeFps);
     if (!requestedMax && !validDuration(next, maximum)) maximum = CMTimeMake(1, kPianoNativeFps);
@@ -211,11 +219,12 @@ static BOOL validDuration(NSUInteger index, CMTime time)
 - (BOOL)authorizedToStartStreamForClient:(CMIOExtensionClient *)client { return YES; }
 
 // Eight moving bars, a sweeping line and 24 clipped counter squares.
-- (void)fill:(CVPixelBufferRef)pb
+- (BOOL)fill:(CVPixelBufferRef)pb
 {
   uint8_t *base = CVPixelBufferGetBaseAddress(pb);
   const size_t stride = CVPixelBufferGetBytesPerRow(pb);
   const int32_t width = (int32_t)CVPixelBufferGetWidth(pb), height = (int32_t)CVPixelBufferGetHeight(pb);
+  if (!base || width <= 0 || height <= 0 || !pianoOutputRowsValid(stride, (uint64_t)width * 4, height)) return NO;
   static const uint8_t bars[8][3] = {{255, 255, 255}, {0, 255, 255}, {255, 255, 0}, {0, 255, 0},
                                      {255, 0, 255}, {0, 0, 255},   {255, 0, 0},   {16, 16, 16}};
   const uint32_t shift = (uint32_t)(_frame * 8 % width), sweep = (uint32_t)(_frame * 6 % height);
@@ -237,11 +246,14 @@ static BOOL validDuration(NSUInteger index, CMTime time)
         px[0] = px[1] = px[2] = v;
       }
   }
+  return YES;
 }
 
 static IOReturn liveCall(io_connect_t connection, uint32_t op, const void *in, size_t inSize, void *out, size_t size)
 {
-  return IOConnectCallStructMethod(connection, op, in, inSize, out, &size);
+  size_t actual = size;
+  IOReturn result = IOConnectCallStructMethod(connection, op, in, inSize, out, &actual);
+  return !result && actual != size ? kIOReturnBadArgument : result;
 }
 
 static BOOL ioResult(IOReturn status, NSError **outError)
@@ -320,8 +332,12 @@ static CVPixelBufferRef borrowPixel(CVPixelBufferPoolRef pool, unsigned threshol
 
 - (void)tick
 {
+  [self tickAtSourceTime:clock_gettime_nsec_np(CLOCK_UPTIME_RAW)];
+}
+
+- (void)tickAtSourceTime:(uint64_t)now
+{
   if (!atomic_load(&_running)) return;
-  const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
   if (_sensor && (!_latest || !pianoOutputSourceFresh(now, _latestSourceNs))) {
     ++_staleTicks;
     if (_latest && !_stalled) {
@@ -338,10 +354,10 @@ static CVPixelBufferRef borrowPixel(CVPixelBufferPoolRef pool, unsigned threshol
   if (!pb) { ++_dropped; return; }
   if (!CVPixelBufferLockBaseAddress(pb, 0)) {
     BOOL initialized = YES;
-    if (!_sensor) [self fill:pb];
+    if (!_sensor) initialized = [self fill:pb];
     else if (CVPixelBufferLockBaseAddress(_latest, kCVPixelBufferLock_ReadOnly)) initialized = NO;
     else {
-      pianoOutputScaleBGRA(CVPixelBufferGetBaseAddress(_latest), _nativeWidth, _nativeHeight,
+      initialized = pianoOutputScaleBGRA(CVPixelBufferGetBaseAddress(_latest), _nativeWidth, _nativeHeight,
                            CVPixelBufferGetBytesPerRow(_latest), CVPixelBufferGetBaseAddress(pb),
                            (uint32_t)CVPixelBufferGetWidth(pb), (uint32_t)CVPixelBufferGetHeight(pb),
                            CVPixelBufferGetBytesPerRow(pb));
@@ -373,24 +389,38 @@ static CVPixelBufferRef borrowPixel(CVPixelBufferPoolRef pool, unsigned threshol
   CVPixelBufferRelease(pb);
 }
 
+static BOOL validLiveFrame(const PianoCameraLiveFrame *frame, uint32_t sensor, uint64_t mapSize, uint64_t lastSequence)
+{
+  if (!frame || (sensor != kPianoCameraRear && sensor != kPianoCameraFront)) return NO;
+  const BOOL rear = sensor == kPianoCameraRear;
+  const uint32_t rawWidth = rear ? 4080 : 3264, rawHeight = rear ? 3072 : 1836, stride = rear ? 5104 : 4080;
+  return frame->version == kPianoCameraLiveVersion && frame->sensor == sensor && frame->slot < kPianoCameraSlots &&
+      frame->width == rawWidth && frame->height == rawHeight && frame->stride == stride &&
+      frame->bayer == (rear ? kPianoCameraGRBG : kPianoCameraBGGR) && frame->black < 1023 &&
+      frame->bytes == stride * rawHeight && frame->bytes <= kPianoCameraSlotBytes && frame->sofTicks &&
+      frame->sequence > lastSequence && (uint64_t)frame->slot * kPianoCameraSlotBytes + frame->bytes <= mapSize;
+}
+
 - (BOOL)convert:(const PianoCameraLiveFrame *)frame pixel:(CVPixelBufferRef)pb
 {
+  if (!_raw || !validLiveFrame(frame, _sensor, _rawSize, _lastReadSequence) || !pb ||
+      CVPixelBufferGetPixelFormatType(pb) != kCVPixelFormatType_32BGRA ||
+      CVPixelBufferGetWidth(pb) != (size_t)_nativeWidth || CVPixelBufferGetHeight(pb) != (size_t)_nativeHeight) return NO;
   const BOOL rear = _sensor == kPianoCameraRear;
-  const uint32_t rawWidth = rear ? 4080 : 3264, rawHeight = rear ? 3072 : 1836, stride = rear ? 5104 : 4080;
-  if (frame->version != kPianoCameraLiveVersion || frame->sensor != _sensor || frame->slot >= kPianoCameraSlots ||
-      frame->width != rawWidth || frame->height != rawHeight || frame->stride != stride ||
-      frame->bayer != (rear ? kPianoCameraGRBG : kPianoCameraBGGR) || frame->black >= 1023 ||
-      frame->bytes != stride * rawHeight || frame->bytes > kPianoCameraSlotBytes || !frame->sofTicks ||
-      frame->sequence <= _lastReadSequence ||
-      (uint64_t)frame->slot * kPianoCameraSlotBytes + frame->bytes > _rawSize) return NO;
+  const size_t samples = (size_t)_nativeWidth * _nativeHeight * 3;
   uint64_t start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
   PianoIspStats stats;
   const uint8_t *raw = (const uint8_t *)(uintptr_t)_raw + (uint64_t)frame->slot * kPianoCameraSlotBytes;
-  if (pianoIsp(raw, rawWidth, rawHeight, stride, frame->bayer, frame->black, 2, _work, _rgb, &stats) ||
+  if (pianoIsp(raw, frame->bytes, frame->width, frame->height, frame->stride, frame->bayer, frame->black, 2,
+               _work, samples, _rgb, samples, &stats) ||
       stats.width != (uint32_t)_nativeWidth || stats.height != (uint32_t)_nativeHeight) return NO;
   if (CVPixelBufferLockBaseAddress(pb, 0)) return NO;
   uint8_t *base = CVPixelBufferGetBaseAddress(pb);
   const size_t rowBytes = CVPixelBufferGetBytesPerRow(pb);
+  if (!base || !pianoOutputRowsValid(rowBytes, (uint64_t)_nativeWidth * 4, _nativeHeight)) {
+    CVPixelBufferUnlockBaseAddress(pb, 0);
+    return NO;
+  }
   for (int32_t y = 0; y < _nativeHeight; ++y) {
     uint8_t *row = base + y * rowBytes;
     for (int32_t x = 0; x < _nativeWidth; ++x) {
@@ -487,18 +517,23 @@ static CVPixelBufferRef borrowPixel(CVPixelBufferPoolRef pool, unsigned threshol
       result = liveCall(_connection, kPianoCameraLiveStart, &req, sizeof req, NULL, 0);
       os_log(gLog, "camera ABI2 start sensor=%u result=%#x", _sensor, result);
     }
+    const BOOL started = !result;
     if (!result) {
       step = "ring-map";
       result = IOConnectMapMemory64(_connection, kPianoCameraMemoryRing, mach_task_self(), &_raw, &_rawSize,
                                     kIOMapAnywhere | kIOMapReadOnly);
       os_log(gLog, "camera ring map sensor=%u bytes=%llu result=%#x", _sensor, _rawSize, result);
-      if (!result && _rawSize != kPianoCameraSlots * (uint64_t)kPianoCameraSlotBytes) {
+      if (!result && (!_raw || _rawSize != kPianoCameraSlots * (uint64_t)kPianoCameraSlotBytes)) {
         step = "ring-length";
         result = kIOReturnBadArgument;
       }
     }
     if (result) {
       os_log_error(gLog, "camera stream start failed sensor=%u step=%{public}s result=%#x", _sensor, step, result);
+      if (started) {
+        PianoCameraLiveStatus state = {0};
+        [self stopLive:&state];
+      }
       [self closeLive];
       return ioResult(result, outError);
     }
@@ -508,37 +543,42 @@ static CVPixelBufferRef borrowPixel(CVPixelBufferPoolRef pool, unsigned threshol
 
 - (BOOL)startStreamAndReturnError:(NSError **)outError
 {
-  if (atomic_load(&_running)) return YES;
-  _lastReadSequence = _ispTotal = _ispMax = _converted = 0;
-  atomic_store(&_captureDropped, 0);
-  dispatch_sync(_outputQueue, ^{
-    self->_frame = self->_dropped = self->_repeated = self->_sourceFrames = self->_staleTicks = self->_discontinuities = 0;
-    self->_lastPublishedSequence = self->_lastPresentationTicks = self->_lastPresentationNs = self->_lastDropCount = 0;
-    self->_firstDropCount = 0;
-    self->_latestSequence = self->_latestDrops = self->_latestSourceNs = 0;
-    self->_stalled = self->_configurationChanged = NO;
-  });
-  if (![self openLiveAndReturnError:outError]) return NO;
-  atomic_store(&_running, true);
-  dispatch_sync(_outputQueue, ^{
-    self->_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, self->_outputQueue);
-    self->_timerCancelled = dispatch_semaphore_create(0);
-    dispatch_semaphore_t cancelled = self->_timerCancelled;
-    dispatch_source_set_cancel_handler(self->_timer, ^{ dispatch_semaphore_signal(cancelled); });
-    __weak PianoStreamSource *weakSelf = self;
-    dispatch_source_set_event_handler(self->_timer, ^{ [weakSelf tick]; });
-    [self retimeOutput];
-    dispatch_resume(self->_timer);
-    os_log(gLog, "camera stream start sensor=%u index=%lu duration=%lld/%d source_fps=%d", self->_sensor,
-           (unsigned long)self->_activeFormat, self->_duration.value, self->_duration.timescale, kPianoNativeFps);
-  });
-  if (_sensor) dispatch_async(_captureQueue, ^{ [self readLive]; });
-  return YES;
+  @synchronized (_lifecycleLock) {
+    if (atomic_load(&_running)) return YES;
+    _lastReadSequence = _ispTotal = _ispMax = _converted = 0;
+    atomic_store(&_captureDropped, 0);
+    dispatch_sync(_outputQueue, ^{
+      self->_frame = self->_dropped = self->_repeated = self->_sourceFrames = self->_staleTicks = self->_discontinuities = 0;
+      self->_lastPublishedSequence = self->_lastPresentationTicks = self->_lastPresentationNs = self->_lastDropCount = 0;
+      self->_firstDropCount = 0;
+      self->_latestSequence = self->_latestDrops = self->_latestSourceNs = 0;
+      self->_stalled = self->_configurationChanged = NO;
+    });
+    if (![self openLiveAndReturnError:outError]) return NO;
+    atomic_store(&_running, true);
+    dispatch_sync(_outputQueue, ^{
+      self->_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, self->_outputQueue);
+      self->_timerCancelled = dispatch_semaphore_create(0);
+      dispatch_semaphore_t cancelled = self->_timerCancelled;
+      dispatch_source_set_cancel_handler(self->_timer, ^{ dispatch_semaphore_signal(cancelled); });
+      __weak PianoStreamSource *weakSelf = self;
+      dispatch_source_set_event_handler(self->_timer, ^{ [weakSelf tick]; });
+      [self retimeOutput];
+      dispatch_resume(self->_timer);
+      os_log(gLog, "camera stream start sensor=%u index=%lu duration=%lld/%d source_fps=%d", self->_sensor,
+             (unsigned long)self->_activeFormat, self->_duration.value, self->_duration.timescale, kPianoNativeFps);
+    });
+    if (_sensor) dispatch_async(_captureQueue, ^{ [self readLive]; });
+    return YES;
+  }
 }
 
 - (IOReturn)stopLive:(PianoCameraLiveStatus *)state
 {
-  return _connection ? liveCall(_connection, kPianoCameraLiveStop, NULL, 0, state, sizeof *state) : kIOReturnSuccess;
+  if (!_connection) return kIOReturnSuccess;
+  IOReturn result = liveCall(_connection, kPianoCameraLiveStop, NULL, 0, state, sizeof *state);
+  if (!result && (state->version != kPianoCameraLiveVersion || state->sensor != _sensor)) return kIOReturnBadArgument;
+  return result;
 }
 
 - (void)closeLive
@@ -552,35 +592,38 @@ static CVPixelBufferRef borrowPixel(CVPixelBufferPoolRef pool, unsigned threshol
 
 - (BOOL)stopStreamAndReturnError:(NSError **)outError
 {
-  if (!atomic_exchange(&_running, false)) return YES;
-  // Cancel on the output queue, then stop/wake the RAW waiter, drain both queues, and only then free mappings/ISP memory.
-  __block dispatch_semaphore_t cancelled;
-  dispatch_sync(_outputQueue, ^{
-    if (self->_timer) {
-      cancelled = self->_timerCancelled;
-      dispatch_source_cancel(self->_timer);
-    }
-    self->_timer = nil;
-    self->_timerCancelled = nil;
-  });
-  if (cancelled) dispatch_semaphore_wait(cancelled, DISPATCH_TIME_FOREVER);
-  PianoCameraLiveStatus state = {0};
-  IOReturn result = [self stopLive:&state];
-  dispatch_sync(_captureQueue, ^{});
-  dispatch_sync(_outputQueue, ^{
-    if (self->_latest) CVPixelBufferRelease(self->_latest);
-    self->_latest = NULL;
-    os_log(gLog, "camera output stop sensor=%u sent=%llu sources=%llu repeated=%llu dropped=%llu stale_ticks=%llu "
-           "source_drops=%llu discontinuities=%llu",
-           self->_sensor, self->_frame, self->_sourceFrames, self->_repeated, self->_dropped, self->_staleTicks,
-           self->_lastDropCount - self->_firstDropCount, self->_discontinuities);
-  });
-  [self closeLive];
-  os_log(gLog, "camera stream stop sensor=%u result=%#x state=%u clean=%u guard=%u smmu=%#x capture_dropped=%llu kernel_drops=%llu converted=%llu isp_avg_ns=%llu isp_max_ns=%llu",
-         _sensor, result, state.state, state.cleanOff, state.guardFault, state.smmuFault, (uint64_t)atomic_load(&_captureDropped),
-         state.dropped, _converted, _converted ? _ispTotal / _converted : 0, _ispMax);
-  if (!result && _sensor && state.state != kPianoCameraStopped) result = kIOReturnIOError;
-  return ioResult(result, outError);
+  @synchronized (_lifecycleLock) {
+    if (!atomic_exchange(&_running, false)) return YES;
+    // Cancel on the output queue, then stop/wake the RAW waiter, drain both queues, and only then free mappings/ISP memory.
+    __block dispatch_semaphore_t cancelled;
+    dispatch_sync(_outputQueue, ^{
+      if (self->_timer) {
+        cancelled = self->_timerCancelled;
+        dispatch_source_cancel(self->_timer);
+      }
+      self->_timer = nil;
+      self->_timerCancelled = nil;
+    });
+    if (cancelled) dispatch_semaphore_wait(cancelled, DISPATCH_TIME_FOREVER);
+    PianoCameraLiveStatus state = {0};
+    IOReturn result = [self stopLive:&state];
+    dispatch_sync(_captureQueue, ^{});
+    dispatch_sync(_outputQueue, ^{
+      if (self->_latest) CVPixelBufferRelease(self->_latest);
+      self->_latest = NULL;
+      os_log(gLog, "camera output stop sensor=%u sent=%llu sources=%llu repeated=%llu dropped=%llu stale_ticks=%llu "
+             "source_drops=%llu discontinuities=%llu",
+             self->_sensor, self->_frame, self->_sourceFrames, self->_repeated, self->_dropped, self->_staleTicks,
+             self->_lastDropCount - self->_firstDropCount, self->_discontinuities);
+    });
+    [self closeLive];
+    os_log(gLog, "camera stream stop sensor=%u result=%#x state=%u clean=%u guard=%u smmu=%#x capture_dropped=%llu kernel_drops=%llu converted=%llu isp_avg_ns=%llu isp_max_ns=%llu",
+           _sensor, result, state.state, state.cleanOff, state.guardFault, state.smmuFault, (uint64_t)atomic_load(&_captureDropped),
+           state.dropped, _converted, _converted ? _ispTotal / _converted : 0, _ispMax);
+    if (!result && _sensor && (state.state != kPianoCameraStopped || !state.cleanOff || state.guardFault || state.smmuFault))
+      result = kIOReturnIOError;
+    return ioResult(result, outError);
+  }
 }
 
 @end

@@ -113,16 +113,18 @@ inline HidCommand parseHidCommand(const char *line)
     if (!hex(s, &mods) || mods > 0xff) { c.op = HidOp::error; c.error = "modifiers"; return c; }
     c.report[0] = kReportKeyboard;
     c.report[1] = uint8_t(mods);
+    bool keysDown = mods != 0;
     unsigned keys = 0;
     while (!end(s)) {
       uint32_t usage = 0;
       if (keys == 6) { c.op = HidOp::error; c.error = "more than six keys"; return c; }
       if (!hex(s, &usage) || usage > 0xff) { c.op = HidOp::error; c.error = "key usage"; return c; }
       c.report[3 + keys++] = uint8_t(usage);
+      keysDown |= usage != 0;
     }
     c.op = HidOp::keyboard;
     c.bytes = kKeyboardReportBytes;
-    c.keysDown = mods || keys;
+    c.keysDown = keysDown;
     return c;
   }
   case 'C': {

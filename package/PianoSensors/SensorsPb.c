@@ -113,9 +113,10 @@ uint32_t spb_done(const SpbOut *o)
 /* ---- decoder ---- */
 void spb_in(SpbIn *in, const uint8_t *data, uint32_t length)
 {
-    in->p = data;
-    in->end = data ? data + length : data;
-    in->error = 0;
+    static const uint8_t empty;
+    in->p = data ? data : &empty;
+    in->end = in->p + (data ? length : 0);
+    in->error = !data && length != 0;
 }
 
 static int fail(SpbIn *in)

@@ -14,6 +14,7 @@
  * every reference PC-relative (the Makefile refuses an object with a relocation). No linker is needed.
  */
 #include "bootflag.h"
+#include "selector_fdt.h"
 
 typedef unsigned char u8;
 typedef unsigned short u16;
@@ -225,30 +226,8 @@ static u32 keys_held(int pon, int gpio)
 	return k;
 }
 
-/* ---- ABL's bootargs -------------------------------------------------------------------------------------------------- */
-/* 1 when the FDT holds "bootmonitor.bootmode=<want>" ended by a space or NUL (only /chosen's bootargs carry the string). */
-static int fdt_has(const u8 *fdt, const char *want, u32 wlen)
-{
-	u32 size, i, n;
-
-	if (fdt[0] != 0xD0 || fdt[1] != 0x0D || fdt[2] != 0xFE || fdt[3] != 0xED)
-		return 0;
-	size = (u32)fdt[4] << 24 | (u32)fdt[5] << 16 | (u32)fdt[6] << 8 | fdt[7];
-	if (size > (64u << 20))
-		return 0;
-	for (i = 0; i + wlen < size; i++) {
-		for (n = 0; n < wlen && fdt[i + n] == (u8)want[n]; n++)
-			;
-		if (n == wlen && (fdt[i + n] == 0 || fdt[i + n] == ' '))
-			return 1;
-	}
-	return 0;
-}
-
 /* In the entry block above (local labels in .text, so the references need no relocation). */
-extern const char want_rec[], want_cg[];
-#define WANT_REC_LEN 29u	/* strlen("bootmonitor.bootmode=recovery") */
-#define WANT_CG_LEN 32u		/* strlen("bootmonitor.bootmode=poweroff_cg") */
+extern const char want_rec[30], want_cg[33];
 
 /* ---- guards, reset, record ------------------------------------------------------------------------------------------- */
 static int can_run(void)
@@ -319,7 +298,8 @@ static __attribute__((used)) int piano_sel_main(void *fdt, const struct piano_me
 	(void)base;
 	in.can_run = can_run();
 	if (in.can_run) {
-		in.bootmode_stock = fdt_has(fdt, want_rec, WANT_REC_LEN) || fdt_has(fdt, want_cg, WANT_CG_LEN);
+		in.bootmode_stock = piano_fdt_has_bootarg(fdt, PIANO_FDT_MAX, want_rec, sizeof(want_rec) - 1) ||
+			piano_fdt_has_bootarg(fdt, PIANO_FDT_MAX, want_cg, sizeof(want_cg) - 1);
 		in.have_uefi = meta->uefi_offset != 0 && meta->uefi_size != 0;
 	}
 	if (in.can_run && !in.bootmode_stock && in.have_uefi && spmi_ok()) {

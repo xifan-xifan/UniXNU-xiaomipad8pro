@@ -31,3 +31,13 @@ anyway.
 
 Sources and licences: `UPSTREAM`, `LICENSE` (BSD-2-Clause-Patent). Design, the first tablet checklist and the results:
 `docs/drivers/usb-host.md` §5.4 and §8.4.
+
+## B7 offline host suite
+
+Run `python3 scripts/ci/self-tests.py --only package/PianoXhciHost/tests/` to discover and run the ASan/UBSan suite.
+It exercises the shared MMIO accessors, probe ring operations, and halt/reset polling against a fake controller. The model
+covers both split-write orders, counter rollover, DMA alignment and 64 KiB splitting, command and event ring wrap, and the
+doorbell and DMA checks for returning the loan to PianoDwc3. [Test source](tests/xhci_dma_ring_model_host.cpp)
+
+Real USB OTG peripheral enumeration remains **HOLD** pending the owner's hands-on qualification session.
+[B7 attended qualification](../../docs/drivers/usb-otg-qual.md)

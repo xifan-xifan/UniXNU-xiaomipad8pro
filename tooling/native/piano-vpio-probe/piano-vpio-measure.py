@@ -33,6 +33,10 @@ coherent part decides and the band level must sit at the floor), noise >= 6 dB u
 the C920 music within 1 dB.
 """
 import argparse, array, cmath, concurrent.futures, json, math, operator, os, random, re, subprocess, sys, tempfile, wave
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from pcm16_wav import read_pcm16_header, read_samples
 
 FA = 8000
 BAND = (200.0, 3500.0)
@@ -57,14 +61,12 @@ def db(p):
 
 
 def read_wav(path):
-    w = wave.open(path, 'rb')
-    if w.getsampwidth() != 2:
-        raise SystemExit('%s: 16-bit PCM only' % path)
-    rate, ch = w.getframerate(), w.getnchannels()
-    a = array.array('h', w.readframes(w.getnframes()))
-    if sys.byteorder == 'big':
-        a.byteswap()
-    return rate, [v / 32768.0 for v in a[0::ch]]
+    with open(path, 'rb') as wav:
+        rate, channels, frames = read_pcm16_header(wav)
+        if not FA <= rate <= 192000 or rate % FA:
+            raise ValueError(f'{path}: expected a supported multiple of {FA} Hz')
+        samples = read_samples(wav, frames, channels)
+    return rate, [v / 32768.0 for v in samples[::channels]]
 
 
 def write_wav(path, rate, x):
@@ -94,9 +96,9 @@ def to_fa(rate, x):
     """Decimate to the analysis rate (integer ratios only)."""
     if rate == FA:
         return list(x)
+    if rate < FA or rate % FA:
+        raise ValueError('rate %d is not a positive multiple of %d' % (rate, FA))
     m = rate // FA
-    if m * FA != rate:
-        raise SystemExit('rate %d is not a multiple of %d' % (rate, FA))
     h = lowpass_taps(rate)
     n = len(h); half = n // 2
     xp = [0.0] * half + list(x) + [0.0] * (half + 1)
@@ -301,7 +303,7 @@ def say_speech(text, voice, rate=48000):
         subprocess.run(['afconvert', '-f', 'WAVE', '-d', 'LEI16@%d' % rate, '-c', '1', aiff, wav], check=True)
         r, x = read_wav(wav)
     if r != rate:
-        raise SystemExit('say/afconvert gave %d Hz' % r)
+        raise ValueError('say/afconvert gave %d Hz' % r)
     return x
 
 
@@ -309,7 +311,7 @@ def fit(x, n, rate):
     """Trim (with a 30 ms fade) or pad x to n samples."""
     if len(x) >= n:
         x = x[:n]
-        f = int(0.03 * rate)
+        f = min(n, int(0.03 * rate))
         for i in range(f):
             x[n - 1 - i] *= i / f
         return x
@@ -327,6 +329,8 @@ def active_rms_scale(x, target_db, rate):
 
 
 def stimuli(a):
+    if not FA <= a.rate <= 192000 or a.rate % FA:
+        raise ValueError(f'--rate must be a multiple of {FA} Hz up to 192000 Hz')
     os.makedirs(a.dir, exist_ok=True)
     rate = a.rate
     rnd = random.Random(1121)
@@ -371,6 +375,8 @@ def find_chirp(y, lo_s, hi_s):
     """Matched filter: the chirp's start (s) in [lo_s, hi_s) and the normalised correlation there."""
     t = band(chirp(FA))
     lo, hi = max(0, int(lo_s * FA)), min(len(y), int(hi_s * FA))
+    if hi <= lo:
+        return None, 0.0
     s = y[lo:hi + len(t)]
     if len(s) < len(t) + 2:
         return None, 0.0
@@ -469,7 +475,7 @@ def dropouts(y, t0, t1, frame=160):
 def parse_probe(path):
     d = {}
     try:
-        t = open(path, errors='replace').read()
+        t = Path(path).read_text(errors='replace')
     except OSError:
         return {'missing': True}
     m = re.search(r'callbacks (\d+) frames (\d+) expected (\d+) gaps (\d+) \(largest (\d+) frames at [\d.]+ s\) peak (-?[\d.]+) dBFS '
@@ -495,6 +501,8 @@ def parse_probe(path):
     d['mic_mode'] = int(m[1]) if m else None
     m = re.search(r'unit latency ([\d.]+) s', t)
     d['unit_latency'] = float(m[1]) if m else None
+    if any(isinstance(v, float) and not math.isfinite(v) for v in d.values()):
+        raise ValueError(f'{path}: nonfinite probe measurement')
     return d
 
 
@@ -505,12 +513,15 @@ def block(a):
     wav = os.path.join(run, tag + '.wav')
     if not os.path.isfile(wav):
         out['void'].append('no recording')
-        return finish(run, tag, out)
+        finish(run, tag, out)
+        return 2
     rate, rec = read_wav(wav)
     y = band(to_fa(rate, rec))
     out['seconds'] = len(y) / FA
-    _, far8 = read_wav(os.path.join(a.assets, 'far8k.wav'))
-    _, near8 = read_wav(os.path.join(a.assets, 'near8k.wav'))
+    far_rate, far8 = read_wav(os.path.join(a.assets, 'far8k.wav'))
+    near_rate, near8 = read_wav(os.path.join(a.assets, 'near8k.wav'))
+    if far_rate != FA or near_rate != FA:
+        raise ValueError(f'expected {FA} Hz reference assets')
     pad = [0.0] * (len(y) + 10 * FA)
     xf = (band(far8) + pad)[:len(pad)]; xn = (band(near8) + pad)[:len(pad)]
     if pr.get('zeros_pct', 0) >= 90 or power(y) < 1e-14:
@@ -622,7 +633,8 @@ def block(a):
 
 
 def finish(run, tag, out):
-    json.dump(out, open(os.path.join(run, tag + '-measure.json'), 'w'), indent=1)
+    with open(os.path.join(run, tag + '-measure.json'), 'w') as report:
+        json.dump(out, report, indent=1, allow_nan=False)
 
     def f(k, d=None):
         v = (d if d is not None else out).get(k)
@@ -639,13 +651,31 @@ def finish(run, tag, out):
     return 0
 
 
+def invalid_number(value):
+    raise ValueError(f'invalid measurement number: {value}')
+
+
+def measurement_float(text):
+    value = float(text)
+    if not math.isfinite(value):
+        invalid_number(text)
+    return value
+
+
 def verdict(a):
     tags = a.tags or ['vpio', 'bypass', 'raw', 'other', 'vpio2']
     B = {}
     for t in tags:
         p = os.path.join(a.run, t + '-measure.json')
         if os.path.isfile(p):
-            B[t] = json.load(open(p))
+            with open(p) as report:
+                data = json.load(report, parse_constant=invalid_number, parse_float=measurement_float)
+            if not isinstance(data, dict) or any(
+                data.get(key) is not None and not isinstance(data[key], dict)
+                for key in ('probe', 'c920', 'delay')
+            ):
+                raise ValueError(f'{p}: invalid measurement report')
+            B[t] = data
     lines = []
     out = lines.append
 
@@ -654,7 +684,7 @@ def verdict(a):
         if sub:
             d = d.get(sub) or {}
         v = d.get(k)
-        return v if isinstance(v, (int, float)) and v > -199 else None
+        return v if type(v) in (int, float) and math.isfinite(v) and v > -199 else None
     V, Y, W = 'vpio', 'bypass', 'raw'
     missing = [t for t in (V, Y, W) if t not in B]
     hard = []
@@ -899,7 +929,11 @@ def main():
     s = sub.add_parser('verdict'); s.add_argument('run'); s.add_argument('tags', nargs='*')
     s = sub.add_parser('selftest'); s.add_argument('dir'); s.add_argument('--voice', default='Samantha')
     a = ap.parse_args()
-    return {'stimuli': stimuli, 'block': block, 'verdict': verdict, 'selftest': selftest}[a.cmd](a)
+    try:
+        return {'stimuli': stimuli, 'block': block, 'verdict': verdict, 'selftest': selftest}[a.cmd](a)
+    except (OSError, OverflowError, ValueError, TypeError, KeyError, wave.Error, subprocess.CalledProcessError) as error:
+        print(f'vpio-measure: {error}', file=sys.stderr)
+        return 2
 
 
 if __name__ == '__main__':

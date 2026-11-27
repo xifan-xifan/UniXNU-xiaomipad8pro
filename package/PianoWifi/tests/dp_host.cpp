@@ -4,7 +4,7 @@
 // its buffer (an EAPOL frame and an Ethernet one, each delivered and its buffer posted again), the frames that must not be
 // delivered (not done, errors, null data, a bad cookie, a link descriptor), the release rings' buffers given back, a frame
 // sent (every field of its descriptor) and its completion, and the transmit side's limits.
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. dp_host.cpp -o /tmp/dp_host && /tmp/dp_host
+//   c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I.. dp_host.cpp -o /tmp/dp_host && /tmp/dp_host
 #include "WifiDp.h"
 #include <cstdio>
 #include <cstdlib>
@@ -349,6 +349,38 @@ int main()
     CHECK(dpPoll(dp, io, deliver) == 3);
     CHECK(dp.st.excEntries == 4 && dp.st.excLinks == 1 && dp.st.excLinkForeign == 1);
     CHECK(dp.st.excBufRecycled == 3 && rx.refillPosted == posted + 3);
+  }
+  {
+    // Duplicate completions across the exception ring wrap may name a buffer
+    // that is already waiting on the refill ring.
+    CeRing &exc = dp.reoExc;
+    exc.ours = exc.entries - 1;
+    const uint32_t posted = rx.refillPosted, recycled = dp.st.excBufRecycled, other = dp.st.excBufOther;
+    const size_t delivered = got.size();
+    for (uint32_t slot : {exc.entries - 1, 0u, 1u}) {
+      uint8_t *e = exc.va + slot * exc.words * 4;
+      const uint32_t cookie = slot == 1 ? 35 : 34;
+      httdetail::putBuffer(e, rx.refillBus[cookie], kDpRbmSw1, cookie);
+      put32(e + 28, 0);
+    }
+    *exc.theirs = 2 * exc.words;
+    CHECK(dpPoll(dp, io, deliver) == 3);
+    CHECK(exc.ours == 2 && chip.regs[kDpReo2Sw0R2 + 4] == 2 * exc.words);
+    CHECK(dp.st.excBufRecycled == recycled + 2 && dp.st.excBufOther == other + 1 && rx.refillPosted == posted + 2);
+    CHECK(dpPoll(dp, io, deliver) == 0 && got.size() == delivered);
+    CHECK(!httRefillPost(rx, UINT32_MAX));
+    // Once firmware takes the refill entries, a later completion can return
+    // the same buffer again. A valid cookie with a foreign address cannot.
+    *refill.tail = refill.ours * refill.entryWords;
+    uint8_t *e = exc.va + 2 * exc.words * 4;
+    httdetail::putBuffer(e, rx.refillBus[35], kDpRbmSw1, 34);
+    put32(e + 28, 0);
+    e += exc.words * 4;
+    httdetail::putBuffer(e, rx.refillBus[34], kDpRbmSw1, 34);
+    put32(e + 28, 0);
+    *exc.theirs = 4 * exc.words;
+    CHECK(dpPoll(dp, io, deliver) == 2 && got.size() == delivered);
+    CHECK(dp.st.excBufRecycled == recycled + 3 && dp.st.excBufOther == other + 2 && rx.refillPosted == posted + 3);
   }
 
   // ---- the peer map's search entry (the second and third forms) and the first form's none

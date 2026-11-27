@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "NativeAdrenoUserClient.h"
+#include "A830GpuTier.h"
 #include "NativeAdrenoMeter.h"
 #include "NativeAdrenoPoolBypass.h"   /* UniXNU-piano: GPU-PAGED P0b */
 #include <IOKit/IOLib.h>
@@ -349,7 +350,8 @@ NativeAdrenoMemory *NativeAdrenoUserClient::memoryForToken(uint32_t token)
 {
     if(!open_ || !token || token>entry_count_)return nullptr;
     Entry &entry=entries_[token-1];
-    return entry.used && !entry.unreleasable && entry.token==token && entry.mapping_leases?&entry.memory:nullptr;
+    return entry.used && !entry.unreleasable && entry.token==token && entry.mapping_leases && !entry.memory.tier()?
+        &entry.memory:nullptr;
 }
 uint32_t NativeAdrenoUserClient::mappingLeases(uint32_t token) const
 {
@@ -370,7 +372,10 @@ IOReturn NativeAdrenoUserClient::query(NativeAdrenoAbiParams *params)
     if(!open_)return kIOReturnNotReady;
     params->abi_version=NativeAdrenoAbiVersion;
     params->input_bits=input_bits_;params->output_bits=output_bits_;
-    params->flags=NativeAdrenoParamsHostImport;params->max_bo_bytes=maxObjectBytes();   /* UniXNU-piano: the window's in macOS builds */
+    params->flags=NativeAdrenoParamsHostImport;
+    if(native_adreno_wc_enabled && NativeAdrenoMemory::tierEligible(a830tier::kSlab))
+        params->flags|=NativeAdrenoParamsGpuPrivate;
+    params->max_bo_bytes=maxObjectBytes();   /* UniXNU-piano: the window's in macOS builds */
     return kIOReturnSuccess;
 }
 #ifdef ADRENO830_MACOS
@@ -416,9 +421,14 @@ IOReturn NativeAdrenoUserClient::allocBoInner(const NativeAdrenoAbiBoAlloc *requ
 #endif
     if(!open_)return ALLOC_REFUSE(NotOpen,BoAlloc,kIOReturnNotReady,0,0,0);
     const uint64_t limit=maxObjectBytes();
-    if(!request->bytes || (request->bytes&4095) || request->align_log2<12 || request->align_log2>24 || request->contiguous>1)
+    const bool gpuPrivate=request->contiguous==NativeAdrenoBoAllocGpuPrivate;
+    const bool contiguous=request->contiguous==1;
+    if(!request->bytes || (request->bytes&4095) || request->align_log2<12 || request->align_log2>24 ||
+        (request->contiguous>1 && !gpuPrivate))
         return ALLOC_REFUSE(Request,BoAlloc,kIOReturnBadArgument,request->bytes,request->align_log2,request->contiguous);
     if(request->bytes>limit)return ALLOC_REFUSE(Limit,BoAlloc,kIOReturnBadArgument,request->bytes,limit,window_bytes_);
+    NativeAdrenoMemory::noteTierRequest(gpuPrivate?NativeAdrenoTierPrivate:contiguous?NativeAdrenoTierContiguous:
+        request->bytes>=a830tier::kSlab?NativeAdrenoTierLegacyLarge:NativeAdrenoTierLegacySmall);
     Entry *entry=free();
     if(!entry)return ALLOC_REFUSE(Objects,BoAlloc,kIOReturnNoResources,live_,entry_count_,0);
     IOReturn status=kIOReturnNoResources;
@@ -429,18 +439,20 @@ IOReturn NativeAdrenoUserClient::allocBoInner(const NativeAdrenoAbiBoAlloc *requ
     const bool bypass=NativeAdrenoPoolBypassed();
     const uint64_t p0b_began=NativeAdrenoP0bNow();
     unsigned p0b_path=NativeAdrenoPathPool;
-    if (!request->contiguous && native_adreno_wc_enabled && NativeAdrenoMemory::tierEligible(request->bytes)) {
+    const bool tryTier=gpuPrivate && native_adreno_wc_enabled && NativeAdrenoMemory::tierEligible(request->bytes);
+    if (tryTier) {
         NativeAdrenoSubmitGuard memory(submit_,NativeAdrenoSubmitLockMemory);
         status=entry->memory.allocateTier(size_t(request->bytes),output_bits_);
     }
+    // A refused tier allocation goes straight to pageable XNU memory, leaving the shared BO pool available.
     if(status==kIOReturnNoResources && bypass)NativeAdrenoP0bAdd(&native_adreno_p0b_alloc[NativeAdrenoPathPool][4],1);
-    else if(status==kIOReturnNoResources) {
+    else if(status==kIOReturnNoResources && !tryTier) {
         /* The BO pool is shared by every connection: a pooled allocation runs under the Memory lock. A client with a pool reserve
          * (setReserve: every one but the render server) leaves keep_pool_ bytes of the pool free (read under the same lock, which every
          * pool allocation and release holds). */
         NativeAdrenoSubmitGuard memory(submit_,NativeAdrenoSubmitLockMemory);
         if(!keep_pool_ || NativeAdrenoMemory::poolFreeBytes()>=keep_pool_+(size_t)request->bytes) {
-            status=entry->memory.allocatePooled((size_t)request->bytes,output_bits_,request->contiguous!=0);
+            status=entry->memory.allocatePooled((size_t)request->bytes,output_bits_,contiguous);
             if(!status && !zero_outside)status=zeroPooled(*entry,clock);
         }
     }
@@ -453,7 +465,8 @@ IOReturn NativeAdrenoUserClient::allocBoInner(const NativeAdrenoAbiBoAlloc *requ
         /* Every BO that comes here: most never make a contiguous attempt, and what they cost in spans shows nowhere else. */
         __atomic_fetch_add(&native_adreno_meter_contig[2],1u,__ATOMIC_RELAXED);
         status=kIOReturnUnsupported;
-        if(!NativeAdrenoMemory::unmappedUser() && request->contiguous==0 && contiguousAllowed(request->bytes,clock)) {
+        const bool pageable=tryTier || NativeAdrenoMemory::unmappedUser();
+        if(!pageable && !contiguous && contiguousAllowed(request->bytes,clock)) {
             __atomic_fetch_add(&native_adreno_meter_contig[0],1u,__ATOMIC_RELAXED);
             p0b_path=NativeAdrenoPathContiguous;
             status=entry->memory.allocate((size_t)request->bytes,output_bits_,true,(size_t)request->bytes);
@@ -461,12 +474,12 @@ IOReturn NativeAdrenoUserClient::allocBoInner(const NativeAdrenoAbiBoAlloc *requ
             if(status && !entry->memory.quarantined() && entry->memory.release()==kIOReturnSuccess)status=kIOReturnUnsupported;
         }
         if(status) {
-            if(NativeAdrenoMemory::unmappedUser() && !request->contiguous) {
+            if(pageable && !contiguous) {
                 p0b_path=NativeAdrenoPathUser;
                 status=entry->memory.allocateUser((size_t)request->bytes,output_bits_,(size_t)request->bytes,native_adreno_wc_enabled);
             } else {
                 p0b_path=NativeAdrenoPathMapped;
-                status=entry->memory.allocate((size_t)request->bytes,output_bits_,request->contiguous!=0,(size_t)request->bytes);
+                status=entry->memory.allocate((size_t)request->bytes,output_bits_,contiguous,(size_t)request->bytes);
             }
         }
     }
@@ -555,6 +568,7 @@ IOReturn NativeAdrenoUserClient::importBo(const NativeAdrenoAbiBoImport *request
      * physical range (ARCHITECTURE 5.3.2). */
     uint64_t offset=0;
     const bool scanout=isScanoutAddress(task,request->address,request->bytes,&offset);
+    NativeAdrenoMemory::noteTierRequest(scanout?NativeAdrenoTierScanoutImport:NativeAdrenoTierHostImport);
     Entry *entry=free();
     if(!entry) {
         noteImport(kIOReturnNoResources,2,request->bytes,request->address);
@@ -985,8 +999,13 @@ IOReturn NativeAdrenoUserClient::cpuMap(const NativeAdrenoAbiBoCpuMap *request,
     if(!entry || entry->unreleasable)return kIOReturnBadArgument;
     /* An imported BO (and the scanout) is the caller's own memory, already mapped where it came from. */
     if(entry->memory.imported() || entry->imported)return kIOReturnUnsupported;
+    if(entry->memory.tier()) {
+        NativeAdrenoMemory::noteTierRequest(NativeAdrenoTierCpuMapDenied);
+        return kIOReturnUnsupported;
+    }
     if(entry->mapping_leases==UINT32_MAX)return kIOReturnNoResources;
     ++entry->mapping_leases;
+    NativeAdrenoMemory::noteTierRequest(NativeAdrenoTierCpuMap);
     reply->token=entry->token;reply->bytes=entry->memory.bytes();
     return kIOReturnSuccess;
 }

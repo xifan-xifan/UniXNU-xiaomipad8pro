@@ -11,8 +11,8 @@
 //
 // bq27z561 standard commands (TI datasheet, two bytes little endian, Smart Battery style): 0x06 Temperature (0.1 K), 0x08 Voltage (mV),
 // 0x0a BatteryStatus, 0x0c Current (mA, signed, + charging), 0x10 RemainingCapacity (mAh), 0x12 FullChargeCapacity (mAh), 0x14
-// AverageCurrent (mA), 0x2a CycleCount, 0x2c RelativeStateOfCharge (%), 0x3c DesignCapacity (mAh). BatteryStatus bit 6 DSG (discharging), bit 5 FC (fully
-// charged), bit 4 FD (fully discharged), bit 7 INIT.
+// AverageCurrent (mA), 0x16 AverageTimeToEmpty and 0x18 AverageTimeToFull (minutes), 0x2a CycleCount, 0x2c RelativeStateOfCharge
+// (%), 0x3c DesignCapacity (mAh). BatteryStatus bit 6 DSG (discharging), bit 5 FC (fully charged), bit 4 FD (fully discharged), bit 7 INIT.
 #ifndef PIANO_POWER_GAUGE_H
 #define PIANO_POWER_GAUGE_H
 #include <stdint.h>
@@ -233,22 +233,24 @@ class I2cBus {
 constexpr uint8_t kGaugeAddress = 0x55;
 enum GaugeCommand : uint8_t {
   kGaugeTemperature = 0x06, kGaugeVoltage = 0x08, kGaugeStatus = 0x0a, kGaugeCurrent = 0x0c, kGaugeRemaining = 0x10,
-  kGaugeFull = 0x12, kGaugeAverageCurrent = 0x14, kGaugeCycles = 0x2a, kGaugeSoc = 0x2c, kGaugeDesign = 0x3c,
+  kGaugeFull = 0x12, kGaugeAverageCurrent = 0x14, kGaugeTimeToEmpty = 0x16, kGaugeTimeToFull = 0x18,
+  kGaugeCycles = 0x2a, kGaugeSoc = 0x2c, kGaugeDesign = 0x3c,
 };
 constexpr uint16_t kGaugeDsg = 1u << 6, kGaugeFc = 1u << 5, kGaugeFd = 1u << 4, kGaugeInit = 1u << 7;
+constexpr uint16_t kGaugeTimeUnknown = 0xffff;
 
 struct GaugeReading {
   bool ok = false;
   I2cResult error = I2cResult::ok;
-  uint8_t failedCommand = 0;
+  uint8_t failedCommand = 0, firstRetryCommand = 0;
   int voltageMv = 0, currentMa = 0, averageMa = 0, socPct = 0, remainingMah = 0, fullMah = 0, cycles = 0;
   int designMah = 0;      // 0 when the gauge did not answer it (read on its own: it never invalidates the reading)
   int tempDeciC = 0;      // tenths of a degree Celsius
+  unsigned wordRereads = 0;
   uint16_t status = 0;
   uint16_t wordRetryMask = 0, wordRetryValid = 0;
-  unsigned wordRereads = 0;
-  uint8_t firstRetryCommand = 0;
   uint16_t firstRetryValue = 0;
+  uint16_t timeToEmpty = kGaugeTimeUnknown, timeToFull = kGaugeTimeUnknown;  // minutes
 };
 
 inline int16_t asSigned(uint16_t v) { return int16_t(v); }
@@ -257,10 +259,16 @@ inline bool gaugeWordCredible(uint8_t command, uint16_t value)
 {
   switch (command) {
     case kGaugeVoltage: return value >= 2500 && value <= 5000;
+    case kGaugeCurrent: case kGaugeAverageCurrent: {
+      // Leave headroom above the 7 A per-pack overcurrent trip while rejecting gross signed-word corruption.
+      constexpr int kMaxCurrentMa = 16000;
+      const int currentMa = asSigned(value);
+      return currentMa >= -kMaxCurrentMa && currentMa <= kMaxCurrentMa;
+    }
     case kGaugeSoc: return value <= 100;
     case kGaugeTemperature: return value > 2332 && value < 3632;
     case kGaugeRemaining: case kGaugeFull: case kGaugeStatus: case kGaugeCycles: return value != 0xffff;
-    default: return true;   // Signed current -1 is a real reading, not an all-ones sentinel.
+    default: return true;
   }
 }
 
@@ -308,7 +316,9 @@ inline GaugeReading readGaugeOnce(I2cBus &bus)
   uint16_t design = 0;
   if (bus.readWord(kGaugeAddress, kGaugeDesign, &design) == I2cResult::ok && design && design != 0xffff) g.designMah = design;
   // A reading no battery can have means the transaction went wrong somewhere (a stuck line reads as 0xffff).
-  g.ok = g.voltageMv >= 2500 && g.voltageMv <= 5000 && g.socPct <= 100 && g.tempDeciC > -400 && g.tempDeciC < 900;
+  g.ok = gaugeWordCredible(kGaugeVoltage, v[0]) && gaugeWordCredible(kGaugeCurrent, v[1]) &&
+         gaugeWordCredible(kGaugeAverageCurrent, v[2]) && gaugeWordCredible(kGaugeSoc, v[3]) &&
+         gaugeWordCredible(kGaugeTemperature, v[6]);
   if (!g.ok) g.failedCommand = 0xff;
   return g;
 }
@@ -318,7 +328,7 @@ inline bool gaugeWordSentinel(const GaugeReading &g)
   return g.remainingMah == 0xffff || g.fullMah == 0xffff || g.status == 0xffff || g.cycles == 0xffff;
 }
 
-inline GaugeReading readGauge(I2cBus &bus)
+inline GaugeReading readGaugeCore(I2cBus &bus)
 {
   const GaugeReading first = readGaugeOnce(bus);
   if (first.ok && !gaugeWordSentinel(first)) return first;
@@ -340,6 +350,18 @@ inline GaugeReading readGauge(I2cBus &bus)
   return result;
 }
 
+inline GaugeReading readGauge(I2cBus &bus, bool readTimes = false)
+{
+  GaugeReading g = readGaugeCore(bus);
+  // Ubuntu's bq27z561 time registers already report minutes. A failed read or
+  // 0xffff leaves that time unknown without invalidating the core sample.
+  if (readTimes && g.ok) {
+    bus.readWord(kGaugeAddress, kGaugeTimeToEmpty, &g.timeToEmpty);
+    bus.readWord(kGaugeAddress, kGaugeTimeToFull, &g.timeToFull);
+  }
+  return g;
+}
+
 struct PackReading {
   bool ok = false;     // at least one pack read
   unsigned packs = 0;  // how many
@@ -359,7 +381,7 @@ inline PackReading combinePacks(const GaugeReading *g, unsigned n)
     p.currentMa += g[i].currentMa;
     p.remainingMah += g[i].remainingMah;
     p.fullMah += g[i].fullMah;
-    p.full = (p.packs == 1 || p.full) && (g[i].status & kGaugeFc);
+    p.full = (p.packs == 1 || p.full) && gaugeWordCredible(kGaugeStatus, g[i].status) && (g[i].status & kGaugeFc);
   }
   if (!p.packs) return p;
   p.ok = true;

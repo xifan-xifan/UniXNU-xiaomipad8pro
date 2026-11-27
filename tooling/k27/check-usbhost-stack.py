@@ -11,6 +11,7 @@ own bundles pull in (the closure of the stack bundle's and PianoXhciHost's libra
     only), unless it waits for a resource the stack itself publishes;
   - a stack personality on a provider that exists at boot (IOPlatformExpertDevice, IOPlatformDevice, IOService, AppleARMIODevice,
     IODTNub) without a name match (name-matched ones are listed: the ADT must not have such a node).
+  - A2 without the SCSI block driver or the three kernel HID fallbacks scoped to the host nub.
 Exit 0 when the stack is gated, 1 otherwise. With none of the stack bundles in the collection: nothing to check (exit 0).
 
 Path A2 (PianoXhciHost, docs/drivers/usb-host.md §5.4) differs in one way that is printed, not refused: our own subclass names
@@ -28,19 +29,63 @@ import fileset_kc  # noqa: E402
 
 GATE = 'PianoUsbHostStack'
 # The bundles that carry the stack: path A1's codeless one, path A2's codeless one and A2's own subclass.
-BUNDLES = ('com.unixnu.driver.PianoUsbHostStack', 'com.unixnu.driver.PianoUsbHostStackA2', 'com.unixnu.driver.PianoXhciHost')
+A2_STACK = 'com.unixnu.driver.PianoUsbHostStackA2'
+BUNDLES = ('com.unixnu.driver.PianoUsbHostStack', A2_STACK, 'com.unixnu.driver.PianoXhciHost')
 A2_BUNDLE = 'com.unixnu.driver.PianoXhciHost'
 NUB = 'PianoUsbHostNub'
+SCSI_BLOCK = 'com.apple.iokit.IOSCSIBlockCommandsDevice'
 # Resources the stack's own kexts publish once loaded (so a personality waiting for one cannot match before the stack loads).
 STACK_RESOURCES = {'com.apple.iokit.SCSISubsystemGlobals'}
 BOOT_PROVIDERS = {'IOPlatformExpertDevice', 'IOPlatformDevice', 'IOService', 'AppleARMIODevice', 'IODTNub'}
 
 
+def check_a2_consumers(by_id):
+    problems = []
+    scsi = by_id.get(SCSI_BLOCK, {}).get('IOKitPersonalities') or {}
+    if not any(p.get('IOClass') == 'IOSCSIPeripheralDeviceType00' and
+               p.get('IOProviderClass') == 'IOSCSIPeripheralDeviceNub' for p in scsi.values()):
+        problems.append('A2: no SCSI direct-access block personality on IOSCSIPeripheralDeviceNub')
+
+    interfaces, event_driver = set(), False
+    fallbacks = by_id[A2_STACK].get('IOKitPersonalities') or {}
+    for name, p in fallbacks.items():
+        if p.get('IOParentMatch') != {'IOProviderClass': NUB}:
+            problems.append(f'A2: "{name}" must match only below {NUB}')
+        if (p.get('CFBundleIdentifier') == 'com.apple.driver.usb.IOUSBHostHIDDevice' and
+                p.get('IOClass') == 'IOUSBHostHIDDevice' and p.get('IOProviderClass') == 'IOUSBHostInterface' and
+                p.get('bInterfaceClass') == 3 and p.get('HIDDefaultBehavior') == ''):
+            interfaces.add(p.get('bInterfaceSubClass'))
+        if (p.get('CFBundleIdentifier') == 'com.apple.iokit.IOHIDFamily' and p.get('IOClass') == 'IOHIDEventDriver' and
+                p.get('IOProviderClass') == 'IOHIDInterface' and p.get('IOPropertyMatch') == {'Transport': 'USB'}):
+            usages = {(u.get('DeviceUsagePage'), u.get('DeviceUsage')) for u in p.get('DeviceUsagePairs', [])}
+            event_driver |= {(1, 2), (1, 6), (12, 1)} <= usages
+    if interfaces != {0, 1} or not event_driver:
+        problems.append('A2: missing USB HID interface or keyboard, mouse and consumer event fallback')
+    return problems
+
+
+def read_prelink_info(kc):
+    prelink = next(s for s in kc.segments if s['name'] == '__PRELINK_INFO')
+    section = next(s for s in prelink['sections'] if s['name'] == '__info')
+    start = section['fileoff']
+    data = bytes(kc.data[start:start + section['size']])
+    end = len(data.rstrip(b'\0'))
+    if not data.startswith(b'bplist00'):
+        return plistlib.loads(data[:end])['_PrelinkInfoDictionary']
+
+    # A binary plist ends with the nonzero 64-bit offset table address. Up to
+    # seven zero bytes can belong to that address before the section padding.
+    for size in range(end, min(len(data), end + 7) + 1):
+        try:
+            return plistlib.loads(data[:size])['_PrelinkInfoDictionary']
+        except plistlib.InvalidFileException:
+            continue
+    raise plistlib.InvalidFileException('invalid binary prelink metadata')
+
+
 def main():
     kc = fileset_kc.Kernelcache(Path(sys.argv[1]).read_bytes())
-    prelink = next(s for s in kc.segments if s['name'] == '__PRELINK_INFO')
-    section = prelink['sections'][0]
-    info = plistlib.loads(bytes(kc.data[section['fileoff']:section['fileoff'] + section['size']]).split(b'\0')[0])['_PrelinkInfoDictionary']
+    info = read_prelink_info(kc)
     by_id = {e['CFBundleIdentifier']: e for e in info}
     ours = [b for b in BUNDLES if b in by_id]
     if not ours:
@@ -75,6 +120,11 @@ def main():
     if A2_BUNDLE in by_id:
         print(f'usbhost stack: path A2: {A2_BUNDLE} links AppleUSBXHCI and IOUSBHostFamily, so those load at boot; they match '
               f'nothing without the gate resource {GATE} and the nub')
+    if A2_STACK in by_id:
+        consumer_problems = check_a2_consumers(by_id)
+        problems.extend(consumer_problems)
+        if not consumer_problems:
+            print('usbhost stack: A2 SCSI direct-access block driver and host-nub-scoped HID fallbacks present')
     gated = 0
     for name in only:
         for pname, p in (by_id[name].get('IOKitPersonalities') or {}).items():
@@ -99,4 +149,5 @@ def main():
     return 1 if problems else 0
 
 
-sys.exit(main())
+if __name__ == '__main__':
+    sys.exit(main())

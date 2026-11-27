@@ -56,6 +56,7 @@ CHANGED=' '
 PLIST_CHANGED=' '
 PASSD_KEEP=0
 PASSD=/usr/local/libexec/piano-passd-policy
+PASSD_AGENT=/Library/LaunchAgents/com.unixnu.piano-passd-policy.plist
 
 # The passd policy changes persistent launchd state as well as files. Revert it
 # BEFORE removing either of its files. A failed revert retains the whole unit
@@ -163,6 +164,21 @@ EOF
 }
 
 [ -f "$S/manifest.tsv" ] || { say "no manifest at $S/manifest.tsv"; exit 1; }
+# The launchd override and its rollback require both files from one coherent unit.
+passd_on=$(awk -F '\t' -v helper="$PASSD" -v agent="$PASSD_AGENT" '
+  $1 == "piano-passd-policy" || $9 == helper || $9 == agent {
+    if (NF != 10 || $1 != "piano-passd-policy" || $3 !~ /^[01]$/ || $5 != "root" || $6 != "wheel")
+      bad = 1
+    if ($9 == helper && $2 == "file" && $4 == "0755" && $10 == "-") {
+      helpers++; on = $3
+    } else if ($9 == agent && $2 == "agent" && $4 == "0644" && $10 == "com.unixnu.piano-passd-policy") {
+      agents++; agent_on = $3
+    } else bad = 1
+  }
+  END {
+    if (bad || ((helpers || agents) && (helpers != 1 || agents != 1 || on != agent_on))) exit 1
+    if (helpers) print on
+  }' "$S/manifest.tsv") || { say 'passd policy: incomplete or invalid unit; hook refused'; exit 1; }
 [ "$MODE" = --check ] || mkdir -p "$STATE"
 
 # 1. Files.
@@ -248,7 +264,6 @@ while IFS=$TAB read -r unit kind on mode owner group want staged dest label; do
 done < "$S/manifest.tsv"
 
 # A removed policy must restore its persistent state before losing its files.
-passd_on=$(awk -F '\t' -v p="$PASSD" '$9 == p {print $3}' "$S/manifest.tsv")
 if [ -z "$passd_on" ] && [ "$MODE" != --check ]; then
   passd_revert || { FAILED=1; PASSD_KEEP=1; }
 fi

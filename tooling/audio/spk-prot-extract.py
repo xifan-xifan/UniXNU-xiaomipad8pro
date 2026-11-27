@@ -70,24 +70,36 @@ class Acdb:
             length = self.u32(off + 4)
             if off + 8 + length > len(data):
                 raise AcdbError(f'chunk {cid!r} runs past the end')
+            if cid in self.chunks:
+                raise AcdbError(f'duplicate chunk {cid!r}')
             self.chunks[cid] = (off + 8, length)
             off += 8 + length
+        if off < len(data):
+            raise AcdbError('truncated chunk header')
         for need in ('GKVT', 'GKVL', 'POOL', 'CSLU', 'CAKT', 'CDLU', 'CDDE', 'CDDO'):
             if need not in self.chunks:
                 raise AcdbError(f'no {need} chunk: not an ACDB of this format')
 
-    def u32(self, off, n=1):
-        if off < 0 or off + 4 * n > len(self.d):
+    def u32(self, off, n=1, *, end=None):
+        if end is None:
+            end = len(self.d)
+        if off < 0 or off + 4 * n > end:
             raise AcdbError(f'read past the end at {off:#x}')
         v = struct.unpack_from(f'<{n}I', self.d, off)
         return v if n > 1 else v[0]
 
-    def words(self, off, n):
-        return list(self.u32(off, n)) if n > 1 else ([self.u32(off)] if n == 1 else [])
+    def words(self, off, n, *, end):
+        if n > 1:
+            return list(self.u32(off, n, end=end))
+        return [self.u32(off, end=end)] if n == 1 else []
+
+    def end(self, chunk):
+        base, length = self.chunks[chunk]
+        return base + length
 
     def at(self, chunk, off=0):
         base, length = self.chunks[chunk]
-        if off >= length:
+        if not 0 <= off < length:
             raise AcdbError(f'{chunk}+{off:#x} outside the chunk')
         return base + off
 
@@ -95,18 +107,20 @@ class Acdb:
         keys = tuple(sorted(gkv))
         vals = tuple(gkv[k] for k in keys)
         o = self.at('GKVT')
-        tables = self.u32(o)
+        end = self.end('GKVT')
+        tables = self.u32(o, end=end)
         o += 4
         for _ in range(tables):
-            nk, ne = self.u32(o, 2)
+            nk, ne = self.u32(o, 2, end=end)
             o += 8
             for e in range(ne):
-                row = self.words(o + e * (nk + 1) * 4, nk + 1)
+                row = self.words(o + e * (nk + 1) * 4, nk + 1, end=end)
                 if nk == len(keys) and tuple(row[:nk]) == keys:
                     lut = self.at('GKVL', row[nk])
-                    lk, ln = self.u32(lut, 2)
+                    lut_end = self.end('GKVL')
+                    lk, ln = self.u32(lut, 2, end=lut_end)
                     for r in range(ln):
-                        v = self.words(lut + 8 + r * (lk + 2) * 4, lk + 2)
+                        v = self.words(lut + 8 + r * (lk + 2) * 4, lk + 2, end=lut_end)
                         if tuple(v[:lk]) == vals:
                             return v[lk], v[lk + 1]
             o += ne * (nk + 1) * 4
@@ -114,80 +128,107 @@ class Acdb:
 
     def subgraphs(self, list_off):
         o = self.at('POOL', list_off)
-        _, n = self.u32(o, 2)
+        end = self.end('POOL')
+        _, n = self.u32(o, 2, end=end)
         o += 8
         out = []
         for _ in range(n):
-            sg, nd = self.u32(o, 2)
+            sg, nd = self.u32(o, 2, end=end)
             out.append(sg)
             o += 8 + 4 * nd
+            if o > end:
+                raise AcdbError('subgraph destinations run past POOL')
         return out
 
-    def modules(self, data_off, want_sg):
-        """The (module, iid) pairs of want_sg's MODULES_LIST in the graph's subgraph data."""
+    def spf_blocks(self, data_off, want_sg):
+        """Yield (parameter ID, payload offset, payload end) within a subgraph."""
         o = self.at('POOL', data_off)
-        _, n = self.u32(o, 2)
+        pool_end = self.end('POOL')
+        _, n = self.u32(o, 2, end=pool_end)
         o += 8
         for _ in range(n):
-            sg, size = self.u32(o, 2)
+            sg, size = self.u32(o, 2, end=pool_end)
             o += 8
             end = o + size
+            if end > pool_end:
+                raise AcdbError('subgraph data runs past POOL')
             if sg == want_sg:
-                p = o + 4 + self.u32(o)          # past the driver properties
-                spf_end = p + 4 + self.u32(p)
+                p = o + 4 + self.u32(o, end=end)  # past the driver properties
+                spf_end = p + 4 + self.u32(p, end=end)
+                if spf_end > end:
+                    raise AcdbError('SPF data runs past the subgraph')
                 p += 4
-                mods = []
                 while p < spf_end:
-                    _, pid, psz = self.u32(p, 3)
+                    _, pid, psz = self.u32(p, 3, end=spf_end)
                     p += 12
-                    if pid == 0x08001002:
-                        q = p
-                        for _ in range(self.u32(q)):
-                            _, _, nm = self.u32(q + 4, 3)
-                            pairs = self.words(q + 16, 2 * nm)
-                            mods += list(zip(pairs[0::2], pairs[1::2]))
-                            q += 12 + 8 * nm
-                    p += psz + (-psz % 8)
-                return mods
+                    next_block = p + psz + (-psz % 8)
+                    if next_block > spf_end:
+                        raise AcdbError('truncated SPF parameter')
+                    yield pid, p, p + psz
+                    p = next_block
+                return
             o = end
         raise AcdbError(f'subgraph {want_sg:#x} has no data in this graph')
+
+    def modules(self, data_off, want_sg):
+        """The (module, iid) pairs of want_sg's MODULES_LIST."""
+        mods = []
+        for pid, start, end in self.spf_blocks(data_off, want_sg):
+            if pid != 0x08001002:
+                continue
+            count = self.u32(start, end=end)
+            q = start + 4
+            for _ in range(count):
+                _, _, nm = self.u32(q, 3, end=end)
+                pairs = self.words(q + 12, 2 * nm, end=end)
+                mods.extend(zip(pairs[0::2], pairs[1::2]))
+                q += 12 + 8 * nm
+        return mods
 
     def persistent(self):
         if 'PPTC' not in self.chunks:
             return set()
         o = self.at('PPTC')
-        return set(self.words(o + 4, self.u32(o)))
+        end = self.end('PPTC')
+        return set(self.words(o + 4, self.u32(o, end=end), end=end))
 
     def default_cal(self, want_sg):
         """[(iid, pid, bytes)] of want_sg's calibration table without keys."""
         o = self.at('CSLU')
-        n = self.u32(o)
+        end = self.end('CSLU')
+        n = self.u32(o, end=end)
         o += 4
         for _ in range(n):
-            sg, ne = self.u32(o, 2)
+            sg, ne = self.u32(o, 2, end=end)
             o += 8
-            tables = [self.u32(o + 8 * k, 2) for k in range(ne)]
+            tables = [self.u32(o + 8 * k, 2, end=end) for k in range(ne)]
             o += 8 * ne
             if sg != want_sg:
                 continue
             for cakt, cdlu in tables:
-                if self.u32(self.at('CAKT', cakt)):
+                if self.u32(self.at('CAKT', cakt), end=self.end('CAKT')):
                     continue                     # keyed by a calibration key: not the default table
                 lut = self.at('CDLU', cdlu)
-                nk, rows = self.u32(lut, 2)
+                lut_end = self.end('CDLU')
+                nk, rows = self.u32(lut, 2, end=lut_end)
                 if nk or rows != 1:
                     raise AcdbError(f'subgraph {want_sg:#x}: a default table with {rows} rows')
-                cdde, cddo, _ = self.u32(lut + 8, 3)
+                cdde, cddo, _ = self.u32(lut + 8, 3, end=lut_end)
                 de, do = self.at('CDDE', cdde), self.at('CDDO', cddo)
-                nd, nt = self.u32(de), self.u32(do)
+                de_end, do_end, pool_end = self.end('CDDE'), self.end('CDDO'), self.end('POOL')
+                nd, nt = self.u32(de, end=de_end), self.u32(do, end=do_end)
+                if nt > (do_end - do - 4) // 4:
+                    raise AcdbError('truncated CDDO offsets')
                 out = []
                 for k in range(nd):
-                    iid, pid = self.u32(de + 4 + 8 * k, 2)
-                    pool = self.u32(do + 4 + 4 * k) if k < nt else 0xffffffff
+                    iid, pid = self.u32(de + 4 + 8 * k, 2, end=de_end)
+                    pool = self.u32(do + 4 + 4 * k, end=do_end) if k < nt else 0xffffffff
                     if pool == 0xffffffff:
                         continue                 # no data for this pair
                     po = self.at('POOL', pool)
-                    size = self.u32(po)
+                    size = self.u32(po, end=pool_end)
+                    if po + 4 + size > pool_end:
+                        raise AcdbError('truncated POOL parameter')
                     out.append((iid, pid, self.d[po + 4:po + 4 + size]))
                 return out
             raise AcdbError(f'subgraph {want_sg:#x} has no default calibration table')
@@ -388,6 +429,26 @@ def self_test():
     check(packed[:4] == b'PSPK' and struct.unpack_from('<I', packed, 8)[0] == len(entries), 'the header')
     check(len(packed) == 16 + sum(12 + len(d) + (-len(d) % 4) for _, _, d in entries), 'the size')
     check('1 out of band' in summary(entries), 'the summary counts the 6180-byte parameter out of band')
+    acdb = Acdb(blob)
+    _, data_off = acdb.find_graph(VI_GKV)
+    module_start = next(start for pid, start, _ in acdb.spf_blocks(data_off, SG_VI) if pid == 0x08001002)
+    short_modules = bytearray(blob)
+    struct.pack_into('<I', short_modules, module_start - 4, 4)
+    _, _, last = dev_cal[-1]
+    last_size = len(blob) - len(last) - 4
+    short_pool = bytearray(blob)
+    struct.pack_into('<I', short_pool, last_size, len(last) + 1)
+    short_offsets = bytearray(blob)
+    last_offsets = acdb.end('CDDO') - 4 * (len(dev_cal) + 1)
+    struct.pack_into('<I', short_offsets, last_offsets, len(dev_cal) + 1)
+    for bad, why in ((short_offsets, 'truncated CDDO offsets'), (blob + b'POOL', 'truncated chunk header'), (short_modules, 'read past the end'),
+                     (short_pool, 'truncated POOL parameter')):
+        try:
+            collect(Acdb(bad))
+        except AcdbError as e:
+            check(why in str(e), f'refused for {why} ({e})')
+        else:
+            check(False, f'refused: {why}')
     for bad, what in ((synthetic_acdb(lane_vi=2)[0], 'lane'), (synthetic_acdb(keyed_only=True)[0], 'default calibration'),
                       (synthetic_acdb(modules_override=[(0x07001015, 0x4032)])[0], 'is not module'),
                       (synthetic_acdb(cal_extra=[(0x4023, TDM_INTF, bytes(28))])[0], 'TDM interface'),
@@ -448,7 +509,7 @@ def main():
         else:
             p.print_help()
             return 2
-    except AcdbError as e:
+    except (AcdbError, OSError) as e:
         raise SystemExit(f'Error: {e}')
     return 0
 

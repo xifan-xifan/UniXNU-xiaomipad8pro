@@ -4,6 +4,7 @@
  * entries and aux data relative to +144); the RSC with its v2/v3 register layouts, three
  * ACTIVE TCSes, busy TCSes, lost writes, late, partial or missing completion; the touch path
  * sharing the DRV-2 lock; and the host vote policy of ARCHITECTURE 4.3.3. */
+// clang -std=c11 -Wall -Wextra -Werror -pthread test_sm8750_rpmh.c ../platform/sm8750/Sm8750Rpmh.c -o /tmp/test_sm8750_rpmh && /tmp/test_sm8750_rpmh
 #include "../platform/sm8750/Sm8750Rpmh.h"
 #include <pthread.h>
 #include <sched.h>
@@ -283,6 +284,7 @@ typedef struct {
     uint64_t idle_at;
     int partial;                            /* last command never gets COMPL */
     int garbage;                            /* CMD_STATUS reads 0xffffffff after completion */
+    uint32_t read_response;
     unsigned pending;
     uint64_t now, triggered_at, touch_release_at;
     uint32_t irq_poke;                      /* another IRQ_ENABLE bit set while a TCS runs */
@@ -378,6 +380,8 @@ static void rsc_delay(void *context, unsigned microseconds)
             int last = !(enabled >> (i + 1));
             uint32_t v = m->partial && last ? 0x100 : 0x10100;
             m->regs[(b + m->msg + 12 + i * m->stride) / 4] = m->garbage ? 0xffffffffu : v;
+            if (m->regs[(b + m->msg + i * m->stride) / 4] == Sm8750RpmhMsgIdRead)
+                m->regs[(b + m->msg + 16 + i * m->stride) / 4] = m->read_response;
         }
         m->idle_at = m->now + (uint64_t)m->status_lag_ms * 1000;
     }
@@ -855,6 +859,34 @@ static void test_tcs_sequence(unsigned major)
     CHECK(m->nsent == 1 && m->sent[0].n == 2 && m->sent[0].msgid[1] == 0x10108);
     CHECK(!(reg_of(m, 0xd04) & 1) && reg_of(m, 0xd00) == 0x87 && Sm8750RpmhDrv2Owner() == 0);
     CHECK(m->now == 1000);
+    free(m);
+}
+
+static void test_tcs_read(unsigned major)
+{
+    Rsc *m = rsc_new(major, 16);
+    Sm8750RpmhIo io = rsc_io(m);
+    Sm8750RpmhResult r;
+    const uint32_t at = tcs(0) + m->msg;
+    m->regs[(at + 8) / 4] = 0xdeadbeef;
+    m->regs[(at + 16) / 4] = 0x12345678;
+    m->read_response = 0x20234567;
+    uint32_t data = 0;
+    CHECK(Sm8750RpmhReadActive(&io, 0x50000, &data, &r) == Sm8750RpmhOk);
+    CHECK(data == m->read_response && r.step == Sm8750RpmhStepDone && r.command[0] == 0x10100);
+    CHECK(m->nsent == 1 && m->sent[0].wait == 1 && m->sent[0].n == 1);
+    CHECK(m->sent[0].msgid[0] == 0x108 && m->sent[0].addr[0] == 0x50000 && m->sent[0].data[0] == 0xdeadbeef);
+    for (unsigned i = 0; i < m->nlog; ++i)
+        CHECK(m->log[i].reg != at + 8 && m->log[i].reg != at + 16);
+    CHECK(reg_of(m, 0xd00) == 0x87 && reg_of(m, tcs(0) + m->enable) == 0 && Sm8750RpmhDrv2Owner() == 0);
+
+    const unsigned writes = m->writes;
+    CHECK(Sm8750RpmhReadActive(&io, 0, &data, &r) == Sm8750RpmhArgument && m->writes == writes);
+    m->complete_ms = -1;
+    data = 0x456;
+    CHECK(Sm8750RpmhReadActive(&io, 0x30000, &data, &r) == Sm8750RpmhTimeout);
+    CHECK(data == 0x456 && r.step == Sm8750RpmhStepPoll && m->sent[1].msgid[0] == 0x108);
+    CHECK(reg_of(m, tcs(0) + m->enable) == 1 && Sm8750RpmhDrv2Owner() == 0);
     free(m);
 }
 
@@ -1436,6 +1468,8 @@ int main(void)
     test_encoding();
     test_tcs_sequence(2);
     test_tcs_sequence(3);
+    test_tcs_read(2);
+    test_tcs_read(3);
     test_tcs_busy();
     test_tcs_refusals();
     test_tcs_lost_write();

@@ -12,6 +12,7 @@
 #include <IOKit/IOService.h>
 #include <IOKit/IOLib.h>
 #include <libkern/c++/OSData.h>
+#include <libkern/c++/OSSymbol.h>
 
 class AppleDiagnosticDataAccess : public IOService {
     OSDeclareDefaultStructors(AppleDiagnosticDataAccess)
@@ -36,13 +37,20 @@ constexpr unsigned char kErased[24] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 bool AppleDiagnosticDataAccessReadOnly::start(IOService *provider)
 {
     if (!AppleDiagnosticDataAccess::start(provider)) return false;
-    OSData *erased = OSData::withBytes(kErased, sizeof kErased);
+    const OSSymbol *key = OSSymbol::withCStringNoCopy("AppleDiagnosticDataSysCfg");
+    OSData *erased = key ? OSData::withBytes(kErased, sizeof kErased) : nullptr;
+    bool published = false;
     if (erased) {
-        setProperty("AppleDiagnosticDataSysCfg", erased);
+        published = setProperty(key, erased);
         erased->release();
     }
+    if (key) key->release();
     registerService();   // MobileGestalt finds it by class (IOServiceMatching), already matched: no wait
-    IOLog("ARMPlatformStandIn: AppleDiagnosticDataAccessReadOnly registered (a stand-in, no hardware: AppleDiagnosticDataSysCfg %u "
-          "bytes, erased)\n", (unsigned)sizeof kErased);
+    if (published) {
+        IOLog("ARMPlatformStandIn: AppleDiagnosticDataAccessReadOnly registered (a stand-in, no hardware: AppleDiagnosticDataSysCfg %u "
+              "bytes, erased)\n", (unsigned)sizeof kErased);
+    } else {
+        IOLog("ARMPlatformStandIn: AppleDiagnosticDataAccessReadOnly registered without AppleDiagnosticDataSysCfg\n");
+    }
     return true;
 }

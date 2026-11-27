@@ -72,15 +72,15 @@ void par_init(ParAgent *a, const ParConfig *c);
 void par_cover(ParAgent *a, int cover, uint64_t now_ms);
 void par_edge(ParAgent *a, int edge, uint64_t now_ms);
 void par_lock(ParAgent *a, int locked);
-/* What WindowServer shows (after a reconfiguration, and while a rotation is awaited). */
+/* What WindowServer shows on the active console, or -1 when the panel is unavailable to the agent. */
 void par_observed(ParAgent *a, int degrees, uint64_t now_ms);
 /* The backend's answer to an apply: ok = it took the request (the reading back confirms it later). */
 void par_applied(ParAgent *a, int degrees, int ok, uint64_t now_ms);
 void par_touch_done(ParAgent *a, int degrees, int ok, uint64_t now_ms);
 /* What to do now. can_apply: the agent may rotate at all now (its session is on the console, the display is awake, a backend). */
 ParDecision par_step(ParAgent *a, uint64_t now_ms, int can_apply);
-/* When par_step has something to do next (absolute ms), or 0 when only an input can change anything. */
-uint64_t par_deadline(const ParAgent *a, uint64_t now_ms);
+/* Next useful policy evaluation (absolute ms). A settled proposal that cannot apply waits for an input. */
+uint64_t par_deadline(const ParAgent *a, uint64_t now_ms, int can_apply);
 /* The edge a rotation corresponds to under the map (PS_EDGE_NONE when none does). */
 int par_edge_of_degrees(const ParConfig *c, int degrees);
 int par_valid_degrees(int degrees);

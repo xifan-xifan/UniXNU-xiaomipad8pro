@@ -4,7 +4,7 @@
 // back the way the firmware reads it — by tag, then by the field's place inside the structure — so that a wrong word count or a
 // wrong order fails here and not on the tablet (a firmware of this family asserts on a structure whose length it does not
 // expect, which is what P22 was about).
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. assoc_host.cpp -o /tmp/assoc_host && /tmp/assoc_host
+//   c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I.. assoc_host.cpp -o /tmp/assoc_host && /tmp/assoc_host
 #include "WifiAssoc.h"
 #include <cstdio>
 #include <cstring>
@@ -105,6 +105,7 @@ static void testRegulatory()
     CHECK(regChannel(reg, 5745, channel) && channel.passive && !channel.radar && channel.powerDbm == 14);
     CHECK(!regChannel(reg, 5340, channel));                       // between two rules: no rule covers its whole width
     CHECK(!regChannel(reg, 5955, channel));                       // the 6 GHz band: not in this domain's rules
+    CHECK(!regChannel(reg, UINT32_MAX, channel) && !channel.allowed);
     // The channel list it becomes.
     ChanList list;
     chanListBuild(list, reg, true);
@@ -139,6 +140,19 @@ static void testRegulatory()
     ChanList list;
     chanListBuild(list, reg, true);
     CHECK(list.count == 0 && list.left24 == 13);
+  }
+  {
+    RegEvent event({{2402, 2422, 10, 20, 0}}, {{5170, 5190, 20, 23, kRegRuleFlagDisabled}}, false);
+    RegDomain reg;
+    CHECK(regParse(reg, event.payload(), event.payloadLength(), false));
+    RegChannel channel;
+    CHECK(!regChannel(reg, 2412, channel) && !channel.allowed);
+    CHECK(!regChannel(reg, 5180, channel) && !channel.allowed);
+    uint8_t *ev = event.bytes.data() + kWmiCmdHeaderBytes + kWmiTlvHeaderBytes;
+    put32(ev + 4 * 12, UINT32_MAX);
+    put32(ev + 4 * 13, 1);
+    CHECK(regParse(reg, event.payload(), event.payloadLength(), false));
+    CHECK(reg.ruleCount == 2 && reg.rulesDropped == UINT32_MAX - 1);
   }
   {   // a truncated event: refused, and nothing of it is believed
     RegEvent event(lower, upper, false);

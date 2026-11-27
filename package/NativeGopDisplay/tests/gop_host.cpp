@@ -24,7 +24,7 @@
 //   - the fixed refresh contract (GopRefresh.h, native-gop-display-120=1): the 32.32 periods against the family's own constants (60 Hz
 //     0x04444444, 24 Hz 0x0aaaaaaa), 120 Hz min = max = 0x02222222 and 8333333 ns, the accepted range, and the VBL tick's absolute
 //     deadlines (phase kept across mid-period re-arms, missed ticks skipped without a burst, a fresh grid after a long stall).
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. gop_host.cpp -o /tmp/gop_host && /tmp/gop_host
+//   c++ -std=c++20 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I.. gop_host.cpp -o /tmp/gop_host && /tmp/gop_host
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -38,6 +38,7 @@
 #include "GopCompose.h"
 #include "GopFence.h"
 #include "GopRefresh.h"
+#include "GopShotDiagnostics.h"
 #include "../PianoDpu/PianoDpuFlipClient.h"           // pianoPrepareSurface: how the copy's kept maps prepare a surface
 #include "../../PianoDpu/tests/prepare_model.h"       // XNU's read-only prepare rule, modelled
 
@@ -139,8 +140,12 @@ static void testPixels()
   convertSpan(kFormatBGRA, bgra, out, 4, t);
   CHECK(!memcmp(out, bgra, sizeof(out)));
   uint32_t b3a8[3] = {894u << 20 | 384u << 10 | 639u, 0, 1023u << 20 | 1023u << 10 | 1023u};
+  alignas(uint32_t) uint8_t unaligned[sizeof(b3a8) + 1];
+  memcpy(unaligned + 1, b3a8, sizeof(b3a8));
+  convertSpan(kFormatB3A8, unaligned + 1, out, 3, t);
   convertSpan(kFormatB3A8, b3a8, b3a8, 3, t);   // in place
   CHECK(b3a8[0] == 0xffff007f && b3a8[1] == 0xff000000 && b3a8[2] == 0xffffffff);
+  CHECK(!memcmp(out, b3a8, sizeof(b3a8)));
   uint64_t rgha[2] = {0x3c00ull << 48 | 0x0000ull << 32 | 0x3800ull << 16 | 0x3c00ull, 0xbc00ull << 32 | 0x7bffull << 16 | 0x2e66ull};
   convertSpan(kFormatRGhA, rgha, out, 2, t);
   CHECK(out[0] == (0xff000000u | 255u << 16 | uint32_t(t.half[0x3800 >> 2]) << 8 | 0));
@@ -257,6 +262,14 @@ struct TestSurface {
 // ---------------------------------------------------------------------------------------------------------------- parallel copy rows
 static void testParallelRows()
 {
+  CHECK(gopcopy::sliceCount(INT32_MIN, INT32_MAX, 3) == 3);
+  const gopcopy::RowSlice wide = gopcopy::sliceAt(INT32_MIN, INT32_MAX, 1, 0);
+  CHECK(wide.y0 == INT32_MIN && wide.y1 == INT32_MAX);
+  const gopcopy::RowSlice middle = gopcopy::sliceAt(INT32_MIN, INT32_MAX, 3, 1);
+  CHECK(middle.y0 == -715827883 && middle.y1 == 715827882);
+  const gopcopy::RowSlice last = gopcopy::sliceAt(INT32_MIN, INT32_MAX, 3, 2);
+  CHECK(last.y0 == middle.y1 && last.y1 == INT32_MAX);
+
   // The kernel compositor uses the same half-open slices.  Check every
   // worker count used by the boot A/B (including the invalid/zero setting),
   // that slices are balanced, contiguous and cover each requested rectangle.
@@ -352,6 +365,15 @@ static uint32_t referencePixel(int32_t x, int32_t y, TestSurface *base, TestSurf
 }
 static void testCompose()
 {
+  const uint64_t visible = 3200 * 4, stride = visible + 64, height = 2136, offset = 4096;
+  const uint64_t length = offset + (height - 1) * stride + visible;
+  CHECK(surfaceRowsFit(length, offset, stride, visible, height));
+  CHECK(!surfaceRowsFit(length - 1, offset, stride, visible, height));
+  CHECK(!surfaceRowsFit(length, offset, visible - 1, visible, height));
+  CHECK(surfaceRowsFit(visible, 0, UINT64_MAX, visible, 1));
+  CHECK(!surfaceRowsFit(visible, 0, UINT64_MAX, visible, 2));
+  CHECK(!surfaceRowsFit(visible, UINT64_MAX, visible, visible, 1));
+
   static Tables t;
   t.init();
   std::mt19937 random(7);
@@ -2010,8 +2032,27 @@ static void testColorLog()
     CHECK(logged(1) && logged(16) && !logged(17) && logged(100) && !logged(101));
 }
 
+static void testShotBusyDiagnostics()
+{
+    using namespace gopshot;
+    CHECK(dpuBusyReason(PianoDpuScanoutBusy::initialLock) == BusyReason::initialLock);
+    CHECK(dpuBusyReason(PianoDpuScanoutBusy::finalLock) == BusyReason::finalLock);
+    CHECK(dpuBusyReason(PianoDpuScanoutBusy::changed) == BusyReason::scanoutChanged);
+    CHECK(dpuBusyReason(PianoDpuScanoutBusy::none) == BusyReason::dpuBusy);
+    CHECK(!std::strcmp(busyReasonName(BusyReason::oddEpoch), "odd-epoch"));
+    CHECK(!std::strcmp(busyReasonName(BusyReason::finalEpoch), "final-epoch"));
+
+    BusyCounts counts;
+    for (unsigned i = 0; i < unsigned(BusyReason::count); ++i) CHECK(counts.record(BusyReason(i)) == 1);
+    CHECK(counts.record(BusyReason::scanoutChanged) == 2);
+    CHECK(counts.record(BusyReason::initialLock) == 2);
+    CHECK(counts.record(BusyReason::scanoutChanged) == 3);
+    CHECK(counts.byReason[unsigned(BusyReason::finalEpoch)] == 1);
+}
+
 int main()
 {
+    testShotBusyDiagnostics();
     testRefreshContract();
     testFencePoll();
     testColorLog();

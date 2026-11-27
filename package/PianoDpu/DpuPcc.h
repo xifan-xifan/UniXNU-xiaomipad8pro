@@ -42,6 +42,7 @@ inline bool same(const Matrix &a, const Matrix &b)
 }
 inline bool isDiagonal(const Matrix &a, int32_t slack = kOne / 256)
 {
+  if (slack < 0) return false;
   for (unsigned o = 0; o < 3; ++o)
     for (unsigned i = 0; i < 3; ++i)
       if (o != i && (a.m[o][i] > slack || a.m[o][i] < -slack)) return false;
@@ -97,11 +98,20 @@ inline Decoded decodeS3132(const uint64_t raw[9], bool acceptSignMagnitude = tru
 inline Matrix multiply(const Matrix &a, const Matrix &b, int32_t limit = 8 * kOne)
 {
   Matrix r{};
+  if (limit <= 0) return r;
   for (unsigned o = 0; o < 3; ++o)
     for (unsigned i = 0; i < 3; ++i) {
-      int64_t s = 0;
-      for (unsigned k = 0; k < 3; ++k) s += int64_t(a.m[o][k]) * b.m[k][i];
-      s = (s + (s >= 0 ? kOne / 2 : -kOne / 2)) / kOne;
+      // Sum the whole and fractional parts separately. Three full-width products can overflow int64_t.
+      int64_t whole = 0, fraction = 0;
+      for (unsigned k = 0; k < 3; ++k) {
+        const int64_t product = int64_t(a.m[o][k]) * b.m[k][i];
+        const int64_t remainder = product % kOne;
+        whole += product / kOne - (remainder < 0);
+        fraction += remainder < 0 ? remainder + kOne : remainder;
+      }
+      whole += fraction / kOne;
+      // The whole part is now floored. Exact half steps round away from zero.
+      int64_t s = whole + (fraction % kOne + kOne / 2 - (whole < 0)) / kOne;
       if (s > limit) s = limit;
       if (s < -limit) s = -limit;
       r.m[o][i] = int32_t(s);
@@ -194,7 +204,8 @@ inline GammaFit fitGamma(const uint32_t *w, unsigned words)
     gain[c] = sr ? int32_t((sc * kOne + sr / 2) / sr) : 0;
     for (unsigned k = 0; k < kGammaEntries; ++k) {
       const int64_t want = (int64_t(ref[k]) * gain[c] + kOne / 2) / kOne, dev = int64_t(ch[c][k]) - want;
-      const uint32_t milli = uint32_t(((dev < 0 ? -dev : dev) * 1000 + top / 2) / top);
+      const uint64_t magnitude = uint64_t(dev < 0 ? -dev : dev);
+      const uint32_t milli = uint32_t((magnitude * 1000 + top / 2) / top);
       if (milli > g.worstMilli) g.worstMilli = milli;
     }
   }
@@ -219,12 +230,12 @@ inline Words pccWords(const Matrix &m, bool allowNegative)
   Words r;
   for (unsigned o = 0; o < 3; ++o)
     for (unsigned i = 0; i < 3; ++i) {
-      int32_t q = m.m[o][i];
+      int64_t q = m.m[o][i];
       if (q < 0 && !allowNegative) {
         q = 0;
         ++r.clampedNegative;
       }
-      int32_t v = q >= 0 ? (q + 1) / 2 : -((-q + 1) / 2);
+      int64_t v = q >= 0 ? (q + 1) / 2 : -((-q + 1) / 2);
       if (v > 0x1ffff) {
         v = 0x1ffff;
         ++r.saturated;

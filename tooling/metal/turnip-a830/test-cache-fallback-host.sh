@@ -27,13 +27,15 @@ FIRST=$CACHE/com.apple.metal/cache_fallback_host/m2v
 printf '(version 1)\n(allow default)\n(deny file-write* (subpath "%s") (subpath "%s") (subpath "/private/var/tmp"))\n' \
   "$CACHE" "$TEMP" > "$OUT/deny-cache.sb"
 run() {   # run LABEL SANDBOXED(0|1) BUNDLE ARGS...: the plugin's device path over the hostsim, stdout OUT/LABEL.txt, stderr OUT/LABEL.err
-  local label=$1 boxed=$2 bundle=$3; shift 3
+  local label=$1 boxed=$2 bundle=$3 status=0; shift 3
   # The environment is set by env(1) inside the sandbox: dyld drops DYLD_INSERT_LIBRARIES at sandbox-exec (a platform binary), and
   # without the shim the host's own AGXAccelerator answers (0xe00002c7).
   local cmd=(/usr/bin/env -u METAL2VULKAN_SHADER_CACHE_OPTIONAL DYLD_INSERT_LIBRARIES=$SHIM HOSTSIM_GPU=a830 HOSTSIM_PAGE_SIZE=4096
              HOSTSIM_VA=16 MESA_LOG= "$OUT/cache_fallback_host" "$bundle/Contents/MacOS/NativeAdrenoMetal" "$@")
   if [ "$boxed" = 1 ]; then cmd=(sandbox-exec -f "$OUT/deny-cache.sb" "${cmd[@]}"); fi
-  "${cmd[@]}" > "$OUT/$label.txt" 2> "$OUT/$label.err" && echo "$label: rc 0" || echo "$label: rc $?"
+  "${cmd[@]}" > "$OUT/$label.txt" 2> "$OUT/$label.err" || status=$?
+  echo "$label: rc $status"
+  if [ "$status" -ne 0 ]; then fail=1; fi
 }
 fail=0
 want() {   # want FILE TEXT: TEXT is in FILE
@@ -56,7 +58,8 @@ run writable 0 "$BUNDLE"
 want "$OUT/writable.txt" 'RESULT PASS'
 want "$OUT/writable.err" 'NativeAdrenoMetal: cache_fallback_host: device Adreno'
 wantnot "$OUT/writable.err" 'no writable cache directory'
-entries=$(find "$FIRST/v1" -type f 2>/dev/null | wc -l | tr -d ' ')
+entries=0
+if [ -d "$FIRST/v1" ]; then entries=$(find "$FIRST/v1" -type f | wc -l | tr -d ' '); fi
 if [ "${entries:-0}" -gt 0 ]; then echo "PASS writable: $entries entries in $FIRST/v1 (the disk cache)"; else echo "FAIL writable: no entries in $FIRST/v1"; fail=1; fi
 if [ -n "$BASELINE" ]; then
   rm -rf "$CACHE/com.apple.metal/cache_fallback_host"

@@ -19,7 +19,10 @@ constexpr uint64_t kVbif = 0x0aeb0000;        // DT "vbif" (len 0x3000): not rea
 constexpr uint64_t kRegDma = 0x0af80000;      // DT "regdma" (len 0x7000): the LUT DMA engine (GC/IGC programming); not read
 constexpr uint64_t kDsi[2] = {0x0ae94000, 0x0ae96000};   // DT dsi@ae94000 (master, qcom,master-dsi) and dsi@ae96000; len 0x400
 constexpr uint32_t kDsiBytes = 0x400;
-constexpr uint64_t kDsiPhy[2] = {0x0ae95000, 0x0ae97000}; // DT phy@ae95000/ae97000 (qcom,sm8750-dsi-phy-3nm): not read
+constexpr uint64_t kDsiPhy[2] = {0x0ae95000, 0x0ae97000}; // DT phy@ae95000/ae97000 (qcom,sm8750-dsi-phy-3nm), dsi_phy resources
+constexpr uint32_t kDsiPhyBytes = 0x200;                 // PHY common only; lane and PLL resources are separate
+constexpr uint64_t kDsiPll[2] = {0x0ae95500, 0x0ae97500}; // DT dsi_pll resources for the same PHYs
+constexpr uint32_t kDsiPllBytes = 0x400;
 constexpr uint64_t kDispCc = 0x0af00000;      // DT clock-controller@af00000 (qcom,sm8750-dispcc, len 0x20000)
 constexpr uint64_t kSmmu = 0x15000000, kSmmuBytes = 0x100000;   // apps SMMU (qcom,sm8750-smmu-500), 1 MiB
 constexpr uint64_t kTlmm = 0x0f100000;        // main TLMM, pin n at + n * 0x1000 (CFG +0, IO +4)

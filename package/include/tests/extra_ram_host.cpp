@@ -133,6 +133,15 @@ int main()
     CHECK(text(p).find("adt=bad-length") != std::string::npos);
   }
 
+  {
+    Pool p;
+    const auto v = adt({{kAllowed[0].base, kSlab, kAllowed[0].bank, kAllowed[0].use}});
+    Config c = cfg(kAllowed[0].use);
+    c.xnuBase = kAllowed[0].base;
+    c.xnuSize = UINT64_MAX;
+    CHECK(p.load(v.data(), v.size(), c) == 0 && p.runs[0].refusal == RefWindow);
+  }
+
   // Classification of every refusal class, and ownership by tag.
   {
     auto v = adt({

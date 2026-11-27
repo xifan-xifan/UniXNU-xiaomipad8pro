@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include "audio-cli.h"
 
 static OSStatus get(AudioObjectID id, AudioObjectPropertySelector key, AudioObjectPropertyScope scope,
                     AudioObjectPropertyElement element, UInt32 *size, void *out)
@@ -40,8 +41,9 @@ static AudioDeviceID mic(void)
     const AudioObjectPropertyAddress a = {kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal, 0};
     UInt32 n = 0;
     if (AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &a, 0, NULL, &n)) return 0;
-    AudioDeviceID *ids = calloc(1, n); AudioDeviceID found = 0;
-    if (ids && !AudioObjectGetPropertyData(kAudioObjectSystemObject, &a, 0, NULL, &n, ids))
+    const UInt32 capacity = n;
+    AudioDeviceID *ids = n ? calloc(1, n) : NULL; AudioDeviceID found = 0;
+    if (ids && !AudioObjectGetPropertyData(kAudioObjectSystemObject, &a, 0, NULL, &n, ids) && n <= capacity)
         for (UInt32 i = 0; i < n / sizeof *ids; ++i)
             if (named(ids[i], kAudioDevicePropertyDeviceUID, "Mic")) {found = ids[i]; break;}
     free(ids); return found;
@@ -51,8 +53,12 @@ int main(int argc, char **argv)
     const char *phase = argc > 1 ? argv[1] : "snapshot";
     const int input = argc > 2 && !strcmp(argv[2], "input");
     const AudioObjectPropertyScope direction = input ? kAudioObjectPropertyScopeInput : kAudioObjectPropertyScopeOutput;
-    const int level = argc > 3 ? atoi(argv[3]) : -1, mute = argc > 4 ? atoi(argv[4]) : -1;
-    if (level < -1 || level > 100 || mute < -1 || mute > 1) return 2;
+    long level_arg = -1, mute_arg = -1;
+    if (argc > 5 ||
+        (argc > 3 && !audio_parse_long(argv[3], -1, 100, &level_arg)) ||
+        (argc > 4 && !audio_parse_long(argv[4], -1, 1, &mute_arg)))
+        return 2;
+    const int level = (int)level_arg, mute = (int)mute_arg;
     AudioDeviceID dev = 0;
     const OSStatus ds = u32(kAudioObjectSystemObject, input ? kAudioHardwarePropertyDefaultInputDevice : kAudioHardwarePropertyDefaultOutputDevice, &dev);
     printf("default_%s phase=%s status=%d device=%u\n", input ? "input" : "output", phase, (int)ds, (unsigned)dev);
@@ -65,7 +71,11 @@ int main(int argc, char **argv)
     OSStatus st = AudioObjectGetPropertyDataSize(dev, &a, 0, NULL, &bytes);
     AudioObjectID *ids = bytes ? calloc(1, bytes) : NULL;
     if (!st && bytes && !ids) return 2;
-    if (!st && bytes) st = AudioObjectGetPropertyData(dev, &a, 0, NULL, &bytes, ids);
+    if (!st && bytes) {
+        const UInt32 capacity = bytes;
+        st = AudioObjectGetPropertyData(dev, &a, 0, NULL, &bytes, ids);
+        if (!st && (bytes > capacity || bytes % sizeof *ids)) st = kAudioHardwareBadPropertySizeError;
+    }
     const UInt32 count = st ? 0 : bytes / sizeof *ids;
     printf("control_list_read phase=%s status=%d count=%u\n", phase, (int)st, (unsigned)count);
     int wrote_level = 0, wrote_mute = 0, invalid = 0, has_level = 0, has_mute = 0;
@@ -75,7 +85,7 @@ int main(int argc, char **argv)
         const OSStatus bs = u32(ids[i], kAudioObjectPropertyBaseClass, &base);
         const OSStatus ss = u32(ids[i], kAudioControlPropertyScope, &scope);
         const OSStatus es = u32(ids[i], kAudioControlPropertyElement, &element);
-        if (!ss && scope == direction && !es && element == 0 &&
+        if (!cs && !ss && scope == direction && !es && element == 0 &&
             ((cls == kAudioVolumeControlClassID && level >= 0) || (cls == kAudioMuteControlClassID && mute >= 0))) {
             const AudioObjectPropertyAddress write = {cls == kAudioVolumeControlClassID ? kAudioLevelControlPropertyScalarValue : kAudioBooleanControlPropertyValue,
                                                        kAudioObjectPropertyScopeGlobal, 0};
@@ -110,7 +120,7 @@ int main(int argc, char **argv)
                (int)es, (unsigned)element, (int)cs, (int)bs, (int)vs, (double)scalar, (int)dbs, (double)db);
     }
     free(ids);
-    if ((level >= 0 && !wrote_level) || (mute >= 0 && !wrote_mute) || invalid || (input && (!has_level || !has_mute))) {
+    if (st || (level >= 0 && !wrote_level) || (mute >= 0 && !wrote_mute) || invalid || (input && (!has_level || !has_mute))) {
         printf("control_validation phase=%s FAIL wrote_level=%d wrote_mute=%d invalid=%d\n", phase, wrote_level, wrote_mute, invalid);
         return 4;
     }

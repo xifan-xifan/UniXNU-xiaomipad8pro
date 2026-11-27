@@ -5,8 +5,9 @@
 // byte-order flag), its two-step write (key info first: a missing key is never written) and its 168-byte 'zEPD' probe;
 // thermalmonitord's 168-byte sensor exchange writes; key by index; refused sizes; 'MSHP' off (piano-smc-mshp=0); the client types
 // per level (libSMC's type 0 refused at level 1).
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. smc_host.cpp -o /tmp/smc_host && /tmp/smc_host
+//   c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I.. smc_host.cpp -o /tmp/smc_host && /tmp/smc_host
 #include "Smc.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -15,15 +16,14 @@ using namespace pianosmc;
 static int failures, checks;
 #define CHECK(c) do { ++checks; if (!(c)) { std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); ++failures; } } while (0)
 
-// The kext's selector 2 in one place: the structure answered in place in a buffer of the caller's output size.
+// Model selector 2 for the client call sequences below.
 struct Smc {
   Config config;
   int calls = 0;
   int call(const uint8_t *in, size_t inBytes, uint8_t *out, size_t outBytes)
   {
     ++calls;
-    std::vector<uint8_t> copy(in, in + inBytes);   // IOUserClient hands separate input and output buffers
-    const Call c = answer(config, copy.data(), inBytes, out, outBytes);
+    const Call c = answer(config, in, inBytes, out, outBytes);
     return c.ret == 0 ? 0 : int(0xe00002c2);   // kIOReturnBadArgument
   }
 };
@@ -88,8 +88,49 @@ static uint32_t powerdWrite(Smc &smc, uint32_t key, const uint8_t *data, uint32_
   return out[kResultAt] ? 0xe00002c9u : ret;
 }
 
+static void sizeBoundaries()
+{
+  for (size_t inBytes : {kMinBytes, kSmallBytes, kLargeBytes, kMaxBytes}) {
+    for (size_t outBytes : {kMinBytes, kSmallBytes, kLargeBytes, kMaxBytes}) {
+      for (uint8_t command : {kCmdRead, kCmdWrite, kCmdKeyByIndex, kCmdKeyInfo}) {
+        const bool supported = command == kCmdKeyInfo || command == kCmdRead;
+        const uint8_t result = supported ? kSuccess : kKeyNotFound;
+        std::vector<uint8_t> in(inBytes, 0xa5), out(outBytes + 1, 0xee);
+        putU32(in.data() + kKeyAt, kKeyMSHP);
+        putU32(in.data() + kDataSizeAt, UINT32_MAX);
+        in[kCommandAt] = command;
+        // Exercise both separate buffers and the kext's in-place staging buffer.
+        auto staged = in;
+        staged.resize(std::max(inBytes, outBytes) + 1, 0xee);
+        const uint8_t guard = staged[outBytes];
+        const Call separate = answer(Config(), in.data(), inBytes, out.data(), outBytes);
+        const Call inplace = answer(Config(), staged.data(), inBytes, staged.data(), outBytes);
+        CHECK(separate.ret == 0 && separate.mshp == supported && separate.result == result);
+        CHECK(inplace.ret == 0 && inplace.mshp == supported && inplace.result == result);
+        CHECK(separate.key == kKeyMSHP && inplace.key == kKeyMSHP && separate.command == command && inplace.command == command);
+        CHECK(std::equal(out.begin(), out.end() - 1, staged.begin()));
+        CHECK(out.back() == 0xee && staged[outBytes] == guard);
+        CHECK(getU32(out.data() + kKeyAt) == kKeyMSHP && out[kCommandAt] == command && out[kStatusAt] == 0);
+        CHECK(out[kResultAt] == result && getU32(out.data() + kDataSizeAt) == (supported ? 1u : 0u));
+        CHECK(getU32(out.data() + kDataTypeAt) == (supported ? kTypeUi8 : 0u));
+        CHECK(out[kDataAttrAt] == (supported ? kAttrRead : 0));
+        CHECK(out[kBytesAt] == (command == kCmdRead ? 1 : 0));
+        CHECK(std::all_of(out.begin() + kMinBytes, out.end() - 1, [](uint8_t byte) { return byte == 0; }));
+      }
+    }
+  }
+  uint8_t in[kMinBytes] = {}, out[kMinBytes];
+  std::memset(out, 0xee, sizeof out);
+  for (size_t invalid : {size_t(0), kMinBytes - 1, kMaxBytes + 1, SIZE_MAX}) {
+    CHECK(answer(Config(), in, invalid, out, sizeof out).ret == kBadSize);
+    CHECK(answer(Config(), in, sizeof in, out, invalid).ret == kBadSize);
+  }
+  CHECK(std::all_of(out, out + sizeof out, [](uint8_t byte) { return byte == 0xee; }));
+}
+
 int main()
 {
+  sizeBoundaries();
   // 1. The Energy Mode path: IOKit reads 'MSHP' and gets 1; smcSupportsHPM true, and stays true (cached).
   {
     Smc smc;
@@ -207,6 +248,12 @@ int main()
     const Call c = answer(Config(), in, kSmallBytes, out, kLargeBytes);
     CHECK(c.ret == 0 && c.mshp && out[kResultAt] == kSuccess && getU32(out + kDataSizeAt) == 1 && out[kLargeBytes - 1] == 0);
     CHECK(answer(Config(), in, kMinBytes, out, kMinBytes).ret == 0);
+    in[kCommandAt] = kCmdRead;
+    for (uint32_t requested : {0u, 1u, 32u, UINT32_MAX}) {
+      putU32(in + kDataSizeAt, requested);
+      CHECK(answer(Config(), in, kMinBytes, out, kMinBytes).mshp);
+      CHECK(getU32(out + kDataSizeAt) == 1 && out[kBytesAt] == 1);
+    }
   }
   // 7. Client types per level: level 1 lets only type 1 open (IOKit.framework, powerd), level 2 also libSMC's type 0.
   {

@@ -1,5 +1,20 @@
 # Sensors: ambient light, accelerometer, gyroscope, proximity through the ADSP's sensor hub: PianoSensors
 
+## Daily status (2026-11-27)
+
+- **Installed v13.1y12q.** The SSC ambient light sensor drives automatic brightness using the unit calibration pack.
+  The installed v13.1y12k and v13.1y12l checks covered ALS on November 25 and 26. A check across a real change in
+  ambient light remains pending.
+  [Hardware backlog, B3 and B13](../BACKLOG-hardware.md#2-backlog-b1b15) · [Support status](../STATUS.md)
+- **RAM qualification, `v131y12t-qual1`, November 27.** The accelerometer stream and the `piano-rotated` boot-argument read
+  past 1024 bytes both passed. Auto-rotate stays off on the daily profile. Physical rotation on all four edges and cover
+  attach/detach still need RAM qualification. Proximity and compass remain open.
+  [November 27 RAM results](../results-2026-11-27.md#ram-qualification) · [Hardware backlog, B3](../BACKLOG-hardware.md#2-backlog-b1b15) · [Auto-rotate](auto-rotate.md)
+
+## Historical bring-up notes
+
+The design, boot arguments, test plans and measurements below describe the builds under test at the time.
+
 Status: levels 1-4 built, 2026-11-11 (backlog B3 and B13). `package/PianoSensors` is a k27 native kext on PianoPower's client
 contract (`package/include/PianoAdspContract.h`, `charging.md` §9): level 1 a read-only survey, level 2 the FastRPC reverse file service
 serving the owner's sensor pack from the ESP (or from a RAM test image that carries it, §5b), level 3 the SNS client's sensor list,
@@ -14,7 +29,7 @@ is built, not yet run. Template: `README.md`. The macOS-side consumers
 (the rotation agent `piano-rotated`, PianoTouch's transform, PianoBacklight's automatic mode) and the streams' off/on lifecycle, which the
 kext now runs itself, are `package/PianoAuto`, host-tested (§5a).
 
-## 1. Purpose and gate
+### 1. Purpose and gate
 
 Automatic brightness (ambient light), display rotation (accelerometer; the normal landscape while the keyboard cover is attached) and,
 unused by macOS but reachable, gyroscope, proximity and magnetometer. Gates no login milestone; daily use. A second reason: the sensor
@@ -26,7 +41,7 @@ sensor PD's file reads over FastRPC (as hexagonrpcd does), (b) be a QMI client o
 (c) turn samples into a backlight target and a rotation. A BSD UniXNU component for another SM8750 device, PaganiSensors, already has (a)
 and (b) as portable C (host-tested only there); piano adds the board facts, the safety rules and the macOS consumers.
 
-## 2. Hardware facts
+### 2. Hardware facts
 
 Sources: DT = Ubuntu's `sm8750.dtsi` + `sm8750-xiaomi-piano.dts` (kernel tree v1.1.0); FRPC = Linux `drivers/misc/fastrpc.c` of that tree;
 IDL = qualcomm/fastrpc v1.0.7 (BSD-3, `inc/*.h`, `src/*_stub.c`, `src/apps_std_skel.c`, `src/listener_android.c`); HRPC = linux-msm/hexagonrpc
@@ -52,7 +67,7 @@ Project-SunUEFI `docs/devel/hardware/sensors.md`; PAG = PaganiSensors 3d570b7; R
 | Calibration | persist's registry holds this unit's `fac_cal` (Ubuntu: unique per device, never public, never another unit's); the ROM's JSON carry generic defaults; **the DSP applies the calibration itself** from the registry it reads | UBU README | verified (source) |
 | Crash signature | `fatal error received: err_qdi.c:1215:EF:qsh_process:0x4:UTIMER_CLIENT_4:0x1000002f:sns_watchdog.c:84:thread idx 1 exceeded processing time-limit`; a wedged DSP-written registry looped about 8 times a minute; afterwards the ADSP may fail with watchdog bites only | UBU `sensors-prepare`, device.md §2.14 | verified (source) |
 
-## 3. Ubuntu as the specification
+### 3. Ubuntu as the specification
 
 The chain: remoteproc boots the ADSP; udev on `fastrpc-adsp-secure` starts `piano-hexagonrpcd-sns`; `sensors-prepare` waits up to 5 s
 for QRTR service 400, checks this boot's kernel log for >= 3 ADSP crashes with one sensor-watchdog fatal (then moves the registry state
@@ -70,7 +85,7 @@ are completed with get_in_bufs2; enable/disable transitions are serialized, one 
 the v1.1.1 "light stops after off/on" fix: a nested close cancelled an open's first report); 0 lux is valid darkness (GSD
 `ambient-zero.patch`); the DSP's first GLINK message is never dropped (K:235ab34e2a6e, PianoPower keeps it since 942af44).
 
-## 4. UniXNU template to build on
+### 4. UniXNU template to build on
 
 **PaganiSensors** (UniXNU-Pagani-Drivers 3d570b7, BSD-2-Clause-Patent; OnePlus 13T, SM8750, iOS; host-tested only): taken unchanged
 (sha256 in `UPSTREAM`): `SensorsPb` (protobuf), `SensorsSsc` (QMI + SNS), `SensorsRpc` (the reverse file service: attach, listener,
@@ -98,7 +113,7 @@ buffers sit at fixed arena offsets with the message's `addr/size` covering only 
 maps each buffer by its page list (remotectl open's name and handle went through it on the tablet); a refusal of that would be a
 contained change in `SensorsRpc.c`'s `invoke()`.
 
-## 5. IOKit family / ABI: the architecture
+### 5. IOKit family / ABI: the architecture
 
 ```
 PianoPower (owns the DSP: PAS, SMP2P, GLINK, IPCRTR, locator, servreg; never touched by sensors)
@@ -188,7 +203,7 @@ The rotation agent applies `ps_rotation_step` itself (SensorsPolicy.c is plain C
   WindowServer's own rotation (verdict R1, §5a.1); PianoTouch follows the rotation read back.
 - Proximity, gyroscope, magnetometer, the rear light sensor: unused (§5a.7).
 
-## 5a. The consumers on macOS: rotation, touch, automatic brightness (package/PianoAuto)
+### 5a. The consumers on macOS: rotation, touch, automatic brightness (package/PianoAuto)
 
 Status, 2026-11-11: offline. `package/PianoAuto` is host-tested (`tests/run-host-tests.py`: the rotation policy, the touch transform,
 the sensor streams' off/on lifecycle, the light chain, PianoBacklight's automatic mode against its own step ladder; the kernel's
@@ -197,7 +212,7 @@ Mac with macOS 26.6. Nothing ran on the tablet. The two driver interfaces are bu
 PianoTouch's rotation (`piano-touch-rotate=1`, §5a.3) and PianoBacklight's automatic mode (`piano-backlight-auto=1`, §5a.4); PianoKeyboard
 and NativeGopDisplay are unchanged. Independent of the sensor transport: everything but §5a.5 works with a test edge source today.
 
-### 5a.1 Display rotation: the mechanism (verdict)
+#### 5a.1 Display rotation: the mechanism (verdict)
 
 | Item | Value | Source | State |
 |---|---|---|---|
@@ -216,7 +231,7 @@ read back with a public call. **R2** (NativeGopDisplay rotates its copy, portrai
 only if R0 shows `canChangeOrientation NO` or transposed swaps: it changes the timing list WindowServer keeps per display, makes every copy
 a transpose (slower than today's 39 ms row copy) and leaves PianoDpu without zero-copy for 90/270. Its spec: §5a.6. **R3**: none.
 
-### 5a.2 piano-rotated (the agent)
+#### 5a.2 piano-rotated (the agent)
 
 ```
 PianoSensors  piano-sensors-edge (top|left|bottom|right|none) when piano-sensors-seq moves --+
@@ -252,7 +267,7 @@ Command line (USB root shell): `--probe` (displays, the setter, `canChangeOrient
 `rotate 0 -> 90 degrees: asked`, `display 0x.. shows 90 degrees`, `PianoTouch told 90 degrees: taken`; failures: `MonitorPanel has no
 ... (another macOS build?)`, `WindowServer offers no rotation ... (canChangeOrientation NO)`, `the rotation asked for did not show`).
 
-### 5a.3 PianoTouch: the rotation input (built: `piano-touch-rotate=1`, touch.md §5)
+#### 5a.3 PianoTouch: the rotation input (built: `piano-touch-rotate=1`, touch.md §5)
 
 - Off by default: without `piano-touch-rotate=1` both inputs are refused as before and every report is unchanged.
 - State `PatRotation fRotation`. Inputs, both only recording (`pat_request`), never waiting:
@@ -265,7 +280,7 @@ Command line (USB root shell): `--probe` (displays, the setter, `canChangeOrient
   (the agent sends what it read back); a change takes effect at the next touch-down, never mid-drag. At 0 the bytes are the same as
   before (host test). One log line per change. The agent needs `piano-touch-rotate=1` with `piano-rotate=3`.
 
-### 5a.4 Automatic brightness: PianoBacklight's automatic mode (built: `piano-backlight-auto=1`, backlight.md §5)
+#### 5a.4 Automatic brightness: PianoBacklight's automatic mode (built: `piano-backlight-auto=1`, backlight.md §5)
 
 - Boot argument `piano-backlight-auto=1` (default 0: targets refused with `kIOReturnUnsupported`, nothing changes).
 - Two inputs, the same effect: PianoSensors' `piano-sensors-light-target` (with `piano-sensors-seq`, `piano-sensors-lux`; §5's table),
@@ -283,7 +298,7 @@ Command line (USB root shell): `--probe` (displays, the setter, `canChangeOrient
 - Log: ambient writes folded into one line per 10 s (`ambient: N targets in S s, lux A..B, target P..Q permille, offset K, code X -> Y`;
   failed accesses still logged at once); key steps in automatic mode `step +1 from ... in automatic mode: offset 0 -> 1, code 757 -> 954`.
 
-### 5a.5 PianoSensors' side (its kext at S4: `AutoStream.h`, `AutoLight.h`; built, §5c)
+#### 5a.5 PianoSensors' side (its kext at S4: `AutoStream.h`, `AutoLight.h`; built, §5c)
 
 The outputs are §5's level-4 properties as landed: `piano-sensors-light-target` (permille), `piano-sensors-lux`, `piano-sensors-edge`
 (`ps_edge_name`), `piano-sensors-seq`, set without a notification but for the edge (a `kIOMessageServicePropertyChange` with each
@@ -306,7 +321,7 @@ accelerometer also waits for its consumer (piano-rotated: `piano-rotate>=1`).
   `piano-sensors-seq` moved. A `messageClients(kIOMessageServicePropertyChange)` with it would let the agent stop polling.
 - PianoKeyboard: nothing new (`piano-keyboard-attached` and its messages exist, keyboard.md §6c).
 
-### 5a.6 NativeGopDisplay and PianoDpu
+#### 5a.6 NativeGopDisplay and PianoDpu
 
 R1 asks nothing of either. R2's spec, only if R0 calls for it, behind `native-gop-display-rotate=1` (byte-identical without): override
 `setRenderingAngle(float*)` (decode its bits without FP, log the first 8 calls and each change, publish
@@ -316,14 +331,14 @@ whole framebuffer rows written); only with `canChangeOrientation NO`, a second t
 `CGDisplaySetDisplayMode`. PianoDpu (B1b): R1's surfaces flip as today; a 180-degree flip is FLIP_LR|FLIP_UD with the two halves'
 sources swapped (the left mixer fetches the surface's right half); 90/270 always go to the copy.
 
-### 5a.7 Unused: proximity, gyroscope, magnetometer, the rear light sensor
+#### 5a.7 Unused: proximity, gyroscope, magnetometer, the rear light sensor
 
 Proximity has no consumer on a Mac: no call or ear detection, the screen goes off by display sleep and the folio's hall (PianoBacklight's
 `piano-backlight-lid`); waking on approach would keep a stream on while the display sleeps (DSP traffic, sensor power) for little gain.
 It is discovered and listed at S2, never streamed. The gyroscope could gate rotation while the tablet turns (the settle time does that),
 the magnetometer has no macOS consumer, the rear light/flicker sensor (`ambient_light_back`) is not the one facing the user.
 
-### 5a.8 Test plan (attended RAM boots, the GPU profile so WindowServer runs; nothing needs the sensors until R3)
+#### 5a.8 Test plan (attended RAM boots, the GPU profile so WindowServer runs; nothing needs the sensors until R3)
 
 Staging (the A830 path's seed plus the agent; `PIANO_SEED`/`PIANO_TRUST` make build-native-image.sh take it). The userland
 pipeline (`configs/userland.toml`, `tooling/userland/stage.py`, `docs/userland.md`) installs the same agent with the rest; the
@@ -347,7 +362,7 @@ PIANO_SEED=out/rotated/stage/scratch-data.img PIANO_TRUST=out/rotated/stage/kern
 | R2 | `piano-rotate=3 piano-touch=2 piano-touch-rotate=1`: at each rotation the four corners and the centre | the pointer under the finger (about 10 px); a drag never jumps at a rotation |
 | R3 | with PianoSensors S4 (§8 S4/S5): `piano-rotate=3` without `-test`; PianoBacklight with `piano-backlight-auto=1` | the four edges upright with touch; attached: normal; the backlight follows a lamp within 2 s; 20 display sleep/wake cycles each give readings and the room's level at once |
 
-### 5a.9 Risks
+#### 5a.9 Risks
 
 1. The setter is private: pinned by name and encoding, checked before each run; a changed macOS refuses cleanly (R2 then).
 2. `canChangeOrientation` may be NO for this IOMFB display, or WindowServer may hand it transposed surfaces: R0 says which; R2.
@@ -363,22 +378,23 @@ PIANO_SEED=out/rotated/stage/scratch-data.img PIANO_TRUST=out/rotated/stage/kern
 7. Sensors (S4): the hub's first event on enable is inferred (the re-arm covers it); an under-display light sensor sees the panel
    (question 9); the edge's axes are inferred (`piano-rotate-map`, `piano-sensors-axes`).
 
-### 5b. The pack, step by step (the owner's own tablet; nothing private is committed)
+#### 5b. The pack, step by step (the owner's own tablet; nothing private is committed)
 
 Ubuntu is no longer on the tablet (its root became macOS's), so the pack is made on the Mac from two local sources:
-- **this unit's registry**: the backup made before the switch, `CRITICAL-BACKUP/sensor-registry.tar` (Ubuntu's private seed: the
+- **this unit's registry**: the registry archive made before the switch (Ubuntu's private seed: the
   outer registry directory with `registry/`, `sns_reg_version` and `parsed_file_list.csv` under `usr/share/piano/sensors/registry-private/`).
   Private: never committed, never printed (the tool reports only a count), never another unit's;
 - **the stock ROM's sensor configuration**: OS3.0.303.0.WPYCNXM's 66 ODM/vendor files as the Ubuntu project keeps them,
-  `xiaomipad-8pro-mainline/firmware/sensors` with `source.json` (each file's device path and sha256; the tool checks every hash). The
-  owner's own ROM image on this Mac is incomplete (`rollback-os3.0.303/`, a sparse download marked do-not-use), so it is not used; the
-  manifest-checked copy is the same build's files. Reading `vendor_a`/`odm_a` from `super` at run time through NativeUfs (LP metadata,
+  `xiaomipad-8pro-mainline/firmware/sensors` with `source.json` (each file's device path and sha256; the tool checks every hash).
+  The manifest-checked files came from the same ROM build. Reading `vendor_a`/`odm_a` from `super` at run time through NativeUfs (LP metadata,
   EROFS) is not needed while this copy matches.
+
+Set `SENSOR_REGISTRY_TAR` to the local registry archive and `SENSOR_ROM_CONFIG` to the directory containing `source.json`.
 
 ```sh
 python3 package/PianoSensors/tools/make-sensor-pack.py \
-  --registry-tar "$HOME/Downloads/XiaomiPad8Pro-Ubuntu/CRITICAL-BACKUP/sensor-registry.tar" \
-  --rom-config "$HOME/Downloads/XiaomiPad8Pro-Ubuntu/xiaomipad-8pro-mainline/firmware/sensors" \
+  --registry-tar "$SENSOR_REGISTRY_TAR" \
+  --rom-config "$SENSOR_ROM_CONFIG" \
   --out out/sensors/pack.bin
 python3 tooling/persist/build-esp.py --profile base --sensor-pack out/sensors/pack.bin    # plus the usual --arg/--default options
 ```
@@ -428,14 +444,14 @@ then `make-sensor-pack.py --dump out/sensors/dump --out out/sensors/pack.bin --l
 registry as a count). The tool warns when sns_reg_config, json.lst or the persist registry is missing (without the registry the DSP falls
 back to the ROM's generic calibration).
 
-## 5c. Level 4: the streams (`piano-sensors=4`, S4), as built
+### 5c. Level 4: the streams (`piano-sensors=4`, S4), as built
 
 Status, 2026-11-11: built, host-tested (`tests/streams.c`, a simulated hub sending the service's message shapes; PianoAuto's
 `stream_tests.h`) and linked; not run. `SensorsStream.c` (portable C on the main thread) drives PianoAuto's `AutoStream.c` and
 `AutoLight.c`, compiled into the kext from their package: the off/on rules the consumers' side was written for are now the producer's
 own. Inert below `piano-sensors=4`: no stream port is opened, the kext does not join the power tree, no level-4 property is set.
 
-### 5c.1 The protocol (facts; libssc and Android as the specification, no code)
+#### 5c.1 The protocol (facts; libssc and Android as the specification, no code)
 
 | Item | Value | Source | State |
 |---|---|---|---|
@@ -450,7 +466,7 @@ own. Inert below `piano-sensors=4`: no stream port is opened, the kext does not 
 | First event | an on-change sensor reports its current value when enabled | Android's on-change semantics, Ubuntu's readings after each enable | inferred; the re-arm covers it (5a.9 risk 7) |
 | A client gone | `piano_qrtr_close` sends DEL_CLIENT for the port; a QMI service drops a gone client's state, as when a Linux client's socket closes | Linux `qrtr` and `qmi_interface.c` (read for behaviour), `QcomQrtr.h` | verified (source); the hub's side: needs-boot |
 
-### 5c.2 When a stream runs, and the off/on rules
+#### 5c.2 When a stream runs, and the off/on rules
 
 | Stream | Wanted while | Read from |
 |---|---|---|
@@ -475,7 +491,7 @@ target, else at most every 250 ms); each accelerometer sample through `ps_accel_
 also sends `kIOMessageServicePropertyChange`. The consumers are unchanged: PianoBacklight's 250 ms poll takes the target (§5a.4),
 piano-rotated reads the edge on each sequence move or notification (§5a.2).
 
-### 5c.3 Battery
+#### 5c.3 Battery
 
 - The lowest report rates: the light on change (nothing while the room stays the same); the accelerometer at 10 Hz, the rotation's need
   (the driver's nearest rate at or above, logged); nothing else streams (proximity, gyroscope, magnetometer, the rear light: §5a.7).
@@ -489,7 +505,7 @@ piano-rotated reads the edge on each sequence move or notification (§5a.2).
 - Stream on/off and failure lines go through a limiter per stream (8 lines, then one per 30 s, the lines left out counted in the next
   one); `piano-sensors-streams` keeps the complete counters.
 
-### 5c.4 Teardown: display sleep, system sleep, the guard's strike
+#### 5c.4 Teardown: display sleep, system sleep, the guard's strike
 
 - The display sleeps, the lid closes, the cover attaches, the consumer goes: the stream's disable goes out (with the guard's token) and
   its late samples are dropped; the light keeps its last target (PianoBacklight lights the wake with it, then the new session's first
@@ -506,7 +522,7 @@ piano-rotated reads the edge on each sequence move or notification (§5a.2).
   charger domain's restart, the DSP up without a fatal sign or crash reason, the charger domain up, no quiet); a dead or dying DSP is
   never touched. A sleep under way is acknowledged at once.
 
-### 5c.5 Lines
+#### 5c.5 Lines
 
 `PianoSensors: ` then: `light: QRTR port 24 for service 0x190 (its own QMI client)`, `light: the service is there generation=1`,
 `light: sensor 0x..., on change`, `light: on (on change) session=1`, `light: first sample: lux=153 session=1`, `light: off (display
@@ -518,7 +534,7 @@ at rest`. The sleep: `streams: system sleep: disabling them`, `streams: ready fo
 `streams: awake`. The strike: `... the guard is off: nothing more is sent, every packet is ignored, the outputs at rest`, `light:
 PianoBacklight told to leave automatic mode: 0x0`, `light: QRTR port 24 closed`.
 
-## 6. Boot args
+### 6. Boot args
 
 | Argument | Default | Values |
 |---|---|---|
@@ -544,7 +560,7 @@ PianoBacklight told to leave automatic mode: 0x0`, `light: QRTR port 24 closed`.
 
 The consumers' own arguments: `piano-rotate*` (the agent, §5a.2) and `piano-backlight-auto=1` (PianoBacklight, §5a.4).
 
-## 7. Kernel component, and the safety story
+### 7. Kernel component, and the safety story
 
 Component `PianoSensors` (`com.unixnu.driver.PianoSensors`, `tooling/k27/kext/PianoSensors.json` naming `com.unixnu.driver.PianoPower`
 and `com.unixnu.driver.NativeUfs` as libraries), listed after both in `configs/k27-native-kexts.txt`; built by
@@ -578,7 +594,7 @@ level 4 adds none: its requests take the same tokens and count as the same failu
    Before an answered attach a stop stays one failure (rule 4). Whether the release itself ends the PD's waiting is inferred (Linux sends
    it at every daemon exit); s1b shows it only if the bring-up fails again.
 
-## 8. Hardware test plan (after PianoPower level 2 is healthy; attended, RAM boot, charged battery, cable attached)
+### 8. Hardware test plan (after PianoPower level 2 is healthy; attended, RAM boot, charged battery, cable attached)
 
 Every run with `piano-power=2` (PianoPower starts the DSP; the sensors never do), after the pack is on the ESP (section 5b).
 
@@ -594,7 +610,7 @@ Every run with `piano-power=2` (PianoPower starts the DSP; the sensors never do)
 What is left: the boots of S1-S4 (one batched session, §8.1), then S5 and S6, about 1-2 weeks, and 9-14 attended boots for all six.
 Fails safe: everything stops at the first guard event; a reboot returns to the tablet's normal boot.
 
-### 8.1 The batched tablet test (S1-S4 in one attended session)
+#### 8.1 The batched tablet test (S1-S4 in one attended session)
 
 Prerequisites: PianoPower level 2 healthy on this kernel (the DSP up, `charger_pd 0x1fffffff`, no fatal), the cable to the Mac, a
 charged battery, the cover, a lamp. The pack is made on the Mac from the owner's sources (§5b) and either carried by every test image
@@ -622,7 +638,7 @@ charger generation change or failed pass; the tablet's normal boot is a reboot a
 | S4c | `s4c` (the consumers decide) | the lamp again; `piano-backlight-percent` (manual), then `piano-backlight-auto` 1 (setProperties, backlight.md §5) | the backlight follows the lamp within 2 s; manual: `light: off`, `-streams` `consumer: PianoBacklight is in manual mode`; automatic again: a first sample at once |
 | S4z | `s4z` (k27 0062: three test sleeps) | nothing: the sleeps come every 120 s | before each sleep `streams: ready for the sleep after N ms` with N below 800 and no `ports closed`; after each wake `streams: awake` and fresh sessions; the room's level at once |
 
-### 8.2 The first S2 (2026-11-14) and the s1b probe
+#### 8.2 The first S2 (2026-11-14) and the s1b probe
 
 The batch-2 `adsp` RAM run (level 4, PAG's framing) passed S1 and stopped S2 one step before serving. Console, in order (the file
 service's `ms=` count from its start, about T0; T = the drivers' `[Ns]`):
@@ -693,14 +709,14 @@ blocked behind serving; `-settle=20` stays (the attach at T≈26 s was answered 
 The release path stays queued for a boot where the bring-up fails. Sources: the live console capture (one boot, quoted throughout); the
 mailbox only for the lines the console lost, quoted where the majority-corrected copy reads cleanly.
 
-## 9. Fallback
+### 9. Fallback
 
 `piano-sensors=0` (the default): nothing runs, as today. Brightness by the keys (PianoBacklight), rotation manual (R1's System Settings
 entry, if it exists for this display) or none. Ubuntu keeps its own sensor stack.
 
-## 10. Open questions and risks
+### 10. Open questions and risks
 
-### 10.1 The API asked of PianoPower and of the other drivers
+#### 10.1 The API asked of PianoPower and of the other drivers
 
 Delivered (2026-11-11): A-C as PianoPower's client contract (`package/include/PianoAdspContract.h`, `charging.md` §9: 6 GLINK slots,
 8 QRTR client ports with callbacks, 2048-byte IPCRTR receive buffers, `piano_adsp_health` with the fatal bit and count, its own crash
@@ -729,7 +745,7 @@ and `piano_qrtr_close` (§5c). Still open: NativeGopDisplay's transform (R2 only
   `TouchRotation.h`); PianoKeyboard's `piano-keyboard-attached` exists (keyboard.md §6c); NativeGopDisplay: nothing for R1, R2's
   opt-in only if R0 asks for it (§5a.6).
 
-### 10.2 Questions
+#### 10.2 Questions
 
 1. Does the sensor PD stay quiet for hours with nobody attached (215 s seen)? (S1, a long charging run)
 2. Which bank the DSP accepts for PD 2 (3 is Linux's first session on piano, 4 the 13T's) and whether 0x1003 is in bypass, fault or
@@ -750,7 +766,7 @@ and `piano_qrtr_close` (§5c). Still open: NativeGopDisplay's transform (R2 only
 12. Whether the hub reports an on-change light's value right after the enable (the re-arm covers it) and how often under a steady lamp. (S4)
 13. Whether the hub drops a closed port's streams (DEL_CLIENT) at once: only the sleep's fallback and a strike close ports. (S4z)
 
-### 10.3 Level 4's risks
+#### 10.3 Level 4's risks
 
 1. The light's consumer uses PianoBacklight's explicit automatic-mode request and control state. Its current-session validity is
    separate from that request: waiting for the first sample must not look like a manual override, and an old target must not survive
@@ -764,7 +780,7 @@ and `piano_qrtr_close` (§5c). Still open: NativeGopDisplay's transform (R2 only
 6. A fatal-free DSP with an unchanged charger generation can still stop communicating. Check progress of GLINK receive counters
    and fresh MCA answers alongside the sensor requests; sens-ab1 lost both while its cached health state remained unchanged.
 
-### 10.4 Bounded transport observation
+#### 10.4 Bounded transport observation
 
 With `piano-sensors=4`, PianoPower arms `[sens-trace1]` diagnostics. The first outgoing SSC 514 identifies the light's local QRTR
 port and starts the shared PMIC comparison window. Each port records at most 64 enqueues, publishes, consumed packets, raw receives
@@ -775,7 +791,7 @@ Raw receive headers are logged before router/QMI/client validation. PMIC is a se
 only MCA read/write packets have a sequence, while PAN/UCSI use transaction -1. Missing events after a cap, a lost console line or an
 unobserved full FIFO lap are inconclusive. These diagnostics change no transport decision, retry, deadline or sensor request.
 
-## 11. Licence note
+### 11. Licence note
 
 PianoSensors is BSD-2-Clause-Patent. PaganiSensors (BSD-2-Clause-Patent) is reused with `UPSTREAM` records. Linux's fastrpc driver and
 the SM8750 devicetree (GPL-2.0), hexagonrpc and the Ubuntu project's patches to it (LGPL-3.0 / GPL-3.0), libssc (GPL-3.0), iio-sensor-proxy
@@ -790,7 +806,7 @@ client model come from libssc (GPL-3.0) and Android's sensor behaviour (the repo
 only, Linux's qrtr and QMI interface (GPL-2.0) for what a gone client means; the RAM image's carrier follows UniXNU's addon layout
 (`scripts/make-gpu-addon.py`, DarwinBoot's `GpuAddon` slot) as a format; the kext inflates it with libkern's own zlib.
 
-### Passive shared-edge snapshots
+#### Passive shared-edge snapshots
 
 With `piano-sensors=4`, sens-trace2 registers five root-only, read-only string sysctls under `machdep`:
 `piano_glink_fifo`, `piano_smem_state`, `piano_smem_crash`, `piano_glink_owner`, and `piano_sensors_faults`.
@@ -803,7 +819,7 @@ IPCC reads only CONFIG; counters/last values observe existing receive/clear/send
 not mask readbacks; remote mask/pending/ACK and independent watchdog state remain unknown. No new doorbell or SMP2P ACK is issued.
 These are diagnostic interfaces, not a repair or evidence that sensors work on the tablet.
 
-### Intent-request diagnostics and bounded A/B
+#### Intent-request diagnostics and bounded A/B
 
 With `piano-sensors=4`, `[sens-trace3]` logs every incoming GLINK RX_INTENT_REQ and INTENT_REQ_ACK, including channel, local/remote
 IDs, requested size, fixed receive size, grant/refusal and reason. Zero-inclusive summaries every 30 seconds include FIFO indices;

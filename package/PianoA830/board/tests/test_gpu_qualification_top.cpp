@@ -9,6 +9,7 @@
  *    adreno830_qualification_top(board) != 0 requires the ring (Adreno830Start.cpp stageDcvs), and its first record goes in.
  * The getter is the board's (PianoA830Board.cpp bootArgument): the driver's pagani-* names read as piano-* boot arguments.
  */
+// c++ -std=c++20 -O1 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I.. test_gpu_qualification_top.cpp -o /tmp/test_gpu_qualification_top && /tmp/test_gpu_qualification_top
 #include "../adreno830/A830QualificationTop.h"
 #include "PianoGpuQualificationLog.h"
 #include <cstdio>

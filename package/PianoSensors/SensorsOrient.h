@@ -26,12 +26,14 @@ enum {SNO_UNKNOWN = 0, SNO_PORTRAIT = 1, SNO_UPSIDE_DOWN = 2, SNO_LANDSCAPE_LEFT
 typedef struct {
     int state;                  /* the state reported last (SNO_UNKNOWN before the first) */
     int candidate;              /* the state the samples show now */
-    uint64_t since_ms;          /* when they began to */
+    uint64_t since;             /* when they began to, in the sample clock's units */
 } SnoState;
 
 void sno_init(SnoState *s);
 /* One sample. The state to report when it changes, else -1. */
 int sno_update(SnoState *s, int32_t x, int32_t y, int32_t z, uint64_t now_ms);
+/* For a different sample clock, now and hold use the same units. */
+int sno_update_at(SnoState *s, int32_t x, int32_t y, int32_t z, uint64_t now, uint64_t hold);
 
 #ifdef __cplusplus
 }

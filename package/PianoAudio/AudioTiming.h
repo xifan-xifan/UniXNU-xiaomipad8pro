@@ -37,49 +37,61 @@ static inline const PianoAudioTiming *piano_audio_timing_profile(uint32_t mode)
     return &profiles[mode == PIANO_AUDIO_TIMING_NEW ? 1 : 0];
 }
 
-static inline uint32_t piano_audio_ring_segment(uint32_t frame, uint32_t count, uint32_t ring_frames)
+static inline uint64_t piano_audio_frames_to_ns(uint64_t frames)
 {
-    const uint32_t at = frame % ring_frames;
+    const uint64_t seconds = frames / PIANO_AUDIO_RATE;
+    const uint64_t remainder = frames % PIANO_AUDIO_RATE;
+    return seconds * 1000000000ull + remainder * 1000000000ull / PIANO_AUDIO_RATE;
+}
+
+static inline uint32_t piano_audio_ring_segment(uint32_t at, uint32_t count, uint32_t ring_frames)
+{
     const uint32_t room = ring_frames - at;
     return count < room ? count : room;
 }
 
-static inline void piano_audio_copy_to_ring(int16_t *ring, uint32_t ring_frames, uint32_t frame,
+static inline void piano_audio_copy_to_ring(int16_t *ring, uint32_t ring_frames, uint64_t frame,
                                             const int16_t *src, uint32_t count, uint32_t channels)
 {
+    uint32_t at = (uint32_t)(frame % ring_frames);
     uint32_t done = 0;
     while (done < count) {
-        const uint32_t n = piano_audio_ring_segment(frame + done, count - done, ring_frames);
+        const uint32_t n = piano_audio_ring_segment(at, count - done, ring_frames);
         for (uint32_t i = 0; i < n; ++i)
             for (uint32_t c = 0; c < channels; ++c)
-                ring[((frame + done + i) % ring_frames) * channels + c] = src[(done + i) * channels + c];
+                ring[(at + i) * channels + c] = src[(done + i) * channels + c];
         done += n;
+        at = 0;
     }
 }
 
-static inline void piano_audio_copy_from_ring(int16_t *dst, const int16_t *ring, uint32_t ring_frames, uint32_t frame,
+static inline void piano_audio_copy_from_ring(int16_t *dst, const int16_t *ring, uint32_t ring_frames, uint64_t frame,
                                               uint32_t count, uint32_t channels)
 {
+    uint32_t at = (uint32_t)(frame % ring_frames);
     uint32_t done = 0;
     while (done < count) {
-        const uint32_t n = piano_audio_ring_segment(frame + done, count - done, ring_frames);
+        const uint32_t n = piano_audio_ring_segment(at, count - done, ring_frames);
         for (uint32_t i = 0; i < n; ++i)
             for (uint32_t c = 0; c < channels; ++c)
-                dst[(done + i) * channels + c] = ring[((frame + done + i) % ring_frames) * channels + c];
+                dst[(done + i) * channels + c] = ring[(at + i) * channels + c];
         done += n;
+        at = 0;
     }
 }
 
-static inline void piano_audio_zero_ring(int16_t *ring, uint32_t ring_frames, uint32_t frame,
+static inline void piano_audio_zero_ring(int16_t *ring, uint32_t ring_frames, uint64_t frame,
                                          uint32_t count, uint32_t channels)
 {
+    uint32_t at = (uint32_t)(frame % ring_frames);
     uint32_t done = 0;
     while (done < count) {
-        const uint32_t n = piano_audio_ring_segment(frame + done, count - done, ring_frames);
+        const uint32_t n = piano_audio_ring_segment(at, count - done, ring_frames);
         for (uint32_t i = 0; i < n; ++i)
             for (uint32_t c = 0; c < channels; ++c)
-                ring[((frame + done + i) % ring_frames) * channels + c] = 0;
+                ring[(at + i) * channels + c] = 0;
         done += n;
+        at = 0;
     }
 }
 

@@ -49,7 +49,15 @@ static void nv12(void)
   assert(!pianoOutputBGRAto420v(src, w, h, w * 4 - 1, ys, yr, uv, cr));
   assert(!pianoOutputBGRAto420v(src, w, h, ss, ys, w - 1, uv, cr));
   assert(!pianoOutputBGRAto420v(src, w, h, ss, ys, yr, uv, w - 1));
+  assert(!pianoOutputBGRAto420v(src, w, h, SIZE_MAX, ys, yr, uv, cr));
   free(src); free(ys); free(uv);
+
+  // An unaligned 2x2 block with odd pitches and no padding after the final row.
+  const uint8_t block[] = {0xa5, 0, 0, 0, 1, 255, 255, 255, 2, 0xa5, 0, 0, 0, 3, 255, 255, 255, 4};
+  uint8_t yCodes[] = {0xa5, 0, 0, 0xa5, 0, 0}, uvCodes[] = {0xa5, 0, 0};
+  assert(pianoOutputBGRAto420v(block + 1, 2, 2, 9, yCodes + 1, 3, uvCodes + 1, 3));
+  const uint8_t expectedY[] = {0xa5, 16, 235, 0xa5, 16, 235}, expectedUV[] = {0xa5, 128, 128};
+  assert(memcmp(yCodes, expectedY, sizeof yCodes) == 0 && memcmp(uvCodes, expectedUV, sizeof uvCodes) == 0);
   puts("camera CPU 420v all-plane reference/padded-pitches/canaries PASS");
 }
 
@@ -72,7 +80,10 @@ static void geometry(uint32_t sw, uint32_t sh, uint32_t dw, uint32_t dh,
       uint8_t *p = src + sy * ss + sx * 4;
       p[0] = (uint8_t)sx; p[1] = (uint8_t)sy; p[2] = 37; p[3] = 255;
     }
-  pianoOutputScaleBGRA(src, sw, sh, ss, dst, dw, dh, ds);
+  assert(!pianoOutputScaleBGRA(src, sw, sh, ss, dst, dw, dh, (size_t)dw * 4 - 1));
+  if (sh > 1) assert(!pianoOutputScaleBGRA(src, sw, sh, SIZE_MAX, dst, dw, dh, ds));
+  assert(!pianoOutputScaleBGRA(NULL, sw, sh, ss, dst, dw, dh, ds));
+  assert(pianoOutputScaleBGRA(src, sw, sh, ss, dst, dw, dh, ds));
   for (uint32_t dy = 0; dy < dh; ++dy) {
     for (uint32_t dx = 0; dx < dw; ++dx) {
       const uint8_t *p = dst + dy * ds + dx * 4;
@@ -93,6 +104,7 @@ static void geometry(uint32_t sw, uint32_t sh, uint32_t dw, uint32_t dh,
 
 static void cadence(void)
 {
+  assert(!pianoOutputDiscontinuity(0, 1, UINT64_MAX, UINT64_MAX));
   // A real source every two 30 fps ticks: one unique and one repeated output per source.
   uint64_t source = 0, sequence = 0, published = 0, repeats = 0, lastSequence = 0;
   for (uint64_t tick = 0; tick < 30; ++tick) {
@@ -163,6 +175,7 @@ int main(void)
   geometry(816, 459, 816, 459, 0, 0, 816, 459);
   geometry(1280, 720, 640, 480, 0, 60, 640, 360);
   geometry(1, 1000, 640, 480, 319, 0, 1, 480);
+  geometry(5, 3, 7, 5, 0, 0, 7, 4);
   cadence();
   discontinuity();
   nv12();

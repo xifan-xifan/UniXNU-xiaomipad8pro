@@ -6,7 +6,7 @@ The official actions run on Node.js 24 (`checkout@v7`, `upload-artifact@v7`, `do
 
 | Workflow | When | Runner | What |
 | --- | --- | --- | --- |
-| `checks.yml` | every pull request, every push to `main`, by hand | ubuntu-24.04, macos-26 | privacy scan, pinned sources, self-tests |
+| [`checks.yml`](../.github/workflows/checks.yml) | every pull request, every push to `main`, by hand | ubuntu-24.04, macos-26 | privacy scan, pinned sources, self-tests |
 | `dependencies.yml` | monthly (1st, 05:23 UTC), by hand | ubuntu-24.04, macos-26 | pins still fetch, pins behind upstream (report), Apple OSS pins, the IPSW index, the runner's toolchain |
 | `build.yml` | by hand, or called by `release.yml` | macos-26 | the FD (hash only), the k27 native kernel, our kexts |
 | `release.yml` | a pushed `v*` tag, or by hand with a tag | ubuntu-24.04 + `build.yml` | a **draft** release of our binaries, recipes, SHA-256 manifests and the install skill |
@@ -26,28 +26,61 @@ The official actions run on Node.js 24 (`checkout@v7`, `upload-artifact@v7`, `do
 
 ## checks.yml
 
-- **privacy**: `scripts/ci/privacy-scan.py` on the lines a change adds and on its commit messages (`--diff BASE`), then on the whole
-  tree. Pattern classes only, no private literals: a user's home path, the maintainer's private notes folder (added lines only),
-  RFC 1918 addresses, local host names, MAC addresses, e-mail addresses other than no-reply ones (author headers such as a patch's
-  `From:` and `Co-authored-by:` are fine), private keys, access tokens, inline secrets, a password piped to `sudo -S`, and file types
-  that would be Apple payloads, encrypted blobs or build output. A meant hit carries `privacy-scan: ok` on its line or an entry in
-  `scripts/ci/privacy-scan.allow`. `scripts/ci/test-privacy-scan.py` holds a known positive and negative per class. The
-  maintainer's own pre-publish audit (with its literal list) is separate and stays private.
-- **pins**: `scripts/fetch-pins.py --verify` fetches every `unixnu.lock` pin and submodule pin by its commit (depth 1, no blobs), and
-  `tooling/k27/fetch-k27-tree.sh` rebuilds the k27 tree from upstream plus `patches/k27-tree` and checks its git tree id.
-- **self-tests** (macos-26: the C/C++ host tests use Apple clang): `scripts/ci/self-tests.py` runs every Python, shell and C/C++ host
-  test of `package/`, `tooling/`, `firmware/` and `scripts/` that needs no Apple content, no `out/` and no tablet, with an empty
-  `HOME` and no `PIANO_*` variables. `scripts/ci/self-tests.skip` names each one it does not run and why (a checker that takes a
-  built file, a test that needs build output or a local backup, a header build line that names generated inputs, or `KNOWN-FAIL`:
-  failing on `main` today, an open item). The runner installs `mtools` and `llvm` with Homebrew. `SELFTEST_TIMEOUT=1500` gives each
-  test command up to 1,500 seconds. The log ends with the ten slowest tests (or all tests for smaller runs) and their elapsed times,
-  including compilation for C/C++ tests. A JUnit report is the only upload from `checks.yml`.
+The workflow uses GitHub-hosted runners with read-only contents permission and cancels superseded runs on the same ref.
+[Checks workflow](../.github/workflows/checks.yml)
 
-The Adreno830 host suite fetches the public `ArmSmmu4K`, `AdrenoPM4` and `AdrenoFirmware` source kits with
-`scripts/fetch-pins.py --only`. It verifies each checkout's HEAD against `unixnu.lock` and adds PianoA830's
-`ArmSmmu4KPaged.c/.h` to the staged SMMU kit. The ArmSmmu4K pin matches the fixed-pool API used by the driver
-([kit provenance](../package/PianoA830/UPSTREAM)). The kits and test binaries share the suite's temporary directory.
-The 1,500-second budget covers fetching, compiling and running the suite with ASan and UBSan.
+- **Privacy, `ubuntu-24.04`, 10 min.** The job checks out full history and runs the scanner's self-test. With a valid PR base or
+  push-before commit, `--diff BASE` scans added lines, commit messages and added or modified file types. The whole-tree scan runs
+  regardless of base availability on a successful job. The scanner checks for private paths, network identifiers, personal e-mail,
+  credentials and disallowed payload or build-output file types. Its exceptions are in the allowlist or marked `privacy-scan: ok`.
+  [Scanner](../scripts/ci/privacy-scan.py) · [Scanner tests](../scripts/ci/test-privacy-scan.py) · [Allowlist](../scripts/ci/privacy-scan.allow)
+- **Pinned sources, `ubuntu-24.04`, 20 min.** `scripts/fetch-pins.py --verify` fetches each `unixnu.lock` pin and submodule pin
+  by commit. `tooling/k27/fetch-k27-tree.sh` then reconstructs the k27 source tree from upstream and `patches/k27-tree` and checks
+  its Git tree ID. [Source verifier](../scripts/fetch-pins.py) · [Lockfile](../unixnu.lock) · [k27 tree reconstruction](../tooling/k27/fetch-k27-tree.sh)
+- **Host self-tests, `macos-26`, 60 min.** Homebrew installs `mtools` for FAT images, `llvm` for the freestanding selector
+  build, and `ffmpeg` for the video host tests. The runner discovers tracked Python, shell and C/C++ host tests under
+  `package/`, `tooling/`, `firmware/` and `scripts/`. It gives each command up to 1,500 seconds, an empty `HOME`, and an
+  environment filtered of `PIANO_*`, `TURNIP_*`, `K27_*` and `K273_*` variables. The log ends with up to ten slowest commands,
+  including compilation time. The `self-tests-report` JUnit upload runs with `if: always()` and 14-day retention.
+  [Self-test runner](../scripts/ci/self-tests.py)
+- **Real APFS pool capture.** The same macOS job separately runs `bash tooling/pool/test-pool-capture-check.sh --real-apfs`
+  after the host suite. It creates and attaches fresh APFS disk images using `hdiutil` and `diskutil`. Test discovery also
+  runs the script in its default mode with simulated disk commands and fixture headers. [Pool capture test](../tooling/pool/test-pool-capture-check.sh)
+
+### Host test inventory (2026-11-27)
+
+`python3 scripts/ci/self-tests.py --list` reports **162 runnable entries** (68 Python, 34 shell, 60 C/C++), **49 explicit
+skips**, and **97 C/C++ files without a standalone build line** (`none`). The count is of runner entries. Suites can run
+multiple tests, and the real APFS step is outside this count. [Self-test runner](../scripts/ci/self-tests.py)
+
+The skip list contains **39 `SUITE`** entries run by another test, **6 `ARGS`** entries that need arguments from a caller, and
+**4 `INPUT`** entries that need local inputs. `KNOWN-FAIL`, `HEADER` and `TOOL` each have **0** entries.
+[Skip list](../scripts/ci/self-tests.skip)
+
+The self-test job fetches the DarwinBoot pin from `unixnu.lock`. The bootloader host tests apply the repository patches in a
+temporary directory and check extra-RAM and parsing against synthetic fixtures. For a local run, set `DARWINBOOT` to a checkout
+containing the pin. The entries below run through test discovery.
+
+| Area | Discovered entry points |
+| --- | --- |
+| Repository integrity | [`test-repo-manifests.py`](../scripts/ci/test-repo-manifests.py) checks manifests, native descriptors and build wiring, patch hygiene, and shell syntax. [`test-doc-links.py`](../scripts/ci/test-doc-links.py) checks tracked Markdown paths and heading anchors, plus driver-index coverage. |
+| CI tooling | [`test-privacy-scan.py`](../scripts/ci/test-privacy-scan.py) covers scanner rules and Git diffs. [`test-fetch-pins.py`](../scripts/ci/test-fetch-pins.py) uses local Git fixtures for pin validation, fetch and recovery. [`test-self-tests.py`](../scripts/ci/test-self-tests.py) covers discovery, timeouts, JUnit output and duration reporting. |
+| Boot and release | [`test-home-ram-boot.py`](../scripts/ci/test-home-ram-boot.py) checks paths and checksums with simulated fastboot. [`test-verify-ram-images.py`](../tooling/bootimg/test-verify-ram-images.py) exercises the offline image verifier. [`test-partition-safety.py`](../tooling/persist/test-partition-safety.py) covers partition and installed-identity guards with fixtures. [`test-release-assets.py`](../tooling/ci/test-release-assets.py) checks release assembly and refusal cases. |
+| Audio and power | [`PianoAudio/tests/run-audio-host.sh`](../package/PianoAudio/tests/run-audio-host.sh), [`PianoPower/tests/run-platform-host.sh`](../package/PianoPower/tests/run-platform-host.sh), and [`test-extractors.py`](../tooling/audio/test-extractors.py). |
+| Camera | [`PianoCamera/tests/run-camera-host.sh`](../package/PianoCamera/tests/run-camera-host.sh), [`tooling/camera/extension/tests/run-camera-provider-host.sh`](../tooling/camera/extension/tests/run-camera-provider-host.sh), [`test-camera-parsers.py`](../tooling/camera/test-camera-parsers.py), and [`test-diagnostic-host.py`](../tooling/camera/diagnostic/test-diagnostic-host.py). |
+| Graphics, video and display | [`test-metal-host.py`](../tooling/metal/test-metal-host.py), [`PianoVideo/tests/run-bringup-host.sh`](../package/PianoVideo/tests/run-bringup-host.sh), [`PianoDp/tests/run-dp-host.sh`](../package/PianoDp/tests/run-dp-host.sh), [`test-dp-phy-tables.py`](../tooling/dp/test-dp-phy-tables.py), and [`piano-frametime/run-tests.sh`](../tooling/native/piano-frametime/run-tests.sh). |
+| IR, brightness and torch | [`PianoIR/tests/run-ir-host.sh`](../package/PianoIR/tests/run-ir-host.sh), [`piano-brightness-sync/tests/run-sync-host.sh`](../tooling/native/piano-brightness-sync/tests/run-sync-host.sh), and [`piano-torch/test-cli.sh`](../tooling/native/piano-torch/test-cli.sh). |
+
+The inventory also covers UFS and durability, DPU readback and scanout, the GOP display and `gop-shot`, input and sensors,
+USB, Wi-Fi and Bluetooth, long boot arguments and ADT merge, ESP tooling, and userland staging.
+
+### Adreno830 host suite
+
+The suite fetches the public `ArmSmmu4K`, `AdrenoPM4` and `AdrenoFirmware` kits with `scripts/fetch-pins.py --only`. It checks
+each checkout's HEAD against `unixnu.lock` and adds PianoA830's `ArmSmmu4KPaged.c/.h` to the staged SMMU kit. The ArmSmmu4K pin
+matches the driver's fixed-pool API. The kits and test binaries share a temporary directory, and the 1,500-second budget
+covers the fetch, compile and run with ASan and UBSan.
+[Adreno830 CI wrapper](../scripts/ci/adreno830-host.py) · [Lockfile](../unixnu.lock) · [Kit provenance](../package/PianoA830/UPSTREAM)
 
 The suite covers the tier allocator, paged SMMU, PM4 submission, HFI votes and recovery, among other host checks.
 It runs the SHA-256 test vectors and synthetic firmware tests. Validating stock gen80000 images locally requires
@@ -55,7 +88,7 @@ the stock images and the matching pin file, supplied to the runner with `--firmw
 `test_a830regs`, whose comparison needs the unpublished Mesa register export under `docs/inputs/regs`, and the
 kernel-object check, which needs a built UniXNU tree. The standalone register-header checks still run. Two timing tests run
 only locally: `test_a830fence` (a sliced wait of at least 40 ms) and `test_p1wire` (a parallel wiring speedup), which a loaded
-3-core hosted runner cannot guarantee.
+3-core hosted runner cannot guarantee. [Adreno830 CI wrapper](../scripts/ci/adreno830-host.py)
 
 Locally: `python3 scripts/ci/privacy-scan.py [--diff BASE]`, `python3 scripts/ci/self-tests.py [--list] [--only SUBSTR]`,
 `python3 scripts/fetch-pins.py --verify`. To repeat the Adreno830 fetch and suite on a Mac with Xcode:
@@ -68,8 +101,8 @@ SELFTEST_TIMEOUT=1500 python3 scripts/ci/self-tests.py --only package/PianoA830/
 
 `unixnu.lock` `[pin."k27"]` pins upstream [Droid-VM/macOS-DroidVM](https://github.com/Droid-VM/macOS-DroidVM) `abcbc18`; our delta
 is `patches/k27-tree` (two patches, provenance and what was left out: [patches/k27-tree/README.md](../patches/k27-tree/README.md)).
-`tooling/k27/fetch-k27-tree.sh DEST` makes the tree; `scripts/fetch-pins.py` does it for `k27` (as `k27-tree`). Locally nothing
-changes: `PIANO_K27_TREE` still names the tree the build reads.
+`tooling/k27/fetch-k27-tree.sh DEST` makes the tree. `scripts/fetch-pins.py` does it for `k27` (as `k27-tree`). Use
+`PIANO_K27_TREE` to point the local build at the tree. [Local builds](building.md)
 
 ## build.yml
 
@@ -81,7 +114,7 @@ uploads `fd.sha256` and the build log.
 | Stage | From |
 | --- | --- |
 | tree | upstream + `patches/k27-tree` |
-| xnu | apple-oss-distributions/xnu `xnu-12377.121.6` + the tree's `patches/xnu-12377` 0001-0054 + `patches/k27` 0055-0066 (`git am`) |
+| xnu | apple-oss-distributions/xnu `xnu-12377.121.6` + the tree's `patches/xnu-12377` 0001–0054 + `patches/k27` 0055 through `K27_TREE_TOP` (default 0066 in the CI recipes, applied with `git am`) |
 | ld | `ld-classic` (ld64; the kernel links with `-threaded_starts_section`) from the runner's toolchain or `LD_CLASSIC` |
 | kdk | headers of a Kernel Debug Kit: `vars.PIANO_KDK_URL` (+ `secrets.PIANO_KDK_AUTH`, an HTTP header), open item |
 | fakeroot | apple-oss-distributions AvailabilityVersions-157.2, libplatform-375.120.2, libdispatch-1542.100.32 headers; the tree's installhdrs; `libfirehose_kernel.a` built from libdispatch's source |
@@ -127,4 +160,6 @@ skill from the user's own IPSW.
    fakeroot stages, the kernelcache fetch and deletion, the release assembly with stand-in binaries, on a desk Mac).
 5. **The Metal plugin** (`tooling/metal/build-turnip-a830.sh`) needs the Mesa work tree and the metal2vulkan bridge, neither pinned in
    `unixnu.lock` yet; not in CI.
-6. **KNOWN-FAIL self-tests** (`scripts/ci/self-tests.skip`): four tests fail on `main` and are skipped until fixed.
+6. **Adreno830 local checks.** The local wrapper uses the pinned AdrenoFirmware vote reference and stays on the skip list as
+   `SUITE` because CI runs the shared suite. The local wrapper also runs the macOS build mode, board checks, timing tests and
+   optional stock firmware checks. [Local wrapper](../tooling/k27/run-a830-host-tests.py) · [Skip list](../scripts/ci/self-tests.skip)

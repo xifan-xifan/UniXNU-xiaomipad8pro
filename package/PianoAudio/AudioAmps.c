@@ -18,6 +18,13 @@ static int reset_line(AudioAmps *g, unsigned slot, int release)
     return r;
 }
 
+static void hold_reset(AudioAmps *g)
+{
+    for (unsigned s = 0; s < AUDIO_AMPS; ++s) reset_line(g, s, 0);
+    g->released = 0;
+    g->present = g->configured = g->started = 0;
+}
+
 void audio_amps_init(AudioAmps *g, const AudioAmpsIo *io)
 {
     for (unsigned i = 0; i < sizeof *g; ++i) ((uint8_t *)g)[i] = 0;
@@ -221,7 +228,12 @@ unsigned audio_amps_off(AudioAmps *g)
         if (g->present >> s & 1u) (void)fs19xx_mute(&g->amp[s], 1);
     for (unsigned s = 0; s < AUDIO_AMPS; ++s)
         if ((g->present >> s & 1u) && fs19xx_shutdown(&g->amp[s])) bad |= 1u << s;
-    if (bad) g->off_errors++;
+    if (bad) {
+        g->off_errors++;
+        /* A NACK can leave an amp powered. Assert hardware reset before
+         * callers tear down the DSP graph and its clock. */
+        hold_reset(g);
+    }
     g->started = 0;
     g->have_first = 0;
     done(g);
@@ -230,9 +242,7 @@ unsigned audio_amps_off(AudioAmps *g)
 
 void audio_amps_hold(AudioAmps *g)
 {
-    if (g->present) audio_amps_off(g);
-    for (unsigned s = 0; s < AUDIO_AMPS; ++s) reset_line(g, s, 0);
-    g->released = 0;
-    g->present = g->configured = g->started = 0;
+    if (g->present && audio_amps_off(g)) return;   /* already held in reset */
+    hold_reset(g);
     done(g);
 }

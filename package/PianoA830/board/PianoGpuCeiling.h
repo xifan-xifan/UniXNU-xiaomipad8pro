@@ -27,12 +27,12 @@ struct CeilingSlots {
   uint32_t khz[kCeilingClients] = {};
   uint32_t effective = 0;   // the lowest non-zero slot, 0 for none (what the DCVS has)
 
-  // The caller's slot to `value`. False for an unknown client (nothing changes). *changed: the effective ceiling moved.
-  bool set(unsigned client, uint32_t value, bool *changed)
+  // Reject platform arguments that cannot name a slot or fit in a kHz field.
+  bool set(uintptr_t client, uintptr_t value, bool *changed)
   {
     if (changed) *changed = false;
-    if (client >= kCeilingClients) return false;
-    khz[client] = value;
+    if (client >= kCeilingClients || value > UINT32_MAX) return false;
+    khz[client] = uint32_t(value);
     uint32_t lowest = 0;
     for (uint32_t k : khz)
       if (k && (!lowest || k < lowest)) lowest = k;
@@ -48,5 +48,11 @@ struct CeilingSlots {
     return kCeilingClients;
   }
 };
+
+// DCVS converts a boost's MHz to kHz in a uint32_t.
+inline bool boostArgumentsFit(uintptr_t mhzOrLevel, uintptr_t holdMs, uintptr_t capMhz)
+{
+  return mhzOrLevel <= UINT32_MAX / 1000u && holdMs <= UINT32_MAX && capMhz <= UINT32_MAX / 1000u;
+}
 
 }  // namespace pianogpu

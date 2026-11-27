@@ -6,7 +6,7 @@
 // off, PianoThermal's passive trip around the shared GPU ceiling, PianoA830's own slot for us (client 1: no arbitration), a missing
 // PianoThermal call), the display's messages in place of the 5 s tick (and its fallback), the profile through PianoThermal's
 // Governor.h to its CPU caps, and machdep.piano_sleep's parse and its read resolved (EPERM: the boot arguments; ENOENT: absent).
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. policy_host.cpp -o /tmp/policy_host && /tmp/policy_host
+//   c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I.. policy_host.cpp -o /tmp/policy_host && /tmp/policy_host
 #include "Policy.h"
 #include "../../PianoThermal/Governor.h"   // PianoThermal's profile modes and caps: the end-to-end check of 5.2
 #include <cstdio>
@@ -166,9 +166,52 @@ static void bootClosed()
   in.lid = Lid::closed;
   CHECK(run(e, in) == "root:kIOPMDisableClamshell root:kIOPMSetACAdaptorConnected (none) root:kIOPMClamshellClosed");
   in.lid = Lid::open;
-  CHECK(run(e, in) == "root:kIOPMEnableClamshell root:kIOPMClamshellOpened user");
+  CHECK(run(e, in) == "root:kIOPMClamshellOpened user root:kIOPMEnableClamshell");
   in.lid = Lid::closed;
   CHECK(run(e, in) == "root:kIOPMClamshellClosed");
+}
+
+static void coverRecovery()
+{
+  Engine e(actLid());
+  Inputs in = base();
+  in.screen = Screen::on;
+  run(e, in);
+  in.lid = Lid::closed;
+  CHECK(run(e, in) == "root:kIOPMClamshellClosed");
+  // An aborted suspend with the cover still closed does not replay the close.
+  CHECK(run(e, in) == "");
+  in.lid = Lid::unknown;
+  CHECK(run(e, in) == "root:kIOPMDisableClamshell");
+  in.lid = Lid::open;
+  in.screen = Screen::off;
+  CHECK(run(e, in) == "root:kIOPMClamshellOpened user root:kIOPMEnableClamshell");
+  CHECK(run(e, in) == "");
+  const char *why = "";
+  Actions a;
+  CHECK(e.powerKey(in, kLongPressMs - 1, a, &why) == Key::wakeDisplay && a.n == 1);
+  a.n = 0;
+  CHECK(e.powerKey(in, kLongPressMs, a, &why) == Key::passThrough && a.n == 0);
+  in.screen = Screen::on;
+  CHECK(e.powerKey(in, kLongPressMs - 1, a, &why) == Key::sleep && a.n == 1 && a.a[0].value == kSleepNow);
+
+  // Keep clamshell sleep disabled through an unplug while disarmed, then re-arm as the cover opens.
+  in.power = Power::external;
+  in.lid = Lid::closed;
+  CHECK(run(e, in) == "root:kIOPMDisableClamshell root:kIOPMSetACAdaptorConnected (connected) root:kIOPMClamshellClosed");
+  in.lidSleepArmed = false;
+  in.power = Power::battery;
+  CHECK(run(e, in) == "root:kIOPMSetACAdaptorConnected (none)");
+  in.lidSleepArmed = true;
+  in.lid = Lid::open;
+  CHECK(run(e, in) == "root:kIOPMClamshellOpened user root:kIOPMEnableClamshell");
+  in.lid = Lid::closed;
+  CHECK(run(e, in) == "root:kIOPMClamshellClosed");
+  in.power = Power::external;
+  CHECK(run(e, in) == "root:kIOPMDisableClamshell root:kIOPMSetACAdaptorConnected (connected)");
+  in.power = Power::battery;
+  in.lid = Lid::open;
+  CHECK(run(e, in) == "root:kIOPMClamshellOpened user root:kIOPMSetACAdaptorConnected (none) root:kIOPMEnableClamshell");
 }
 
 static void noSleep()
@@ -725,6 +768,10 @@ static void parse()
   CHECK(!on && mask == 0);
   parseSleep("on; wake mask 0X1f", &on, &mask);
   CHECK(on && mask == 0x1f);
+  parseSleep("on; wake mask 0x100000002", &on, &mask);
+  CHECK(on && mask == 0);
+  parseSleep("on; wake mask 0x2unexpected", &on, &mask);
+  CHECK(on && mask == 0);
 }
 
 // machdep.piano_sleep's read resolved (2026-11-12, queue5 P10: every 0062-0064 kernel answered EPERM, the OID without CTLFLAG_KERN,
@@ -773,10 +820,11 @@ static void acDemandSleep()
 {
   Config c = actLid(); c.profile = false; c.lidSleepAC = true;
   for (Power power : {Power::unknown, Power::battery, Power::external})
-    for (bool on : {false, true}) for (bool wake : {false, true}) for (bool seen : {false, true}) {
-      Inputs in = base(); in.power = power; in.sleepOn = on; in.wakeMask = wake ? kWakeLid : 0;
-      CHECK((view(c, in, seen).close == Close::sleep) == (power != Power::unknown && on && wake && seen));
-    }
+    for (bool armed : {false, true})
+      for (bool on : {false, true}) for (bool wake : {false, true}) for (bool seen : {false, true}) {
+        Inputs in = base(); in.power = power; in.lidSleepArmed = armed; in.sleepOn = on; in.wakeMask = wake ? kWakeLid : 0;
+        CHECK((view(c, in, seen).close == Close::sleep) == (power != Power::unknown && armed && on && wake && seen));
+      }
   Engine e(c); Inputs in = base(); in.power = Power::external;
   in.lidSleepArmed=false; CHECK(view(c,in,true).close==Close::lock);
   in.lidSleepArmed=true;
@@ -827,12 +875,52 @@ static void acRuntimeSwitch()
   CHECK(!lidSleepAC(on, x) && view(on, x, true).close == Close::lock);
 }
 
+static void acDemandEpochs()
+{
+  Config c = actLid(); c.profile = false;
+  Engine e(c);
+  Inputs in = base();
+  in.power = Power::external;
+  in.lid = Lid::closed;
+  in.lidSleepAC = 1;
+  CHECK(run(e, in) == "root:kIOPMDisableClamshell root:kIOPMSetACAdaptorConnected (connected) root:kIOPMClamshellClosed");
+  in.lidSleepArmed = false;
+  in.lid = Lid::open;
+  CHECK(run(e, in) == "root:kIOPMClamshellOpened user");
+  in.lid = Lid::closed;
+  CHECK(run(e, in) == "root:kIOPMClamshellClosed");
+  in.lidSleepArmed = true;
+  CHECK(run(e, in) == "root:kIOPMEnableClamshell root:kIOPMSleepNow");
+  CHECK(run(e, in).empty());
+
+  in.power = Power::unknown;
+  CHECK(run(e, in) == "root:kIOPMDisableClamshell");
+  in.power = Power::external;
+  CHECK(run(e, in) == "root:kIOPMEnableClamshell root:kIOPMSleepNow");
+  in.lid = Lid::unknown;
+  CHECK(run(e, in) == "root:kIOPMDisableClamshell");
+  in.lid = Lid::open;
+  in.power = Power::battery;
+  CHECK(run(e, in) == "root:kIOPMClamshellOpened user root:kIOPMSetACAdaptorConnected (none) root:kIOPMEnableClamshell");
+  in.lid = Lid::closed;
+  in.power = Power::external;
+  CHECK(run(e, in) == "root:kIOPMSetACAdaptorConnected (connected) root:kIOPMClamshellClosed root:kIOPMSleepNow");
+  CHECK(run(e, in).empty());
+  in.lidSleepArmed = false;
+  CHECK(run(e, in) == "root:kIOPMDisableClamshell");
+  in.lidSleepAC = 0;
+  in.lidSleepArmed = true;
+  CHECK(run(e, in).empty());
+}
+
 int main()
 {
   table();
   acDemandSleep();
   acRuntimeSwitch();
+  acDemandEpochs();
   coverOnBattery();
+  coverRecovery();
   bootClosed();
   noSleep();
   lidOff();

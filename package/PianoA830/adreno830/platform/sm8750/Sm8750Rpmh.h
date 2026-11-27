@@ -66,6 +66,7 @@ enum {
     Sm8750RpmhTcsBase = 0xd00,              /* IRQ_ENABLE +0, IRQ_STATUS +4, IRQ_CLEAR +8 */
     Sm8750RpmhTcsStride = 0x2a0,
     Sm8750RpmhActiveTcs = 3,                /* TCS 0..2 */
+    Sm8750RpmhMsgIdRead = 0x00000108,       /* read, response required, 4 bytes */
     Sm8750RpmhMsgIdWrite = 0x00010108,      /* write, response required, 4 bytes */
     Sm8750RpmhCmdComplete = 0x00010100,     /* CMD_STATUS issued | completed */
     Sm8750RpmhAmcEnable = 0x00010000,
@@ -262,13 +263,17 @@ int Sm8750RpmhHostCn0Request(const Sm8750RpmhResources *res, Sm8750RpmhRequest *
  * ARC data <= 0xff, VRM data < 0x2000, BCM data with bits 31 and 28 clear. */
 int Sm8750RpmhWriteActive(const Sm8750RpmhIo *drv2, const Sm8750RpmhCmd *cmds, unsigned n,
     uint32_t wait_mask, Sm8750RpmhResult *result);
+/* Query one validated cmd-db resource's current DRV-2 vote. Only the transport
+ * registers are written. *data receives CMD_RESP_DATA on success. */
+int Sm8750RpmhReadActive(const Sm8750RpmhIo *drv2, uint32_t addr, uint32_t *data, Sm8750RpmhResult *result);
 int Sm8750RpmhSend(const Sm8750RpmhIo *drv2, const Sm8750RpmhRequest *request, Sm8750RpmhResult *result);
 
 /* DRV-2 lock (ARCHITECTURE 4.3.4). One 32-bit word, `sm8750_rpmh_drv2_owner`, defined weak in
  * every user (this file and SOC kits/Sm8750Platform/Rpmh.h for the touch votes), so the kernel
  * link keeps a single copy: 0 = free, any other value = owner. Acquire swaps 0 for `owner`
  * atomically, waiting 10 us between tries, at most 2 s; release stores 0. Must not be held
- * across Sm8750RpmhWriteActive, which takes it itself. `waits` (optional) gets the 10 us waits. */
+ * across Sm8750RpmhWriteActive or Sm8750RpmhReadActive, which take it themselves.
+ * `waits` (optional) gets the 10 us waits. */
 int Sm8750RpmhDrv2Acquire(const Sm8750RpmhIo *io, uint32_t owner, uint32_t *waits);
 void Sm8750RpmhDrv2Release(void);
 uint32_t Sm8750RpmhDrv2Owner(void);

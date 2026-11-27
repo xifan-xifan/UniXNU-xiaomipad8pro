@@ -21,7 +21,7 @@ constexpr IOReturn kIOReturnSuccess = 0, kIOReturnError = 0xe00002bc, kIOReturnB
 constexpr unsigned kMicrosecondScale = 1;
 constexpr unsigned kMillisecondScale = 1000;
 static UfsRootDiagnostics gRootDiagnostic;
-struct Host { uint8_t *virt; uint64_t phys; bool ready, poisoned; uintptr_t hc; void *lock; };
+struct Host { uint8_t *virt; uint64_t phys; UfsAtomicField<bool, true> ready, poisoned; uintptr_t hc; void *lock; };
 static Host gHost;
 alignas(4096) static uint8_t memory[kDmaBytes];
 using Callback = uint64_t (*) (unsigned operation, uint64_t address, uint64_t value, void *bytes);

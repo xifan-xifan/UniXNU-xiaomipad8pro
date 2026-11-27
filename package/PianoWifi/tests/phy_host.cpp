@@ -2,6 +2,7 @@
 // Host test of level 7's HT/VHT choice (WifiHtVht.h, boot 10r) and of what it puts on the wire: the association request's
 // elements (WifiDot11.h), the peer's association command and the started channel (WifiAssoc.h), read back as the firmware
 // reads them.
+//   c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I.. phy_host.cpp -o /tmp/phy_host && /tmp/phy_host
 #include <cstdio>
 #include <cstring>
 #include "WifiAssoc.h"

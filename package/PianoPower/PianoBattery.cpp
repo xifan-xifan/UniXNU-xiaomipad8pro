@@ -6,8 +6,7 @@
 // (which feeds the menu bar's battery item) watches for that class too; updateStatus() copies the values into the registry and sends
 // kIOPMMessageBatteryStatusHasChanged to its clients. The class is named AppleSmartBattery, the name a Mac's battery service has, so
 // anything that looks the battery up by that class name or registry name finds this one; the vma2 kernel collection has no class of
-// that name (it boots virtual machines, which have no battery), so there is no clash. Only setters of the public IOPMPowerSource
-// interface and setPSProperty are used.
+// that name (it boots virtual machines, which have no battery), so there is no clash.
 //
 // Low charge: AtWarnLevel and AtCriticalLevel are never set here. The kernel's own low-battery sleep is started by
 // kIOPMPowerEmergency from Apple's battery manager, which this is not; and every system sleep request is refused while the ADT's
@@ -22,6 +21,7 @@
 #include <libkern/c++/OSString.h>
 #include <libkern/c++/OSSymbol.h>
 #include "PianoBattery.h"
+#include "BatteryHealthData.h"
 
 using namespace pianopower;
 
@@ -50,6 +50,13 @@ class AppleSmartBattery : public IOPMPowerSource {
     OSSafeReleaseNULL(s);
     OSSafeReleaseNULL(symbol);
   }
+  void clear(const char *key)
+  {
+    if (!properties->getObject(key)) return;
+    properties->removeObject(key);
+    removeProperty(key);
+    settingsChangedSinceUpdate = true;
+  }
 
  public:
   void apply(const BatteryValues &v)
@@ -72,14 +79,28 @@ class AppleSmartBattery : public IOPMPowerSource {
     setMaxCapacity(v.maxCapacity);
     setVoltage(v.voltageMv);
     setAmperage(v.amperageMa);
-    setCycleCount(v.cycles);
-    setTimeRemaining(int(v.timeRemaining));
+    if (!v.gaugeFields || v.cycles != kCycleCountUnknown) setCycleCount(v.cycles);
+    else clear(kIOPMPSCycleCountKey);
+    setTimeRemaining(v.systemTimeRemaining());
     flag("FullyCharged", v.full);
     number("InstantAmperage", v.instantMa);
-    number("DesignCapacity", v.designMah);
     number("AppleRawCurrentCapacity", v.rawMah);
     number("AppleRawMaxCapacity", v.fullMah);
-    number("NominalChargeCapacity", v.fullMah);
+    if (!v.gaugeFields || v.designMah) {
+      number(kIOPMPSDesignCapacityKey, v.designMah);
+      number("NominalChargeCapacity", v.fullMah);
+    } else {
+      clear(kIOPMPSDesignCapacityKey);
+      clear("NominalChargeCapacity");
+    }
+    if (v.gaugeFields) {
+      // Legacy source identity. The 27.3 pack path also needs Serial inside BatteryData (ps-health below).
+      text(kIOPMPSSerialKey, kLogicalBatterySerial);
+      if (v.designMah) number(kIOPMPSBatteryHealthKey, v.lowCapacity ? kIOPMFairValue : kIOPMGoodValue);
+      else clear(kIOPMPSBatteryHealthKey);
+      if (v.gaugeStatusValid) flag("PianoGaugeFullyDischarged", v.gaugeFullyDischarged);
+      else clear("PianoGaugeFullyDischarged");
+    }
     number("AvgTimeToEmpty", v.timeToEmpty);
     number("AvgTimeToFull", v.timeToFull);
     // What a Mac's AppleSmartBattery publishes next to these (this Mac's own node is the reference): the update stamp, the
@@ -117,8 +138,57 @@ class AppleSmartBattery : public IOPMPowerSource {
 
 OSDefineMetaClassAndStructors(AppleSmartBattery, IOPMPowerSource)
 
+// powerd 27.3 matches this class and ID=0; a BatteryData property on the power
+// source alone cannot satisfy that lookup. This is the same logical A+B pack.
+class AppleSmartBatteryPack : public IOService {
+  OSDeclareDefaultStructors(AppleSmartBatteryPack)
+};
+OSDefineMetaClassAndStructors(AppleSmartBatteryPack, IOService)
+
 namespace {
 AppleSmartBattery *gBattery;
+AppleSmartBatteryPack *gHealthPack;
+
+bool healthNumber(OSDictionary *dict, const char *key, uint64_t value, unsigned bits)
+{
+  OSNumber *n = OSNumber::withNumber(value, bits);
+  const bool ok = n && dict->setObject(key, n);
+  OSSafeReleaseNULL(n);
+  return ok;
+}
+
+void updateHealthPack(AppleSmartBattery *battery, const BatteryValues &v)
+{
+  OSDictionary *props = batteryHealthProperties<OSDictionary, OSString>(v, healthNumber);
+  if (!props) return; // keep the last complete sample across a transient invalid health report
+  AppleSmartBatteryPack *pack = gHealthPack;
+  if (!pack) {
+    pack = OSTypeAlloc(AppleSmartBatteryPack);
+    if (!pack || !pack->init() || !pack->attach(battery)) {
+      IOLog("PianoPower: battery: FAILED to create the health pack\n");
+      OSSafeReleaseNULL(pack);
+      props->release();
+      return;
+    }
+  }
+  bool ok = true;
+  if (!gHealthPack) {
+    ok = pack->setProperty("ID", props->getObject("ID")) &&
+         pack->setProperty("FeatureFlags", props->getObject("FeatureFlags"));
+  }
+  ok = ok && pack->setProperty("BatteryData", props->getObject("BatteryData"));
+  props->release();
+  if (!ok) {
+    IOLog("PianoPower: battery: FAILED to publish the health pack properties\n");
+    if (!gHealthPack) { pack->detach(battery); pack->release(); }
+    return;
+  }
+  if (!gHealthPack) {
+    pack->registerService(); // ready before the source is registered or its update notification is sent
+    gHealthPack = pack;
+    IOLog("PianoPower: battery: ps-health: AppleSmartBatteryPack ID=0 published (nominal metric)\n");
+  }
+}
 }
 
 bool pianoBatteryUpdate(IOService *owner, const BatteryValues &v)
@@ -140,6 +210,7 @@ bool pianoBatteryUpdate(IOService *owner, const BatteryValues &v)
       b->release();
       return false;
     }
+    updateHealthPack(b, v);
     b->registerService();
     gBattery = b;   // the attachment keeps it; this reference is the driver's
     IOLog("PianoPower: battery: AppleSmartBattery (IOPMPowerSource) published: %u %%, %s%s\n", v.percent,
@@ -147,6 +218,7 @@ bool pianoBatteryUpdate(IOService *owner, const BatteryValues &v)
           v.clamped ? " (shown at the floor)" : "");
     return true;
   }
+  updateHealthPack(gBattery, v);
   gBattery->apply(v);
   gBattery->updateStatus();
   return true;

@@ -37,8 +37,9 @@
 #include <unistd.h>
 
 #include "../../../package/PianoWifi/PianoWifiNet.h"
+#include "../../../package/PianoWifi/WifiProfile.h"
 
-#define DEFAULT_PROFILE "/private/var/db/piano-wifi/profile"
+#define DEFAULT_PROFILE PIANO_WIFI_PROFILE_PATH
 
 static bool gSyslog;
 
@@ -323,52 +324,68 @@ struct profile {
   bool wpa2;
 };
 
+static const char *parse_profile(const uint8_t *text, uint32_t length, struct profile *p)
+{
+  struct piano_wifi_profile parsed;
+  const char *problem = piano_wifi_profile_parse(text, length, &parsed);
+  if (!problem && parsed.security != PianoWifiSecWpa2Psk) problem = "not a WPA2-PSK profile";
+  if (!problem) {
+    *p = (struct profile){.ssid_len = parsed.ssid_len, .wpa2 = true};
+    memcpy(p->ssid, parsed.ssid, parsed.ssid_len);
+    memcpy(p->psk, parsed.psk, parsed.psk_len);
+  }
+  piano_wifi_profile_wipe(&parsed);
+  return problem;
+}
+
 static int read_profile(const char *path, struct profile *p)
 {
   memset(p, 0, sizeof *p);
   char dir[1024];
-  snprintf(dir, sizeof dir, "%s", path);
+  int length = snprintf(dir, sizeof dir, "%s", path);
+  if (length < 0 || (size_t)length >= sizeof dir) return -1;
   char *slash = strrchr(dir, '/');
   if (!slash) return -1;
   *slash = 0;
   struct stat sd, sf;
   if (lstat(dir, &sd) != 0) { say("no join profile yet (its directory is not there)"); return -1; }
   if (!S_ISDIR(sd.st_mode) || sd.st_uid != 0 || (sd.st_mode & 0077)) { say("the profile's directory is not root-only (mode 700): refused"); return -1; }
-  int fd = open(path, O_RDONLY | O_NOFOLLOW);
+  int fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
   if (fd < 0 || fstat(fd, &sf) != 0 || !S_ISREG(sf.st_mode) || sf.st_uid != 0 || (sf.st_mode & 0077) || sf.st_size > 4096) {
     if (fd >= 0) close(fd);
     say("the profile is missing or not a root-only file (mode 600, at most 4 KiB): refused");
     return -1;
   }
-  char buf[4097];
-  ssize_t n = read(fd, buf, sizeof buf - 1);
+  uint8_t buf[4097];
+  size_t got = 0;
+  ssize_t n;
+  do {
+    n = read(fd, buf + got, sizeof buf - got);
+    if (n > 0) got += (size_t)n;
+  } while (got < sizeof buf && (n > 0 || (n < 0 && errno == EINTR)));
   close(fd);
-  if (n <= 0) return -1;
-  if (buf[n - 1] != '\n') {   // a file still being written (writers replace it by a rename): not taken until it is whole
-    wipe(buf, sizeof buf);
-    say("the profile's last line has no newline (a file still being written?): not taken yet");
-    return -1;
-  }
-  buf[n] = 0;
-  for (char *line = strtok(buf, "\n"); line; line = strtok(NULL, "\n")) {
-    if (!strncmp(line, "ssid=", 5)) { p->ssid_len = strlen(line + 5); if (p->ssid_len > 32) p->ssid_len = 0; else memcpy(p->ssid, line + 5, p->ssid_len); }
-    else if (!strncmp(line, "psk=", 4)) { if (strlen(line + 4) <= 64) snprintf(p->psk, sizeof p->psk, "%s", line + 4); }
-    else if (!strncmp(line, "security=", 9)) p->wpa2 = !strcmp(line + 9, "wpa2-psk");
-  }
+  const char *problem = n < 0 || got == sizeof buf || got != (size_t)sf.st_size ?
+                        "incomplete or oversized profile" : parse_profile(buf, (uint32_t)got, p);
   wipe(buf, sizeof buf);
-  size_t pl = strlen(p->psk);
-  if (!p->ssid_len || !p->wpa2 || pl < 8) { say("the profile lacks a name, WPA2-PSK or a passphrase of 8-64 characters"); return -1; }
-  say("profile read: a network name of %zu byte(s), WPA2-PSK, a passphrase of %zu character(s)", p->ssid_len, pl);
+  if (problem) { say("the profile was refused: %s", problem); return -1; }
+  say("profile read: a network name of %zu byte(s), WPA2-PSK, a passphrase of %zu character(s)", p->ssid_len, strlen(p->psk));
   return 0;
 }
 
 static int pmk_of_profile(const struct profile *p, uint8_t pmk[32])
 {
-  size_t pl = strlen(p->psk);
+  size_t pl = strnlen(p->psk, sizeof p->psk);
   if (pl == 64) {                                   // a raw PSK in hex
-    for (int i = 0; i < 32; i++) { unsigned v; if (sscanf(p->psk + 2 * i, "%2x", &v) != 1) return -1; pmk[i] = (uint8_t)v; }
+    for (size_t i = 0; i < pl; ++i)
+      if (piano_wifi_profile_hex((uint8_t)p->psk[i]) < 0) return -1;
+    for (size_t i = 0; i < 32; ++i)
+      pmk[i] = (uint8_t)(piano_wifi_profile_hex((uint8_t)p->psk[2 * i]) << 4 |
+                        piano_wifi_profile_hex((uint8_t)p->psk[2 * i + 1]));
     return 0;
   }
+  if (pl < 8 || pl > 63) return -1;
+  for (size_t i = 0; i < pl; ++i)
+    if ((uint8_t)p->psk[i] < 0x20 || (uint8_t)p->psk[i] > 0x7e) return -1;
   return pmk_from_passphrase(p->psk, p->ssid, p->ssid_len, pmk);
 }
 
@@ -414,6 +431,7 @@ static bool profile_from_wire(const struct piano_wifi_8021x_profile *wire, struc
     return false;
   if (wire->security == 1 && wire->psk_len != 64 && (wire->psk_len < 8 || wire->psk_len > 63)) return false;
   if (wire->security == 0 && wire->psk_len != 0) return false;
+  if (memchr(wire->psk, 0, wire->psk_len)) return false;
   memset(out, 0, sizeof *out);
   out->ssid_len = wire->ssid_len;
   memcpy(out->ssid, wire->ssid, out->ssid_len);
@@ -619,6 +637,26 @@ static int model_send(void *ctx, uint16_t type, const void *body, size_t body_le
 static int self_test(void)
 {
   printf("piano-wifi-supplicant self-test\n");
+  struct profile invalid = {.ssid = "IEEE", .ssid_len = 4, .wpa2 = true};
+  memset(invalid.psk, 'a', 64);
+  invalid.psk[63] = 'z';
+  struct pmk_state bad = {0};
+  check(!set_pmk_profile(&invalid, &bad) && !bad.have, "raw PSK requires two hex digits per byte");
+  invalid.psk[63] = 'F';
+  check(set_pmk_profile(&invalid, &bad) && bad.pmk[0] == 0xaa && bad.pmk[31] == 0xaf,
+        "raw PSK decodes lower and upper case hex");
+  wipe(&bad, sizeof bad);
+  wipe(&invalid, sizeof invalid);
+  static const uint8_t text[] = "ssid=fixture\r\nsecurity=wpa2-psk\r\npsk=fixture-only\r\n";
+  struct profile parsed;
+  check(!parse_profile(text, sizeof text - 1, &parsed) && parsed.ssid_len == 7 &&
+        !strcmp(parsed.psk, "fixture-only"), "complete profile uses shared parsing rules");
+  check(parse_profile(text, sizeof text - 2, &parsed) != NULL &&
+        parse_profile(text, 0, &parsed) != NULL, "truncated and empty profiles are refused");
+  wipe(&parsed, sizeof parsed);
+  struct piano_wifi_8021x_profile wire = {.version = PIANO_WIFI_8021X_PROFILE_VERSION, .ssid_len = 1,
+                                          .security = 1, .psk_len = 9, .psk = "fixture1"};
+  check(!profile_from_wire(&wire, &parsed), "a wire passphrase with an embedded NUL is refused");
   // IEEE 802.11-2020 annex J.4 (PSK mapping): passphrase "password", SSID "IEEE".
   uint8_t pmk[32];
   check(pmk_from_passphrase("password", (const uint8_t *)"IEEE", 4, pmk) == 0 &&

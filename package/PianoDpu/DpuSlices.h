@@ -227,15 +227,15 @@ Frames readFrames(Io &io)
 template <class Io, class Poll = PlainPoll>
 bool waitFrameEdge(Io &io, uint32_t timeoutUs, Frames *edge, const Poll &poll = {})
 {
+  if (!edge || !timeoutUs) return false;
   const uint32_t f0 = io.rd(intfReg(1, kIntfFrameCount));
-  const uint64_t end = io.nowUs() + timeoutUs;
-  if (io.nowUs() >= end) return false;
+  const uint64_t start = io.nowUs();
   io.delayUs(50);
   for (;;) {
     const Frames r = readFrames(io);
     const PollRead a{intfReg(1, kIntfFrameCount), r.f[0]}, b{intfReg(2, kIntfFrameCount), r.f[1]};
     const bool moved = r.f[0] != f0;
-    if (moved || io.nowUs() >= end) {
+    if (moved || io.nowUs() - start >= timeoutUs) {
       poll.sample(io, a, b);
       if (!moved) return false;
       *edge = r;
@@ -265,8 +265,8 @@ Rate measureRate(Io &io, uint32_t ms, const Poll &poll = {})
   r.frames[1] = b.f[1] - a.f[1];
   r.us = b.us - a.us;
   r.milliHz = r.us ? (uint64_t(r.frames[0]) * 1000000000ull + r.us / 2) / r.us : 0;
-  const int32_t d = int32_t(r.frames[0] - r.frames[1]);
-  r.lockstep = r.frames[0] && d >= -1 && d <= 1;
+  const int64_t d = int64_t(r.frames[0]) - r.frames[1];
+  r.lockstep = r.frames[0] && r.frames[1] && d >= -1 && d <= 1;
   return r;
 }
 
@@ -275,19 +275,27 @@ Rate measureRate(Io &io, uint32_t ms, const Poll &poll = {})
 template <class Io, class Poll = PlainPoll>
 bool waitLines(Io &io, unsigned lo, unsigned hi, unsigned vtotal, uint32_t timeoutUs, uint32_t lineNs = kLineNs, const Poll &poll = {})
 {
-  const uint64_t end = io.nowUs() + timeoutUs;
+  if (lo > hi || hi >= vtotal || !lineNs) return false;
+  const uint64_t start = io.nowUs();
   for (;;) {
     const uint64_t pa = intfReg(1, kIntfLineCount);
     const uint32_t line = io.rd(pa);
     if (line >= lo && line <= hi) return true;  // the caller may need to issue a store within this window
-    if (io.nowUs() >= end) {
+    const uint64_t elapsed = io.nowUs() - start;
+    if (elapsed >= timeoutUs) {
       poll.sample(io, {pa, line});
       return false;
     }
     const uint64_t lines = line < lo ? lo - line : (line < vtotal ? vtotal - line : 0) + lo;
     const uint64_t us = lines * lineNs / 1000;
-    if (us > 2500) poll.pause(io, uint32_t((us - 1500) / 1000) * 1000, true, {pa, line});
-    else poll.pause(io, us > 100 ? 100 : uint32_t(us) + 1, false, {pa, line});
+    const uint32_t remaining = timeoutUs - uint32_t(elapsed);
+    if (us > 2500 && remaining >= 1000) {
+      const uint64_t ms = (us - 1500) / 1000;
+      poll.pause(io, uint32_t(ms < remaining / 1000 ? ms : remaining / 1000) * 1000, true, {pa, line});
+    } else {
+      const uint32_t delay = us > 100 ? 100 : uint32_t(us) + 1;
+      poll.pause(io, delay < remaining ? delay : remaining, false, {pa, line});
+    }
   }
 }
 
@@ -295,15 +303,16 @@ bool waitLines(Io &io, unsigned lo, unsigned hi, unsigned vtotal, uint32_t timeo
 template <class Io, class Poll = PlainPoll>
 int32_t waitFlush(Io &io, unsigned ctl, uint32_t mask, uint32_t timeoutUs, const Poll &poll = {})
 {
+  if (ctl >= kCtlCount) return -1;
   const uint64_t t0 = io.nowUs();
   for (;;) {
-    const uint64_t now = io.nowUs();
+    const uint64_t elapsed = io.nowUs() - t0;
     const uint64_t pa = ctlReg(ctl, kCtlFlush);
     const uint32_t flush = io.rd(pa);
     const bool latched = !(flush & mask);
-    if (latched || now - t0 >= timeoutUs) {
+    if (latched || elapsed >= timeoutUs) {
       poll.sample(io, {pa, flush});
-      return latched ? int32_t(now - t0) : -1;
+      return latched && elapsed <= INT32_MAX ? int32_t(elapsed) : -1;
     }
     poll.pause(io, 1000, true, {pa, flush});
   }
@@ -347,8 +356,7 @@ CounterInit initCounters(Io &io, LivePath &p)
     result.firstLine[i] = result.lastLine[i] = io.rd(intfReg(i + 1, kIntfLineCount));
   }
   result.sampled = true;
-  const uint64_t end = first.us + 50000;   // enough time for at least two frame edges at 60 Hz
-  while (io.nowUs() < end) {
+  while (io.nowUs() - first.us < 50000) {   // enough for at least two frame edges at 60 Hz
     io.sleepMs(1);
     const Frames now = readFrames(io);
     bool linesInRange = true;

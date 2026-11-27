@@ -78,7 +78,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -429,7 +428,7 @@ def config_text(a, lines, prev, guard=0):
     text += ('[[entry]]\nid = "reset"\ntitle = "Restart"\ntype = "action"\naction = "reset"\n'
              '[[entry]]\nid = "shutdown"\ntitle = "Power off"\ntype = "action"\naction = "shutdown"\n'
              '[[entry]]\nid = "tools"\ntitle = "Tools"\ntype = "action"\naction = "tools"\n')
-    parsed = tomllib.loads(text)
+    parsed = common.toml_loads(text)
     ids = [e['id'] for e in parsed['entry']]
     if a.default not in ids:
         raise SystemExit(f'default {a.default} is not one of {ids}')

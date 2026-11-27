@@ -95,7 +95,7 @@ static int grab(io_connect_t c, uint32_t sensor, int pattern, int ae, uint32_t t
 {
   const char *name = sensorName(sensor);
   PianoCameraCaptureArgs a = {kPianoCameraABIVersion, sensor, (uint32_t)pattern, (uint32_t)ae, target, 30000};
-  PianoCameraFrameInfo info;
+  PianoCameraFrameInfo info = {0};
   size_t size = sizeof info;
   kern_return_t r;
   for (unsigned t = 0;; ++t) {
@@ -108,15 +108,20 @@ static int grab(io_connect_t c, uint32_t sensor, int pattern, int ae, uint32_t t
     printf("piano-camera-grab: %s: capture: %#x\n", name, r);
     return -1;
   }
-  printf("piano-camera-grab: %s: %s; exposure %u gain %u (%u.%02ux); %ux%u stride %u; means %u/%u/%u/%u; status %u\n", name, info.verdict,
+  if (size != sizeof info || info.version != kPianoCameraABIVersion || info.sensor != sensor) return -1;
+  printf("piano-camera-grab: %s: %.96s; exposure %u gain %u (%u.%02ux); %ux%u stride %u; means %u/%u/%u/%u; status %u\n", name, info.verdict,
          info.exposure, info.gain, info.gainUnit ? info.gain / info.gainUnit : 0, info.gainUnit ? info.gain % info.gainUnit * 100 / info.gainUnit : 0,
          info.width, info.height, info.stride, info.means[0], info.means[1], info.means[2], info.means[3], info.status);
-  if (info.status || !info.bytes) return -1;
+  PianoIspLayout layout;
+  if (info.status || info.bayer > 3 || info.black >= 1023 || info.bytes > SIZE_MAX ||
+      info.bytes != (uint64_t)info.stride * info.height ||
+      pianoIspLayout(info.width, info.height, info.stride, (size_t)info.bytes, scale, &layout)) return -1;
   mach_vm_address_t va = 0;
   mach_vm_size_t len = 0;
   r = IOConnectMapMemory64(c, kPianoCameraMemoryRaw, mach_task_self(), &va, &len, kIOMapAnywhere | kIOMapReadOnly);
-  if (r != KERN_SUCCESS || len < info.bytes) {
+  if (r != KERN_SUCCESS || !va || len < info.bytes) {
     printf("piano-camera-grab: %s: map: %#x (%llu bytes)\n", name, r, (unsigned long long)len);
+    if (r == KERN_SUCCESS && va) IOConnectUnmapMemory64(c, kPianoCameraMemoryRaw, mach_task_self(), va);
     return -1;
   }
   const uint8_t *frame = (const uint8_t *)(uintptr_t)va;
@@ -129,12 +134,12 @@ static int grab(io_connect_t c, uint32_t sensor, int pattern, int ae, uint32_t t
       fclose(f);
     }
   }
-  const uint32_t ow = info.width / 2 / scale, oh = info.height / 2 / scale;
-  float *work = malloc((size_t)ow * oh * 3 * sizeof(float));
-  uint8_t *rgb = malloc((size_t)ow * oh * 3);
+  float *work = malloc(layout.samples * sizeof(float));
+  uint8_t *rgb = malloc(layout.samples);
   PianoIspStats st;
   int rc = -1;
-  if (work && rgb && pianoIsp(frame, info.width, info.height, info.stride, info.bayer, info.black, scale, work, rgb, &st) == 0) {
+  if (pianoIsp(frame, (size_t)info.bytes, info.width, info.height, info.stride, info.bayer, info.black, scale,
+               work, layout.samples, rgb, layout.samples, &st) == 0) {
     snprintf(path, sizeof path, "%s/piano-camera-%s.ppm", dir, name);
     rc = writePpm(path, rgb, st.width, st.height);
     printf("piano-camera-grab: %s isp: %ux%u (scale %u) means %.1f/%.1f/%.1f above black, white balance %.2f/%.2f, digital gain %.2f -> %s%s\n",

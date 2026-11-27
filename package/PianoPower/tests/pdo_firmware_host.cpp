@@ -20,7 +20,7 @@ static unsigned checks, failures;
 // cp-first1's vendor-object RDOs (MIPPS-RDO.md): object 7 PPS-format 5000 mV / 3250 mA, object 5
 static constexpr uint32_t kVendorRdo7 = 0x7301f441u, kVendorRdo5 = 0x53026e3cu;
 static uint32_t fixedRdo(unsigned object, unsigned ma) {return object << 28 | ma / 10 << 10 | ma / 10;}
-static uint32_t ppsRdo(unsigned object) {return object << 28 | 450u << 9 | 60u;}   // 9000 mV, 3000 mA
+static uint32_t ppsRdo(unsigned object, unsigned ma = 3000) {return object << 28 | 450u << 9 | ma / 50;}
 
 struct Bench {
   PianoChargeContract contract{};
@@ -89,7 +89,7 @@ struct Bench {
       const auto w = link.plan.write[i];
       CHECK(piano_charge_write_allowed(&link.cfg, w.property, w.value, w.bytes));
       CHECK(piano_mca_write_allowed_for(&m, w.property, w.value, w.bytes));
-      if ((w.property == PIANO_CHG_PD_FIXED && w.value == 9000) || w.property == PIANO_CHG_PPS) {
+      if ((w.property == PIANO_CHG_PD_FIXED && w.value == 9000) || (w.property == PIANO_CHG_PPS && link.st.hv == PIANO_CHG_HV_ASKED)) {
         // the barrier: reduced currents acknowledged and the input limit read back before any raise
         CHECK(link.st.icl_set && link.st.icl_set <= link.st.transition_ma && link.st.icl_set <= 500);
         CHECK(link.st.fcc_set && link.st.fcc_set <= 500);
@@ -110,7 +110,7 @@ struct Bench {
         rdo = wrongPps && bus == 9000 ? ppsRdo(obj) : fixedRdo(obj, bus == 9000 ? 1600 : 3000);
         break;
       }
-      case PIANO_CHG_PPS: bus = (w.value >> 16) * 20; rdo = ppsRdo(wrongObject ? wrongObject : 3); break;
+      case PIANO_CHG_PPS: bus = (w.value >> 16) * 20; rdo = ppsRdo(wrongObject ? wrongObject : 3, (w.value & 0xffff) * 50); break;
       default: CHECK(false);
       }
       piano_charge_ack(&link.st, w.property, w.value, 0);
@@ -206,6 +206,7 @@ static void fixedNineThenPps() {
   // PPS through the same administrator mode transaction: 5 V withdrawal first
   const auto start = b.writes.size();
   CHECK(!piano_charge_config_transaction(&b.link.cfg, 1, 80, 75, 2, 0));
+  b.link.syncPpsOption(b.m);
   for (unsigned i = 0; i < 20 && b.contract.protocol != PIANO_CONTRACT_PPS; ++i) b.tick();
   for (unsigned i = 0; i < 4; ++i) b.tick();
   CHECK(b.contract.protocol == PIANO_CONTRACT_PPS && b.contract.mv == 9000 && b.contract.object == 3);
@@ -213,7 +214,7 @@ static void fixedNineThenPps() {
   bool five = false;
   for (size_t i = start; i < b.writes.size(); ++i) {
     if (b.writes[i].property == PIANO_CHG_PD_FIXED && b.writes[i].value == 5000) five = true;
-    if (b.writes[i].property == PIANO_CHG_PPS) CHECK(five && b.writes[i].value == piano_charge_pps_word(9000, 3000));
+    if (b.writes[i].property == PIANO_CHG_PPS) CHECK(five && b.writes[i].value == piano_charge_pps_word(9000, 1600));
   }
   CHECK(five);
   // a bounded administrator inhibit (a stop vote like the 80 % hold) ends 9 V and charging; 80/75 untouched
@@ -588,7 +589,7 @@ static void ladderOrder() {
     for (unsigned i = 0; i < 20 && b.link.st.hv != PIANO_CHG_HV_ON; ++i) b.tick();
     CHECK(b.link.st.hv == PIANO_CHG_HV_ON && b.link.st.ladder_obj == (hv == 1 ? 2 : 3));
     CHECK(b.contract.object == b.link.st.ladder_obj && b.voltageRequests == 1);
-    CHECK(hv == 1 ? b.wrote(PIANO_CHG_PD_FIXED, 9000) : b.count(PIANO_CHG_PPS) == 1);
+    CHECK(hv == 1 ? b.wrote(PIANO_CHG_PD_FIXED, 9000) : b.count(PIANO_CHG_PPS) >= 1);
   }
 }
 

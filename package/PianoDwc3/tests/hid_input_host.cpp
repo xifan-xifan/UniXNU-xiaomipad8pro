@@ -2,7 +2,8 @@
 // Host test of HidInput.h (the input port's command parser and line framing) and of the report layouts against the descriptors the
 // HID devices declare (package/PianoKeyboard/HidDescriptors.h): every report the parser builds must have the size and report ID
 // that a walk of the descriptor gives.
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. -I../../PianoKeyboard hid_input_host.cpp -o /tmp/hid_input_host && /tmp/hid_input_host
+//   c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=undefined -I.. -I../../PianoKeyboard hid_input_host.cpp -o /tmp/hid_input_host && /tmp/hid_input_host
+#include "ByteRing.h"
 #include "HidInput.h"
 #include "HidDescriptors.h"
 #include "Wn8030Piano.h"
@@ -46,6 +47,28 @@ static std::map<unsigned, unsigned> inputReports(const uint8_t *d, unsigned n)
 
 static HidCommand parse(const char *s) { return parseHidCommand(s); }
 
+static void ringBounds()
+{
+  uint8_t storage[16];
+  ByteRing ring{storage, sizeof storage, UINT32_MAX - 3, UINT32_MAX - 3, 0};
+  const char commands[] = "K 0 4\r\nP 1 0 0\nC 0\n";
+  CHECK(ring.put(reinterpret_cast<const uint8_t *>(commands), sizeof commands - 1) == sizeof storage);
+  CHECK(ring.used() == sizeof storage && ring.space() == 0 && ring.head == 12 && ring.dropped == 3);
+
+  LineAssembler lines;
+  std::string got;
+  uint8_t read[5];
+  while (const unsigned n = ring.get(read, sizeof read)) {
+    for (unsigned i = 0; i < n; ++i)
+      if (lines.push(char(read[i])) == 1) got += std::string(lines.line()) + "|";
+  }
+  CHECK(got == "K 0 4|P 1 0 0|" && ring.used() == 0 && ring.space() == sizeof storage && ring.tail == ring.head);
+  const uint8_t rest[] = {' ', '0', '\n'};
+  CHECK(ring.put(rest, sizeof rest) == sizeof rest && ring.get(read, sizeof read) == sizeof rest);
+  CHECK(lines.push(char(read[0])) == 0 && lines.push(char(read[1])) == 0 && lines.push(char(read[2])) == 1);
+  CHECK(parse(lines.line()).op == HidOp::consumer && !parse(lines.line()).keysDown);
+}
+
 // hid_input_host FILE: every line of FILE must parse (tooling/native/test_piano_input.py feeds it what piano-input.py sends).
 static int parseFile(const char *path)
 {
@@ -67,6 +90,7 @@ static int parseFile(const char *path)
 int main(int argc, char **argv)
 {
   if (argc > 1 && argv[1][0] != 'v') return parseFile(argv[1]);
+  ringBounds();
   // Descriptors vs. the parser's reports.
   auto kb = inputReports(pianokeyboard::kKeyboardDescriptor, sizeof pianokeyboard::kKeyboardDescriptor);
   auto pt = inputReports(pianokeyboard::kPointerDescriptor, sizeof pianokeyboard::kPointerDescriptor);
@@ -80,6 +104,10 @@ int main(int argc, char **argv)
   CHECK(std::memcmp(c.report, shiftA, 9) == 0);
   c = parse("K 0");
   CHECK(c.op == HidOp::keyboard && !c.keysDown && c.report[0] == 5 && c.report[1] == 0 && c.report[3] == 0);
+  const HidCommand paddedRelease = parse("K 0 0 0 0 0 0 0");
+  CHECK(paddedRelease.op == HidOp::keyboard && !paddedRelease.keysDown && paddedRelease.bytes == c.bytes &&
+        std::memcmp(paddedRelease.report, c.report, c.bytes) == 0);
+  CHECK(parse("K 0 0 0 0 0 0 4").keysDown && parse("K 2 0 0 0 0 0 0").keysDown);
   c = parse("  K 8 2c  ");                        // cmd + space, spaces around
   CHECK(c.op == HidOp::keyboard && c.report[1] == 8 && c.report[3] == 0x2c);
   c = parse("K ff 4 5 6 7 8 9");
@@ -136,8 +164,11 @@ int main(int argc, char **argv)
   feed(std::string(300, 'x') + "\nK 0\n");
   CHECK(got == "K 0|" && dropped == 1);
   got.clear();
-  feed(std::string(kLineMax - 2, 'y') + "\n");
-  CHECK(got.size() == kLineMax - 2 + 1);
+  feed(std::string(kLineMax - 1, 'y') + "\n");
+  CHECK(got == std::string(kLineMax - 1, 'y') + "|" && dropped == 1);
+  got.clear();
+  feed(std::string(kLineMax, 'x') + "\r\nR\n");
+  CHECK(got == "R|" && dropped == 2);
 
   std::printf("%s: %d failure(s)\n", failures ? "FAILED" : "ok", failures);
   return failures ? 1 : 0;

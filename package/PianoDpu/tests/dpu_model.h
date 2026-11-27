@@ -516,4 +516,30 @@ struct Dpu {
   }
 };
 
+// The inherited 120 Hz scanout with programmable fetch and the idle DSI command path.
+inline Dpu modeSwitchFixture()
+{
+  Dpu io;
+  io.modeWrites = true;
+  io.blockDma = false;
+  for (unsigned l = 0; l < 2; ++l) {
+    const unsigned i = l + 1;
+    io.regs[intfReg(i, kIntfConfig)] = 0x80800000;
+    io.regs[intfReg(i, kIntfVsyncWidth)] = 0x480;
+    io.regs[intfReg(i, kIntfDispVStart)] = 0xee80;
+    io.regs[intfReg(i, kIntfDispVEnd)] = 0x13b47f;
+    io.regs[intfReg(i, kIntfDispHctl)] = 0x01ca0020;
+    io.intf[i].fetch = io.regs[intfReg(i, kIntfProgFetch)] = 0x13b6c1;
+    io.intf[i].counting = false;
+    io.regs[intfReg(i, kIntfCountEn)] = 0;
+    io.regs[dsiReg(l, kDsiActiveH)] = 0x01cb0020;
+    io.regs[dsiReg(l, kDsiActiveV)] = 0x08c2006a;
+    io.regs[dsiReg(l, kDsiCtrl)] = 0x000001f7;
+    io.regs[dsiReg(l, kDsiCmdDmaCtrl)] = 0x14000000;
+    io.regs[dsiReg(l, kDsiDmaCtrl1)] = 0;
+    io.dsi[l].intr = 0x00010000;
+  }
+  return io;
+}
+
 }  // namespace model

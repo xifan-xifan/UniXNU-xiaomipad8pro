@@ -76,7 +76,7 @@ typedef struct {
     const uint8_t *tlvs;
     uint32_t length;
 } SscQmi;
-int ssc_qmi_parse(const uint8_t *data, uint32_t length, SscQmi *m);            /* 0, or -1 when not a QMI message */
+int ssc_qmi_parse(const uint8_t *data, uint32_t length, SscQmi *m);            /* 0 on complete framing, -1 malformed */
 const uint8_t *ssc_qmi_tlv(const SscQmi *m, uint8_t type, uint32_t *size);    /* null when absent or malformed */
 typedef struct {
     uint16_t result, error;            /* TLV 0x02 */
@@ -85,7 +85,7 @@ typedef struct {
     int has_status;
     uint32_t status;                   /* TLV 0x11 */
 } SscResponse;
-int ssc_qmi_response(const SscQmi *m, SscResponse *r);                         /* 0, or -1 without TLV 0x02 */
+int ssc_qmi_response(const SscQmi *m, SscResponse *r);                         /* 0, or -1 missing result or bad field length */
 int ssc_response_ok(const SscResponse *r);
 /* A report (0x21 or 0x22): the client id (TLV 0x01, optional) and the event message (TLV 0x02). 0, or -1. */
 int ssc_qmi_report(const SscQmi *m, int *has_client, uint64_t *client_id, const uint8_t **message, uint32_t *length);

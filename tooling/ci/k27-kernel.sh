@@ -37,7 +37,7 @@ XNU_URL=https://github.com/apple-oss-distributions/xnu.git;                XNU_C
 DISPATCH_URL=https://github.com/apple-oss-distributions/libdispatch.git;   DISPATCH_COMMIT=701f4d1a24ae9c6863901bbbb22624b7d1b87321   # libdispatch-1542.100.32
 PLATFORM_URL=https://github.com/apple-oss-distributions/libplatform.git;   PLATFORM_COMMIT=b7ed7cf5cf7dd12b98672435db2225a860f199d8   # libplatform-375.120.2
 AVAIL_URL=https://github.com/apple-oss-distributions/AvailabilityVersions.git; AVAIL_COMMIT=149b1777f3e8c2133042d8e188f72e3adf6a7110 # AvailabilityVersions-157.2
-pin() { python3 -c "import tomllib,sys;print(tomllib.load(open('$D/unixnu.lock','rb'))['pin'][sys.argv[1]][sys.argv[2]])" "$1" "$2"; }
+pin() { python3 -c 'import tomllib,sys;print(tomllib.load(open(sys.argv[1],"rb"))["pin"][sys.argv[2]][sys.argv[3]])' "$D/unixnu.lock" "$1" "$2"; }
 fetch() {   # fetch URL COMMIT DIR: DIR's HEAD at COMMIT (one commit deep)
   [ "$(git -C "$3" rev-parse HEAD 2>/dev/null)" = "$2" ] && return 0
   rm -rf "$3"; git init -q "$3"; git -C "$3" remote add origin "$1"
@@ -47,11 +47,12 @@ say() { printf '== %s\n' "$*"; }
 
 stage_verify() {   # not a build stage: every Apple OSS pin above still exists upstream (the monthly dependency check)
   say "verify the Apple OSS pins"
-  local t rc=0 pair
+  local t rc=0 pair url commit
   for pair in "$XNU_URL $XNU_COMMIT" "$DISPATCH_URL $DISPATCH_COMMIT" "$PLATFORM_URL $PLATFORM_COMMIT" "$AVAIL_URL $AVAIL_COMMIT"; do
-    set -- $pair; t=$(mktemp -d)
-    if git -C "$t" init -q && git -C "$t" fetch -q --depth 1 --filter=blob:none "$1" "$2"; then echo "ok   $1 @ ${2:0:10}"
-    else echo "FAIL $1 @ ${2:0:10}"; rc=1; fi
+    IFS=' ' read -r url commit <<< "$pair"
+    t=$(mktemp -d)
+    if git -C "$t" init -q && git -C "$t" fetch -q --depth 1 --filter=blob:none "$url" "$commit"; then echo "ok   $url @ ${commit:0:10}"
+    else echo "FAIL $url @ ${commit:0:10}"; rc=1; fi
     rm -rf "$t"
   done
   return $rc
@@ -173,8 +174,13 @@ stage_platform() {
 stage_kernel() {
   say "kernel (K27_VARIANT=native)"
   K27_VARIANT=native JOBS=$JOBS bash "$M/build-k27-piano.sh" > "$WORK/kernel.log" 2>&1 || { grep -E 'error:|Undefined' "$WORK/kernel.log" | head -30; exit 1; }
-  local k=$X/build/xnu/k27-native-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped
-  [ -f "$k" ] || k=$(ls "$X"/build/xnu/k27-native-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped* | head -1)
+  local k=$X/build/xnu/k27-native-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped candidate
+  if [ ! -f "$k" ]; then
+    for candidate in "$k"*; do
+      if [ -f "$candidate" ]; then k=$candidate; break; fi
+    done
+  fi
+  [ -f "$k" ] || { echo "no unstripped kernel in ${k%/*}" >&2; exit 1; }
   cp "$k" "$OUT/kernel-k27-native.macho"
   cp "$k" "$M/out/k27/kernel-k27-$TOP-native.macho"   # the name tooling/k273/prepare-k27-tree.sh measures (TAG = K27_TREE_TOP)
   ( cd "$OUT" && shasum -a 256 kernel-k27-native.macho > kernel-k27-native.macho.sha256 && cat kernel-k27-native.macho.sha256 )

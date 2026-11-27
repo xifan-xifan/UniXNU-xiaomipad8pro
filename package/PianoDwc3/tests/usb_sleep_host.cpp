@@ -3,7 +3,7 @@
 // piano-sleep-usb=1, else a soft disconnect; nothing before the takeover; the interrupt masked), the clock check at the wake (an
 // unclocked glue is never touched again), and the QSCRATCH guard (no write while asleep or unclocked: recorded, the last value
 // per register, replayed at the wake; K:7dffd78b342d's SoC reset).
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. usb_sleep_host.cpp -o /tmp/usb_sleep_host && /tmp/usb_sleep_host
+//   c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=undefined -I.. usb_sleep_host.cpp -o /tmp/usb_sleep_host && /tmp/usb_sleep_host
 #include "UsbSleep.h"
 #include "PianoUsbHw.h"
 #include <cstdio>

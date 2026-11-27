@@ -43,6 +43,11 @@
 // -irq=0|1 (polled, SPI 133; default 1; -attach=3 tries the personality and then the allocation, one boot for both),
 // -probe=0|1 (our No-Op probe before Apple's driver, default 1), -a2=0|1 (default 0:
 // Apple's class itself; 1: our PianoXhciHost subclass, which needs a PIANO_USBHOST_A2=1 collection).
+// The real path (levels 3/4 with piano-usbhost-handoff=6, no piano-usbhost-test-loan; U1, the first real-device session): a fresh UCSI snapshot that says a
+// UFP partner (a device, a hub, a dock's data side) lends the controller to Apple's xHCI for at most piano-usbhost-back s; the unplug,
+// a role change, a stale snapshot or the deadline gives it back to PianoDwc3. By default only while we source VBUS (an OTG adapter, a
+// bus-powered device); piano-usbhost-sinkhost=1 also while the partner powers the bus (a PD pass-through hub after its data-role
+// swap). Nothing here sources VBUS: the DSP's firmware does that by itself on a sink's Rd (usb-host.md section 6.4).
 #include <IOKit/IOService.h>
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/IOLib.h>
@@ -90,6 +95,7 @@ struct Args {
   uint32_t level, delay, xhci, qmp, spmi, watch, period;
   uint32_t back, csr, utmi, reset, smmu, slots, attach, irq, probe, a2;   // levels 5 and 6 (a2: our own subclass, path A2)
   uint32_t handoff, debounce, uor;                                    // levels 3 and 4
+  uint32_t sinkHost;                                                  // the real path: host also while we sink (a PD hub)
 };
 Args gArgs;
 uint64_t gHostDeadline;
@@ -139,9 +145,13 @@ void readArgs()
   if (gArgs.debounce > 10000) gArgs.debounce = 10000;
   gArgs.uor = bootArg("piano-usbhost-uor", 0);           // level 4: SET_UOR once per generation (1 DFP, 2 UFP); a test switch
   if (gArgs.uor > 2) gArgs.uor = 0;
+  // the real path's host gate (PortRole.h hostGate): 0 (default) host only while we source VBUS; 1 also while the partner powers
+  // the bus (a hub or dock with PD pass-through after its data-role swap: we sink, the partner is a UFP)
+  gArgs.sinkHost = bootArg("piano-usbhost-sinkhost", 0) != 0;
   if (gArgs.handoff && (gArgs.level == 3 || gArgs.level == 4)) {
     gArgs.smmu = bootArg("piano-usbhost-smmu", gArgs.handoff == 6 ? 2 : 1);
     if (gArgs.smmu > 2) gArgs.smmu = 2;
+    if (gArgs.handoff == 5 && !gArgs.back) gArgs.back = gArgs.watch ? gArgs.watch : 300;
   }
 }
 // The level that runs: 1 and 2 (read only), 3 (the port notifications), 4 (the UCSI client too), 5 (our xHCI probe), 6 (Apple's xHCI
@@ -1340,10 +1350,11 @@ void hostSession(char *line, size_t size)
       portsReport(pr, ports, sizeof ports);
       portWatch(pr, session);
     }
-    hostEnd(&pr, sw, gArgs.back != 0);
-    snprintf(line, size, "switch ok | No-Op %s | ports %s | smmu %s | dma %s | %s", ok ? "PASS" : pr.running ? "FAIL" : "not reached",
+    const char *probe = ok ? "PASS" : pr.running ? "FAIL" : "not reached";
+    const bool stopped = hostEnd(&pr, sw, gArgs.back != 0);
+    snprintf(line, size, "switch ok | No-Op %s | ports %s | smmu %s | dma %s | %s", probe,
              ports, gArgs.smmu == 2 ? "identity" : gArgs.smmu ? "bypass" : "untouched", !gDma.va ? "none" : gDma.below4g ? "<4G" : ">4G",
-             gArgs.back ? "back to device" : "host kept");
+             !stopped ? "held" : gArgs.back ? "back to device" : "host kept");
     return;
   }
   const Xhci x = readCaps(gHal);
@@ -1357,23 +1368,26 @@ void hostSession(char *line, size_t size)
   if (gArgs.probe) {
     Probe pr;
     probe = xhciProbe(pr) ? "PASS" : pr.running ? "FAIL" : "not reached";
-    if (pr.running) {
+    if (pr.x.sane) {
       const StopResult st = xhciStop(gHal, pr.x);
       note("xHCI stop before %s: halted and reset: USBSTS %08x: %s", gArgs.a2 ? "our subclass of Apple's driver" : "Apple's driver",
            st.usbsts, st.ok ? "ok" : st.why);
+      if (!st.ok) {
+        stage(-20, "probe stop unconfirmed: Apple start forbidden");
+        snprintf(line, size, "switch ok | probe %s | held", probe);
+        return;
+      }
     }
   }
   appleStack(x, session);
   uint32_t vidPid = 0;
   const unsigned devices = usbDevices(&vidPid);
+  const bool nubUp = gNub != nullptr, attached = gAppleXhci != nullptr;
+  const char *irq = gNubIrq.polled ? "polled" : gNubIrq.line.up ? "SPI 133" : "-";
+  const bool returned = gArgs.back && appleDown(x) && hostEnd(nullptr, sw, true);
   snprintf(line, size, "switch ok | probe %s | nub %s | %s %s | USB devices %u (last %04x:%04x) | interrupt %s | %s", probe,
-           gNub ? "up" : "none", controllerClass(), gAppleXhci ? "attached" : "not attached", devices, vidPid >> 16,
-           vidPid & 0xffff, gNubIrq.polled ? "polled" : gNubIrq.line.up ? "SPI 133" : "-",
-           gArgs.back ? "back to device" : "host kept");
-  if (gArgs.back) {
-    appleDown(x);
-    hostEnd(nullptr, sw, true);
-  }
+           nubUp ? "up" : "none", controllerClass(), attached ? "attached" : "not attached", devices, vidPid >> 16,
+           vidPid & 0xffff, irq, returned ? "back to device" : gArgs.back ? "held" : "host kept");
 }
 
 // ------------------------------------------------------------------------------------- levels 3 and 4: the port manager (H3/H4)
@@ -1488,8 +1502,19 @@ bool sharedDomain(bool baseline)
   note("usb-a2b borrower domain %s bank %u ASID %u CDC %u net %u baseline-required %u", ok ? "ready" : "NOT ready",
        info.bank, info.asid, info.configured, info.net, baseline);
   note("usb-a2b domain fault raw %08x fault_bits %08x", info.fsr, info.fsr & kFsrFaults);
-  return ok && (!baseline || (info.configured && info.net));
+  return loanDomainReady(ok, baseline, info.configured, info.net);
 }
+
+bool loanDmaReady()
+{
+  using namespace pianohw;
+  if (gArgs.smmu == 2) return sharedDomain(false);
+  if (!gArgs.smmu) return true;
+  if (!mapRegion(gSmmu, kSmmu, kSmmuBytes)) return false;
+  const auto p = pianousb::planSmmuStream(kUsbStream, kSmmuBytes, smmuRd);
+  return !p.error && p.keep;
+}
+
 volatile uint32_t gLoanRequest;
 uint64_t gLoanRequestAt;
 int loanSysctl(struct sysctl_oid *oidp, void *, int, struct sysctl_req *req)
@@ -1547,8 +1572,8 @@ bool liveUp(LiveHost &h)
   h.sessions++;
   gReturnSafe = true;
   if (!gLoan.deadline || nowMs() >= gLoan.deadline) { loanFailure("loan-deadline"); return false; }
+  if (!loanDmaReady()) { loanFailure("shared-domain"); return false; }
   if (gArgs.handoff == 6) {
-    if (!sharedDomain(false)) { loanFailure("shared-domain"); return false; }
     if (!controllerClassPresent()) { loanFailure("apple-class"); return false; }
   }
   note("hand-off: host session %u: %s", h.sessions, gArgs.handoff == 6 ? "the switch, then Apple's xHCI on the nub" : "the switch, then our xHCI probe");
@@ -1568,16 +1593,15 @@ bool liveUp(LiveHost &h)
     }
     if (gArgs.probe) {
       Probe pr;
-      bool ok = xhciProbe(pr);
-      if (pr.running) {
+      const bool ok = xhciProbe(pr);
+      if (pr.x.sane) {
         const StopResult st = xhciStop(gHal, pr.x);
         note("xHCI stop before Apple's driver: halted and reset: USBSTS %08x: %s", st.usbsts, st.ok ? "ok" : st.why);
         if (!st.ok) { loanFailure("h5-stop"); gReturnSafe = false; return false; }
-        pr.running = false;
       }
       if (!ok) {
         loanFailure("h5-probe");
-        gReturnSafe = hostEnd(&pr, h.sw, true);
+        gReturnSafe = hostEnd(nullptr, h.sw, true);
         return false;
       }
     }
@@ -1598,7 +1622,8 @@ bool liveUp(LiveHost &h)
       portLine(h.x, i, port, "Apple root port:");
     }
     const uint32_t cmd = gHal.rd(at.op + kOpUsbCmd), sts = gHal.rd(at.op + kOpUsbSts);
-    const char *notReady = !(cmd & kUsbCmdRun) ? "apple-run" : (sts & kUsbStsHalted) ? "apple-halted" :
+    const char *notReady = (sts & (kUsbStsHce | kUsbStsHse | kUsbStsCnr)) ? "apple-usbsts" :
+                          !(cmd & kUsbCmdRun) ? "apple-run" : (sts & kUsbStsHalted) ? "apple-halted" :
                           !portsPowered ? "apple-root-power" : nowMs() >= gLoan.deadline ? "apple-ready-deadline" : nullptr;
     if (notReady) {
       note("usb-a2d Apple ready USBCMD %08x USBSTS %08x ports %u PPC %u powered %u", cmd, sts, h.x.maxPorts, h.x.ppc, portsPowered);
@@ -1755,7 +1780,7 @@ void logUcsiEvents(const pianoucsi::Client &c, uint32_t e)
          (c.concap.bits & kOpUsb3) ? ", USB3" : "", (c.concap.bits & kOpAltMode) ? ", alt modes" : "", (c.concap.bits & kCapProvider) ? ", provider" : "",
          (c.concap.bits & kCapSwapToDfp) ? ", swaps to DFP" : "", (unsigned long long)c.enabled, c.count.commands, c.count.byNotify,
          c.count.byPoll, c.count.busy);
-  if (e & kEvStatus) {
+  if ((e & kEvStatus) && c.status.valid) {
     const ConnectorStatus &s = c.status;
     note("ucsi: connector 1 status %02x%02x%02x%02x %02x%02x%02x%02x %02x: %s%s, partner %s (flags %#x), %s, power mode %s, changes %#x, "
          "RDO %#x, battery charging %u%s",
@@ -1775,7 +1800,7 @@ void logUcsiEvents(const pianoucsi::Client &c, uint32_t e)
   if (e & kEvUserDone)
     note("ucsi: %s (piano-usbhost-uor): %s", commandName(c.userCommand),
          c.userResult == 0 ? "done" : c.userResult == 1 ? "rejected (error)" : c.userResult == 2 ? "not supported" : "no answer");
-  if (e & kEvBogus) note("ucsi: a change reported for a connector that does not exist (CCI %#x): not followed", c.cci);
+  if (e & kEvBogus) note("ucsi: a change reported for a connector other than our port (CCI %#x): ignored", c.cci);
   if (e & kEvStorm) note("ucsi: more than %u connector changes in %u s: not followed until the next notification", kStormChanges, kStormWindowMs / 1000);
 }
 
@@ -1786,6 +1811,7 @@ void portManager(IOService *self)
   const bool ucsiOn = gArgs.level == 4;
   const bool shared = ucsiOn && bootArg("piano-power", 0) >= 2 &&
       (bootArg("piano-power-policy", 0) || bootArg("piano-power-b4pd", 0));
+  const bool testLoan = bootArg("piano-usbhost-test-loan", 0) != 0;
   stage(40, ucsiOn ? "port manager: the UCSI client over PianoPower's USB-C relay, the port notifications from its port events"
                    : "port manager: the port notifications from PianoPower's port events (no UCSI command)");
   gRx.lock = IOSimpleLockAlloc();
@@ -1804,8 +1830,6 @@ void portManager(IOService *self)
        portSlot >= 0 ? "slot taken" : "NO SLOT: no port notification will be seen", piano_port_seen(),
        gArgs.handoff ? (gArgs.handoff == 6 ? "is ON: host with Apple's xHCI on the nub (piano-usbhost-handoff=6)" : "is ON: host with our probe (piano-usbhost-handoff=5)")
                      : "is off (piano-usbhost-handoff=0: the decision is published, nothing is switched)");
-  const uint32_t usbLevel = bootArg("piano-usb", 0);
-  const bool dwc3Owns = usbLevel >= 2;
   RoleSwitch rs;
   rs.enabled = gArgs.handoff != 0;
   rs.debounceMs = gArgs.debounce;
@@ -1813,6 +1837,7 @@ void portManager(IOService *self)
   PortWitnesses w;
   PortView v;
   bool ready = false, uorSent = false;
+  int lastGateWhy = 0;
   uint32_t generation = 0, moves = 0, panLogged = 0;
   uint8_t lastPan[3] = {0xff, 0xff, 0xff};
   char line[400], lastLine[400] = "";
@@ -1820,7 +1845,12 @@ void portManager(IOService *self)
     // Resolve the real library closure while CDC still runs. A missing class
     // must never consume a controller loan or erase its own failure evidence.
     if (!controllerClassPresent()) { stage(-40, "A2 class unavailable before release"); return; }
-    if (bootArg("piano-usbhost-test-loan", 0)) registerLoanSysctl();
+    if (testLoan) registerLoanSysctl();
+    note("usb-host2: real loan %s: host for a UFP partner %s; at most %u s per loan (piano-usbhost-back); the unplug, a role change, "
+         "a stale snapshot or the deadline returns the core to device mode; no VBUS write [PianoUsbHost2V1]",
+         testLoan ? "OFF (piano-usbhost-test-loan=1: the diagnostic sysctl only)" : "armed",
+         gArgs.sinkHost ? "in either power direction (piano-usbhost-sinkhost=1)" : "only while we source VBUS (piano-usbhost-sinkhost=0)",
+         gArgs.back);
   }
   PianoUsbcObservation previous = {};
   if (shared && gArgs.uor) note("ucsi: SET_UOR disabled: PianoPower owns the mailbox");
@@ -1932,34 +1962,63 @@ void portManager(IOService *self)
     }
     // A diagnostic request is allowed once only after CDC + ssh baseline;
     // it does not claim to have negotiated VBUS or a Type-C host partner.
-    bool diagnostic = __atomic_load_n(&gLoanRequest, __ATOMIC_ACQUIRE) == 1;
-    const bool hostWitness = ready && v.known && v.connected && v.vbus == 1 && v.role.role == Role::host;
-    SwitchAction a = rs.step(hostWitness ? Role::host : Role::device, v.connected, now);
-    if (!v.connected && !diagnostic) gLoan.disconnected();
-    if (bootArg("piano-usbhost-test-loan", 0)) a = SwitchAction::none;
+    const bool diagnostic = __atomic_load_n(&gLoanRequest, __ATOMIC_ACQUIRE) == 1;
+    const bool sinkHost = gArgs.handoff == 6 && gArgs.sinkHost;
+    const bool hostWitness = hostGate(ready && w.ucsiReady, v, sinkHost);
+    const bool detached = ready && w.ucsiReady && !w.ucsi.connected; // only a confirmed detach rearms a loan
+    // A UFP partner the gate keeps in device mode (we sink without piano-usbhost-sinkhost=1, or an unknown direction): once per change.
+    const int gateWhy = gArgs.handoff != 6 || !ready || !v.connected || v.role.role != Role::host
+                        ? 0 : hostWitness ? 1 : v.vbus == 0 ? 2 : 3;
+    if (gateWhy != lastGateWhy) {
+      if (gateWhy == 1) note("usb-host2: host gate open: partner UFP, %s [PianoUsbHost2V1]", powerName(v.vbus));
+      else if (gateWhy == 2) note("usb-host2: host gate closed: partner UFP but we sink (the partner powers the bus): device mode kept "
+                                  "(piano-usbhost-sinkhost=0) [PianoUsbHost2V1]");
+      else if (gateWhy == 3) note("usb-host2: host gate closed: partner UFP, power direction unknown: device mode kept [PianoUsbHost2V1]");
+      lastGateWhy = gateWhy;
+    }
+    SwitchAction a = rs.step(hostWitness ? Role::host : Role::device, !detached, now);
+    if (detached && !diagnostic) gLoan.disconnected();
+    if (testLoan) a = SwitchAction::none;
     if (diagnostic && ready && w.ucsiReady && gLoan.phase == LoanPhase::idle && nowMs() >= __atomic_load_n(&gLoanRequestAt, __ATOMIC_ACQUIRE)) a = SwitchAction::toHost;
     bool present = false;
     if (gLive.active) {
-      for (unsigned i = 1; i <= gLive.x.maxPorts; ++i) present |= (gHal.rd(portscAt(gLive.x, i)) & kPortCcs) != 0;
-      const LoanEnd reason = gLoan.end(nowMs(), ready, v.connected, hostWitness, present);
+      const uint32_t sts = gHal.glueClocked() ? gHal.rd(xhciAt(gLive.x).op + kOpUsbSts) : kUsbStsCnr;
+      const bool fault = (sts & (kUsbStsHse | kUsbStsHce | kUsbStsHalted | kUsbStsCnr)) != 0;
+      if (!fault) {
+        for (unsigned i = 1; i <= gLive.x.maxPorts; ++i) present |= (gHal.rd(portscAt(gLive.x, i)) & kPortCcs) != 0;
+      }
+      const LoanEnd reason = gLoan.end(nowMs(), ready && w.ucsiReady, v.connected, hostWitness, present, fault);
       if (reason != LoanEnd::none) {
-        note("usb-a2b loan END reason %s present %u", loanEndName(reason), present);
+        note("usb-a2b loan END reason %s present %u USBSTS %08x", loanEndName(reason), present, sts);
         a = SwitchAction::toDevice;
       } else if (gLoan.diagnostic) a = SwitchAction::none;
     }
-    if (a == SwitchAction::toHost) {
-      if (!dwc3Owns || (gArgs.handoff == 6 && !sharedDomain(true))) {
+    if (a == SwitchAction::toHost && gLoan.canBegin()) {
+      if (gArgs.handoff == 6 && !sharedDomain(diagnostic)) {
         rs.defer(nowMs() + 2000);
       } else if (gLoan.begin(nowMs(), gArgs.back * 1000, diagnostic)) {
-        note("usb-a2b loan BEGIN budget-s %u diagnostic %u VBUS-witness %d", gArgs.back, diagnostic, v.vbus);
+        note("usb-a2b loan BEGIN budget-s %u diagnostic %u VBUS-witness %d power %s sinkhost %u [PianoUsbHost2V1]", gArgs.back, diagnostic,
+             v.vbus, powerName(v.vbus), gArgs.sinkHost);
         __atomic_store_n(&gLoanRequest, 2u, __ATOMIC_RELEASE);
         uint32_t st = dwc3Ask(pianousb::kAskRelease, 2000);
         if (st == pianousb::kHoDevice) st = dwc3Ask(pianousb::kAskState, 0);
         const bool free = pianousb::handoffCoreFree(true, st);
         note("hand-off: release: %s", pianousb::handoffStateName(st));
         gLoanFailure = "none";
+        gReturnSafe = true;
+        bool stillEligible = true;
+        if (free && shared) {
+          PianoUsbcObservation latest = {};
+          piano_usbc_observation(&latest);
+          PortWitnesses witness;
+          stillEligible = latest.generation == previous.generation && observePort(witness, latest, nowMs()) &&
+                          (diagnostic || hostGate(true, portView(witness), sinkHost));
+        } else if (free) {
+          stillEligible = m == __atomic_load_n(&gRx.stateMoves, __ATOMIC_ACQUIRE);
+        }
         if (!free) loanFailure("gadget-release");
-        const bool ok = free && liveUp(gLive);
+        else if (!stillEligible) loanFailure("role-witness-changed");
+        const bool ok = free && stillEligible && liveUp(gLive);
         if (!ok) {
           gLoan.returning();
           bool reclaimed = st == pianousb::kHoDevice;
@@ -1975,7 +2034,7 @@ void portManager(IOService *self)
       const bool reclaimed = stopped && dwc3Ask(pianousb::kAskReclaim, 5000) == pianousb::kHoDevice;
       gLoan.returned(stopped, stopped, reclaimed);
       rs.done(a, reclaimed);
-      rs.failedThisConnection = true; // no re-entry on the same cable after expiry
+      rs.failedThisConnection = !detached;
       note("usb-a2b loan RETURN %s domain-pinned %u", reclaimed ? "device" : "FAILED held for boot guard", sharedDomain(false));
     }
     if (gLive.active && nowMs() >= gLive.nextPoll) {
@@ -1985,7 +2044,7 @@ void portManager(IOService *self)
     // Sleep until woken or the next deadline (none: no timer at all).
     uint64_t deadline = shared ? nowMs() + 1000 : ucsiOn ? c.deadline() : 0;
     const auto earliest = [&deadline](uint64_t t) { if (t && (!deadline || t < deadline)) deadline = t; };
-    earliest(rs.deadline());
+    if (gLoan.canBegin() && !testLoan) earliest(rs.deadline());
     if (gLive.active) { earliest(gLive.nextPoll); earliest(gLoan.deadline); }
     if (diagnostic && gLoan.phase == LoanPhase::idle) {
       const uint64_t at = __atomic_load_n(&gLoanRequestAt, __ATOMIC_ACQUIRE);
@@ -2041,9 +2100,10 @@ bool PianoUsbHost::start(IOService *provider)
            gArgs.delay, usbDelay);
     }
   }
-  // Levels 3/4: the port manager. The switch needs the controller: free (piano-usb < 2) or PianoDwc3's hand-off (piano-usb-handoff=1).
-  if ((gArgs.level == 3 || gArgs.level == 4) && gArgs.handoff && usb >= 2 && !bootArg("piano-usb-handoff", 0)) {
-    note("piano-usbhost-handoff=%u refused: PianoDwc3 owns the controller (piano-usb=%u) without piano-usb-handoff=1: the decision only",
+  // Live hand-offs borrow the controller and DMA route from PianoDwc3.
+  if ((gArgs.level == 3 || gArgs.level == 4) && gArgs.handoff &&
+      (gArgs.level != 4 || usb < 2 || !bootArg("piano-usb-handoff", 0))) {
+    note("piano-usbhost-handoff=%u refused: requires level 4 and PianoDwc3 with piano-usb-handoff=1 (piano-usb=%u)",
          gArgs.handoff, usb);
     gArgs.handoff = 0;
   }
@@ -2055,16 +2115,10 @@ bool PianoUsbHost::start(IOService *provider)
          gArgs.handoff == 6 ? "ON with Apple's xHCI on the nub (piano-usbhost-handoff=6)" : gArgs.handoff ? "ON with our probe (piano-usbhost-handoff=5)" : "off",
          gArgs.debounce, gArgs.uor ? (gArgs.uor == 1 ? "; SET_UOR DFP once connected (piano-usbhost-uor=1)" : "; SET_UOR UFP once connected (piano-usbhost-uor=2)") : "");
     if (!bootArg("piano-power", 0)) note("level %u: piano-power is not set: the DSP does not run, nothing will be ready", gArgs.level);
-    if (gArgs.handoff == 6 && usb >= 2) {
+    if (gArgs.handoff == 6) {
       note("usb-a2b shared domain: PianoDwc3 is the sole initializer; borrower waits for ready");
       if (!gArgs.back || gArgs.smmu != 2) { note("usb-a2b loan refused: requires nonzero back and shared S1"); gArgs.handoff = 0; }
       gArgs.irq = 0; // retain the gadget's SPI handler; host uses the poll path
-    } else if (gArgs.handoff && gArgs.smmu) {
-      stage(9, gArgs.smmu == 2 ? "SMMU: stream 0x40 through an identity-mapped write-back context bank" : "SMMU: stream 0x40 through a bypass bank");
-      if (!smmuSetup(gArgs.smmu)) {
-        stage(-9, "SMMU: no route for stream 0x40: the role switch is off");
-        gArgs.handoff = 0;
-      }
     }
   } else if (gArgs.level <= 2) {
     note("level %u: loads only, nothing written (the SPMI observer's read command is the only store)", gArgs.level);

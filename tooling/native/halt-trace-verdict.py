@@ -101,7 +101,8 @@ def verdict(lines):
     if not starts:
         return [], None
     raw_tail = lines[starts[-1]:]
-    markers = [t for t in texts[starts[-1]:] if t]
+    tail = texts[starts[-1]:]
+    markers = [t for t in tail if t]
     cut = next((i for i, m in enumerate(markers) if TIMEOUT.search(m)), None)
     before = markers if cut is None else markers[:cut]
     timed_out = cut is not None or any(re.search(r'Halt/Restart Timed Out|timed out in phase', x, re.I) for x in raw_tail)
@@ -160,9 +161,18 @@ def verdict(lines):
             return markers, 'quiescePowerTree itself did not return (the PM work loop)'
         return markers, 'PM quiesce: no blocker attached or retired and no callback: IOPM work-loop/request bookkeeping'
     if phase == 'notifying haltrestart action handlers':
-        entries = [m.group(1) for m in (re.search(r'IOPlatformHaltRestartAction -> (\S+)', x, re.I) for x in raw_tail) if m]
-        returns = [m.group(1) for m in (re.search(r'IOPlatformHaltRestartAction <- (\S+) returned', x, re.I) for x in before) if m]
-        pending = [e for e in entries if returns.count(e) < entries.count(e)]
+        raw_cut = next((i for i, text in enumerate(tail)
+                        if (text and TIMEOUT.search(text)) or
+                        re.search(r'Halt/Restart Timed Out|timed out in phase', raw_tail[i], re.I)), None)
+        pending = []
+        for line, repaired in zip(raw_tail[:raw_cut], tail[:raw_cut]):
+            line = repaired or line
+            entry = re.search(r'IOPlatformHaltRestartAction -> (\S+)', line, re.I)
+            returned = re.search(r'IOPlatformHaltRestartAction <- (\S+) returned', line, re.I)
+            if entry:
+                pending.append(entry[1])
+            if returned and returned[1] in pending:
+                pending.remove(returned[1])
         if pending:
             return markers, 'the halt/restart platform action of %s never returned (its callPlatformFunction)' % pending[-1]
         if has('halt/restart actions done'):
@@ -321,7 +331,11 @@ def main():
     if not sys.argv[1:]:
         print(__doc__)
         return 2
-    markers, result = verdict(read(sys.argv[1:]))
+    try:
+        markers, result = verdict(read(sys.argv[1:]))
+    except OSError as exc:
+        print(f'halt-trace-verdict: {exc}', file=sys.stderr)
+        return 1
     if result is None:
         print('halt-trace-verdict: no "piano-halt: PEHaltRestart" marker (piano-halt-trace=1 missing, or no halt/restart in the log)')
         return 1

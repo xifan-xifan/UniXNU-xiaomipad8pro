@@ -1,5 +1,29 @@
 # Charging policy: ChargePolicy (what PianoPower decides about the charger)
 
+## Daily status (2026-11-27)
+
+- **Installed v13.1y12q daily policy.** At **5 V**, input reaches **3 A** from a 3 A source. Fixed **9 V PD buck** is on
+  by default and drew 9 V / 1.6 A (about **14 W**) on the stock charger. Both were verified on installed v13.1y12d on
+  November 24. The **80/75% hold** stops charging at 80% and resumes at 75%. It is in the daily profile after the
+  November 17 `chg-buck6` RAM check. Battery percentage and power state work on the installed system.
+  [Support status](../STATUS.md) · [Buck charging](charging-buck-session.md)
+- **Battery health.** On November 26, RAM `m120c-120` reported **122 cycles**, 9200 mAh design capacity and 8781 mAh
+  full capacity. System Information showed 122 cycles and “Service Recommended” and omitted Maximum Capacity. The
+  November 27 opt-in **BH-2** check on RAM `v131y12t-qual1` published `AppleSmartBatteryPack`, and `powerd` returned
+  `0xe00002ca` (`kIOReturnIOError`) writing `BHPersistentStorage`. **Owner decision (2026-11-27, `OWNER-0748`):**
+  host-side disassembly analysis of Apple 27.3 `powerd` is APPROVED (analysis only; never commit Apple binaries) to
+  fix the battery health storage write. The [27.3 storage trace](power-bh2-powerd-analysis.md) identifies error normalization and
+  the separate missing durable NVRAM backend; the raw failed operation is still unknown and the fix-image gate stays HOLD.
+  Both reporting opt-ins remain default 0. [November 26 battery results](../results-2026-11-26.md#efi-memory-battery-and-video) · [November 27 RAM results](../results-2026-11-27.md#ram-qualification)
+- **PPS and direct charging.** The **9 V PPS buck** path up to 2.5 A has a host safety audit and awaits RAM qualification.
+  **Charge Pump / MiPPS stays off by default.** The November 24 attended attempt stayed at a 100 mA input limit because of an
+  unmapped vendor power object. The fix is built and awaits an owner-present test.
+  [Audit and RAM qualification checklist](#25-b4-9-v-pps-buck-host-audit-and-ram-qualification) · [Hardware backlog, B4](../BACKLOG-hardware.md#2-backlog-b1b15)
+
+## Historical charging-policy bring-up
+
+The design, boot-argument defaults, measurements and register notes below describe the builds under test at the time.
+
 Status 2026-11-11: `package/PianoPower/ChargePolicy.{h,c}` written and host-tested (`package/PianoPower/tests/policy_host.cpp`,
 also under ASan/UBSan), compiled with the kernel's C recipe (no undefined symbol beyond the signed-overflow hooks PianoPower.o
 already links with), and **wired into PianoPower level 2 behind `piano-power-policy=1`** (default 0: PianoMca.c's built-in policy,
@@ -27,7 +51,7 @@ DSP ready before the stop keeps the charger charging. Built and host-tested, not
 configuration) logged and diffed with every report, a 2 s watch of the stop's moment, the picture in the IORegistry for a shell, and
 `piano-power-chgfix` (default 0; 1: the enable command pulsed, then AICL restarted; 2: also the USB input suspended 1 s), level 1.
 
-## 0. The answer
+### 0. The answer
 
 - One pure function, `piano_charge_decide(config, input, state, plan)`: (source type, PDOs, charge, temperatures, limits, time,
   what the firmware reads back) → (the writes to make, in order; the charging-hold level; a re-sync request; events for the log).
@@ -49,7 +73,7 @@ Sources: [device.md](../ubuntu-history/device.md) §2.5, [kernel.md](../ubuntu-h
 `yzddmr6/linux-sm8750-piano` `drivers/power/supply/xiaomi_mca.c` at `piano/dev` 7f8d6bedde47 (GPL-2.0, read for behaviour and
 numbers only: nothing copied); xnu `iokit/IOKit/pwr_mgt/IOPM.h`, `RootDomain.h`, `iokit/Kernel/IOPMrootDomain.cpp` (the k27 tree).
 
-## 1. Input limit and charge current by source (0x2000c)
+### 1. Input limit and charge current by source (0x2000c)
 
 | Type | Class | Input limit (0x2008) | Charge current (0x2005), 15–48 °C | Note |
 |---|---|---:|---:|---|
@@ -95,7 +119,7 @@ trust for the boot (`RP_DISTRUST`). PD sources keep their contract's 5 V offer. 
 up to 1500 mA without a connector reading (BC 1.2's CDP/DCP current and the 1.5 A Rp, which the DCP row takes without a thermistor),
 above it only with one below 50 °C; the sag, the quick detach and a refusal each cost one step for the boot instead of the trust.
 
-## 2. 9 V: fixed PDO and PPS APDO (opt-in, `hv` 1 or 2)
+### 2. 9 V: fixed PDO and PPS APDO (opt-in, `hv` 1 or 2)
 
 | State | Leaves when | To |
 |---|---|---|
@@ -116,7 +140,7 @@ With `piano-power-b4pd=1`, HVDCP3/HVDCP3_B/HVDCP3P5 types use the ADSP's QC volt
 property `0x201d` has values `0x20` (up) and `0x10` (down), but is reserved for the later SC8541 pump regulation loop and is not
 sent by this first step.
 
-## 3. PPS with the original adapter: the direct-charging curve (specification)
+### 3. PPS with the original adapter: the direct-charging curve (specification)
 
 Ubuntu v1.1.1 charges fast through the SC8541 2:1 switched-capacitor stage from an **authenticated** Xiaomi adapter's PPS APDO;
 the battery current is set by the cells' voltage (the stock step tables), the state of charge (FFC only below 95 %) and the
@@ -137,14 +161,14 @@ end voltage, or 7 A. Warm: from 40 °C 4500 mA, held 30 s, then +500 mA per 15 s
 at 500 / 500 mA (stock moves it to 1500 / 2000 when the bus carries > 2.7 A and > 5 A is asked); after a session, 9 V on the buck
 until detach. Without authentication a PPS source gets 9 V on the buck (§2): 2500 / 3500 at stage B, derated by §1.
 
-## 4. Float voltage (opt-in, `full_charge`)
+### 4. Float voltage (opt-in, `full_charge`)
 
 4480 mV (stock; the firmware's 4400 "leaves the fuel gauges short of Full", Ubuntu v0.10.0); 4060 mV from 48 °C until below
 46 °C; no temperature counts as hot. 0x2007 is read every cycle and reads 2 × mV − 3600 (4400 → 5200, 4480 → 5360, 4060 → 4520):
 a value already in force is not sent; one that reads otherwise twice in a row is written again (three writes in all at most),
 then left alone (event). The option turned off after use writes 4400 once. 4540 belongs to a direct-charging FFC session only.
 
-## 5. Preserve Battery Health (opt-in)
+### 5. Preserve Battery Health (opt-in)
 
 - **Rule.** The higher pack's charge (one charger feeds both): ≥ stop (80) → stop; ≤ resume (75) → charge; in between nothing
   changes. The mode adds Ubuntu's own window inside JEITA: warmest ≥ 55 °C stops until < 53; coolest < 0 °C stops until ≥ 2.
@@ -155,9 +179,9 @@ then left alone (event). The option turned off after use writes 4400 once. 4540 
   **Read-back.** 0x2003 every cycle (two disagreeing → written again, three writes in all at most); and the verdict that matters: if the
   packs still take > 100 mA a minute after a confirmed stop, a `STOP_LEAK` event (then the firmware's bit does not mean what
   Ubuntu found; turn the mode off and report).
-- **A stop never outlives the driver.** Lifted on detach (the next attach decides again within a cycle) and by
-  `piano_charge_shutdown()` (stop/restart): our FD's stubbed charger DXE does not re-enable charging and a warm reset does not
-  reset the PMIC (charging.md §0, §6).
+- **Cable changes preserve the SOC stop.** Detach restores the firmware's current limits while the health inhibit stays in force.
+  On a clean stop or restart, `piano_charge_shutdown()` hands charging back to firmware. The stubbed charger DXE leaves the
+  enable bit alone, and a warm reset preserves PMIC state (charging.md §0, §6).
 - **The charging hold.** `plan.hold_awake` = writes on, mode on, charge known, a known source attached, charging allowed (below
   the limit, not hot/cold). PianoPower creates one assertion on first use, `getPMRootDomain()->createPMAssertion(
   kIOPMDriverAssertionPreventSystemIdleSleepBit, kIOPMDriverAssertionLevelOff, this, "com.unixnu.driver.PianoPower.charging-hold")`,
@@ -178,7 +202,7 @@ then left alone (event). The option turned off after use writes 4400 once. 4540 
   settings pane drives it: those talk to a Mac's battery manager, which this tablet does not have (not checked on 27). The menu
   bar shows "not charging" on power (BatteryMap: IsCharging false, ExternalConnected true).
 
-## 6. Sleep, wake, a new generation, #18, detach
+### 6. Sleep, wake, a new generation, #18, detach
 
 | Event | Plan |
 |---|---|
@@ -192,7 +216,7 @@ then left alone (event). The option turned off after use writes 4400 once. 4540 
 PianoPower's contract (power.md §4): `setPowerState(off)` loops decide/send/ack for at most 2 s, then returns; the gauges' I2C idle.
 `mach_absolute_time` stands still while suspended, so every timer here counts awake time.
 
-## 7. The writes, the allowlist and the read-back plan (for the owner)
+### 7. The writes, the allowlist and the read-back plan (for the owner)
 
 | Property | Bytes | Values | When | Read-back |
 |---|---|---|---|---|
@@ -225,7 +249,7 @@ A — the policy wired at stage A on a wall DCP and a PD charger; B — `hv` = 1
 F — `full_charge`, 0x2007 reading 5360, Full reached; L — the mode, crossing 80 % on the cable: 0x2003 reads 0 and the current
 ≈ 0 within two cycles, resume at 75; S — a sleep and wake on the cable with the mode on. `hv` = 2 and direct charging come last.
 
-## 8. Wiring (as built 2026-11-11, `piano-power-policy=1`)
+### 8. Wiring (as built 2026-11-11, `piano-power-policy=1`)
 
 Default `piano-power-policy=0`: none of this runs, PianoMca.c's built-in policy and its log lines are as before.
 
@@ -271,19 +295,24 @@ Default `piano-power-policy=0`: none of this runs, PianoMca.c's built-in policy 
    answer is awaited, §15.3); `piano-power-health=1`, `-health-stop=N`, `-health-resume=N`
    (§5); `piano-power-hv=0|1|2` (2 adds the APDO); `piano-power-b4pd=1` (attended first step: fixed-PDO/PPS/QC3 requests);
    `piano-power-kick=0|1` (1, the default: the charging restart, §17);
+   `piano-power-own-bus=0|1` (0, the default; [VBUS witnesses](usb-host.md#64-vbus-h3)): with `piano-usbhost=3` through `6`, 1
+   excludes the DSP's sourced VBUS from external power. A fresh UCSI provider status or, without one, a PMIC Rd reading supplies
+   the evidence. An observed Rp takes precedence. The policy retires the previous attach and revokes unsent writes. It can reduce
+   limits while preserving charge stops. The battery publisher excludes sourced VBUS from the AC state. The transition logs
+   `PianoOwnBusGuardV1`.
    `piano-power-write=0` decides for the log only (nothing is sent). Not offered yet:
    `piano-power-fv`, the stage B ceilings, `sleep_charge`, the `setProperties()` switch. `piano-power-unsuspend` stays the built-in
    policy's.
 
-## 9. Deliberate differences
+### 9. Deliberate differences
 
 From PianoMca.c's policy today: charge current by type with −300 mA/°C from 49 °C (was 1000 mA, 1500 at 9 V, 500 from 38 °C); type 15 on the
 float row (was DCP); PD without PDOs 500 (was 900); unknown types no write (was 500); 0x2003 = 1 only to lift our own 0 (was:
 whenever it reads 0, 3 times per attach); timers in ms plus decision counts (were cycles). From Ubuntu: no charge reading → charging
-on after 5 min (Ubuntu stops); a stop lifted on detach; demand sleep stops a protected charge instead of refusing the sleep; no
-direct charging from third-party PPS sources (Ubuntu allows 4.1 A); the 5 V limits kept through sleep (Ubuntu v1.1.0, as here).
+on after 5 min (Ubuntu stops). Detach lifts stops without a health hold. Demand sleep stops a protected charge and keeps the
+5 V limits (Ubuntu v1.1.0 also keeps the limits). Direct charging from third-party PPS sources remains off (Ubuntu allows 4.1 A).
 
-## 10. Tests (host, done)
+### 10. Tests (host, done)
 
 `tooling/k27/build-native-piano-power.sh` runs both (`policy_host: all charging-policy tests passed`, `power_host: all passed`);
 alone:
@@ -326,7 +355,7 @@ resume / leak / no charge / hot / cold, the sleep handover and the wake, #18, sh
 of 60 000 decisions checking every plan against the allowlist, the ceilings and the hold rules. The ids are checked against
 PianoMca.h at compile time.
 
-## 11. Risks
+### 11. Risks
 
 - **The wiring is untested on the tablet.** The power-tree join, the 3 s sleep acknowledgement and `systemWillShutdown` run only with
   `piano-power-policy=1`; the ADT's `sleep-disabled` keeps every native image awake, so the handover and the wake path have only the
@@ -340,8 +369,8 @@ PianoMca.h at compile time.
 
 - **Unproven writes**: 0x2003 = 0 (Ubuntu's, on the same firmware family; our build may differ), 0x2007, 0x21017, charge currents
   above 1000 mA. Each is opt-in or stage-gated and has the read-back of §7; nothing is written for an unknown source.
-- **A stop that outlives PianoPower** (a panic between the stop and a detach): charging stays off until the next DSP start
-  (every level 2 boot starts it on its defaults). Lifted on detach and shutdown to keep the window short.
+- **A stop that outlives PianoPower** after a panic: charging stays off until the next DSP start
+  (every level 2 boot starts it on its defaults). A clean shutdown restores the firmware's enable state.
 - **Demand sleep below the limit** stops charging for the sleep by default (a night on the charger at 50 % stays at 50 %).
 - **The charge reading**: the higher pack decides; a gauge reading high stops early, one reading low overshoots. No reading for
   5 min ends the limit.
@@ -350,13 +379,13 @@ PianoMca.h at compile time.
 - **Thermal**: the mode's 55 °C stop only exists with the mode on; otherwise the firmware's JEITA and the charge-current derating.
 - **The curve of §3 is a specification**: untested on hardware, no authentication, no charge-pump driver.
 
-## 12. Licence note
+### 12. Licence note
 
 ChargePolicy.c/.h and policy_host.cpp are new code (BSD-2-Clause-Patent, `package/PianoPower/LICENSE`). xiaomi_mca and pmic_glink
 (GPL-2.0) were read as specifications of behaviour and numbers; no code, comment or structure was copied. No vendor binary was
 read.
 
-## 13. A computer port: the CDP row by default, the Rp current opt-in
+### 13. A computer port: the CDP row by default, the Rp current opt-in
 
 On 2026-11-11 the Mac's port read type CDP (0x2000c = 2) on the firmware's side and Rp 3.0 A on the PMIC's Type-C block (sink status 0x02,
 the decode corrected 2026-11-11). The USB Type-C specification ranks a sink's sources of current: a PD contract, then the Type-C
@@ -381,9 +410,9 @@ itself offers. The default is still the policy's CDP row (900 mA, Ubuntu's and x
 The charge current is the CDP row's 900 mA, derated from 39 °C (the packs reached 37.7 °C on 2026-11-11). So "battery ≥ 0 at the login
 screen" on this port needs the Rp limit and a quieter system (display dimmed, GPU idle), or a wall charger.
 
-## 14. Test images and expected lines (owner present, the Mac's port, RAM boots)
+### 14. Test images and expected lines (owner present, the Mac's port, RAM boots)
 
-Built in the main checkout's style (`PIANO_K27_TREE` from `~/.config/piano/env`); each command leaves the image in `out/ram`, copy it
+The build uses `PIANO_K27_TREE` from the host configuration. Each command leaves the image in `out/ram`, copy it
 aside before the next:
 
 ```sh
@@ -452,9 +481,9 @@ sagged under 1.6 A or the port cut out: the Mac's port does not deliver its Rp c
 
 **Battery health** (`piano-power-health=1`) is not built as a default image: at 97 % it stops charging at once (0x2003 = 0), and the
 reset at the end of a RAM test bypasses the shutdown handover, so the stop would stay in the PMIC until the next DSP start. Run it as
-§7's session L, attended, at 80–90 %, and unplug the cable before the reset (a detach lifts the stop).
+§7's session L, attended, at 80–90 %. Use a clean shutdown to hand charging back to the firmware.
 
-## 15. The stepped Type-C current and the write answers (2026-11-12)
+### 15. The stepped Type-C current and the write answers (2026-11-12)
 
 Why ([charging.md](charging.md) "Measured 2026-11-12" has the evidence and what is inferred): on the Mac's port the PMIC alone
 (level 1) gives about 1.5 A in (inferred), P2's 1.6 A (measured: 1594 mA) left the packs at −46 mA at the login window, and the
@@ -462,7 +491,7 @@ port advertises 3.0 A on its Rp. More input is the only lever on the cable, and 
 (0x2012 = 0): nothing walks a limit down that the source or the cable cannot hold. So the policy finds the limit itself, upwards
 only on evidence, and remembers for the boot where it failed.
 
-### 15.1 The steps (`piano-power-rp=1`, `piano-power-ramp=1`, ChargePolicy.c `ramp()`)
+#### 15.1 The steps (`piano-power-rp=1`, `piano-power-ramp=1`, ChargePolicy.c `ramp()`)
 
 | Rule | Value | Why |
 |---|---|---|
@@ -491,7 +520,7 @@ port, not how hard the cells are charged. JEITA (0–55 °C) and the 4400 mV flo
 while the steps follow a trusted Rp the charge current is the DCP row's within the ceiling (1500 mA), and a step counts as used up
 against the firmware's own limit (0x2029) once that has settled below the step.
 
-### 15.2 What the log says
+#### 15.2 What the log says
 
 ```
 PianoPower: piano-power-rp=1 piano-power-ramp=1: a source without PD that advertises 1.5 or 3.0 A on its Rp is stepped from its class row to that current, at most 3000 mA ...
@@ -506,7 +535,7 @@ PianoPower: mca: late answer to the write of input limit (0x2008) = 1600: ok (0)
 PianoPower: mca: an answer that matches no request: opcode 2, input limit (0x2008), sequence 41, return code 0 (in flight: 43); 1 so far
 ```
 
-### 15.3 The "no answer" to 0x2005 (and 0x2008)
+#### 15.3 The "no answer" to 0x2005 (and 0x2008)
 
 Evidence (2026-11-12): in P1 and P2 the first charge current write (900 mA, the first policy write after the board configuration,
 the input still at the firmware's 100 mA request) got `no answer (-60)` from the codec's 1 s window; in P2 the input limit write
@@ -525,7 +554,7 @@ with their property and sequence; the input limit goes first when it rises; the 
 firmware never answers is planned again after 10 s as before (three times, then left until the next attach). `ram-chg-late`
 (§15.5) repeats P2 with the old 1 s window: `late answer` lines mean late, `no answer` without them means lost.
 
-### 15.4 Safety summary
+#### 15.4 Safety summary
 
 Never above what the source advertises (the Rp current; a 1.5 A Rp or no connector reading: 1.5 A; the class rows otherwise, PD:
 its contract); every write through two allowlists (the policy's `piano_charge_write_allowed`, the codec's
@@ -534,7 +563,7 @@ float) plus the policy's derating; on any error (a refusal, a sag, a quick detac
 up; the connector thermistors' 60 °C hold (100 mA) and the charger's 85 °C hold (500 mA) win over every step. Nothing here starts,
 stops or restarts the DSP.
 
-### 15.5 Test images (unattended, the Mac's cable, 600 s, RAM boots)
+#### 15.5 Test images (unattended, the Mac's cable, 600 s, RAM boots)
 
 `tooling/k27/build-charge-test-images.sh [ramp l1 late]` builds them from a KC of this tree (`K27_KERNEL=<kernel-k27-0063-native.macho>
 PIANO_GPU=2 PIANO_VMM_PRESENT=0 tooling/k27/build-native-image.sh`), the Turnip-staged seed (the login window) and the FD A. Every
@@ -564,7 +593,7 @@ about 150 s on `battery: ... mA (charging)` (or ≥ 0) at the login window, bett
 Fail: the packs still negative at 3000 mA (then the load, not the input, is the problem: P11's spinning daemons), or the bus current
 not following the steps (the firmware clamps 0x2008: the `0x2029` field shows its own value).
 
-## 16. The daily profile's charging level (decision, 2026-11-12)
+### 16. The daily profile's charging level (decision, 2026-11-12)
 
 **Level 2 with the stepped Type-C current** (`build-esp.py --profile daily` now defaults to `--charging 2`: `piano-power=2
 piano-power-policy=1 piano-power-rp=1 piano-thermal=1 piano-thermal-adc=1`), installed only after `ram-chg-ramp` passed; until then
@@ -590,14 +619,14 @@ restarts the DSP natively: none seen in any native run (the `adsp:` report line 
 (the 5 s charger cycle of 27 GLINK round trips, PianoAdsp's 20 ms doorbell poll: tens of wakeups a second against the ~12000 idle
 entries a second measured, power.md 1.1); (d) the steps above 1.6 A are host-tested only, hence the gate.
 
-## 17. The 0 mA of 2026-11-12 and the charging restart
+### 17. The 0 mA of 2026-11-12 and the charging restart
 
 Runs (the USB console logs, local, not published; `grep -a PianoPower`): `chg-ramp` (09:05, level 2, the steps of §15, 93 %),
 `chg-l1` (09:27, level 1, 90 %), `chg-late` (14:59, level 2, 1600 mA at once, 81 %), `p8-idle`, `p8-idleold`, `p9-base`, `p9-off`
 (15:28-16:44, level 1, 82-83 %; `p9-off` without PerfPowerServices and audiomxd, [power.md](../power.md) §1.2), and the survey of
 every native boot of 11-11 and 11-12 with PianoPower (46 at level 1, 17 at level 2). **M** = measured, **I** = inferred.
 
-### 17.1 Not a stale gauge, not a system that takes the whole input
+#### 17.1 Not a stale gauge, not a system that takes the whole input
 
 | | `chg-ramp`, 132-582 s | `chg-late`, 132-582 s |
 |---|---|---|
@@ -621,7 +650,7 @@ every native boot of 11-11 and 11-12 with PianoPower (46 at level 1, 17 at level
   the system's 1.3-1.7 A never came within 250 mA of 2000, so `steps 2000 mA (not used up)` for the rest of the run. More input would
   not have helped: the charger did not use what it had.
 
-### 17.2 The charger stops charging at about 40 s of every native boot, before the DSP starts
+#### 17.2 The charger stops charging at about 40 s of every native boot, before the DSP starts
 
 - **Level 1 (M):** the PMIC alone charges at +472..+481 mA at the first reports of 36 of the 46 level-1 boots of 11-11 and 11-12
   (81-97 %; the other ten started at 0: seven at 97 %, on the float, and three at 82-93 % that followed another boot within a few
@@ -649,7 +678,7 @@ every native boot of 11-11 and 11-12 with PianoPower (46 at level 1, 17 at level
 - **2026-11-12 evening:** the charger watchdog is the hypothesis with the most support (the CHGR state byte reads full-on → disabled
   at the stop, the 40 s fits a 32 s bark + 8 s bite); the fix (pet it, clear "a bite disables charging") is §18.
 
-### 17.3 The fix as built (ChargePolicy.c, `piano-power-policy=1`)
+#### 17.3 The fix as built (ChargePolicy.c, `piano-power-policy=1`)
 
 1. **The charging restart** (`kick()`, `cfg.kick`, boot argument `piano-power-kick`, default 1 with the policy). When both packs read
    within 30 mA of 0 on two gauge readings 20 s apart or more, while the bus is at 4.65 V or more and its current is 150 mA or more
@@ -687,7 +716,7 @@ the sleep handover, which now also lifts a restart's stop, the shutdown handover
 0); the worst case is a reset (`piano-reset-after`, a panic) inside the 5 s: charging off until the next DSP start, which is the state
 the restart answers anyway, with the system still on the input. The float voltage, JEITA and the input rules are untouched.
 
-### 17.4 Tests (host)
+#### 17.4 Tests (host)
 
 `policy_host`: `testKick` (the 2026-11-12 state against a charger model that stays at 0 mA until its enable goes 0 and back to 1:
 the 0 alone in its plan, held 5 s, the 1, the charge current again, the verdict 15 s on, the steps then on to 3000 with the battery's
@@ -701,7 +730,7 @@ codec and the DSP model (0x2003 = 0 then 1 as one byte each through the codec's 
 steps to 2500 once the packs take current; three without effect; none with `piano-power-kick=0`; a detach and a shutdown between the 0
 and the 1). Both also under ASan/UBSan.
 
-### 17.5 Test images (unattended, the Mac's cable, 900 s, RAM boots)
+#### 17.5 Test images (unattended, the Mac's cable, 900 s, RAM boots)
 
 `tooling/k27/build-charge-test-images.sh` (default now `kick kick-idle`), the arguments of §15.5's `ram-chg-ramp`
 (`piano-power=2 piano-power-policy=1 piano-power-rp=1` and the daily drivers), 900 s:
@@ -723,7 +752,7 @@ CHARGING again`, then `charging: ... ; charging` lines to the end, `input steps:
 current, the percentage rising; `kick-idle` with more battery current than `kick` at the same step. Fail: `no change` three times
 (0x2003 does not restart this charger: §17.6).
 
-### 17.6 If the restart does not restart it (attended, next)
+#### 17.6 If the restart does not restart it (attended, next)
 
 1. Unplug and replug the cable at the login window and read the `charging:` lines: a real re-attach makes the PMIC run its detection
    and start a charge cycle; charging again says the state is the PMIC's and is cleared by an attach (then the input's own suspend,
@@ -733,7 +762,7 @@ current, the percentage rising; `kick-idle` with more battery current than `kick
    the first write would say the stop is something the firmware prevents when it runs early, as under Linux.
 3. A wall charger (DCP or PD) instead of the Mac's port: whether a computer port is the condition.
 
-## 18. The charger watchdog (2026-11-12 evening; run at dev14: not armed, §19)
+### 18. The charger watchdog (2026-11-12 evening; run at dev14: not armed, §19)
 
 The hypothesis for §17.2's stop: the charger PMIC's BARK/BITE watchdog. In Qualcomm's SCHG charger family a host must pet a watchdog
 in the MISC block; its configuration can make a bite **disable charging** (input kept on), and the boot stages leave it armed. Natively
@@ -741,7 +770,7 @@ nothing pets it (our FD's charger DXE pets none, §0 of [charging.md](charging.m
 the bite ends charging ~40 s into every boot and it stays so. **M** = measured, **I** = inferred, **F** = a register fact of another
 generation of the family.
 
-### 18.1 Register facts and where they are on piano
+#### 18.1 Register facts and where they are on piano
 
 Read for the facts only (no code copied): Linux's `drivers/power/supply/qcom_smbx.c` (GPL-2.0, PMI8998: the family's one mainline host
 driver) and the PM8150B DT (`pm8150b.dtsi`: vbus regulator @1100, Type-C @1500 for the charger @1000).
@@ -759,7 +788,7 @@ The Type-C block at 0x2b00 is verified (attach, CC, Rp in every boot). The MISC 
 +0x643 from the charger base, the vendor SMB5 MISC + 0x43/0x51/0x53), hence the best guess for PMIH010x; this generation's own map is
 not public. ChargerPmic.h's names (from SunUEFI) call 0x2600 "DCDC" and 0x2800 "USBIN"; in this layout they are CHGR and BATIF.
 
-### 18.2 Evidence
+#### 18.2 Evidence
 
 For:
 - **The state byte (M + decode I).** 0x2600 +0x06 read `c3`/`83` while the packs took +470 mA and `87` from the stop on, in this
@@ -777,7 +806,7 @@ decode sensibly with PMI8998's layout (+0x0d `28` → `38` would be "too cold"),
 MISC offsets are the guess with the most support, not a certainty. The fall over 28-38 s (477 → 463 → 328 → 0 mA) is the gauge's ~1 s
 average catching a step.
 
-### 18.3 The fix as built (`ChargerWdog.h`, PianoPower at both levels, default on)
+#### 18.3 The fix as built (`ChargerWdog.h`, PianoPower at both levels, default on)
 
 `piano-power-wdog=2` (default): right after the SPMI probe, before the gauges (PianoPower starts in the first seconds of XNU's uptime:
 its `[30s]` report still shows the packs charging; the stop is at ~40 s), PianoPower locates CHGR and MISC from the Type-C block, logs the watchdog as the boot stages left it, clears **bit 7 of
@@ -808,7 +837,7 @@ charger block 0x2200: APID 698 EE 0, type 02/ba, +06 ..., rt .., +51..53 .. .. .
 [30s] charging: in ? (level 1: ...), battery +470 mA at 4287 mV (2.0 W); charging; CHGR state 3 (full-on); wdog pets 5
 ```
 
-### 18.4 Tests (host)
+#### 18.4 Tests (host)
 
 `power_host` `testWdog`: piano's complex (charger block 0x2200 subtype 0xba, CHGR 0x2600, Type-C 0x2b00, MISC 0x2c00) against a model
 of the watchdog armed with a 32 s bark and an 8 s bite that disables charging: without our writes the model stops at 40 s (state 3 →
@@ -818,7 +847,7 @@ by another EE, of another TYPE, absent, or the watchdog not armed; the bit alrea
 three tries in all; a refusing channel: three failed pets, then none; no clear once the DSP owns the charger; no writer: every write
 refused. Also under ASan/UBSan. A mutation (pet period twice the bark) fails eight checks.
 
-### 18.5 Reading the next boot (pass / fail)
+#### 18.5 Reading the next boot (pass / fail)
 
 `grep -aE 'PianoPower: (wdog|charger block|\[[0-9]+s\] (battery|charging|wdog))'`.
 
@@ -834,13 +863,13 @@ refused. Also under ASan/UBSan. A mutation (pet period twice the bark) fails eig
 - **Map wrong:** MISC's TYPE not 0x02 or no APID at 0x2c00: `no write: ...`; the block survey shows where TYPE 0x02 blocks are and
   which one holds a watchdog-like +0x51..+0x53.
 
-## 19. The charging enable command, and what dev14 rules out (2026-11-12 night; built, not run)
+### 19. The charging enable command, and what dev14 rules out (2026-11-12 night; built, not run)
 
 Run: `dev14` (20:18, the desk-dev image with ChargerWdog.h, level 1, the Mac's port; its USB console log, local, and the boot line's
 tail from the tablet's unified log, where the console had cut it). **M** = measured, **I** = inferred, **F** = a register fact of
 PMI8998 (Linux's `qcom_smbx.c`, read for the facts only).
 
-### 19.1 What dev14 read
+#### 19.1 What dev14 read
 
 | Register | Read (M) | Decode (F, its place on piano I) |
 |---|---|---|
@@ -854,7 +883,7 @@ The per-report `wdog:` line's `cmd 04 45 05` is +0x40, +0x41, +0x42: the 0x04 is
 decode (`+0x42 enable command 0x05, +0x51 cfg2 0x07`) is in the tablet's unified log (`log show` with the predicate
 `eventMessage CONTAINS "PianoPower: wdog: as"` over desk-ssh, read only).
 
-### 19.2 What that rules out, and what is left
+#### 19.2 What that rules out, and what is left
 
 - **Not the watchdog (M, one caveat).** Off as the boot stages left it. Caveat: dev14 started already disabled (below), so the stop
   itself has not been watched with the new code; the boot stages run anew at every reset, and a watchdog they arm would read armed
@@ -880,7 +909,7 @@ decode (`+0x42 enable command 0x05, +0x51 cfg2 0x07`) is in the tablet's unified
   (its charger state machine or a PBS sequence), acting on a condition this map does not name, at a fixed time (~40 s of XNU's uptime
   whatever the load).
 
-### 19.3 The fix as built (`ChargerEnable.h`, PianoPower at both levels until the DSP runs, default on)
+#### 19.3 The fix as built (`ChargerEnable.h`, PianoPower at both levels until the DSP runs, default on)
 
 `piano-power-chgen=1` (default; `=0` reads and logs only). With every report, after the watchdog's read, CHGR +0x42 is written with
 bit 0 set (the value read a moment before, every other bit kept), read back with the state byte, when all of these hold:
@@ -920,7 +949,7 @@ chgen: piano-power-chgen=1 (set the enable command when it reads off); CHGR 0x26
   chgen: the enable command is on: the charger is disabled by something else; wdog pets 0, chgen sets 0, pulses 0     (dev14's state)
 ```
 
-### 19.4 Tests (host)
+#### 19.4 Tests (host)
 
 `power_host` `testChgEn`: dev14's complex (every block mapped for EE 3, then for EE 0) with a charger model (DISABLED while bit 0 is
 clear, charging after an edge unless stuck): the EE 0 APID chosen, EE 3's found and never written; dev14's state (0x05, 0x07,
@@ -933,7 +962,7 @@ it through; a set that does not read back, or is refused: failures, five at most
 2 s, a refused second half retried every second until it goes through; `diffViews` on the stop's bytes. Also under ASan/UBSan. A
 mutation (no state gate) fails four checks.
 
-### 19.5 The next boots (pass / fail)
+#### 19.5 The next boots (pass / fail)
 
 `grep -aE 'PianoPower: (chgen|wdog|\[[0-9]+s\] (battery|charging|chgr|chgen|wdog))'`.
 
@@ -947,7 +976,7 @@ mutation (no state gate) fails four checks.
 - The desk-dev image's command line is 990 bytes against the limit of 1000: `piano-power-chgen=2` does not fit there and goes in an
   image with a shorter line (e.g. `out/ram` of `tooling/k27/build-native-image.sh` with `PIANO_EXTRA_ARGS`).
 
-## 20. What the stop's bytes say, the whole complex in view, and a gated recovery (2026-11-12 late; built, not run)
+### 20. What the stop's bytes say, the whole complex in view, and a gated recovery (2026-11-12 late; built, not run)
 
 Runs (the USB console logs, local, not published): the 21:18 RAM boot (`v32-probe`, level 1, 84-85 %, +480 mA at the start), the
 installed system's 21:31 boot (v3.2a, level 1, 85 %, +823 mA at the start), dev14, dev15 and v3.1 (20:18-21:00, the block survey),
@@ -956,7 +985,7 @@ measured, **F** = a register fact of another generation of the family, read for 
 of the PM8150B generation, `smb5-reg.h`, `qpnp-smb5.c`, `smb5-lib.c` and its vendor DT; PMI8998: mainline `qcom_smbx.c`; all GPL),
 **I** = inferred. No PMIH010x register map is public; every name below is the family's, placed on piano by inference.
 
-### 20.1 The blocks
+#### 20.1 The blocks
 
 | piano (TYPE/SUBTYPE) | Family place (PM8150B) | Evidence |
 |---|---|---|
@@ -969,7 +998,7 @@ of the PM8150B generation, `smb5-reg.h`, `qpnp-smb5.c`, `smb5-lib.c` and its ven
 | 0x2c00 (02/c4) MISC | + 0x100 | I: watchdog off (§19); +0x08 0x02 in every boot (SMB5: SKIN_TEMP_UB, F); +0x06 bit 6 follows the load (§20.2); rt 0 always (M; SMB5: bark 1, aicl-fail 2, F) |
 | 0x2300 (02/bb) | none | M: +0x06 0x87, +0x0a 0x05, +0x0c 0, +0x0d 0x10, +0x51..53 07 03 02 in every boot, charging or not: a second charger-state block that is always DISABLED (I) |
 
-### 20.2 The CHGR bytes, charging and DISABLED (every boot of 11-11/11-12)
+#### 20.2 The CHGR bytes, charging and DISABLED (every boot of 11-11/11-12)
 
 | CHGR | Charging (M) | DISABLED (M) | Reading |
 |---|---|---|---|
@@ -987,7 +1016,7 @@ MISC +0x06 bit 6 (the 21:31 boot: set at [30 s] with +502 mA, clear at [60 s] af
 also set while DISABLED with the packs discharging (21:31 [150 s] −558 mA; dev14 [330 s] −255 mA) and before v3.1's stop (+553 mA),
 and the 21:18 and dev15 boots stopped without it (M): a regulation flag that follows the load, not a warning of the stop (I).
 
-### 20.3 What is ruled out, and the new fact
+#### 20.3 What is ruled out, and the new fact
 
 - **No reason code beyond "disabled".** What changes at the stop is its consequence (the current to 0, the charging bits off,
   +0x0a bit 0 on), and 0x2300, which never charges, shows the same signature (M, I). The CHGR error interrupt never asserts (M).
@@ -1002,7 +1031,7 @@ and the 21:18 and dev15 boots stopped without it (M): a regulation flag that fol
   time; the firmware prevents it when it is early and does not undo it when it is late (I). This makes §17.6's second test (the DSP
   early, `piano-power=2 piano-power-delay=0`) the most promising one, and the snapshot below shows what the firmware writes.
 
-### 20.4 Built: the whole complex in view (every level, read only, on by default)
+#### 20.4 Built: the whole complex in view (every level, read only, on by default)
 
 `ChargerFix.h` (`ChargerComplex`, `ChargerWatch`) and PianoPower.cpp:
 
@@ -1027,7 +1056,7 @@ complex: watching the charger's state every 2 s for 180 s (piano-power-chgwatch;
 [60s] chgr: changed since [30s]: CHGR +06 c3>87 +07 19>00 +0a 00>05 +0c 0a>00 +0d 28>38 +10 22>20; BATIF +10 40>00; ...
 ```
 
-### 20.5 Built: the recovery (`piano-power-chgfix`, level 1 only, default 0)
+#### 20.5 Built: the recovery (`piano-power-chgfix`, level 1 only, default 0)
 
 When CHGR has read DISABLED for 20 s with its enable command on, CHGR_CFG2 bits 7/6 clear, and every gate of §19.3's set passing (a
 source on the port, both packs read, below 4350 mV, not full, 15-45 °C; level 1, not with the DSP), one step at a time, each judged
@@ -1062,7 +1091,7 @@ chgfix: piano-power-chgfix=1 (steps A (the enable command pulsed) and B (AICL re
 [107s] chgfix: no step brought charging back: none more this boot (2 attempts, 0 worked)
 ```
 
-### 20.6 Watching the charger live on the installed system (read only, no reboot)
+#### 20.6 Watching the charger live on the installed system (read only, no reboot)
 
 PianoPower publishes on its IORegistry entry (class `PianoPower`; the owner's shell reads it, no root needed):
 
@@ -1083,7 +1112,7 @@ sudo /usr/bin/log show --last 10m --style compact --predicate 'eventMessage CONT
 
 The picture is refreshed every report (30 s), at once on a watch change and on each recovery event; nothing is read on demand.
 
-### 20.7 Tests (host)
+#### 20.7 Tests (host)
 
 `power_host` `testChgFix`: the 21:18 boot's complex (dev14's arbiter map, the DCDC, USBIN and MISC bytes) against a charger model
 that charges until 40 s and then reads DISABLED with its command on, restarted by one chosen step: the places and both snapshot
@@ -1099,7 +1128,7 @@ is chgen's); MISC +0x44 not at 0x00: B passed over; USBIN's plug-in bit clear: C
 source, left at `=0` and without one); the allowlist with nothing armed; no writer: refused; chgen's own pulses and judge untouched
 by the fix's. Also under ASan/UBSan. `testChgEn` passes unchanged (its gates now share `chgBatteryGate`).
 
-### 20.8 The next boots (pass / fail)
+#### 20.8 The next boots (pass / fail)
 
 `grep -aE 'PianoPower: (complex|chgfix|\[[0-9]+s\] (battery|charging|chgr|chgfix))'`, or §20.6 on the installed system.
 
@@ -1112,7 +1141,7 @@ by the fix's. Also under ASan/UBSan. `testChgEn` passes unchanged (its gates now
 - **Level 2 with the DSP early** (`piano-power=2 piano-power-delay=0`, the policy for the input limit): CHGR stays at 3 past 60 s and
   the `chgr: changed since` line of the report after the DSP's start names the firmware's writes.
 
-## 21. The buck fast-charge set behind boot arguments (charge/pd1, 2026-11-23; built and host-tested, not run)
+### 21. The buck fast-charge set behind boot arguments (charge/pd1, 2026-11-23; built and host-tested, not run)
 
 What the Ubuntu port's charger driver does on the buck path above 5 V, read as a specification (behaviour, sequence and numbers
 only; no code taken), and what PianoPower now has for it, each **off by default** so the daily profile stays at 5 V. All four act
@@ -1136,7 +1165,7 @@ is the pump's source budget). The registry's `PianoCharge` now also carries the 
 `FVHold`, `FastOptions` (bits 1 order, 2 caps, 4 qc, 8 fv-hot) and the real `FVTarget`; one `buck-fast:` line per report
 (`[PianoFastChargeV1]`). Host test: `tests/fastcharge_host.cpp`.
 
-## 22. T-14: at 5 V the source's advertised current, at most 3 A, also with a 9 V mode (2026-11-23; built and host-tested, not run)
+### 22. T-14: at 5 V the source's advertised current, at most 3 A, also with a 9 V mode (2026-11-23; built and host-tested, not run)
 
 Owner 2026-11-23 18:45/18:47: at 5 V as much input current as the source advertises (Type-C Rp 1.5 / 3.0 A, or the PD 5 V
 contract), at most 3 A; never above the advertisement; the USB default keeps the class row.
@@ -1157,7 +1186,7 @@ contract), at most 3 A; never above the advertisement; the USB default keeps the
   new boot argument.
 - **Tests:** `tests/policy_host.cpp` testT14FiveVoltMax. Analysis: the private note T14-ICL.md (charging lane).
 
-## 23. The buck path at 9 V, by default (charge/pd2, 2026-11-24; host-tested, not run)
+### 23. The buck path at 9 V, by default (charge/pd2, 2026-11-24; host-tested, not run)
 
 The daily profile has carried the buck fast-charge set since v13.1y10 (`piano-power-hv=1 -pdo-mca=1 -hv-order=1 -hv-caps=1 -qc=1
 -fv-hot=1`, §21): a PD charger with a fixed 9 V object is asked for 9 V, and its input limit is min(RDO operating current, object,
@@ -1173,7 +1202,7 @@ buck's only path to in_pps 2500.
 - **Tests:** `tests/policy_host.cpp` testT14NineVolt (PPS cases: 2500 with a cool connector; 1600 without a reading or at 51 °C;
   100 mA at 60 °C; a 2 A APDO; 80/75 from PPS).
 
-## 24. The charging ladder, in the Ubuntu port's order (charge/mipps2, 2026-11-24; host-tested, not run)
+### 24. The charging ladder, in the Ubuntu port's order (charge/mipps2, 2026-11-24; host-tested, not run)
 
 A line-by-line comparison with the Ubuntu port (yzddmr6/linux-sm8750-piano, `xiaomi_mca.c` at v1.4.0 and at v1.6.3; read for behaviour
 only) covers PD, MiPPS, the pump session, the 9 V buck, AICL, the input caps, the thermal and stop limits and the replug, retry and
@@ -1200,7 +1229,7 @@ At 5 V a PD source gets its class row at once (at most 1.5 A) and, once it is se
 the 10 s steps under the connector rule. The firmware's own AICL (0x2029) still holds the input where a weak source's bus sags: on the
 Mac mini's Rp 3 A port the request is 3 A and the firmware holds 1.8 A at 4.72 V; no host setting raises that safely.
 
-### 24.1 A PD RDO that does not decode, at 5 V (cp-first2, 2026-11-24; host-tested, not run)
+#### 24.1 A PD RDO that does not decode, at 5 V (cp-first2, 2026-11-24; host-tested, not run)
 
 On the RAM boot cp-first2 the firmware, after MiPPS, formed RDO 0x7301f441 (object 7, PPS layout 5000 mV / 3250 mA) while its own
 0x21011 list held 4 entries and the first of them was no 5000/5000 object (the only conjunct of the old test that could fail: the
@@ -1219,3 +1248,70 @@ Registry keys that survive the dmesg ring and the swap back: `McaPDO1-7` / `McaP
 1 empty slot, 2 another object there, 4 no vSafe5V at slot 1, 5 no vSafe5V at all), `PDUnmappedMs`, `PDUnmappedChanges`; `MiPPSRuns`,
 `MiPPSResults`, `MiPPSResultError`, `MiPPSResultVerified`, `MiPPSResultAdapter`, `MiPPSResultMs`, `MiPPSVersion`, `MiPPSCleared`.
 Test: `tests/pdo_firmware_host.cpp` cpFirst2Replay (fails on a8ff8e74 with ICL 100 / FCC 500, as on the tablet).
+
+### 25. B4 9 V PPS buck host audit and RAM qualification
+
+**Host-verified. RAM qualification pending.** PianoPower defaults to `piano-power-hv=0` and `piano-power-hv-order=0`.
+The shipped profile sets `piano-power-hv=1 piano-power-hv-order=1`. It prefers fixed 9 V and already allows PPS at 9 V
+when a source offers a suitable APDO and lacks a fixed 9 V PDO. Mode 2 explicitly prefers PPS when both are offered.
+The shipped boot arguments, fixed 9 V preference and 80/75% policy are unchanged.
+
+| Audit area | Host-verified behavior |
+|---|---|
+| Source and RDO | `ChargeContract.h` checks the RDO against the selected raw PDO, preserving source positions. On this tablet's PPM the firmware's `0x21011` list supplies the PDOs after two agreeing UCSI status reads. `ChargeLink.h` selects the strongest usable 9 V APDO from that validated list and checks it against the current firmware offer. The PPS word encodes exactly 9000 mV and requests at most the APDO, 2500 mA and the thermal cap, rounded down in 50 mA units. Both the buck policy and MCA codec reject words above 2500 mA. The reduced-current barrier requires FCC and ICL acknowledgements and ICL readback at or below 500 mA before the initial request. The selected APDO, a 9000 mV RDO within the requested current and measured VBUS 8.0–9.6 V must agree before the buck raises its load. |
+| Refresh and withdrawal | The stock host planner suppressed identical writes. It now schedules a repeat MCA `0x21017` write 4 s after the previous acknowledged write's plan time, independently of the 5 s charger read cycle. The 8 s watchdog covers queued, late and missed work. A refusal, missing completion or expired deadline removes queued PPS work, lowers the current through the barrier and requests fixed 5 V with `0x21018 = 5000`. A late ACK cannot renew the session. PPS timeouts and rejection block PPS until detach. A withdrawal still measured above the 5 V band stays behind the barrier and gets up to two additional fixed-5 V writes after an ACK. [USB-IF PPS timing and source timeout tests](https://www.usb.org/sites/default/files/Power%20Delivery%203%200%20Tests%20v1p14%20r2.pdf) |
+| Battery health and sleep | PPS requires an enabled 80/75% health vote. The higher pack's 80% reading plans `0x2003 = 0` first, cancels unsent PPS work and withdraws to fixed 5 V. The hold persists through 76–79% and missing SOC. At 75% the buck resumes through the fresh-contract and reduced-current gates. Sleep cancels queued PPS, attempts withdrawal and stops charging under the health policy. If the 2 s PM handover runs out, PianoPower publishes `PianoChargeHandoverFault`; that is a qualification failure. Wake clears PPS timing and relinks for fresh charger and contract evidence. |
+| Thermals | PPS requires valid pack telemetry, a coolest battery reading of at least 15 °C and a warmest reading of at most 45 °C in the driver's whole-degree conversion. The warmest and coolest combine both packs, firmware battery temperature and the battery NTC when valid. With fast caps enabled, more than 1600 mA requires a readable connector below 50 °C with all readable connectors below 50 °C, a valid charger reading below 75 °C and a valid virtual skin reading below 42 °C. Missing board or skin evidence for that higher cap gives at most 1600 mA. An active contract above a newly lowered cap withdraws through 5 V and waits at least 15 s before requesting again under the lower cap. At 44 °C virtual skin, PPS stops until the proxy reads below 42 °C. The proxy is PianoThermal's board-derived virtual temperature. |
+| Hot holds | Either connector at 60 °C caps input at 100 mA, with release after both read below 50 °C. Charger at 85 °C caps input at 500 mA until below 75 °C. These holds withdraw PPS. At 5 V, battery FCC derates by 300 mA per whole degree above 48 °C, with upward steps limited to one per 30 s for a steady charge row. The battery hot stop trips at 55 °C and clears below 53 °C. A battery reading below 0 °C stops charging and clears at 2 °C. |
+| Cable and service changes | A confirmed detach drops the old request, object, current limits and timing. A detach while a request is pending imposes a 60 s backoff. A hard reset returning an active PPS session to 5 V blocks its retry on the same attachment. A timeout quarantine can reinitialize UCSI after the measured detach is corroborated by the PMIC Type-C state. A changed or lost offer or an invalid/mismatched RDO revokes the old budget. Fixed-only PD can select fixed 9 V in mode 2 with ordering enabled. USB sources use their 5 V row. |
+| Charge pump isolation | PPS buck writes only the charger firmware's PPS property. SC8541 probing and the pump session require the independent `piano-power-cp=1` gate, and pump writes also require the per-boot root arm. The ordinary policy's SC8541 control-register read verifies the pump is off. MiPPS additionally needs `piano-power-mipps=1`, loaded keys and an allocated pump session. Both boot defaults are zero. The buck codec tests reject pump-range PPS words and MiPPS verify writes with those paths off. |
+
+The host cases in `tests/fastcharge_host.cpp`, `tests/pdo_firmware_host.cpp`, `tests/contract_link_host.cpp` and
+`tests/policy_host.cpp` exercise the APDO/RDO path, live cap changes, refresh scheduling and queue revocation, 80/75%,
+temperature boundaries, resets and fallback. The same synthetic PPS source on the starting revision negotiated 3000 mA and
+received one MCA PPS write. The audited build passes both the request limit and repeat-write assertions.
+The host can check what goes to MCA and what the simulated UCSI observer reads.
+The ADSP owns the wire protocol. An MCA ACK or an unchanged UCSI RDO cannot establish that the ADSP emitted a fresh
+USB PD Request. The attended capture must establish PPS cadence before any deployment decision.
+
+#### Future attended RAM checklist
+
+1. Use a RAM image based on the audited build. Replace any conflicting charging arguments in that image with the following
+   values. Start with a cool, dry port, both packs between 40% and 70%, and a PD analyzer that records packets, VBUS and IBUS.
+   Use a known PPS source advertising 9 V within an APDO, a fixed-9 V-only PD source and a USB 5 V source for controls.
+
+   ```text
+   piano-power=2 piano-power-policy=1 piano-power-write=1 piano-power-gauge=1 piano-power-period=5
+   piano-power-ucsi=1 piano-power-pdo-mca=1 piano-power-hv=2 piano-power-hv-order=1 piano-power-hv-caps=1
+   piano-power-health=1 piano-power-health-stop=80 piano-power-health-resume=75
+   piano-power-b4pd=0 piano-power-qc=0 piano-power-cp=0 piano-power-mipps=0
+   piano-thermal=1 piano-thermal-adc=1 piano-thermal-adc-s=5
+   ```
+
+2. Check `PianoCharge` in IORegistry. Require `HealthEnabled=1`, `HealthStop=80`, `HealthResume=75`, a clear
+   `CPControl` switching bit (0x10), `MiPPSActive=0`, `MiPPSRuns=0`, dry/no gauge alerts and valid thermal and
+   pack telemetry. Record `SourcePDO*`, `LadderObject`, `RDO`, `ContractMV`, `ContractMA`, `VBUS`, `IBUS`,
+   `AppliedICL`, `ICLReadback`, `AppliedFCC`, `PPSAckPlanMs`, `VirtualSkinValid`, `VirtualSkinDeciC` and pack current.
+   Capture the initial fixed 5 V and current barrier.
+3. Run 10 minutes at a steady moderate load. Pass when every PPS Request selects the advertised APDO at exactly 9000 mV
+   and within its budget, thermal cap and 2500 mA. Verify steady VBUS 8.0–9.6 V and no draw above the active limit. Measure
+   every successive PPS Request interval on the wire and require at most 10 s. Any source Hard Reset, rejected PPS Request
+   or repeated renegotiation in this steady-state segment fails it.
+4. Observe a normal charge to 80%. Pass when the first decision with the higher pack at 80% requests charge disable and
+   return to fixed 5 V, the wire stops sending PPS Requests, and enable readback is 0 with pack current near zero or
+   discharging within two settled samples. Verify the hold at 76–79%, then observe resume at 75% with a fresh 5 V contract
+   and the current barrier before renewed PPS. Zero charge-enable readback with more than +100 mA after 60 s is a failure.
+5. Disconnect and replug, then test the fixed-only PD and USB controls. Require fresh source evidence before PPS on replug,
+   fixed 9 V for the fixed-only PD control and 5 V for USB. With a PD test source able to reject or reset, verify withdrawal to
+   fixed 5 V and no stale PPS words. With cool hardware and the analyzer attached, exercise sleep/wake. Pass when fixed 5 V
+   and charge disable are observed before PM acknowledgement, the sleeping capture has no PPS Requests, and a fresh contract
+   and barrier precede any new PPS Request after wake. Any handover fault fails the run.
+6. Abort by disconnecting the source if a steady 9 V session leaves 8.0–9.6 V, a Request exceeds its voltage or current
+   budget, the bus stays above the 5 V band after withdrawal, the pump switches, or SOC disable fails. Also abort on liquid
+   or gauge alerts, telemetry loss, either pack or battery NTC outside 15–45 °C, connector at 50 °C, charger at 75 °C,
+   virtual skin at 42 °C, or measured case surface at 42 °C. These attended gates sit ahead of the driver's hard holds.
+   Thermal trips and missing sensor behavior are exercised in the host fixtures. Record the first failing sample and the
+   preceding analyzer trace. Leave the installed profile as-is after the RAM session.
+
+Charge Pump / MiPPS remains a separate B4 item, blocked on the owner-present session. A successful PPS buck RAM run
+qualifies only the attended buck configuration. Daily mode stays fixed-first.

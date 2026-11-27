@@ -96,7 +96,8 @@ unsigned audio_amps_mute(AudioAmps *g);
 int audio_amps_unmute(AudioAmps *g);
 /* After audio_amps_read while playing: the slots that look wrong (fs19xx_group_check against the first reading after the unmute). */
 unsigned audio_amps_check(AudioAmps *g);
-/* Mute all, then power each down (every write tried); returns the amplifiers with a bus error. */
+/* Mute all, then power each down (every write tried). On a shutdown bus error, holds the group in reset
+ * and returns the mask of amplifiers with that error. */
 unsigned audio_amps_off(AudioAmps *g);
 /* audio_amps_off, then the reset lines low. */
 void audio_amps_hold(AudioAmps *g);

@@ -1,0 +1,25 @@
+PianoIR is new code for UniXNU-piano (BSD-2-Clause-Patent, LICENSE): piano's IR transmitter (owner item HW-IR, 2026-11-24). What it
+takes from other work, and from where:
+
+UniXNU-piano (this repository), BSD-2-Clause-Patent:
+  package/PianoTouch/GeniSpi.c / GeniSpi.h (sha256 2042cfc9647391e24d5a558202046425ac62a05adfc73afe769367b8374e3f91 / e73891e4571c5323bca27aaf987bafa002856dfa1dcee156ff31b119e2d3ae3c):
+    compiled in, not copied (the GENI SPI engine: SE DMA, the loopback, the clock divider).
+  package/PianoDwc3/SmmuStream.h (sha256 8f566938f259730d15407aa2d84abb3f6ec3b06c7bf3dabaef78c7e7fbb930a3): included, not copied (the bypass bank for
+    stream 0x423).
+  package/PianoTouch/PianoTouch.cpp: the SE bring-up order (votes under PianoA830's lock word, the branch check before every engine
+    access, the contiguous DMA buffer kept to the end, the cache maintenance, the SMMU on the matching thread), re-written here.
+  package/PianoTorch/PianoTorch.cpp, tooling/native/piano-torch/piano-torch.c: the kext's shape (probe gate on the boot argument,
+    the stage word, an administrator-only setProperties) and the tool's form, re-written.
+  package/PianoBluetooth/BtHw.h: the QUP2 vote word and RCG/DFS layout (facts), re-expressed for the s7 engine in IrHw.h.
+  package/include/PianoPowerContract.h: the power-tree join.
+
+Facts only (no code or text copied):
+  The Linux piano kernel yzddmr6/linux-sm8750-piano 1c21cb9895d69c1c5e83ceae68952fedf522644a (GPL-2.0; pinned by
+  yzddmr6/xiaomipad-8pro-mainline a43f79c): sm8750-xiaomi-piano-desktop.dts (spi15, "xiaomi,piano-ir-spi", the pin states),
+  sm8750.dtsi (spi@89c000, geniqup@8c0000 and its stream, the pins), gcc-sm8750.c (the s7 branch, RCG and votes),
+  pinctrl-sm8750.c (gpio28-31 function 1), drivers/media/rc/ir-spi.c (the piano variant's waveform rules: sample rate, carrier
+  period, duty, cumulative boundaries, the trailing zero word, the 32 KiB bound). IrWave.h re-implements that behaviour.
+  Project-SunUEFI 766ab7ca35d1 (linux/dts/piano-ir-spi-controller.dtso, patches/linux/7.3/0043): GPIO29 active high, idle low,
+  park only after the engine is idle.
+  The NEC code timings (9 ms / 4.5 ms leader, 562.5 us units, 108 ms repeat): the public protocol description.
+No vendor firmware, no Apple binary or payload.

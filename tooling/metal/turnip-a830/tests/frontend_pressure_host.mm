@@ -65,6 +65,16 @@ static uint32_t test_notify_register_dispatch(const char *,int *token,dispatch_q
 static uint32_t test_notify_post(const char *){mockPosts++;return NOTIFY_STATUS_OK;}
 #define notify_register_dispatch test_notify_register_dispatch
 #define notify_post test_notify_post
+#ifdef TEST_MOCK_IOSURFACE
+// The import path uses a surface's identity, storage address and CF ownership.
+// CFMutableData supplies real retain/release without the IOSurface service.
+static uint32_t testSurfaceID(IOSurfaceRef) {return 1;}
+static void *testSurfaceAddress(IOSurfaceRef surface) {
+ return CFDataGetMutableBytePtr(reinterpret_cast<CFMutableDataRef>(surface));
+}
+#define IOSurfaceGetID testSurfaceID
+#define IOSurfaceGetBaseAddress testSurfaceAddress
+#endif
 // System pressure events are not inputs to a deterministic host test; all pressure is injected explicitly below.
 #define dispatch_source_create(...) nullptr
 #include "frontend_pressure_actual.inc"
@@ -108,12 +118,24 @@ static void nmb_buffer_release(NmbBuffer *buffer) {
  mockReleased++;mockImports-=buffer->bytes;if(buffer->release)buffer->release(buffer->context,buffer->base,buffer->bytes);delete buffer;
 }
 static IOSurfaceRef makeSurface() {
+#ifdef TEST_MOCK_IOSURFACE
+ CFMutableDataRef data=CFDataCreateMutable(kCFAllocatorDefault,4096);
+ assert(data);
+ CFDataSetLength(data,4096);
+ return reinterpret_cast<IOSurfaceRef>(data);
+#else
  IOSurfaceRef result=IOSurfaceCreate((__bridge CFDictionaryRef)@{(id)kIOSurfaceWidth:@16,(id)kIOSurfaceHeight:@16,
   (id)kIOSurfaceBytesPerElement:@4,(id)kIOSurfaceBytesPerRow:@64,(id)kIOSurfaceAllocSize:@4096});
  assert(result);return result;
+#endif
 }
 static void policyTests() {
  HeldImportPolicy<int,int> cache;std::vector<int> gone;
+ cache.prune(0,0,0,true,[](int){return false;},gone);
+ cache.hold(1,1,1,0,0,gone);assert(cache.count()==0 && cache.bytes()==0 && gone.empty());
+ cache.hold(1,1,1,0,1,gone);
+ cache.prune(0,0,1,false,[](int){return false;},gone);
+ assert(cache.count()==0 && cache.bytes()==0 && gone==std::vector<int>{1});gone.clear();
  cache.hold(1,1,20,0,64,gone);cache.hold(2,2,30,1,64,gone);cache.hold(1,1,20,2,64,gone);
  cache.hold(3,3,40,3,64,gone);assert(cache.bytes()==60 && cache.count()==2 && gone==std::vector<int>{2});gone.clear();
  cache.hold(4,4,65,4,64,gone);cache.hold(5,5,0,4,64,gone);assert(cache.count()==2 && gone.empty());

@@ -13,6 +13,7 @@
 # SIGN_DRY=1 needs neither: it prints the AVB parameters and exits.
 set -euo pipefail
 D=$(cd "$(dirname "$0")/../.." && pwd)
+# shellcheck source=/dev/null
 [ -f "$HOME/.config/piano/env" ] && . "$HOME/.config/piano/env"
 FIXED_PART=
 if [ "${1:-}" = --props-from ]; then
@@ -28,8 +29,8 @@ PY
   FIXED_PART=100663296
 else
   PROFILE=${PIANO_V110:-$HOME/Downloads/XiaomiPad8Pro-Ubuntu/v1.1.0}/release/boot/boot-profile.json
-  RI=$(python3 -c "import json;print(json.load(open('$PROFILE'))['boot']['rollback_index'])")
-  PROPS=$(python3 -c "import json,shlex;print(' '.join('--prop '+shlex.quote(k+':'+v) for k,v in json.load(open('$PROFILE'))['boot']['avb_properties'].items()))")
+  RI=$(python3 -I -c "import json,sys;print(json.load(open(sys.argv[1]))['boot']['rollback_index'])" "$PROFILE")
+  PROPS=$(python3 -I -c "import json,shlex,sys;print(' '.join('--prop '+shlex.quote(k+':'+v) for k,v in json.load(open(sys.argv[1]))['boot']['avb_properties'].items()))" "$PROFILE")
 fi
 [ "${SIGN_DRY:-0}" = 1 ] && { echo "SIGN_DRY rollback_index $RI props $PROPS partition ${FIXED_PART:-auto}"; exit 0; }
 H=${SIGN_HOST:-${PIANO_SIGN_HOST:?set PIANO_SIGN_HOST (user@host of the signing host) in ~/.config/piano/env}}

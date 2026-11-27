@@ -12,9 +12,9 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include "piano-torch-args.h"
 
 static int property(io_service_t s, const char *key, char *out, size_t size)
 {
@@ -39,6 +39,15 @@ static int lit(io_service_t s)
 {
   char v[16];
   return property(s, "piano-torch-lit", v, sizeof v) && strcmp(v, "true") == 0;
+}
+
+static int reached(io_service_t s, int want)
+{
+  if (lit(s) != want) return 0;
+  if (want) return 1;
+  char state[160];
+  return property(s, "piano-torch-state", state, sizeof state) &&
+         (strcmp(state, "off") == 0 || strncmp(state, "off (", 5) == 0);
 }
 
 static void show(io_service_t s)
@@ -71,38 +80,21 @@ static kern_return_t request(io_service_t s, long long ma, long long seconds)
   return r;
 }
 
-static long long number(const char *s)
-{
-  char *end = NULL;
-  const long long v = strtoll(s, &end, 10);
-  return (end && !*end && v >= 0) ? v : -2;
-}
-
 int main(int argc, char **argv)
 {
-  const char *cmd = argc > 1 ? argv[1] : "status";
+  struct arguments args;
+  if (!parse_arguments(argc, argv, &args)) {
+    fprintf(stderr, "usage: piano-torch [on [MA [SECONDS]] | off | toggle | status]\n");
+    return 2;
+  }
   io_service_t s = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("PianoTorch"));
   if (!s) {
     fprintf(stderr, "piano-torch: no PianoTorch service (boot with piano-torch=2)\n");
     return 2;
   }
-  int want = -1;   // -1: only show
-  long long ma = -1, seconds = 0;
-  if (!strcmp(cmd, "on")) {
-    want = 1;
-    if (argc > 2 && (ma = number(argv[2])) < 0) goto usage;
-    if (argc > 3 && (seconds = number(argv[3])) < 0) goto usage;
-  } else if (!strcmp(cmd, "off")) {
-    want = 0;
-    ma = 0;
-  } else if (!strcmp(cmd, "toggle")) {
-    want = !lit(s);
-    ma = want ? -1 : 0;
-  } else if (strcmp(cmd, "status")) {
-    goto usage;
-  }
+  const int want = args.command == STATUS ? -1 : args.command == TOGGLE ? !lit(s) : args.command == ON;
   if (want >= 0) {
-    const kern_return_t r = request(s, ma, seconds);
+    const kern_return_t r = request(s, want ? args.ma : 0, args.seconds);
     if (r != KERN_SUCCESS) {
       fprintf(stderr, "piano-torch: the kext refused the request: %#x%s\n", r,
               r == kIOReturnNotPrivileged ? " (not an administrator: use sudo)"
@@ -111,14 +103,10 @@ int main(int argc, char **argv)
       IOObjectRelease(s);
       return 1;
     }
-    for (int i = 0; i < 20 && lit(s) != want; ++i) usleep(100000);   // the kext's thread acts within a few milliseconds
+    for (int i = 0; i < 20 && !reached(s, want); ++i) usleep(100000);
   }
   show(s);
-  const int ok = want < 0 || lit(s) == want;
+  const int ok = want < 0 || reached(s, want);
   IOObjectRelease(s);
   return ok ? 0 : 1;
-usage:
-  fprintf(stderr, "usage: piano-torch [on [MA [SECONDS]] | off | toggle | status]\n");
-  IOObjectRelease(s);
-  return 2;
 }

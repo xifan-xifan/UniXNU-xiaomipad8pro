@@ -45,62 +45,78 @@ int qcom_smem_partition(const QcomSmem *smem, uint16_t host, uint16_t remote, Qc
     return QcomSmemNoPartition;
 }
 
-/* Walks the uncached list; returns the offset (relative to the partition) where it ends, or the item's entry when found. */
-static int walk_uncached(const QcomSmem *smem, const QcomSmemPartition *p, uint16_t item, uint32_t *at_out, int *found)
+/* The remote can update these after qcom_smem_partition. Bound each walk by a fresh snapshot. */
+static int partition_marks(const QcomSmem *smem, const QcomSmemPartition *p, uint32_t *end, uint32_t *last)
 {
-    const uint32_t end = rd(smem, p->offset + 12);
-    uint32_t at = PART_HEADER;
-    *found = 0;
-    while (at < end) {
-        if (!fits(at, ENTRY, end)) return QcomSmemCorrupt;
-        const uint32_t w0 = rd(smem, p->offset + at), size = rd(smem, p->offset + at + 4), pads = rd(smem, p->offset + at + 8);
-        if ((w0 & 0xffff) != CANARY) return QcomSmemCorrupt;
-        const uint32_t padding_header = pads >> 16;
-        if ((uint64_t)at + ENTRY + padding_header + size > end) return QcomSmemCorrupt;
-        if ((w0 >> 16) == item) {*found = 1; *at_out = at; return QcomSmemOk;}
-        at += ENTRY + padding_header + size;
-    }
-    if (at != end) return QcomSmemCorrupt;
-    *at_out = at;
-    return QcomSmemOk;
+    *end = rd(smem, p->offset + 12);
+    *last = rd(smem, p->offset + 16);
+    return *end >= PART_HEADER && *end <= *last && *last <= p->size;
 }
 
-int qcom_smem_find(const QcomSmem *smem, const QcomSmemPartition *p, uint16_t item, uint32_t *offset, uint32_t *size)
+static int find_uncached(const QcomSmem *smem, const QcomSmemPartition *p, uint16_t item, uint32_t end,
+                         uint32_t *offset, uint32_t *size)
 {
-    uint32_t at;
-    int found, rc = walk_uncached(smem, p, item, &at, &found);
-    if (rc) return rc;
-    if (found) {
+    for (uint32_t at = PART_HEADER; at < end;) {
+        if (!fits(at, ENTRY, end)) return QcomSmemCorrupt;
         const uint32_t bytes = rd(smem, p->offset + at + 4), pads = rd(smem, p->offset + at + 8);
-        if ((pads & 0xffff) > bytes) return QcomSmemCorrupt;
-        *offset = p->offset + at + ENTRY + (pads >> 16);
-        *size = bytes - (pads & 0xffff);
-        return QcomSmemOk;
+        const uint32_t tag = rd(smem, p->offset + at), pad = pads & 0xffff;
+        const uint64_t data = (uint64_t)at + ENTRY + (pads >> 16), next = data + bytes;
+        if ((tag & 0xffff) != CANARY || pad > bytes || next > end || ((data | next) & 3)) return QcomSmemCorrupt;
+        if ((tag >> 16) == item) {
+            *offset = p->offset + (uint32_t)data;
+            *size = bytes - pad;
+            return QcomSmemOk;
+        }
+        at = (uint32_t)next;
     }
+    return QcomSmemMissing;
+}
+
+static int find_cached(const QcomSmem *smem, const QcomSmemPartition *p, uint16_t item, uint32_t last,
+                       uint32_t *offset, uint32_t *size)
+{
     /* Cached items: each entry sits at the end of its cache line slot, its data right below it. */
-    const uint32_t header = align_up(ENTRY, p->cacheline), last = rd(smem, p->offset + 16);
+    if (last == p->size) return QcomSmemMissing;
+    const uint32_t header = align_up(ENTRY, p->cacheline);
     if (p->size < header) return QcomSmemCorrupt;
     uint32_t e = p->size - header;
     while (e > last) {
+        if (e & 3) return QcomSmemCorrupt;
         const uint32_t w0 = rd(smem, p->offset + e), bytes = rd(smem, p->offset + e + 4), pads = rd(smem, p->offset + e + 8);
-        if ((w0 & 0xffff) != CANARY || bytes > e || (pads & 0xffff) > bytes) return QcomSmemCorrupt;
+        if ((w0 & 0xffff) != CANARY || bytes > e - last || (pads & 0xffff) > bytes || ((e - bytes) & 3))
+            return QcomSmemCorrupt;
         if ((w0 >> 16) == item) {*offset = p->offset + e - bytes; *size = bytes - (pads & 0xffff); return QcomSmemOk;}
-        if (e < bytes + header) return QcomSmemCorrupt;
+        if (e - bytes == last) break;
+        if (e - bytes - last < header) return QcomSmemCorrupt;
         e -= bytes + header;
     }
     return QcomSmemMissing;
 }
 
+static int find_item(const QcomSmem *smem, const QcomSmemPartition *p, uint16_t item, uint32_t end, uint32_t last,
+                     uint32_t *offset, uint32_t *size)
+{
+    const int rc = find_uncached(smem, p, item, end, offset, size);
+    return rc == QcomSmemMissing ? find_cached(smem, p, item, last, offset, size) : rc;
+}
+
+int qcom_smem_find(const QcomSmem *smem, const QcomSmemPartition *p, uint16_t item, uint32_t *offset, uint32_t *size)
+{
+    uint32_t end, last;
+    if (!partition_marks(smem, p, &end, &last)) return QcomSmemCorrupt;
+    return find_item(smem, p, item, end, last, offset, size);
+}
+
 int qcom_smem_alloc(const QcomSmem *smem, const QcomSmemPartition *p, uint16_t item, uint32_t size)
 {
-    uint32_t at;
-    int found, rc = walk_uncached(smem, p, item, &at, &found);
-    if (rc) return rc;
-    if (found) return QcomSmemExists;
+    uint32_t at, last;
+    if (!partition_marks(smem, p, &at, &last)) return QcomSmemCorrupt;
     uint32_t offset, bytes;
-    if (qcom_smem_find(smem, p, item, &offset, &bytes) == QcomSmemOk) return QcomSmemExists;
+    const int rc = find_item(smem, p, item, at, last, &offset, &bytes);
+    if (rc != QcomSmemMissing) return rc == QcomSmemOk ? QcomSmemExists : rc;
+    if (!size || (uint64_t)size + ENTRY > last - at) return QcomSmemNoSpace;
     const uint32_t aligned = align_up(size, 8), need = ENTRY + aligned;
-    if (!size || aligned < size || (uint64_t)at + need > rd(smem, p->offset + 16)) return QcomSmemNoSpace;
+    if (need > last - at) return QcomSmemNoSpace;
     qcom_smem_write32(smem, p->offset + at, CANARY | (uint32_t)item << 16);
     qcom_smem_write32(smem, p->offset + at + 4, aligned);
     qcom_smem_write32(smem, p->offset + at + 8, aligned - size);  /* padding_data, padding_header 0 */

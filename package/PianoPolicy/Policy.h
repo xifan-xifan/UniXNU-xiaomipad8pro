@@ -205,14 +205,19 @@ class Engine {
     }
     const View v = view(c_, in, seenOpen_);
     if (pianopolicy::gpuOwnSlot(in.gpuClients)) ownSlotSeen();
+    const bool allow = v.close == Close::sleep;
+    if (!allow && (clamshell_ == 1 || (clamshell_ < 0 && v.close != Close::none))) {
+      out.add(Kind::root, kDisableClamshell, v.closeWhy);
+      clamshell_ = 0;
+    }
     if (v.close != Close::none) {
-      // The order matters: clamshell sleep refused before the AC adaptor appears (plug-in), the AC adaptor gone before clamshell
-      // sleep is allowed (unplug: IOPMrootDomain re-evaluates the closed clamshell then and sleeps), both before the clamshell state.
-      const bool allow = v.close == Close::sleep;
-      if (!allow && clamshell_ != 0) {
-        out.add(Kind::root, kDisableClamshell, v.closeWhy);
-        clamshell_ = 0;
+      // Report a reopening before anything can re-evaluate the previously closed clamshell.
+      if (lid_ == 1 && in.lid == Lid::open) {
+        out.add(Kind::root, kClamshellOpened, "cover open");
+        out.add(Kind::userActive, 0, "cover open");
+        lid_ = 0;
       }
+      // Disable before reporting AC connected, and report AC disconnected before enabling sleep.
       if (in.power != Power::unknown) {
         const int ac = in.power == Power::external ? 1 : 0;
         if (ac_ != ac) {
@@ -226,9 +231,7 @@ class Engine {
       }
       const int closed = in.lid == Lid::closed ? 1 : 0;
       if (lid_ != closed) {
-        const bool opening = lid_ == 1 && !closed;
         out.add(Kind::root, closed ? kClamshellClosed : kClamshellOpened, closed ? v.closeWhy : "cover open");
-        if (opening) out.add(Kind::userActive, 0, "cover open");
         lid_ = closed;
       }
     }
@@ -391,8 +394,10 @@ inline void parseSleep(const char *s, bool *on, uint32_t *mask)
       const char ch = *p;
       const int d = ch >= '0' && ch <= '9' ? ch - '0' : ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : ch >= 'A' && ch <= 'F' ? ch - 'A' + 10 : -1;
       if (d < 0) break;
+      if (v > UINT32_MAX / 16) return;
       v = v * 16 + uint32_t(d);
     }
+    if (*p && *p != ',' && *p != ';' && *p != ' ' && *p != '\n') return;
     *mask = v;
     return;
   }

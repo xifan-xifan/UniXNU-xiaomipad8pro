@@ -1,19 +1,56 @@
 # Self-tests that scripts/ci/self-tests.py does not run on a hosted runner, one path per line, `#` and the reason after it.
-# Reason classes: ARGS (a checker called by a build with its inputs, not a standalone test), INPUT (needs build output, a local
-# checkout or a backup a runner does not have), HEADER (its header's build line names generated inputs), KNOWN-FAIL (fails on
-# main as of the commit named; an open item, to be fixed and taken off this list).
+# Reason classes: ARGS (a checker called by a build with its inputs, not a standalone test), SUITE (run by another test),
+# INPUT (needs build output, a local checkout or a backup a runner does not have), HEADER (its header's build line names
+# generated inputs), KNOWN-FAIL (fails on main as of the commit named; an open item, to be fixed and taken off this list).
 firmware/selector/test/test-selector-bin.py            # ARGS: checks a built selector (OBJ BIN), called by firmware/selector/Makefile
-tooling/switch/test-pack-selector.py                   # ARGS: checks a packed selector image given as its argument
+tooling/switch/test-pack-selector.py                   # ARGS: takes the selector binary built by tooling/switch/run-tests.sh
+tooling/switch/test-bootflag-sh.sh                     # SUITE: tooling/switch/run-tests.sh
+tooling/switch/test-sign-props.sh                      # SUITE: tooling/switch/run-tests.sh
 tooling/native/tests/test_mic_diag.py                  # ARGS: takes a recorded fixture as its argument
-package/PianoCamera/tests/camera_host.cpp              # HEADER: -I<gen>, the sensor tables generated from data/camera by the build
-package/PianoVideo/tests/bringup_host.cpp              # HEADER: links QcomMdt.o from the kext build
-package/PianoUsbHost/tests/ucsi_host.cpp               # HEADER: needs PianoUsbHw.h's include path from build-native-piano-usbhost.sh
-package/PianoWifi/tests/qmi_host.cpp                   # HEADER: its build line compiles a .c file as C++ (-Werror,-Wdeprecated)
+tooling/native/piano-mic-check/test-mic-check.py       # ARGS: tooling/native/piano-mic-check/run-tests.sh builds the app and WAV via make test
+package/PianoAudio/tests/amps_host.c                   # SUITE: package/PianoAudio/tests/run-audio-host.sh
+package/PianoAudio/tests/audio_host.cpp                # SUITE: package/PianoAudio/tests/run-audio-host.sh
+package/PianoAudio/tests/audioreach_host.c             # SUITE: package/PianoAudio/tests/run-audio-host.sh
+package/PianoAudio/tests/control_host.c                # SUITE: package/PianoAudio/tests/run-audio-host.sh
+package/PianoAudio/tests/dsplink_host.c                # SUITE: package/PianoAudio/tests/run-audio-host.sh
+package/PianoAudio/tests/duplex_schedule_host.c        # SUITE: package/PianoAudio/tests/run-audio-host.sh
+package/PianoAudio/tests/fs19xx_host.c                 # SUITE: package/PianoAudio/tests/run-audio-host.sh
+package/PianoAudio/tests/gpr_host.c                    # SUITE: package/PianoAudio/tests/run-audio-host.sh
+package/PianoAudio/tests/level_dictionary_host.cpp     # SUITE: package/PianoAudio/tests/run-audio-host.sh
+package/PianoAudio/tests/live_host.c                   # SUITE: package/PianoAudio/tests/run-audio-host.sh
+package/PianoAudio/tests/mic_fifo_host.c               # SUITE: package/PianoAudio/tests/run-audio-host.sh
+package/PianoAudio/tests/pcm_host.c                    # SUITE: package/PianoAudio/tests/run-audio-host.sh
+package/PianoAudio/tests/preset_host.c                 # SUITE: package/PianoAudio/tests/run-audio-host.sh
+package/PianoAudio/tests/prime_host.c                  # SUITE: package/PianoAudio/tests/run-audio-host.sh
+package/PianoAudio/tests/sequence_host.c               # SUITE: package/PianoAudio/tests/run-audio-host.sh
+package/PianoAudio/tests/session_host.c                # SUITE: package/PianoAudio/tests/run-audio-host.sh
+package/PianoAudio/tests/spkprot_host.c                # SUITE: package/PianoAudio/tests/run-audio-host.sh
+package/PianoAudio/tests/tap_host.c                    # SUITE: package/PianoAudio/tests/run-audio-host.sh
+package/PianoAudio/tests/timing_host.c                 # SUITE: package/PianoAudio/tests/run-audio-host.sh
+package/PianoAudio/tests/va_host.c                     # SUITE: package/PianoAudio/tests/run-audio-host.sh
+package/PianoBluetooth/tests/firmware_host.c           # SUITE: package/PianoBluetooth/tests/run-firmware-host.py prepares the host headers
+package/PianoCamera/tests/camera_host.cpp              # SUITE: package/PianoCamera/tests/run-camera-host.sh
+package/PianoDp/tests/dp_host.cpp                      # SUITE: package/PianoDp/tests/run-dp-host.sh
+package/PianoDp/tests/dp_d0_host.cpp                   # SUITE: package/PianoDp/tests/run-dp-host.sh generates the PHY header
+package/PianoPower/tests/policy_host.cpp              # SUITE: package/PianoPower/tests/run-charge-host.sh
+package/PianoVideo/tests/bringup_host.cpp              # SUITE: package/PianoVideo/tests/run-bringup-host.sh
+package/PianoVideo/tests/enc_host.cpp                  # SUITE: package/PianoVideo/tests/run-bringup-host.sh
+package/PianoVideo/tests/video_vt_cancel_e1_handoff_host.cpp # SUITE: package/PianoVideo/tests/run-bringup-host.sh
+package/common/tests/firmware_host.c                   # SUITE: package/common/tests/run-firmware-tests.py generates the pins and volume
+package/common/tests/irq_host.cpp                      # SUITE: package/common/tests/run.sh
+package/common/tests/shared_addon_host.c               # SUITE: package/common/tests/run-firmware-tests.py generates the shared addon
+package/include/tests/extra_ram_host.cpp               # SUITE: package/include/tests/run.sh
+package/include/tests/gpu_preset_host.cpp              # SUITE: package/include/tests/run.sh
+package/include/tests/mm_votes_host.cpp                # SUITE: package/include/tests/run.sh
+package/include/tests/scm_lock_host.cpp                # SUITE: package/include/tests/run.sh
+package/include/tests/spmi_lock_host.cpp               # SUITE: package/include/tests/run.sh
+package/include/tests/wcn_rails_host.cpp               # SUITE: package/include/tests/run.sh
 tooling/persist/test-data-store.py                     # INPUT: imports the UniXNU checkout's unixnu.bootimg (fetch-pins.py UniXNU)
 tooling/persist/test-persist.py                        # INPUT: reads the maintainer's partition-table backup
 tooling/persist/test-switch-pair.py                    # INPUT: reads the maintainer's partition-table backup
-tooling/k27/run-a830-host-tests.py                     # KNOWN-FAIL ffec0acd: test_a830votes fails (56 pass); also 6.5 min
-tooling/native/test_piano_input.py                     # KNOWN-FAIL ffec0acd: test_refused_command_releases_and_reports ('Z 1' != 'R')
-tooling/native/tests/test_desk_login.py                # KNOWN-FAIL ffec0acd: the fake sleep does float arithmetic in bash $(( ))
-tooling/metal/turnip-a830/test-cache-fallback-host.sh   # needs a built NativeAdrenoMetal.bundle argument (run by hand after tooling/metal/build-turnip-a830.sh)
-tooling/metal/turnip-a830/test-family-host.sh   # needs a built NativeAdrenoMetal.bundle argument (run by hand after tooling/metal/build-turnip-a830.sh)
+tooling/persist/test-window-capture.py                 # INPUT: the replay reads local partition-table and boot partition fixtures
+tooling/k27/run-a830-host-tests.py                     # SUITE: scripts/ci/adreno830-host.py runs the shared suite; macOS, board, timing and stock firmware checks run locally
+package/PianoA830/adreno830/tests/test_tier_boalloc.cpp # SUITE: package/PianoA830/adreno830/tests/run-host-tests.py
+tooling/metal/turnip-a830/test-cache-fallback-host.sh   # ARGS: needs a built NativeAdrenoMetal.bundle argument (run by hand after tooling/metal/build-turnip-a830.sh)
+tooling/metal/turnip-a830/test-family-host.sh           # ARGS: needs a built NativeAdrenoMetal.bundle argument (run by hand after tooling/metal/build-turnip-a830.sh)
+package/PianoPower/tests/battery_health_host.cpp      # SUITE: package/PianoPower/tests/run-battery-health-host.sh (CoreFoundation, ASan/UBSan)

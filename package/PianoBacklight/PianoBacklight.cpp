@@ -44,7 +44,7 @@
 //                               "piano-backlight-sync" (16.16 nits) announces that piano-brightness-sync gives CoreBrightness the
 //                               panel's level: WindowServer's next request (its echo) is not taken for the user's move;
 //                               root's "piano-backlight-managed" (a lease, seconds) hands the user's moves to the daemon (the
-//                               stream then never ends automatic mode: EDR ramps and CoreBrightness's restore arrive there too),
+//                               stream then leaves the automatic curve alone: EDR ramps and CoreBrightness's restore arrive there too),
 //                               "piano-backlight-moved" (16.16) is the move it saw in CoreBrightness's own level: while
 //                               automatic mode is requested it stays on and the move becomes the curve's trim (2026-11-22,
 //                               published as piano-backlight-trim); in manual mode it is the level
@@ -366,8 +366,7 @@ class PianoBacklight : public IOService {
   KextIcs fIcs;
   Controller fCtl{fIcs};
   IOService *fDisplay = nullptr, *fKeyboard = nullptr, *fSensors = nullptr;   // fSensors: piano-backlight-auto=1 only
-  uint64_t fSensorsSeq = ~0ull;   // PianoSensors' piano-sensors-seq as last taken
-  int64_t fSensorsTarget = -2;    // its piano-sensors-light-target as last taken (-2: none yet)
+  uint64_t fSensorsSeq = 0;   // the newest sequence applied in the current bounded-SDR revision
   uint64_t fPublished[25] = {};
   bool fHavePublished = false;
   uint64_t fNextLookupMs = 0;
@@ -379,14 +378,12 @@ class PianoBacklight : public IOService {
   NativeIntent fIntent;                     // 2026-11-20: the user's moves among WindowServer's stream
   uint32_t fSyncPublished = ~0u;            // 2026-11-21: fIntent's sync counters as last published (syncs + echoes + missed)
   Lease fManaged;                           // piano-brightness-sync's lease: the stream does not end automatic mode
-  Handover fHandover;                       // automatic mode the stream ended before a lease: given back when one arrives
   int fManagedPublished = -1;
   int32_t fLastNative = -1;                 // the newest request seen, taken or dropped (16.16), and when
   uint64_t fLastNativeMs = 0;
   int32_t fRequestedPublished = -1;
   uint64_t fRequestedPublishedMs = 0;
   uint32_t fManagedDrops = 0, fDaemonMoves = 0;
-  bool fNativeTookAuto = false;             // a move ended automatic mode (a power-on or a wake gives it back)
   uint32_t fNativeFollowed = 0, fNativeMoves = 0, fNativeDropped = 0;
   bool fReference = true;
   uint32_t fRevision = 0, fNativePublishedRevision = 0;
@@ -413,7 +410,7 @@ class PianoBacklight : public IOService {
   void publishAndroidApply(const NativeBrightness &adapter, bool applied, uint16_t code);
   void restartAmbient();
   void setAutomatic(bool on);
-  void nativeSettle(const char *why);
+  void nativeSettle();
   IOReturn enqueueSwapNits(int64_t asked);
   void applyAmbient(int32_t permille, uint32_t lux, const char *source, const pianoauto::AmbientVersion &version);
   IOReturn enqueueNative(OSDictionary &properties, OSObject *value);
@@ -564,10 +561,28 @@ void PianoBacklight::poll(uint64_t now, bool lidOnly)
     }
   }
   if (fKeyboard) {
-    OSNumber *hall = OSDynamicCast(OSNumber, fKeyboard->getProperty("piano-keyboard-hall"));
+    OSObject *property = fKeyboard->copyProperty("piano-keyboard-hall");
+    OSNumber *hall = OSDynamicCast(OSNumber, property);
     const bool wasLit = fCtl.wantLit();
     if (hall) fCtl.lid(hall->unsigned32BitValue() == 0 ? 0 : hall->unsigned32BitValue() == 1 ? 1 : -1);
+    OSSafeReleaseNULL(property);
     if (wasLit != fCtl.wantLit()) restartAmbient();
+  }
+  if (!lidOnly && fDisplay) {
+    OSObject *property = fDisplay->copyProperty(kDisplayPowerProperty);
+    OSBoolean *power = OSDynamicCast(OSBoolean, property);
+    const int value = power ? power->isTrue() : -1;
+    OSSafeReleaseNULL(property);
+    if (value >= 0 && value != fDisplayProperty && (!fDisplayKnown || bool(value) != fDisplayOn)) {
+      note("display power from NativeGopDisplay's property: %s", value ? "on" : "off");
+      if (value) nativeSettle();
+      fDisplayKnown = true;
+      fDisplayOn = value;
+      const bool wasLit = fCtl.wantLit();
+      fCtl.display(value, fSystem, fApi);
+      if (wasLit != fCtl.wantLit()) restartAmbient();
+    }
+    fDisplayProperty = value;
   }
   // PianoSensors' light target (its level 4; the property is absent before): a new one when its sequence or the value moved.
   if (fSensors) {
@@ -588,26 +603,12 @@ void PianoBacklight::poll(uint64_t now, bool lidOnly)
                      {q, revision->unsigned32BitValue(), curve->unsigned32BitValue()});
     } else if (!valid || !valid->isTrue() || (fault && fault->isTrue())) {
       fCtl.invalidateAmbient(fault && fault->isTrue());
-      fSensorsTarget = -2;
-    } else if (target && seq && t <= 1000 && (int64_t(t) != fSensorsTarget || q != fSensorsSeq)) {
-      fSensorsTarget = int64_t(t);
-      fSensorsSeq = q;
-      fCtl.ambient(int32_t(t), lux ? lux->unsigned32BitValue() : 0, "PianoSensors");
+    } else if (seq && t <= 1000) {
+      OSNumber *session = OSDynamicCast(OSNumber, d->getObject("session"));
+      if (session) fCtl.ambientSnapshot(q, session->unsigned32BitValue(), uint32_t(t), lux ? lux->unsigned32BitValue() : 0);
     }
     OSSafeReleaseNULL(snapshot);
   }
-  if (lidOnly || !fDisplay) return;
-  OSBoolean *power = OSDynamicCast(OSBoolean, fDisplay->getProperty(kDisplayPowerProperty));
-  const int value = power ? power->isTrue() : -1;
-  if (value >= 0 && value != fDisplayProperty && (!fDisplayKnown || bool(value) != fDisplayOn)) {
-    note("display power from NativeGopDisplay's property: %s", value ? "on" : "off");
-    fDisplayKnown = true;
-    fDisplayOn = value;
-    const bool wasLit = fCtl.wantLit();
-    fCtl.display(value, fSystem, fApi);
-    if (wasLit != fCtl.wantLit()) restartAmbient();
-  }
-  fDisplayProperty = value;
 }
 
 // A service beside this one under IOPlatformExpertDevice, by class, registered or not (copyMatchingService finds registered ones
@@ -678,9 +679,10 @@ void PianoBacklight::serve()
     gPending.ambientFault = false;
     const uint32_t asked = gSleepAsked;
     const uint32_t blank = gBlankAsked;
+    const uint32_t darkRequests = gNativeDark, swapRequests = gSwapNits;
     IOLockUnlock(gLock);
 
-    if (p.sleep == 0 && fCtl.asleep()) nativeSettle("a wake");
+    if (p.sleep == 0 && fCtl.asleep()) nativeSettle();
     if (p.sleep >= 0) {
       const bool wasAsleep = fCtl.asleep();
       fCtl.sleep(p.sleep == 1);
@@ -690,7 +692,7 @@ void PianoBacklight::serve()
         fCtl.retry();
       }
       IOLockLock(gLock);
-      gDarkForSleep = !fCtl.lit(0) && !fCtl.lit(1);
+      gDarkForSleep = fCtl.bothDark();
       gSleepTaken = asked;
       IOLockWakeup(gLock, &gSleepTaken, false);
       IOLockUnlock(gLock);
@@ -698,7 +700,7 @@ void PianoBacklight::serve()
 
     if (p.display) {
       fDisplayKnown = true;
-      if (p.on && !fDisplayOn) nativeSettle("a display power-on");
+      if (p.on && !fDisplayOn) nativeSettle();
       fDisplayOn = p.on;
       fSystem = p.system;
       fApi = p.api;
@@ -712,7 +714,7 @@ void PianoBacklight::serve()
         fCtl.retry();
       }
       IOLockLock(gLock);
-      gDarkForPanel = !p.on && fCtl.controlling() && !fCtl.lit(0) && !fCtl.lit(1);
+      gDarkForPanel = !p.on && fCtl.bothDark();
       gBlankTaken = blank;
       IOLockWakeup(gLock, &gBlankTaken, false);
       IOLockUnlock(gLock);
@@ -723,7 +725,6 @@ void PianoBacklight::serve()
       restartAmbient();
     }
     const bool autoAfterNative = !fRevision || (p.native >= 0 && p.autoOrder > p.nativeOrder);
-    if (p.automatic >= 0) fHandover.cleared();   // an explicit piano-backlight-auto is the last word
     if (p.automatic >= 0 && !autoAfterNative) setAutomatic(p.automatic == 1);
     if (p.steps) fCtl.step(p.steps, p.source);
     if (p.percent >= 0) fCtl.percent(uint32_t(p.percent), "setProperties");
@@ -746,11 +747,11 @@ void PianoBacklight::serve()
       setProperty("piano-backlight-sync-echoes", uint64_t(fIntent.echoes()), 32);
       setProperty("piano-backlight-sync-missed", uint64_t(fIntent.missed()), 32);
     }
-    const bool autoOwns = gArgs.autoAllowed && fCtl.ambientState().requested();
+    const bool autoOwns = gArgs.autoAllowed && fCtl.ambientState().requested() && !fCtl.autoFault();
+    bool trimNative = false;
     if (p.moved >= 0) {   // the user moved CoreBrightness's level (piano-brightness-sync saw DisplayNitsKey change)
       ++fDaemonMoves;
       ++fNativeMoves;
-      fHandover.cleared();
       if (autoOwns) {
         // 2026-11-22 (AUTO-BRIGHT.md): automatic mode stays; CoreBrightness's own SDR level becomes the curve's trim (the panel shows it
         // now and follows the room from there). The stream's EDR-scaled value is not used: automatic mode is SDR.
@@ -770,20 +771,17 @@ void PianoBacklight::serve()
         p.native = level;
       }
     } else if (p.native >= 0) {
-      const StreamChoice c = streamChoice(intent, autoOwns, managed, false);
-      if (!c.apply) {
+      const StreamChoice choice = streamChoice(intent, autoOwns, managed);
+      trimNative = choice == StreamChoice::automaticTrim;
+      if (choice == StreamChoice::follow) {
         ++fNativeFollowed;   // CoreBrightness's own value while automatic mode owns the panel: kept as the settled value only
         if (intent == NativeIntent::kUserMove) ++fManagedDrops;   // the restore, an EDR ramp or the user: the daemon tells them apart
         p.native = -1;
       } else if (intent == NativeIntent::kUserMove) {
         ++fNativeMoves;
-        if (c.endsAuto) {
-          fNativeTookAuto = true;
-          fHandover.streamEndedAuto(managed);
-        }
-        if (c.endsAuto || fNativeMoves % 25 == 1)
+        if (trimNative || fNativeMoves % 25 == 1)
           note("PianoBacklightNativeIntentV1 a move to requested16=%d (%u moves, %u followed, %u dark, %u from the swap): %s", p.native,
-               fNativeMoves, fNativeFollowed, gNativeDark, gSwapNits, c.endsAuto ? "automatic mode ends until a display power-on or a wake" : "manual");
+               fNativeMoves, fNativeFollowed, darkRequests, swapRequests, trimNative ? "automatic curve trim" : "manual");
       }
     }
     if (p.native >= 0) {
@@ -792,8 +790,9 @@ void PianoBacklight::serve()
       if (NativeBrightness(fCtl.floor(), fCtl.ceiling(), fRevision && fReference).decode(uint32_t(p.native), code, &dbv)) {
         fNativeRequest = p.native;
         fNativeErrors = fCtl.errors();
-        if (fRevision) fAndroidApply = {"native", fRevision, pa_sdr_millinits(uint32_t(p.native)), fNativeErrors, dbv, code};
-        fCtl.manualCode(code, kNativeRequest);
+        if (trimNative) fCtl.userLevel(code, kNativeRequest);
+        else fCtl.manualCode(code, kNativeRequest);
+        if (fRevision) fAndroidApply = {"native", fRevision, pa_sdr_millinits(uint32_t(p.native)), fNativeErrors, dbv, fCtl.code()};
       }
     }
     if (gArgs.native) {   // what the daemon watches: its lease and the newest request (at most every 100 ms, the last one always)
@@ -802,17 +801,11 @@ void PianoBacklight::serve()
       if (on != fManagedPublished) {
         if (on || fManagedPublished == 1)
           note("PianoBacklightManagedV1 %s (%u moves reported, %u stream changes left to it while automatic)",
-               on ? "piano-brightness-sync watches CoreBrightness's level: the stream no longer ends automatic mode"
+               on ? "piano-brightness-sync watches CoreBrightness's level: the stream leaves the automatic curve alone"
                   : "the lease ended: WindowServer's stream decides again", fDaemonMoves, fManagedDrops);
         fManagedPublished = on;
         setProperty(kNativeManaged, bool(on));
         changed = true;
-        if (on && fHandover.leaseArrived() && fNativeTookAuto && gArgs.autoAllowed) {
-          fNativeTookAuto = false;
-          setAutomatic(true);
-          note("PianoBacklightNativeIntentV1 automatic mode again: WindowServer's stream ended it before piano-brightness-sync "
-               "watched (CoreBrightness's restore or an EDR ramp)");
-        }
       }
       if (fLastNative != fRequestedPublished && nowMs() - fRequestedPublishedMs >= 100) {
         fRequestedPublished = fLastNative;
@@ -925,18 +918,10 @@ void PianoBacklight::restartAmbient()
   publishAndroidModel();
 }
 
-// A display power-on or a wake: WindowServer's next values settle again (its power-on ramp is not a move), and automatic mode
-// comes back when the stream's own rule (no lease) had ended it. A reported move never ends it (2026-11-22: the curve's trim).
-void PianoBacklight::nativeSettle(const char *why)
+// Give the display's power-on ramp time to settle before interpreting stream changes as user input.
+void PianoBacklight::nativeSettle()
 {
-  if (!gArgs.native) return;
-  fIntent.reset(nowMs());
-  fHandover.cleared();
-  if (fNativeTookAuto && gArgs.autoAllowed) {
-    fNativeTookAuto = false;
-    setAutomatic(true);
-    note("PianoBacklightNativeIntentV1 automatic mode again after %s (the slider's level held until then)", why);
-  }
+  if (gArgs.native) fIntent.reset(nowMs());
 }
 
 void PianoBacklight::setAutomatic(bool on)
@@ -1013,7 +998,7 @@ void PianoBacklight::publishState()
   setProperty("piano-backlight-floor", uint64_t(fCtl.floor()), 32);
   setProperty("piano-backlight-exponential", fCtl.exponential());
   setProperty("piano-backlight-percent", percentOf(fCtl.code()), 32);
-  setProperty("piano-backlight-lit", fCtl.lit(0) && fCtl.lit(1));
+  setProperty("piano-backlight-lit", fCtl.bothLit());
   setProperty("piano-backlight-control", fCtl.controlling());
   setProperty("piano-backlight-want-lit", fCtl.wantLit());
   setProperty("piano-backlight-errors", uint64_t(fCtl.errors()), 32);
@@ -1090,7 +1075,7 @@ IOReturn PianoBacklight::callPlatformFunction(const OSSymbol *name, bool wait, v
     ++gPending.displayCalls;
   } else {
     const int32_t delta = int32_t(intptr_t(p1));
-    gPending.steps = int32_t(clampArg(uint32_t(gPending.steps + delta + 20), 0, 40)) - 20;
+    gPending.steps = queuedSteps(gPending.steps, delta);
     gPending.source = p2 ? static_cast<const char *>(p2) : "?";
     ++gPending.stepCalls;
   }
@@ -1161,7 +1146,7 @@ IOReturn PianoBacklight::enqueueNative(OSDictionary &properties, OSObject *value
   const uint64_t fixed = asked <= 0 ? 0 : asked < int64_t(min) ? min : asked > int64_t(max) ? max : uint64_t(asked);
   const IOReturn result = !authorized ? kIOReturnNotPrivileged : !valid ? kIOReturnBadArgument
       : !gNativeReady ? kIOReturnNotReady : kIOReturnSuccess;
-  uint32_t dropped;
+  uint32_t dropped = 0;
   const bool logRefusal = result != kIOReturnSuccess && gNativeRejectionLog.allow(nowMs(), &dropped);
   if (result == kIOReturnSuccess && !fixed) {
     ++gNativeDark;   // a dark ramp's value: nothing to apply (the display's power takes the backlight down)
@@ -1234,11 +1219,11 @@ IOReturn PianoBacklight::setProperties(OSObject *properties)
     if (d->getCount() != 1 || !number || (bits != 32 && bits != 64)) return kIOReturnBadArgument;
     IOLockLock(gLock);
     const bool ready = gServing && gNativeReady;
-    const bool inRange = managedObject ? asked >= 0 && asked <= int64_t(kManagedMaxS)
-                                       : asked >= int64_t(gNativeMin) && asked <= int64_t(gNativeMax);
+    const bool inRange = asked >= 0 && asked <= (managedObject ? int64_t(kManagedMaxS) : INT32_MAX);
     if (ready && inRange) {
       if (managedObject) gPending.managed = int32_t(asked);
-      else gPending.moved = int32_t(asked);
+      else gPending.moved = asked < int64_t(gNativeMin) ? int32_t(gNativeMin)
+                          : asked > int64_t(gNativeMax) ? int32_t(gNativeMax) : int32_t(asked);
       gPending.any = true;
       IOLockWakeup(gLock, &gPending, false);
     }
@@ -1273,7 +1258,9 @@ IOReturn PianoBacklight::setProperties(OSObject *properties)
   }
   if (percent) gPending.percent = int32_t(clampArg(percent->unsigned32BitValue(), 0, 100));
   if (steps) {
-    gPending.steps = int32_t(clampArg(uint32_t(gPending.steps + int32_t(steps->unsigned32BitValue()) + 20), 0, 40)) - 20;
+    const int64_t delta = steps->numberOfBits() == 64 ? int64_t(steps->unsigned64BitValue())
+                                                   : int64_t(int32_t(steps->unsigned32BitValue()));
+    gPending.steps = queuedSteps(gPending.steps, delta);
     gPending.source = "setProperties";
   }
   if (autoNumber || autoBoolean) {

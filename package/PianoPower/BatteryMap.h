@@ -19,7 +19,8 @@
 
 namespace pianopower {
 
-constexpr unsigned kTimeUnknown = 65535;
+constexpr unsigned kTimeUnknown = kGaugeTimeUnknown;
+constexpr unsigned kCycleCountUnknown = 0xffff;
 
 struct BatteryValues {
   bool known = false;          // a reading to show (until the first one, nothing is published)
@@ -33,6 +34,9 @@ struct BatteryValues {
   int temperatureCenti = 0;    // 0.01 degC
   bool temperatureValid = false;
   unsigned timeRemaining = kTimeUnknown, timeToEmpty = kTimeUnknown, timeToFull = kTimeUnknown;  // minutes
+  bool gaugeFields = false;
+  bool packHealth = false;    // piano-power-ps-health=1: complete logical-pack health telemetry for powerd
+  bool gaugeStatusValid = false, gaugeFullyDischarged = false, lowCapacity = false;
   uint32_t updateSec = 0;      // the calendar time of this reading (0: unknown, not published; "UpdateTime" on a Mac)
   // the adapter, when a source is seen on the Type-C port (its Rp current, ChargerPmic.h; the firmware's contract at level 2)
   bool healthEnabled = false, healthHold = false, healthPending = false, healthApplied = false;
@@ -42,6 +46,8 @@ struct BatteryValues {
   bool adapterPd = false;      // the numbers come from a PD contract, not just a Type-C Rp
   unsigned adapterMv = 0, adapterMa = 0, adapterWatts = 0;
   uint32_t adapterFamily = 0;  // kIOPSFamilyCode value: 0xe0004009 USB Type-C (UniXNU-sheng ShengBattmgr.c's table)
+
+  int systemTimeRemaining() const { return gaugeFields && timeRemaining == kTimeUnknown ? -1 : int(timeRemaining); }
 };
 
 constexpr uint32_t kFamilyTypeC = 0xe0004009u;
@@ -102,7 +108,7 @@ inline BatteryValues mapBattery(const GaugeReading *packs, unsigned n, const Pac
     if (!packs[i].ok) continue;
     average += packs[i].averageMa;
     design += packs[i].designMah;
-    if (unsigned(packs[i].cycles) > cycles) cycles = unsigned(packs[i].cycles);
+    if (packs[i].cycles != 0xffff && unsigned(packs[i].cycles) > cycles) cycles = unsigned(packs[i].cycles);
   }
   v.amperageMa = int(average);
   v.designMah = design > 0 ? unsigned(design) : v.fullMah;
@@ -129,6 +135,35 @@ inline BatteryValues mapBattery(const GaugeReading *packs, unsigned n, const Pac
     v.adapterWatts = (v.adapterMv * v.adapterMa + 500000) / 1000000;
   }
   return v;
+}
+
+// Apply after the publisher settles AC and charging state, including a charge hold. Both gauges describe the same
+// parallel battery, so use the first pack to empty and the last to fill. Keep unknown values until both gauges answer.
+inline void mapGaugeBatteryFields(BatteryValues &v, const GaugeReading (&packs)[2])
+{
+  v.gaugeFields = true;
+  v.cycles = kCycleCountUnknown;
+  v.designMah = 0;
+  v.gaugeStatusValid = v.gaugeFullyDischarged = v.lowCapacity = false;
+  v.timeToEmpty = v.timeToFull = v.timeRemaining = kTimeUnknown;
+  const GaugeReading &a = packs[0], &b = packs[1];
+  if (!a.ok || !b.ok) return;
+
+  if (unsigned(a.cycles) < kCycleCountUnknown && unsigned(b.cycles) < kCycleCountUnknown)
+    v.cycles = unsigned(a.cycles > b.cycles ? a.cycles : b.cycles);
+  if (a.designMah > 0 && b.designMah > 0 && a.fullMah > 0 && b.fullMah > 0 && a.fullMah != 0xffff && b.fullMah != 0xffff) {
+    v.designMah = unsigned(a.designMah + b.designMah);
+    // A capacity observation for the registry. powerd applies its own service condition policy.
+    v.lowCapacity = v.fullMah * 100 < v.designMah * 80;
+  }
+  v.gaugeStatusValid = a.status != 0xffff && b.status != 0xffff;
+  v.gaugeFullyDischarged = v.gaugeStatusValid && ((a.status | b.status) & kGaugeFd);
+
+  if (!v.external && a.timeToEmpty != kTimeUnknown && b.timeToEmpty != kTimeUnknown)
+    v.timeToEmpty = a.timeToEmpty < b.timeToEmpty ? a.timeToEmpty : b.timeToEmpty;
+  if (v.external && v.charging && !v.full && a.timeToFull != kTimeUnknown && b.timeToFull != kTimeUnknown)
+    v.timeToFull = a.timeToFull > b.timeToFull ? a.timeToFull : b.timeToFull;
+  v.timeRemaining = v.external ? v.timeToFull : v.timeToEmpty;
 }
 
 }  // namespace pianopower

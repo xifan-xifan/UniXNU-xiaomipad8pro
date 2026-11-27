@@ -90,6 +90,7 @@ const char *ps_edge_name(int edge);
 /* One accelerometer sample: the hub's three floats (m/s^2, bits), mapped and given to the orientation state machine. The new state
  * when it changed, else -1. */
 int ps_accel_sample(SnoState *s, const SfxAxes *axes, const uint32_t bits[3], uint64_t now_ms);
+int ps_accel_sample_at(SnoState *s, const SfxAxes *axes, const uint32_t bits[3], uint64_t now, uint64_t hold);
 
 typedef struct {
     uint16_t degrees[4];                 /* the rotation for each edge up (TOP, LEFT, BOTTOM, RIGHT): 0, 90, 180, 270 by default */

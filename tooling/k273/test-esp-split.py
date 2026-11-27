@@ -23,9 +23,9 @@ import json
 import os
 import shutil
 import struct
+import subprocess
 import sys
 import tempfile
-import tomllib
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -39,6 +39,9 @@ spec.loader.exec_module(tk)
 spec = importlib.util.spec_from_file_location('boot_args', D / 'tooling/adt/boot_args.py')
 boot_args = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(boot_args)
+spec = importlib.util.spec_from_file_location('pool_esp', HERE / 'build-pool-esp.py')
+pool_esp = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(pool_esp)
 
 ADT = 'EFI/UniXNU/Payloads/k273/kernel.macho.adt'
 TOML = 'EFI/UniXNU/unixnu.toml'
@@ -93,6 +96,74 @@ def tail_of(image):
     return boot_args.sets(common.fat32_read(image)['files'][ADT]).get('piano-boot-args-macos')
 
 
+def pool_build(out, base, name):
+    ids = ['10000000-0000-0000-0000-000000000001', '10000000-0000-0000-0000-000000000002']
+    return subprocess.run([sys.executable, str(HERE / 'build-pool-esp.py'),
+                           '--base', str(out / f'{base}.json'), '--out', str(out), '--name', name,
+                           '--placeholder', *ids], capture_output=True, text=True)
+
+
+def test_base_refusals(out):
+    base = out / 'esp-dual66.json'
+    original = base.read_bytes()
+    rec = json.loads(original)
+    image = out / rec['image']
+    rc, log = tk.build(out, base.stem, '--name', image.stem, expect=1)
+    check(rc != 0 and 'overwrite the rollback base' in log and base.read_bytes() == original,
+          'the k273-only output cannot replace its base image or record')
+
+    # A short image whose hash and record agree still cannot fill the ESP partition.
+    bad_image = out / 'esp-short.img'
+    bad_image.write_bytes(bytes(511))
+    short = dict(rec, image=bad_image.name, bytes=511, sha256=common.sha(bad_image))
+    for record, expected in ((short, 'must both be'), (dict(rec, sha256='0' * 64), 'not the image'),
+                             (dict(rec, files=dict(rec['files'], **{ADT: '0' * 64})), 'files differ')):
+        common.write_json(out / 'esp-corrupt.json', record)
+        rc, log = tk.build(out, 'esp-corrupt', '--name', 'corruption', expect=1)
+        result = pool_build(out, 'esp-corrupt', 'corruption-TEST')
+        check(rc != 0 and expected in log and result.returncode != 0 and expected in result.stderr,
+              f'both ESP builders refuse {expected}')
+    check(not list(out.glob('corruption*')) and not list(out.glob('.esp-output-*')),
+          'rejected builds leave no output or staging directory')
+    check(base.read_bytes() == original and common.sha(image) == rec['sha256'], 'refusals preserve the base')
+
+
+def test_pool_readback(out, inputs):
+    props = [('name', b'chosen\0'), ('darwinboot-memory-size', struct.pack('<Q', tk.WINDOW13))]
+    props += [(name, value.encode() + b'\0') for name, (value, _, _) in pool_esp.PROPS.items()]
+    adt = tk.adt_node([('name', b'device-tree\0')], [tk.adt_node(props)])
+    base, _, _ = tk.make_dual(out, 'esp-pool-base-TEST', tk.line_273(long=False), dict(inputs, adt273=adt))
+    result = pool_build(out, 'esp-pool-base-TEST', 'esp-pool-base-TEST')
+    check(result.returncode != 0 and 'overwrite the rollback base' in result.stderr, 'the pool builder protects its rollback base')
+    result = pool_build(out, 'esp-pool-base-TEST', 'esp-pool-TEST')
+    check(result.returncode == 0, f'pool builder creates a verified image ({result.stderr.strip()})')
+    if result.returncode:
+        return
+    image = out / 'esp-pool-TEST.img'
+    record = json.loads(image.with_suffix('.json').read_text())
+    fat = common.fat32_read(image)
+    check(not fat['problems'] and image.stat().st_size == record['bytes'] == common.ESP_BLOCKS * common.LBA and
+          common.sha(image) == record['sha256'] and all(pool_esp.h(data) == record['files'].get(name)
+                                                        for name, data in fat['files'].items()),
+          'pool readback matches the image size, checksum and file manifest')
+    check(all(record['files'].get(name) == digest for name, digest in base['files'].items() if name != TOML) and
+          common.sha(out / base['image']) == base['sha256'], 'pool output preserves the rollback payload and base image')
+
+
+def test_edit_syntax():
+    builders = [
+        ('build-k273-esp.py', []),
+        ('build-dual-esp.py', ['--kc', 'unused', '--adt', 'unused', '--trust', 'unused', '--seed', 'unused']),
+    ]
+    invalid = ('=5', 'piano-x', 'piano-x=1 piano-y=2', 'piano-x=1\tpiano-y=2', 'piano-x="yes"')
+    for builder, required in builders:
+        for value in invalid:
+            result = subprocess.run([sys.executable, str(HERE / builder), *required, '--base', 'missing.json',
+                                     '--arg', value], capture_output=True, text=True, timeout=10)
+            check(result.returncode == 2 and 'one NAME=VALUE' in result.stderr,
+                  f'{builder} rejects malformed --arg {value!r} before reading a base')
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--keep', type=Path)
@@ -100,6 +171,7 @@ def main():
     tmp = Path(tempfile.mkdtemp(prefix='piano-esp-split-')) if not a.keep else a.keep
     tmp.mkdir(parents=True, exist_ok=True)
     try:
+        test_edit_syntax()
         out = tmp / 'out'
         out.mkdir()
         inputs = split_inputs()
@@ -146,12 +218,17 @@ def main():
         merge2 = len(' '.join(base2['cmdlines']['macos-27.3'].split()[:-1] + base2['boot_args_split']['tail'].split()))
         check(rc == 0 and base2['boot_args_split'] and base2['cmdlines']['macos-27.3'].split()[-1] == 'piano-boot-args=macos'
               and merge2 >= 1000, f'a {len(long_line)}-B base line: split by size alone (its merge is {merge2} B)')
-        rc, log = tk.build(out, 'esp-split2', '--arg', 'piano-gpu=8', '--name', 'esp-v6l')
+        rc, log = tk.build(out, 'esp-split2', '--arg', 'piano-gpu=8', '--arg', 'test-label=é', '--name', 'esp-v6l')
         v6l = json.loads((out / 'esp-v6l.json').read_text())
         check(rc == 0 and v6l['boot_args_split'] and v6l['cmdlines']['macos-27.3'].split()[-1] == 'piano-boot-args=macos' and
-              arg_map(whole_of(v6l)) == dict(arg_map(whole_of(base2)), **{'piano-gpu': '8'}) and
+              arg_map(whole_of(v6l)) == dict(arg_map(whole_of(base2)), **{'piano-gpu': '8', 'test-label': 'é'}) and
               'piano-gpu=8' in v6l['boot_args_split']['tail'].split() and v6l['base_split_rebuilt'] is not None,
               'rebuilt from the size-split base without --split: split again by size, the edit in the tail')
+        v6l_line = v6l['cmdlines']['macos-27.3']
+        check(v6l['boot_args_split']['line_bytes'] == len(v6l_line.encode()) and
+              v6l['boot_args_split']['full_bytes'] == len(' '.join(
+                  v6l_line.split()[:-1] + v6l['boot_args_split']['tail'].split()).encode()),
+              'the split record counts UTF-8 bytes')
 
         # -- edits, the v6 story -------------------------------------------------------------------------------------------------------------------
         rc, log = tk.build(out, 'esp-split', '--split', '--arg', 'piano-gpu-delay=0', '--arg', 'cs-native4k-skip=1',
@@ -169,7 +246,7 @@ def main():
                   [x for x in merged.split() if x.split('=', 1)[0] not in ('piano-gpu-delay', 'cs-native4k-skip')] +
                   ['piano-gpu-delay=0', 'cs-native4k-skip=1'])),
               'the image\'s ADT carries the edited tail; full_bytes is the edited, reassembled line')
-        menu = tomllib.loads(common.fat32_read(out / 'esp-v6.img')['files'][TOML].decode())
+        menu = common.toml_loads(common.fat32_read(out / 'esp-v6.img')['files'][TOML].decode())
         ids = [e['id'] for e in menu['entry']]
         diag = next(e for e in menu['entry'] if e['id'] == 'macos-27.3-diag')
         fb = next(e for e in menu['entry'] if e['id'] == 'fastboot')
@@ -220,6 +297,13 @@ def main():
         tk.make_dual(out, 'esp-notail', tk.line_273(long=False) + ' piano-boot-args=macos', inputs)
         rc, log = tk.build(out, 'esp-notail', '--name', 'x', expect=1)
         check(rc != 0 and 'refused rather than drop' in log, f'a selector with no tail anywhere: refused ({log.strip()[-90:]})')
+        no_tail_record = out / 'esp-notail.json'
+        record = json.loads(no_tail_record.read_text())
+        record['boot_args_split'] = {'set': 'macos', 'tail': 'piano-gpu=2'}
+        common.write_json(no_tail_record, record)
+        rc, log = tk.build(out, 'esp-notail', '--name', 'x', expect=1)
+        check(rc != 0 and 'is not the /chosen/piano-boot-args-macos' in log,
+              'a tail named only in the record is refused')
         rec = json.loads((out / 'esp-split.json').read_text())
         common.write_json(out / 'esp-split.json', dict(
             rec, boot_args_split=dict(rec['boot_args_split'], tail=rec['boot_args_split']['tail'].replace('piano-gpu=2', 'piano-gpu=9', 1))))
@@ -250,6 +334,15 @@ def main():
         check(rc != 0 and 'given more than once' in log, '--arg data-store-lba with --seed (its own edit): refused')
         for suffix in ('.img', '.json'):
             (out / ('x' + suffix)).unlink(missing_ok=True)
+        fat = common.fat32_read(bytes(511))
+        check('truncated FAT32 boot sector' in fat['problems'], 'FAT reader refuses a short boot sector')
+        sector = bytearray(512)
+        struct.pack_into('<HB', sector, 11, 512, 0)
+        sector[510:512] = b'\x55\xaa'
+        fat = common.fat32_read(sector)
+        check('sectors per cluster 0' in fat['problems'], 'FAT reader refuses zero sectors per cluster')
+        test_base_refusals(out)
+        test_pool_readback(out, inputs)
     finally:
         if not a.keep:
             shutil.rmtree(tmp, ignore_errors=True)

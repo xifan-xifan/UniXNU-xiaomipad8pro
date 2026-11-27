@@ -330,6 +330,25 @@ int main()
         CHECK(r.detach()==kIOReturnBusy);
         ++cases;
     }
+    /* A poll started on fence 1 must accept fence 2 after another submission and reset. */
+    {
+        reset();NativeAdrenoRing r;
+        const uint32_t word=0x70000000;
+        uint32_t first=0,observed=0;
+        CHECK(attach(r)==kIOReturnSuccess && r.submit(&word,1,&first)==kIOReturnSuccess && first==1);
+        const NativeAdrenoRingClock resetClock{&r,[](void *) {return clock_us;},[](void *cookie) {
+            auto &ring=*static_cast<NativeAdrenoRing *>(cookie);
+            const uint32_t word=0x70000000;
+            uint32_t second=0,last=0;
+            CHECK(ring.submit(&word,1,&second)==kIOReturnSuccess && second==2);
+            CHECK(ring.recover(&last)==kIOReturnSuccess && last==second);
+            ++clock_us;
+            return 0;
+        }};
+        CHECK(r.wait(first,&resetClock,10,&observed)==NativeAdrenoRingFenceComplete);
+        CHECK(observed==2 && r.completedFence()==2 && !r.poisoned());
+        ++cases;
+    }
     /* The ring lock brackets every submission, kick and recover exactly once; waits never take it. */
     {
         reset();NativeAdrenoRing r;CHECK(attach(r)==kIOReturnSuccess);r.setLock(&ringLock);

@@ -47,11 +47,12 @@ inline int32_t signExtend12(uint32_t v)
   return (v & 0x800) ? int32_t(v) - 0x1000 : int32_t(v);
 }
 
-// One TM_Sn_STATUS word: the reading in deci-degrees C (sign-extended even when not VALID) and whether VALID is set.
+// One TM_Sn_STATUS word: the reading in deci-degrees C (sign-extended even when not VALID) and whether it is valid.
 inline bool decodeStatus(uint32_t status, int32_t &deci)
 {
   deci = signExtend12(status);
-  return (status & kStatusValid) != 0;
+  // A failed TM read returns all ones, including VALID and the plausible temperature code for -0.1 C.
+  return status != UINT32_MAX && (status & kStatusValid) != 0;
 }
 
 struct Thresholds {
@@ -295,6 +296,13 @@ class Monitor {
     return false;
   }
   bool usable(unsigned c, unsigned s) const { return c < kControllers && s < kMaxSensors && (usable_[c] & (1u << s)); }
+  bool fresh(unsigned c, unsigned s) const { return c < kControllers && s < kMaxSensors && (fresh_[c] & (1u << s)); }
+  bool allFresh() const
+  {
+    for (unsigned c = 0; c < kControllers; ++c)
+      if (fresh_[c] != (1u << kMap[c].count) - 1u) return false;
+    return true;
+  }
   int32_t deci(unsigned c, unsigned s) const { return deci_[c][s]; }
   uint32_t raw(unsigned c, unsigned s) const { return raw_[c][s]; }
   uint16_t freshMask(unsigned c) const { return fresh_[c]; }

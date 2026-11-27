@@ -6,11 +6,24 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
-import time
 import unittest
 
 W = Path(__file__).resolve().parents[3]
 CLEAR_AND_SUBMIT = ['key cmd+a', 'key backspace', 'type --stdin --enter']
+
+# Route only the camera call through the fake transport without a host timeout helper.
+OFFLINE_LOGIN = '''
+/bin/bash() {
+  if [ "$1" = /tmp/tmo.sh ]; then
+    shift 2
+    [ "$1" = imagesnap ] || return 2
+    "$@"
+  else
+    command /bin/bash "$@"
+  fi
+}
+source "$0"
+'''
 
 
 class LoginTests(unittest.TestCase):
@@ -24,7 +37,7 @@ class LoginTests(unittest.TestCase):
             console = p / 'console'
             console.write_text(('PianoA830: SecurityAgent opens the accelerator\n' if console_line else '') +
                                'NativeGopDisplay: last frame 99.4% non-black\n')
-            (p / 'clock').write_text(str(int(time.time()) + 2))
+            (p / 'clock').write_text('1700000000\n')
             trace = p / 'trace'
             commands = {
                 'hid': """echo "$*" >> "$TRACE"
@@ -37,6 +50,7 @@ esac
 n=$(grep -c '^type ' "$TRACE" 2>/dev/null || :); n=${n:-0}
 case "$MODE:$n" in
   already:*|ready:[12]|retry:2|nocons:1) echo 'C=501 U=1 L=0 S=0 F=81,';;
+  badfinder:*) echo 'C=501 U=1 L=0 S=0 F=,,';;
   oldfinder:0) echo 'C=0 U=1 L=0 S=1 F=80,';;
   oldfinder:1) echo 'C=501 U=1 L=0 S=0 F=80,';;
   wronguid:1) echo 'C=502 U=1 L=0 S=0 F=81,';;
@@ -51,15 +65,23 @@ case "$MODE:$n" in
 esac
 """,
                 'date': 'cat "$STATE/clock"\n',
-                'sleep': 'echo $(( $(cat "$STATE/clock") + 3 * ${1%%.*} + 1 )) > "$STATE/clock"\n',
+                # Strip fractional seconds before arithmetic and accelerate the polling loops.
+                'sleep': """seconds=${1%%.*}
+echo $(( $(cat "$STATE/clock") + 3 * ${seconds:-0} + 1 )) > "$STATE/clock"
+""",
+                # Stamp the wake marker on the same clock as the camera frames.
+                'touch': """epoch=$(cat "$STATE/clock")
+/usr/bin/touch -t "$(/bin/date -r "$epoch" +%Y%m%d%H%M.%S)" "$@"
+""",
                 'imagesnap': """for photo in "$@"; do :; done
 echo "camera ${photo##*/}" >> "$TRACE"
 if [ -n "$FRAME" ]; then cp "$FRAME" "$photo"; else echo image > "$photo"; fi
+sleep 0.1 || exit 1
 epoch=$(cat "$STATE/clock")
 case "$MODE:${photo##*/}" in
   stale:*|retrystale:after-wake-2.jpg) epoch=$((epoch - 300));;
 esac
-touch -t "$(/bin/date -r "$epoch" +%Y%m%d%H%M.%S)" "$photo"
+/usr/bin/touch -t "$(/bin/date -r "$epoch" +%Y%m%d%H%M.%S)" "$photo"
 """,
             }
             if frame is None:
@@ -71,11 +93,11 @@ echo "lavfi.signalstats.YAVG=$y"
                 tool = p / name
                 tool.write_text('#!/bin/sh\n' + body)
                 tool.chmod(0o700)
-            env = dict(os.environ, PATH=str(p) + ':' + os.environ['PATH'],
-                       DESK_LOGIN_INPUT=str(p / 'hid'), DESK_LOGIN_PROBE=str(p / 'probe'),
+            env = dict(PATH=str(p) + ':' + os.environ['PATH'], TZ='UTC', TMPDIR=str(p),
+                       DESK_LOGIN_INPUT='hid', DESK_LOGIN_PROBE='probe',
                        DESK_LOGIN_UID='501', DESK_LOGIN_BRIGHTEN='0', TRACE=str(trace), STATE=str(p), MODE=mode,
                        FRAME=str(frame) if frame else '')
-            r = subprocess.run(['/bin/bash', str(W / 'tooling/native/desk-login.sh'),
+            r = subprocess.run(['/bin/bash', '-c', OFFLINE_LOGIN, str(W / 'tooling/native/desk-login.sh'),
                                 '--console', str(console), '--timeout', '300', '--secret', str(secret),
                                 '--webcam-dir', str(p / 'camera'), *extra], env=env, capture_output=True,
                                text=True, timeout=20)
@@ -131,7 +153,7 @@ echo "lavfi.signalstats.YAVG=$y"
         self.run_case('locked', 0, 1, console_line=False)
 
     def test_state_only(self):
-        for mode, rc in (('already', 0), ('locked', 3), ('ready', 4), ('nousers', 1)):
+        for mode, rc in (('already', 0), ('locked', 3), ('ready', 4), ('nousers', 1), ('badfinder', 1)):
             with self.subTest(mode=mode):
                 self.run_case(mode, rc, 0, extra=('--state',))
 

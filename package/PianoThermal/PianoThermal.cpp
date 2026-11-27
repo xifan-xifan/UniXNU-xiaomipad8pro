@@ -559,7 +559,7 @@ void registerAndroidCpu()
 {
   gAndroidOid.oid_parent = &sysctl__machdep_children;
   gAndroidOid.oid_number = OID_AUTO;
-  gAndroidOid.oid_kind = CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_OID2;
+  gAndroidOid.oid_kind = int(CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_OID2);
   gAndroidOid.oid_name = "piano_cpufreq_android";
   gAndroidOid.oid_handler = sysctlAndroidCpu;
   gAndroidOid.oid_fmt = "I";
@@ -677,11 +677,11 @@ int sysctlPerfState(struct sysctl_oid *, void *, int, struct sysctl_req *req)
 
 void registerPerf()
 {
-  auto fill = [](struct sysctl_oid &oid, const char *name, int kind, int (*handler)(struct sysctl_oid *, void *, int, struct sysctl_req *),
+  auto fill = [](struct sysctl_oid &oid, const char *name, unsigned kind, int (*handler)(struct sysctl_oid *, void *, int, struct sysctl_req *),
                  int arg2, const char *fmt, const char *descr) {
     oid.oid_parent = &sysctl__machdep_children;
     oid.oid_number = OID_AUTO;
-    oid.oid_kind = kind;
+    oid.oid_kind = int(kind);
     oid.oid_name = name;
     oid.oid_handler = handler;
     oid.oid_arg2 = arg2;
@@ -795,7 +795,7 @@ void registerBoost()
 {
   gBoostOid.oid_parent = &sysctl__machdep_children;
   gBoostOid.oid_number = OID_AUTO;
-  gBoostOid.oid_kind = CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_OID2;
+  gBoostOid.oid_kind = int(CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_OID2);
   gBoostOid.oid_name = "piano_cpufreq_boost";
   gBoostOid.oid_handler = sysctlBoost;
   gBoostOid.oid_fmt = "I";
@@ -814,20 +814,18 @@ void refreshService(IOService *&service, const char *name, uint64_t now, uint64_
   }
 }
 
-// PianoA830's reversible GPU ceiling (kHz, 0 clears) through its registered service, no link dependency: true when PianoA830 took it
-// (kIOReturnSuccess). Until PianoA830 implements "piano-gpu-ceiling" its service answers kIOReturnUnsupported, and without
-// piano-gpu=2 there is no service at all: false.
-bool gpuCeiling(uint32_t khz)
+// PianoA830's reversible GPU ceiling (kHz, 0 clears). A missing service may still publish later.
+IOReturn gpuCeiling(uint32_t khz)
 {
   OSDictionary *match = IOService::serviceMatching("PianoA830");
-  if (!match) return false;
+  if (!match) return kIOReturnNoMemory;
   IOService *gpu = IOService::copyMatchingService(match);
   match->release();
-  if (!gpu) return false;
+  if (!gpu) return kIOReturnNotReady;
   const IOReturn r = gpu->callPlatformFunction("piano-gpu-ceiling", false, reinterpret_cast<void *>(uintptr_t(khz)), nullptr, nullptr,
                                                nullptr);
   gpu->release();
-  return r == kIOReturnSuccess;
+  return r;
 }
 
 }  // namespace
@@ -1331,20 +1329,15 @@ void PianoThermal::protect(const PolicyEvent &e)
   if (gArgs.level < 2) return;
   // The GPU: at passive a reversible ceiling (PianoA830's "piano-gpu-ceiling", once it has one: docs/drivers/thermal.md section
   // 10), else the boot-long park; at critical always the park.
-  if (e.after >= State::passive && !parked_ && !gpuCapped_) {
-    const int32_t critical = sn.criticalDeci - int32_t(gArgs.marginC) * 10;
-    const int32_t passive = passiveOf(sn) < critical - 50 ? passiveOf(sn) : critical - 50;
-    if (gpuCeiling(gArgs.gpuMhz * 1000u)) {
+  if (e.gpuLimited() && !parked_ && !gpuCapped_) {
+    const IOReturn result = gpuCeiling(gArgs.gpuMhz * 1000u);
+    if (result == kIOReturnSuccess) {
       gpuCapped_ = true;
-      note("[%us] PASSIVE: %s %s C >= %s C (stock passive %s C): GPU capped at %u MHz until the state is below passive "
-           "(PianoA830 piano-gpu-ceiling)",
-           upS(), sn.name, Deci(e.deci).s, Deci(passive).s, Deci(passiveOf(sn)).s, gArgs.gpuMhz);
-    } else {
+      note("[%us] GPU capped at %u MHz (%s)", upS(), gArgs.gpuMhz, e.incomplete ? "incomplete TSENS poll" : "passive trip");
+    } else if (result == kIOReturnUnsupported) {
       parked_ = true;
       adreno830_dcvs_park();
-      note("[%us] PASSIVE: %s %s C >= %s C (stock passive %s C): GPU parked at its lowest level for the rest of the boot "
-           "(adreno830_dcvs_park; PianoA830 has no reversible ceiling)",
-           upS(), sn.name, Deci(e.deci).s, Deci(passive).s, Deci(passiveOf(sn)).s);
+      note("[%us] GPU parked at its lowest level (PianoA830 has no reversible ceiling)", upS());
     }
   }
   if (e.after == State::critical && !parked_) {
@@ -1352,9 +1345,8 @@ void PianoThermal::protect(const PolicyEvent &e)
     adreno830_dcvs_park();
     note("[%us] CRITICAL: GPU parked at its lowest level for the rest of the boot (adreno830_dcvs_park)", upS());
   }
-  if (e.after < State::passive && gpuCapped_ && !parked_) {
+  if (!e.gpuLimited() && gpuCapped_ && !parked_ && gpuCeiling(0) == kIOReturnSuccess) {
     gpuCapped_ = false;
-    gpuCeiling(0);
     note("[%us] GPU ceiling cleared (state %s)", upS(), stateName(e.after));
   }
   if (!e.criticalPending && e.after != State::critical) criticalPendingLogged_ = false;
@@ -1476,7 +1468,7 @@ void PianoThermal::cpuStart()
          "skin), tick %u ms (machdep.piano_cpufreq_perf_tick_ms), downs held %u ms; 0 = caps by the measured source, hard caps %u / "
          "%u MHz, tick %u ms, 3 ticks down; thermal limit on top in both: %s",
          gArgs.perf, gArgs.skin ? "on" : "off", adc::hookLevel() ? "piano-thermal-adc on" : "piano-thermal-adc OFF: no skin reading, "
-         "the first step's cap", gArgs.burst[0], gArgs.burst[1], gArgs.burstMs, gArgs.burstGapMs, gArgs.skinLimitC, gArgs.perfTickMs,
+         "the lowest step's cap", gArgs.burst[0], gArgs.burst[1], gArgs.burstMs, gArgs.burstGapMs, gArgs.skinLimitC, gArgs.perfTickMs,
          gArgs.perfDownMs, gArgs.legacyCap[0], gArgs.legacyCap[1], gArgs.tickMs, tripsText());
     note("cpufreq: perf policy 2 = beyond stock: as 1 without the skin table (sustained ceilings), the onset burst up to %u / %u MHz "
          "(over sustained only while open)", gArgs.burstMax[0], gArgs.burstMax[1]);
@@ -1636,13 +1628,6 @@ void PianoThermal::cpuAndroidSuspend()
   cpuAndroidReport(in, selection, false);
 }
 
-bool freshCpuThermal(const Monitor &m, unsigned cluster)
-{
-  const Controller &k = kMap[cluster];
-  const uint32_t mask = ((2u << k.cpuLast) - 1) & ~((1u << k.cpuFirst) - 1);
-  return (m.freshMask(cluster) & mask) != 0;
-}
-
 // Every sensor poll: the thermal limit (fixed and governor modes) and, at most once per piano-cpufreq-tick-ms (governor) or at
 // once (fixed), the level; report mode asks LEVEL_GET at the log cadence only (slow).
 void PianoThermal::cpuTick(const Monitor &m, bool slow, bool loadTick)
@@ -1717,8 +1702,7 @@ void PianoThermal::cpuTick(const Monitor &m, bool slow, bool loadTick)
   const AndroidCpuInput in{
     gArgs.androidArmed, gArgs.androidArmed && __atomic_load_n(&gAndroidRequested, __ATOMIC_ACQUIRE) == 1,
     androidDomains_ && domainOk_[0] && domainOk_[1],
-    gArgs.androidArmed && thermal[0].valid && thermal[1].valid && !thermal[0].cut && !thermal[1].cut &&
-        freshCpuThermal(m, 0) && freshCpuThermal(m, 1),
+    gArgs.androidArmed && thermal[0].valid && thermal[1].valid && !thermal[0].cut && !thermal[1].cut,
     boostEndNs_ && !(boostEnded_[0] && boostEnded_[1]), false, power_, profile, androidLpm_,
   };
   const AndroidCpuSelection selection = androidCpuSelection(in);
@@ -1747,7 +1731,7 @@ void PianoThermal::cpuTick(const Monitor &m, bool slow, bool loadTick)
   if (perfMode && loadTick) {
     int32_t in5[perf::kSkinInputs] = {};
     uint32_t mask = 0;
-    skin_ = adc::hookSkin(in5, mask) ? perf::virtualSkin(in5, mask) : perf::Skin();
+    skin_ = adc::hookSkin(in5, mask);
     for (unsigned i = 0; i < perf::kSkinInputs; ++i) skinIn_[i] = in5[i];
     skinInMask_ = mask;
     gSkinMilli = skin_.milliC;
@@ -1758,7 +1742,7 @@ void PianoThermal::cpuTick(const Monitor &m, bool slow, bool loadTick)
   // Power Saver) and the skin under its boost limit; the silicon gate below decides per cluster.
   const uint64_t launchNs = __atomic_load_n(&gLaunchNs, __ATOMIC_ACQUIRE), inputNs = __atomic_load_n(&gInputNs, __ATOMIC_ACQUIRE);
   const bool boostsAllowed = perfMode && __atomic_load_n(&gBoost, __ATOMIC_ACQUIRE) && power == PowerSource::external &&
-      !(skin_.valid && skin_.milliC >= boostLimitMilli);
+      skin_.valid && skin_.milliC < boostLimitMilli;
   const perf::BoostKind bk = boostsAllowed ? perf::boostAt(now, launchNs, gArgs.launchMs, inputNs, gArgs.inputMs) : perf::BoostKind::none;
   androidActive_ = selection.enabled;
   for (unsigned d = 0; d < kDomains; ++d) {
@@ -1865,6 +1849,7 @@ void PianoThermal::cpuTick(const Monitor &m, bool slow, bool loadTick)
         const uint32_t topKhz = capKhz(gArgs.hpmTop[d]);
         const uint32_t capNow = perf::fullCapKhz(stepKhz ? stepKhz : topKhz, socLimit_.khz(d));
         const uint32_t burstKhz = capKhz(gArgs.burst[d]);
+        const bool burstAllowed = power == PowerSource::external && gateOk && !high && !socLimit_.level() && skin_.valid;
         if (loadTick) {
           perf::BurstConfig bc;
           bc.khz = burstKhz;
@@ -1872,8 +1857,8 @@ void PianoThermal::cpuTick(const Monitor &m, bool slow, bool loadTick)
           bc.gapMs = gArgs.burstGapMs;
           bc.limitMilli = boostLimitMilli;
           burst_[d].tick(bc, now / 1000000ull, g.rawWant() > g.ceilingFor(power, capNow),
-                         power == PowerSource::external && gateOk && !high && !socLimit_.level(), skin_.valid, skin_.milliC);
-        } else if (burst_[d].open() && !gateOk) {
+                         burstAllowed, skin_.valid, skin_.milliC);
+        } else if (burst_[d].open() && !burstAllowed) {
           perf::BurstConfig bc;
           bc.khz = burstKhz;
           burst_[d].tick(bc, now / 1000000ull, true, false, skin_.valid, skin_.milliC);
@@ -1898,6 +1883,7 @@ void PianoThermal::cpuTick(const Monitor &m, bool slow, bool loadTick)
                                                        : 0;
         gPd[d].sceneKhz = skinKhz;
         const uint32_t burstKhz = capKhz(beyond ? gArgs.burstMax[d] : gArgs.burst[d]);
+        const bool burstAllowed = power == PowerSource::external && gateOk && !high && skin_.valid;
         if (loadTick) {
           perf::BurstConfig bc;
           bc.khz = burstKhz;
@@ -1905,8 +1891,8 @@ void PianoThermal::cpuTick(const Monitor &m, bool slow, bool loadTick)
           bc.gapMs = gArgs.burstGapMs;
           bc.limitMilli = boostLimitMilli;
           burst_[d].tick(bc, now / 1000000ull, g.rawWant() > g.ceilingFor(power, skinKhz),
-                         power == PowerSource::external && gateOk && !high, skin_.valid, skin_.milliC);
-        } else if (burst_[d].open() && !gateOk) {
+                         burstAllowed, skin_.valid, skin_.milliC);
+        } else if (burst_[d].open() && !burstAllowed) {
           perf::BurstConfig bc;
           bc.khz = burstKhz;
           burst_[d].tick(bc, now / 1000000ull, true, false, skin_.valid, skin_.milliC);   // the gate closes it at once
@@ -1937,6 +1923,8 @@ void PianoThermal::cpuTick(const Monitor &m, bool slow, bool loadTick)
         g.setDownTicks(3);
         g.setRuntimeCaps(true, capKhz(gArgs.legacyCap[d]), 0);
       }
+      if (perfMode && gArgs.skin && !skin_.valid)
+        g.setRuntimeCaps(false, 0, perf::fullCapKhz(g.perfKhz(), perf::skinFaultCap(d)));
     }
     // the WALT-like demand (Perf.h WaltCore): each core's window work at the level it ran at, its history kept in every perf mode so
     // switching it on starts from a fresh history; used for the decision only with machdep.piano_cpufreq_walt
@@ -2172,17 +2160,19 @@ void PianoThermal::run()
   uint64_t tierNs[kPollTiers] = {};
   uint32_t tierChanges = 0;
   Poll tier = Poll::base;
-  bool first = true, fastNoted = false;
+  bool first = true, fastNoted = false, policyFresh = false;
   for (;;) {
-    if (park()) {   // back from a system sleep: the power source read again at the next CPU tick, the zones now
+    const bool woke = park();
+    if (woke) {   // back from a system sleep: the power source read again at the next CPU tick, the zones now
       powerAtNs_ = 0;
       androidInputsAt_ = 0;
+      policy_.resetCriticalStreak();
       note("[%us] wake %u: polling again", upS(), sleep_.wakes());
     }
     const uint64_t workStart = mach_absolute_time();   // this poll's own work, up to the wait: noteSelf, left out of busy
     if (governing) base = curTickMs();
     const uint64_t before = nowNs();
-    const bool sensorsDue = first || tier != Poll::base || base >= 100 || before - lastSensors >= 100000000ull;
+    const bool sensorsDue = first || woke || tier != Poll::base || base >= 100 || before - lastSensors >= 100000000ull;
     if (sensorsDue) {
       monitor_.poll(kTsensIo);
       lastSensors = before;
@@ -2226,14 +2216,17 @@ void PianoThermal::run()
       }
       tier = next;
     }
-    if (first || tier != Poll::base || now - lastPolicy >= uint64_t(gArgs.pollMs) * 1000000ull) {
+    if (sensorsDue && (first || woke || tier != Poll::base || monitor_.allFresh() != policyFresh ||
+                       now - lastPolicy >= uint64_t(gArgs.pollMs) * 1000000ull)) {
       lastPolicy = now;
       const PolicyEvent e = policy_.update(monitor_, now / 1000000ull);
-      piano_thermal_state = int32_t(e.after);
-      if (e.changed() || (e.after == State::critical && !halting_) || e.criticalPending) protect(e);
+      policyFresh = !e.incomplete;
+      if (e.gpuLimited() && gArgs.level >= 2 && e.after < State::passive) piano_thermal_state = int32_t(State::passive);
+      else piano_thermal_state = int32_t(e.after);
+      protect(e);
     }
     const bool slow = first || now - lastLog >= uint64_t(gArgs.logS) * 1000000000ull;
-    const bool loadTick = first || now - lastLoad >= uint64_t(governing ? base : gArgs.tickMs) * 1000000ull;
+    const bool loadTick = first || woke || now - lastLoad >= uint64_t(governing ? base : gArgs.tickMs) * 1000000ull;
     if (loadTick) lastLoad = now;
     if (gArgs.cpufreq) cpuTick(monitor_, slow, loadTick);
     // TEST (piano-cpufreq-sweep): machdep.piano_cpufreq_measure asked for each core's clock (the dependent-add chain on each core)

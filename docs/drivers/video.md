@@ -1,5 +1,30 @@
 # Video: the Iris video core natively (PianoVideo) and VideoToolbox through the VM-era paravirtual decoder
 
+## Daily status (2026-11-27)
+
+- **QuickTime on the v13.1y12q daily line.** AVC High and HEVC Main10 decode in hardware on Iris. Installed v13.1x verified
+  about 100 s of playback per codec on November 21, with zero transient or dark frames in the webcam check.
+  [Support status](../STATUS.md) · [Hardware backlog, B10](../BACKLOG-hardware.md#2-backlog-b1b15)
+- **Safari on installed v13.1y12o, November 26.** H.264 at 1080p used Iris with zero dropped frames. HEVC at 4K
+  played in software, with 600 decoded and zero dropped frames in the November 25 v13.1y12j run. Safari VP9 and AV1
+  remain unsupported.
+  [Support status](../STATUS.md) · [November 26 browser follow-up](../results-2026-11-26.md#v131y12o-installed)
+- **Chrome on installed v13.1y12q, November 27.** H.264 and HEVC played at 1080p and 4K, and VP9 and AV1 at 1080p, with
+  0–1 dropped frames. HEVC went through VideoToolbox.
+  [November 27 Chrome results](../results-2026-11-27.md#chrome)
+- **RAM only, `ram16g-hevc1`, November 26.** The **684 MiB** mixed HEVC arena (274 MiB from region 0 and 410 MiB from XNU)
+  passed its reservation self-test. **24/24** decoded 4K Main10 frames matched the golden P010 hashes, 12 on first open and
+  12 on resident reopen, with no video faults.
+  [November 26 RAM results](../results-2026-11-26.md#efi-memory-battery-and-video)
+
+See the [pending AVC cancellation analysis for `ram16g-hevc1`](video-hevc-cancel.md).
+The opt-in E1 H.264 encode self-test is host-tested and built for arm64e. Tablet qualification is pending.
+[E1 integration and qualification](video-encode-e1.md) · [Hardware backlog, B10](../BACKLOG-hardware.md#2-backlog-b1b15)
+
+## Historical bring-up notes
+
+The design, boot arguments, test plans and measurements below describe the builds under test at the time.
+
 Status, 2026-11-18: V2 power/PAS and V3 INIT/version/lifecycle are tablet-confirmed. V4 (`vid-v4a`) decoded
 our real 320×240 AVC AU and matched the exact active NV12 golden hash, with safe DMA teardown (§13).
 V5c is tablet-confirmed: real caller input traverses VT and Iris into an IOSurface-backed callback with the original golden
@@ -16,7 +41,7 @@ does not establish hardware health. Owning-task PID/name and lifecycle reason lo
 this containment does not establish the electrical cause of a reset or safe repeated cold initialization.
 The earlier ladder and historical test recipes below do not establish macOS app playback. Backlog item B10.
 
-## 1. Purpose and gate
+### 1. Purpose and gate
 
 The native Iris bridge is an opt-in qualification endpoint; stock QuickTime continuous playback is confirmed for the two
 owned AVC fixtures. Throughput for other streams needs measurement. The SoC's video core decodes H.264, HEVC and VP9 (§4.5), and encodes H.264
@@ -27,7 +52,7 @@ at submit: `unixnu-research/hackios-redmi-k90-annibale/docs/analysis/2026-11-05-
 in the VM, VideoToolbox decoded H.264 and HEVC (including the 4096x2160 P010 Aerial) on Ubuntu's Iris through a paravirtual decoder
 (the VM-era progress notes, local, not published: issue 4, 2026-11-10).
 
-## 2. Hardware facts
+### 2. Hardware facts
 
 Sources: the piano boot DT (`out/inputs/piano-boot.dtb`, "DT"); the Ubuntu piano kernel (`unixnu-research/ubuntu-ref/kernel`, piano/dev
 7f8d6bed, GPL: facts only): iris (`drivers/media/platform/qcom/iris`), videocc/gcc (`drivers/clk/qcom/*-sm8750.c`), qcom_scm,
@@ -51,7 +76,7 @@ interconnect `sm8750.c`; the firmware pin (`xiaomipad-8pro-mainline/firmware/pia
 | Thermal | zone `video` = TSENS2 (`c22a000`) sensor 15: hot 120 °C, critical 125 °C (PianoThermal reads it) | DT | verified |
 | State at XNU | expected cold (nothing before XNU runs video); SMMU entries for 0x1940/0x1947, free groups and banks, IDR0.CTTW | level 1 | **needs-boot** |
 
-## 3. Ubuntu as the specification
+### 3. Ubuntu as the specification
 
 - **Core init** (`iris_core.c:iris_core_init`): queues, power, firmware, boot, HFI. *Queues* (`iris_hfi_queues_init`): a 456-byte
   table (288-byte header, three 56-byte queue headers: command, message, debug), three 1 MiB queues of variable-size packets (indices
@@ -88,7 +113,7 @@ interconnect `sm8750.c`; the firmware pin (`xiaomipad-8pro-mainline/firmware/pia
 - **Acceptance** (`device/media/iris-check.py`): one bounded H.264 decode, every frame's MD5 against a host `framemd5`: level 5's
   criterion.
 
-## 4. UniXNU template to build on, and the design
+### 4. UniXNU template to build on, and the design
 
 | Piece | Base (licence) | Use |
 |---|---|---|
@@ -172,7 +197,7 @@ common stream runs at the **lowest OPP, 240 MHz** (MXC svs, MMCX low_svs_d1), wi
 Measured as `power.md` §6.4: one 1080p30 H.264 and one HEVC clip looped in QuickTime, fixed brightness, no cable,
 `piano-video=0` against `=6`, the mean of PianoPower's 10 s battery lines from minute 2 to 9, and the decoding process's CPU in `top`.
 
-## 5. IOKit family / ABI
+### 5. IOKit family / ABI
 
 Level 1: `PianoVideo : IOService` on IOPlatformExpertDevice, registers nothing; properties `piano-video`, `piano-video-survey` (one
 line). Levels 2-4 add `piano-video-bringup` (one line: §12.8's summaries). Level 6: the vendored transport registers `AppleVideoToolboxParavirtualizationDriver` on IOResources (IOUserClientClass
@@ -181,7 +206,7 @@ names) and the descriptor gains `com.apple.iokit.IOSurface`. The vendored files 
 kext rule checks bundle, name and IOClass, not symbols). PianoVideo joins the power contract: off = every session paused and the core
 collapsed, votes dropped; on = nothing until the next session.
 
-## 6. Boot args
+### 6. Boot args
 
 | Argument | Default | Meaning |
 |---|---|---|
@@ -196,10 +221,15 @@ collapsed, votes dropped; on = nothing until the next session.
 | `piano-video-resumes=N` | 0 | level 4: resume / ping / idle / collapse cycles after the first collapse (the test plan: 10) |
 | `piano-video-unload=1` | 0 | level 4: end with Linux's deinit (resume, PAS shutdown, off, the bank and UC region released); 0 leaves the steady state (collapsed, firmware kept) |
 | `piano-video-stop=STEP` | 0 | levels 2-4: power everything down after step STEP (§12.6's numbers): the bisecting aid |
+| `piano-video-enc=1` | 0 | level 6 with a successful boot reservation: run one native H.264 encode self-test on synthetic NV12 (§18) |
+| `piano-video-enc-delay=S` | 120 | E1 start delay in seconds (0–3600) |
+| `piano-video-enc-res=R` | 0 | E1 input size (0 for 640×480, 1 for 1280×720, 2 for 1920×1080, 3 for 320×240) |
+| `piano-video-enc-frames=N` | 10 | E1 frame count (2–120) |
+| `piano-video-enc-kbps=K` | 2000 | E1 variable bitrate in kbit/s (100–40000) |
 | `piano-video-mmcx-floor=VLVL` | 0x140 | the MMCX vote is never below this and never lowered under it (NOM_L1: the boot display's need, §12.1); 0 only once a native display votes its own |
 | later: `piano-video-codecs=MASK`, `piano-video-direct` | 3 (H.264, HEVC), 0 | which codecs `decs` offers (4 = VP9); decode into IOSurfaces |
 
-## 7. Kernel collection
+### 7. Kernel collection
 
 `tooling/k27/build-native-piano-video.sh`: the secure-call lock's own tests (`package/include/tests/run.sh`), the shared firmware
 loader's tests (`package/common/tests/run-firmware-tests.py`), the copies checked byte for byte against their originals
@@ -215,7 +245,7 @@ imports, 4 from the libraries (`_native_ufs_part_find`, `_native_ufs_part_read` 
 `com.unixnu.driver.NativeUfs` and `com.unixnu.driver.PianoA830` as libraries; both are linked before PianoVideo in
 `configs/k27-native-kexts.txt`, so every `build-native-image.sh` links it. The link with the whole list and its result: §12.7.
 
-## 8. Hardware test plan and the ladder (RAM boots; V0 unattended, the rest attended)
+### 8. Hardware test plan and the ladder (RAM boots; V0 unattended, the rest attended)
 
 ```sh
 PIANO_GPU=2 PIANO_VMM_PRESENT=0 PIANO_RESET_AFTER=300 PIANO_EXTRA_ARGS="panic_on_crash_disabled=1 piano-usb=2 piano-video=1" \
@@ -266,13 +296,13 @@ SMMU (`piano-video-smmu=0`; PianoDpu and PianoWifi read the same pages). A `core
 
 Total about 10–16 weeks attended; H.264 in VideoToolbox (the first battery payoff) after V5, about 6–9 weeks in.
 
-## 9. Fallback
+### 9. Fallback
 
 Without `piano-video` and `piano-video-vt` nothing is mapped and VideoToolbox keeps Apple's software decoders. `piano-video-vt=1` publishes only the V0b service; the stub advertises H.264/HEVC and refuses stream start, so no Iris register or HFI work occurs. From level 6, a format the core cannot
 take is refused at `dsta` (VideoToolbox then decodes in software); a session error or a core watchdog ends the sessions with ERROR
 events (software again) and powers the core off. A hang or reset returns to the previous system (RAM boots, `piano-reset-after`).
 
-## 10. Open questions
+### 10. Open questions
 
 1. **Guest gate (resolved in V0b analysis):** 27.3 dispatches once to `VTParavirtualizationGuestSupportSetUpWithHandlers`; the
    support framework calls `IOServiceMatching("AppleVideoToolboxParavirtualizationDriver")`, `IOServiceGetMatchingService`, and
@@ -298,7 +328,7 @@ events (software again) and powers the core off. A hang or reset returns to the 
 13. The firmware's answer times (CTRL_STATUS, INIT, the version, PC_READY) on piano: Linux's bounds are used (100 ms, 1 s,
     2.5 ms) → V3's lines give them.
 
-## 11. Licence note
+### 11. Licence note
 
 The Linux iris, Venus, clock, SCM, interconnect and SMMU drivers (GPL-2.0) are read as the specification only (offsets, fields,
 sequences, sizes); nothing is copied. PianoVideo is BSD-2-Clause-Patent; its shape comes from PianoDpu (this repository); levels
@@ -309,7 +339,7 @@ files to vendor are BSD-2-Clause-Patent (source in §4). `vpu35_4v.mbn` is the o
 disassembled; no Apple binary is reverse engineered (public headers, class and symbol names only). Provenance:
 `package/PianoVideo/UPSTREAM`.
 
-## 12. Levels 2-4 as built: V1 power, V2 firmware, V3 SMMU bank and HFI (2026-11-11, offline)
+### 12. Levels 2-4 as built: V1 power, V2 firmware, V3 SMMU bank and HFI (2026-11-11, offline)
 
 | File | What |
 |---|---|
@@ -325,7 +355,7 @@ disassembled; no Apple binary is reverse engineered (public headers, class and s
 The gate: the kext runs levels 2-4 only for `piano-video=2..4`, after level 1's survey (unchanged); `Bringup::run` refuses any
 other level before its first access, so nothing is read or written by them below 2 (host-tested).
 
-### 12.1 V1: power on and off at 240 MHz (`piano-video=2`)
+#### 12.1 V1: power on and off at 240 MHz (`piano-video=2`)
 
 The votes (apps DRV-2 under PianoA830's DRV-2 owner word: compare-exchange 0 → `VIDE`, 10 µs steps, at most 2 s; one ACTIVE TCS per
 request in PianoA830's `Sm8750RpmhWriteActive` protocol, completion polled every 1 ms for at most 100 ms; a TCS that does not
@@ -370,7 +400,7 @@ unmasks the A2H/watchdog interrupt, V1-V3 poll; GCC's critical branches get a CL
 Repeated cycles: step 13 runs once; PLL0's calibration once; RETAIN_FF stays set after the first collapse, so cycle 2 writes the
 two GDSC words with bit 11 set once more and from cycle 3 on no new pair is logged.
 
-### 12.2 V2: the firmware (`piano-video=3`)
+#### 12.2 V2: the firmware (`piano-video=3`)
 
 **Where the file comes from: the shared run-time loader** ([kc-space.md](../kc-space.md) §6). The kext carries only the pin
 `PianoVideo/vpu35_4v.mbn` (2 409 160 bytes, SHA-256 `95c5882f9b66b93ad2635604b7db563cc310481e017fa6b82e0ce6cbb9eae01b`, the
@@ -403,7 +433,7 @@ the load or the authentication too lets the next try start from a clean PAS stat
 while the core is still powered (Linux unloads before it powers off). Every secure call has a line before it (with 20 ms for the
 console) and one after, so a call that does not return is the last line.
 
-### 12.3 V3: the streams' own SMMU bank and the HFI handshake (`piano-video=4`)
+#### 12.3 V3: the streams' own SMMU bank and the HFI handshake (`piano-video=4`)
 
 **V3 S1 lifecycle (vid-v3b, awaiting tablet verification).** The prior `vid-v3a` mailbox confirmed stage 42 rejected
 SCTLR `0x1027` reading `0x27`; teardown then ended at an unsupported as-found CBAR TYPE0 store (the inferred SError cause).
@@ -478,7 +508,7 @@ words again (no PAS), hardware mode, INTRA_FRAME_POWER_COLLAPSE, IMAGE_VERSION a
 steady state is: both GDSCs collapsed, the rails at the boot's levels, the firmware in the carveout under PAS 9, the bank and the
 3 MiB UC region kept for the next session (V5's).
 
-### 12.4 Failures
+#### 12.4 Failures
 
 V1/V2 retain their established power/PAS cleanup. V3 captures readable core/queue/SFR/fault evidence, resumes a collapsed core
 before PAS shutdown, releases the S1 domain while dependencies remain on, then powers off and frees memory. A failed secure
@@ -486,13 +516,13 @@ shutdown retains firmware ownership flags. An unconfirmed shutdown, detach, TLB 
 cleanup error alongside the original failure. The stage word ends
 negative at the failed step (`PianoVideo: FAILED at stage N: <reason>`), and `piano-video-bringup` says the same in one line.
 
-### 12.5 What every level keeps
+#### 12.5 What every level keeps
 
 Every register write logged once; every wait bounded (the brackets above; the DRV-2 lock 2 s; the secure-call lock its 30 s
 bound; a TCS 100 ms; the loader's wait for the ESP 60 s, only when the boot has no addon); no store from the zero register; nothing written below `piano-video=2`; `piano-video-stop=STEP`
 powers everything down after that step (§12.6).
 
-### 12.6 Step numbers
+#### 12.6 Step numbers
 
 10 rails · 11 MM1 · 12 GCC · 13 VIDEO_CC set-up · 14 controller GDSC · 15 controller clocks · 16 codec GDSC · 17 codec clocks · 18
 preset · 19 readout · 20 codec off · 21 controller off · 22 GDSCs read collapsed · 23 votes off · 30 the file · 31 the pin · 32 the
@@ -502,7 +532,7 @@ three packets · 48 the answers · 49 idle · 50 prepare-PC · 51 SET_REMOTE_STA
 SET_REMOTE_STATE(1) · 55 boot words again · 56 the ping · 57 unload · 58 SMMU teardown · 59 done. `piano-video-stop` takes 10-19,
 31, 33, 34, 36, 37, 41, 42, 46, 48 and 50 (other numbers are ignored).
 
-### 12.7 Host tests and the link
+#### 12.7 Host tests and the link
 
 `tests/bringup_host.cpp` runs the levels against one SoC model: GCC's branches; VIDEO_CC (a PLL0 that locks only when configured
 and running, a shared RCG whose update completes only on a running source, GDSCs reporting power-up/down in CFG, branches that run
@@ -538,7 +568,7 @@ from outside this repository`, `firmware: 1 of 1 pinned file(s) in the addon` (t
 `verify-ram-images.py`: the addon present and recorded, the ADT's `GpuAddon` slot, the entry
 `EFI/UniXNU/firmware/PianoVideo/vpu35_4v.mbn` matching its pin in the payload's own collection, `PASS: 0 failure(s)`.
 
-### 12.8 The batched tablet test list (RAM boots only; V0 first)
+#### 12.8 The batched tablet test list (RAM boots only; V0 first)
 
 Prerequisites: V0 (§8) passed: VIDEO_CC was readable, the core cold, no SMMU entry for 0x1940-0x194f (if V0 needed
 `piano-video-cc=0`, add it to every line below). No ESP update: the firmware travels in each RAM image's addon
@@ -662,7 +692,7 @@ with `piano-video-stop=33` to separate the file from the calls. `FAILED at stage
 `FAILED at stage 48` with `smmu: FAULT ... fsr ...`: the bank or the table (record FAR); without a fault: the firmware's packets
 (record `fw:` lines and the SFR). `FAILED at stage 50`: the firmware never idles (record CTRL_STATUS and the tz cpu word).
 
-### 12.9 Risks
+#### 12.9 Risks
 
 1. **The display's MMCX**: if the boot loader's MMCX vote sat on another DRV and was higher than NOM_L1, our NOM_L1 vote on DRV-2
    changes nothing; if it sat on DRV-2 and was higher, ours lowers it to NOM_L1, which the MDP at 575 MHz still has. T1's "panel
@@ -688,7 +718,7 @@ with `piano-video-stop=33` to separate the file from the calls. `FAILED at stage
    stage 30 reports `not found` on that system).
 
 
-## 13. V4 kernel single-frame self-test (tablet-confirmed)
+### 13. V4 kernel single-frame self-test (tablet-confirmed)
 
 `piano-video=5` adds one bounded session inside V3's verified lifecycle; the autonomous self-test and native VT mode are mutually exclusive.
 The committed fixture is an own encode of constant Y/Cb/Cr=64/96/160 at 320×240: SPS/PPS/one Baseline IDR, 286 bytes,
@@ -718,7 +748,7 @@ checks exercise the real portable V3 teardown on a nonresponsive session, includ
 the valid `vid-v4a` tablet capture confirms rel0039 session acceptance and pixel DMA with this exact golden.
 QuickTime, Safari, IOSurface and VT selection remain separate consumer work.
 
-## 14. V5a bounded native AVC VT bridge (tablet qualification pending)
+### 14. V5a bounded native AVC VT bridge (tablet qualification pending)
 
 The vid-v5a tablet run confirmed PV selection, client mappings and dsta delivery, then our driver returned -12910 before
 native session open. The 27.3 QuickTime ImageDescription serializer includes a zero-u32 after its extension atoms;
@@ -763,7 +793,7 @@ its fresh hardware+PV-required session must return one IOSurface-backed420v call
 inputs, and finish/invalidate safely. Selection, input/frame correlation and native completions are required alongside the
 hardware property. This endpoint is opt-in RAM qualification, not general AVC/HEVC, QuickTime, Safari or wallpaper rollout.
 
-## 15. Bounded persistent AVC qualification (V6; hardware result pending)
+### 15. Bounded persistent AVC qualification (V6; hardware result pending)
 
 The one-AU bridge is now a persistent exclusive session. The supported input is one complete picture per sample in a real
 avcC configuration: 320×240, 8-bit 4:2:0 progressive, no crop, Baseline/Main, POC0/2 and bounded references/reordering.
@@ -813,7 +843,7 @@ Absent domains are marked unreadable rather than read speculatively. The unchang
 original phase order. This is diagnostic instrumentation, not a firmware-stall fix or a continuous-decoding qualification.
 
 
-## 16. Stock playback qualification and bounded High AVC (V8)
+### 16. Stock playback qualification and bounded High AVC (V8)
 
 The V7e2 RAM test qualified the owned 320×240 Main AVC fixture in unmodified QuickTime: 60 native frames, client lifetime
 60 decoded/0 dropped, rate1 and optically confirmed fixture motion. The asynchronous reply window stays four with eight
@@ -840,7 +870,7 @@ safe close and optical motion in stock QuickTime. V8a subsequently passed these 
 aerial playback, Safari/MSE and concurrent sessions remain separate gates; cinematic boot is a frozen-surface/Metal
 handoff, with no established HEVC movie dependency.
 
-## 17. Bounded HEVC implementation (V9; tablet qualification pending)
+### 17. Bounded HEVC implementation (V9; tablet qualification pending)
 
 The first visible HEVC target is Aerial wallpaper: the27.3 default asset is Main10,3840×2160, High tier6.1 with temporal
 layers, WPP and B pictures. Its consumer can submit synchronous flags0/2. Official cinematic boot instead hands RGB
@@ -891,7 +921,7 @@ failed. Its wallpaper capture showed no resolved motion across26.45seconds; the 
 V9e removes the unnecessary maximum-size reservation while preserving every buffer capacity, both scratch generations,
 Ncap10, invalid guards and quarantine. This allocation correction is host-checked;1080p HEVC remains tablet-unqualified.
 
-### RAM16G: the AVC arena from region0 (R3, docs/extra-ram.md)
+#### RAM16G: the AVC arena from region0 (R3, docs/extra-ram.md)
 
 With `piano-extra-ram=1 piano-video-extra-ram=1` (both default 0), level 6 backs the 256 MiB AVC boot reservation with 128 slabs of
 the region0 modem run (0x89e00000 + 274 MiB, published by DarwinBoot in `/chosen/piano-extra-ram`, use 3), self-tested by the shared
@@ -900,3 +930,24 @@ translates every page as before (`VideoHw.h arenaPagePa`). The CPU view is one w
 cached alias exists. Loans are subranges of the same physical descriptor. Any shortfall falls back to the XNU allocation unchanged and
 is logged as `RAM16G arena from XNU: ...`. The pool's report is `machdep.piano_extra_ram_video` (root). HEVC arenas larger than the
 run stay XNU-backed.
+
+### 18. E1 bounded native H.264 encode self-test
+
+E1 exercises the native Iris encoder once with synthetic frames. VideoToolbox still reports zero hardware encoders through
+`encs`, and movie encoding continues through `VTEncoderXPCService` in software. The native self-test requires one literal
+`piano-video-enc=1` token, level 6 and a successful boot reservation. Omission, a zero value or duplicate keys leave it off.
+
+- `VideoEncode.h` defines the aligned NV12 input, bitstream and VPU35 internal buffer sizes for the four supported sizes.
+  The arena maps two raw buffers, two bitstream buffers and the internal buffers. The H.264 script uses High 5.0, CABAC,
+  variable bitrate, headers joined to the first IDR and zero B-frames.
+- `VideoEncodeSession.h` follows the pinned Linux Iris stream-on order. It opens one session, configures and starts the
+  raw port, provisions the internal buffers and starts the bitstream port. The session submits the bounded frame count,
+  waits for DRAIN acknowledgment and LAST, stops both ports and closes the session. The `E1` log records transactions
+  and output sizes, picture types, NAL types and timing.
+- The worker waits at most ten minutes for the shared decoder reservation after the configured delay. After a healthy session
+  and CLOSE acknowledgment, the core stays resident for the next decode session, which remaps its own arena. Failure
+  quarantines the core for that boot. The IORegistry properties `piano-video-enc-result` and `piano-video-enc-stream` carry
+  the result and up to 256 KiB of Annex B output.
+- The host suites check opt-in parsing, arena mapping, scripted HFI transactions and FFmpeg grading of the synthetic
+  pattern. The macOS host suite also exercises the VT cancellation path under ASan/UBSan.
+  [E1 integration and qualification](video-encode-e1.md)

@@ -17,29 +17,14 @@ does not wait. Two values are well formed:
 Anything else (shorter, or neither) is refused. Without mac-address-wifi0, every Wi-Fi address question (the UDID's: akd asks
 about every 5 s) waits 5 s for an IONetworkController under a service named wlan, sdio or marconi-wifi. Exit 0 = PASS, 1 = FAIL.
 """
+import importlib.util
 import struct
 import sys
+from pathlib import Path
 
 MAGIC = 0x53436667   # 'SCfg'
 CNTB = 0x434E5442    # 'CNTB'
 HEADER, ENTRY = 0x18, 0x14
-
-
-def parse_adt(data, offset=0):
-    """(properties, children) of the node at offset, and the offset after it (the flattened ADT format)."""
-    nprops, nchildren = struct.unpack_from('<II', data, offset)
-    offset += 8
-    props = {}
-    for _ in range(nprops):
-        name = data[offset:offset + 32].split(b'\0', 1)[0].decode(errors='replace')
-        size = struct.unpack_from('<I', data, offset + 32)[0] & 0x7fffffff
-        props[name] = data[offset + 36:offset + 36 + size]
-        offset += 36 + ((size + 3) & ~3)
-    children = []
-    for _ in range(nchildren):
-        child, offset = parse_adt(data, offset)
-        children.append(child)
-    return (props, children), offset
 
 
 def key_text(value):
@@ -128,12 +113,20 @@ def main():
     if len(sys.argv) != 2:
         print(__doc__.strip().split('\n\n')[1])
         return 2
-    (props, children), _ = parse_adt(open(sys.argv[1], 'rb').read())
-    chosen = [c for c in children if c[0].get('name', b'').rstrip(b'\0') == b'chosen']
+    spec = importlib.util.spec_from_file_location('adt_dump', Path(__file__).with_name('adt-dump.py'))
+    adt = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(adt)
+    try:
+        _, children = adt.parse_tree(Path(sys.argv[1]).read_bytes())
+    except (OSError, ValueError) as error:
+        print(f'FAIL: {error}')
+        return 1
+    chosen = [props for props in (dict(props) for props, _ in children)
+              if props.get('name', b'').rstrip(b'\0') == b'chosen']
     if len(chosen) != 1:
         print(f'FAIL: {len(chosen)} /chosen nodes')
         return 1
-    blob = chosen[0][0].get('syscfg-v2-data')
+    blob = chosen[0].get('syscfg-v2-data')
     if blob is None:
         print('FAIL: no /chosen syscfg-v2-data: every process waits 5 s in MobileGestalt (docs/identity.md section 9)')
         return 1
@@ -142,7 +135,7 @@ def main():
     except ValueError as e:
         print(f'FAIL: /chosen syscfg-v2-data: {e}')
         return 1
-    mac = chosen[0][0].get('mac-address-wifi0')
+    mac = chosen[0].get('mac-address-wifi0')
     if mac is None:
         print('FAIL: no /chosen mac-address-wifi0: every Wi-Fi address question waits 5 s in MobileGestalt (docs/identity.md section 9)')
         return 1

@@ -111,9 +111,10 @@ extern "C" int piano_audio_dsp_link(uint32_t wait_s, uint32_t settle_ms, int por
             lastGuard = gLink.guard.state;
         }
         if (gLink.set != lastSet) {
-            const AudioPorts *now = audio_ports(gLink.set);
+            const AudioPorts *newPorts = audio_ports(gLink.set);
             piano_audio_log("dsp: nobody answered from port %#x: GPR ports set %d (%s: %s) now: APM %#x, PRM %#x, data %#x",
-                            audio_ports(lastSet)->apm, gLink.set, now->name, now->source, now->apm, now->prm, now->data);
+                            audio_ports(lastSet)->apm, gLink.set, newPorts->name, newPorts->source, newPorts->apm, newPorts->prm,
+                            newPorts->data);
             lastSet = gLink.set;
             lastQueries = 0;
         }
@@ -348,6 +349,52 @@ int spkState(struct sysctl_oid *, void *, int, struct sysctl_req *req)
                            l.mip_failed, l.mip_starts, l.mip_fallbacks, int(l.preg_sent), l.preg_updates, l.mip_why ? l.mip_why : "-");
     return SYSCTL_OUT(req, line, size_t(n < int(sizeof line) ? n : int(sizeof line) - 1) + 1);
 }
+// spk-probe1 (AudioLive.h audio_live_spk_probe): machdep.piano_audio_spk_probe, write S = 1..30:
+// the protection pair up S seconds without sound, the amplifiers left powered down; S + 100: powered up and held muted.
+// Writes return ENOENT while protection is not ready. Read: the ms left of the running probe.
+// machdep.piano_audio_spk_live (read only): the probe's state and the last live data per amplifier, relative values only.
+struct sysctl_oid gSpkProbeOid, gSpkLiveOid;
+AudioLiveSpkStatus gSpkLiveStatus;
+
+void publishSpkLive()
+{
+    AudioLiveSpkStatus status;
+    audio_live_spk_status(gLive, &status);
+    IOLockLock(gWakeLock);
+    gSpkLiveStatus = status;
+    IOLockUnlock(gWakeLock);
+}
+
+int spkProbeControl(struct sysctl_oid *oidp, void *, int, struct sysctl_req *req)
+{
+    if (!gLive || !gShared) return ENXIO;
+    IOLockLock(gWakeLock);
+    const bool probing = gSpkLiveStatus.probing;
+    const uint32_t until = gSpkLiveStatus.until;
+    IOLockUnlock(gWakeLock);
+    const int32_t left = probing ? int32_t(until - nowMs()) : 0;
+    int value = left > 0 ? left : 0;
+    const int err = sysctl_handle_int(oidp, &value, 0, req);
+    if (err || !req->newptr) return err;
+    if (!gLive->cfg.spk_probe) return EPERM;
+    if (!gLive->prot_ready) return ENOENT;
+    const int queued = audio_live_spk_probe(gShared, uint32_t(value));
+    if (queued) return queued;
+    piano_audio_log("spk-probe1: request %d (taken at the worker's next tick)", value);
+    liveWake();
+    return 0;
+}
+int spkLive(struct sysctl_oid *, void *, int, struct sysctl_req *req)
+{
+    if (req->newptr) return EPERM;
+    if (!gLive) return ENXIO;
+    IOLockLock(gWakeLock);
+    const AudioLiveSpkStatus status = gSpkLiveStatus;
+    IOLockUnlock(gWakeLock);
+    char line[640];
+    const unsigned n = audio_live_spk_live_text(&status, nowMs(), line, sizeof line);
+    return SYSCTL_OUT(req, line, size_t(n) + 1);
+}
 // MIPLAY (AudioSpkProt.h): machdep.piano_audio_miplay asks for the Dolby/MiSound subgraph inside the protection plan from its next start
 // (0 off; 1 or 2 the perf mode; +4 the DAP's pregain follows the master volume; +16 x (r + 1) the rotation r); a new request also clears a
 // MIPLAY fallback of this boot. Its state is in machdep.piano_audio_spk_state ("miplay ...").
@@ -388,6 +435,22 @@ void registerSpk()
     gMiplayOid.oid_descr = "MIPLAY (Dolby) inside speaker protection from its next start: 0 off, 1/2 perf mode, +4 pregain tracked, +16(r+1) rotation r";
     gMiplayOid.oid_version = SYSCTL_OID_VERSION;
     sysctl_register_oid(&gMiplayOid);
+    if (!gLive->cfg.spk_probe || gLive->cfg.level < 9) return;
+    publishSpkLive();
+    bzero(&gSpkLiveOid, sizeof gSpkLiveOid);
+    gSpkLiveOid.oid_parent = &sysctl__machdep_children; gSpkLiveOid.oid_number = OID_AUTO;
+    gSpkLiveOid.oid_kind = int(CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_OID2);
+    gSpkLiveOid.oid_name = "piano_audio_spk_live"; gSpkLiveOid.oid_handler = spkLive;
+    gSpkLiveOid.oid_fmt = "A"; gSpkLiveOid.oid_descr = "spk-probe1: probe state and per-amp live data (permille of Re25, f0, Q, 0.1 C)";
+    gSpkLiveOid.oid_version = SYSCTL_OID_VERSION;
+    sysctl_register_oid(&gSpkLiveOid);
+    bzero(&gSpkProbeOid, sizeof gSpkProbeOid);
+    gSpkProbeOid.oid_parent = &sysctl__machdep_children; gSpkProbeOid.oid_number = OID_AUTO;
+    gSpkProbeOid.oid_kind = int(CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_OID2);
+    gSpkProbeOid.oid_name = "piano_audio_spk_probe"; gSpkProbeOid.oid_handler = spkProbeControl;
+    gSpkProbeOid.oid_fmt = "I"; gSpkProbeOid.oid_descr = "spk-probe1: protection pair S s without sound (1..30; +100 amps up muted)";
+    gSpkProbeOid.oid_version = SYSCTL_OID_VERSION;
+    sysctl_register_oid(&gSpkProbeOid);
 }
 // duplex-hold1 (A/B switch, private DUPLEX-VOTES.txt; AudioLive.h audio_live_hold_select): machdep.piano_audio_duplex_hold 0 off, 1 the
 // LPASS macro and digital codec votes, 3 also the VA (TX core) mclk, held by their own plan from before the first path starts until both
@@ -575,6 +638,7 @@ void liveRun(const PianoAudioLevelArgs *a)
     lc.spk_prot = int(a->spk);   // 0, or the round-2 mask (AudioSpkProt.h SPK_VAR_*), checked by PianoAudio.cpp and AudioLive
     lc.age_old = int(a->ageOld);   // duplex-age1 A/B control
     lc.miplay = int(a->miplay);   // MIPLAY: 0, or AudioSpkProt.h's request (checked by PianoAudio.cpp and AudioLive)
+    lc.spk_probe = int(a->spkProbe);   // spk-probe1: 0 ignores machdep.piano_audio_spk_probe, 1 takes it
     lc.duplex_hold = int(a->duplexHold);   // duplex-hold1: 0, 1 or 3 (checked by PianoAudio.cpp and AudioLive)
     static AudioLiveSpk *spkState;   // kept for the boot, as gLive
     if (!spkState) spkState = IOMallocType(AudioLiveSpk);
@@ -648,6 +712,7 @@ void liveRun(const PianoAudioLevelArgs *a)
                 __atomic_store_n(&gPmAck,request,__ATOMIC_RELEASE); handled=request;
             }
         }
+        if (lc.spk_probe) publishSpkLive();
         const uint32_t word = liveWord(*gLive);
         piano_audio_live_word = word;
         if (word != lastWord || (lc.mic && now - registryAt >= 1000)) {

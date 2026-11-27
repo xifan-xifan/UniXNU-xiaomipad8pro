@@ -167,7 +167,8 @@ Adreno830 (github.com/Shad0w23333/Adreno830; local unixnu-research/Adreno830), m
       reservePool and a contiguous BO of 2 GiB refused unasked, 2 GiB less a page asked, a scattered 2 GiB BO still asked.
   Not compiled into the kext: NativeAdrenoAccelerator.cpp (the iPadOS IOAcceleratorES class), NativeAdrenoClient.cpp and
   NativeAdrenoBoard.cpp (host-only), tests/ and scripts/ (host tools). The source lists are those of scripts/build-adreno830.py.
-  NativeAdrenoABI.h (the v2 user-client ABI Turnip's darwin KMD includes) is unchanged, byte for byte.
+  NativeAdrenoABI.h preserves the v2 wire layout. The optional GPU-private tier adds a Query flag and a value for
+  BoAlloc's existing contiguous field.
 
 ArmSmmu4K (github.com/UniXNU/ArmSmmu4K), 3ba92451bd44bb742d11758fbfcd3a446ecad685, MIT (kits/ArmSmmu4K/LICENSE, sha256
 7a730b868c1ff986cdfc210a7b140ab4e0a31bf7db1d15db901427973efaa70f). The revision Adreno830 1a13210 was built and tested against

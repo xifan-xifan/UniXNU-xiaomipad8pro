@@ -19,7 +19,9 @@ vge()  { # vge A B: version A >= B (dotted numbers)
   python3 -I -c 'import sys; a, b = ([int(x) for x in v.split(".")] for v in sys.argv[1:3]); sys.exit(0 if a >= b else 1)' "$1" "$2" 2> /dev/null; }
 
 # 1 the host
-[ "$(uname -s)" = Darwin ] && ok "macOS host" || { bad "not macOS ($(uname -s)): the build needs hdiutil/APFS, codesign, Xcode, compression_tool, aea"; }
+OS=$(uname -s)
+if [ "$OS" = Darwin ]; then ok "macOS host"
+else bad "not macOS ($OS): the build needs hdiutil/APFS, codesign, Xcode, compression_tool, aea"; fi
 ARCH=$(uname -m)
 if [ "$(sysctl -n sysctl.proc_translated 2> /dev/null)" = 1 ]; then
   bad "this shell runs under Rosetta (x86_64 on Apple silicon): run the build from a native arm64 shell"
@@ -35,23 +37,26 @@ XV=$(xcodebuild -version 2> /dev/null) && XV=$(printf '%s\n' "$XV" | awk 'NR == 
 if [ -n "$XV" ]; then
   if vge "$XV" 27.0; then ok "Xcode $XV (tested: 27.2, 27B52)"; else warn "Xcode $XV: untested (tested: 27.2); the k27 kernel's flags and the SDK 27 headers were built with Xcode 27"; fi
   SDK=$(xcrun --sdk macosx --show-sdk-path 2> /dev/null)
-  [ -d "$SDK/System/Library/Frameworks/Kernel.framework/Headers" ] && ok "macOS SDK $(xcrun --sdk macosx --show-sdk-version 2> /dev/null) with Kernel.framework" \
-    || bad "no Kernel.framework in the macOS SDK ($SDK): install Xcode and run xcode-select -s /Applications/Xcode.app"
-  [ -d "$(xcrun --sdk iphoneos --show-sdk-path 2> /dev/null)" ] && ok "iphoneos SDK (the k27 kernel builds with SDKROOT=iphoneos)" \
-    || bad "no iphoneos SDK: the k27 kernel's make uses SDKROOT=iphoneos (Xcode's iOS platform component)"
+  if [ -d "$SDK/System/Library/Frameworks/Kernel.framework/Headers" ]; then
+    ok "macOS SDK $(xcrun --sdk macosx --show-sdk-version 2> /dev/null) with Kernel.framework"
+  else bad "no Kernel.framework in the macOS SDK ($SDK): install Xcode and run xcode-select -s /Applications/Xcode.app"; fi
+  if [ -d "$(xcrun --sdk iphoneos --show-sdk-path 2> /dev/null)" ]; then
+    ok "iphoneos SDK (the k27 kernel builds with SDKROOT=iphoneos)"
+  else bad "no iphoneos SDK: the k27 kernel's make uses SDKROOT=iphoneos (Xcode's iOS platform component)"; fi
 else
   bad "no Xcode (xcodebuild): install Xcode 27 from Apple and run sudo xcode-select -s /Applications/Xcode.app; the Command Line Tools alone lack the SDKs"
 fi
 
 # 3 macOS tools the build and the fetch call
 for t in /usr/bin/aea /usr/bin/compression_tool /usr/bin/hdiutil /usr/sbin/diskutil /sbin/newfs_apfs /usr/bin/codesign /usr/bin/ditto /usr/sbin/mkfile /usr/bin/curl /usr/bin/git; do
-  [ -x "$t" ] && ok "$t" || bad "missing $t"
+  if [ -x "$t" ]; then ok "$t"; else bad "missing $t"; fi
 done
 if PV=$(python3 -I -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2> /dev/null) && vge "$PV" 3.11; then ok "python3 $PV"
 else bad "python3 3.11 or later is needed (found ${PV:-none})"; fi
 
 # 4 Homebrew packages, at the Apple-silicon prefix /opt/homebrew that several scripts name (PYTHON315, LLVM_NM, LLVM_BIN override some)
-[ -d /opt/homebrew ] && ok "Homebrew at /opt/homebrew" || bad "no /opt/homebrew (Apple silicon Homebrew): tooling/k27, tooling/metal and the k27 kernel script use it"
+if [ -d /opt/homebrew ]; then ok "Homebrew at /opt/homebrew"
+else bad "no /opt/homebrew (Apple silicon Homebrew): tooling/k27, tooling/metal and the k27 kernel script use it"; fi
 for spec in "python@3.15:/opt/homebrew/opt/python@3.15/bin/python3.15:the Turnip meson venv (PYTHON315)" \
             "llvm:/opt/homebrew/opt/llvm/bin/llvm-nm:llvm-nm and the GOP display build (LLVM_NM, LLVM_BIN)" \
             "gnu-sed:/opt/homebrew/opt/gnu-sed/libexec/gnubin/sed:the k27 kernel's GNU-style sed -i" \
@@ -60,28 +65,32 @@ for spec in "python@3.15:/opt/homebrew/opt/python@3.15/bin/python3.15:the Turnip
             "dtc:/opt/homebrew/bin/dtc:device trees" \
             "zstd:/opt/homebrew/bin/zstd:release archives"; do
   IFS=: read -r pkg path why <<< "$spec"
-  [ -x "$path" ] && ok "$pkg ($why)" || bad "brew install $pkg: $path missing ($why)"
+  if [ -x "$path" ]; then ok "$pkg ($why)"; else bad "brew install $pkg: $path missing ($why)"; fi
 done
-have ipsw && ok "ipsw $(ipsw version 2> /dev/null | awk 'NR == 1 {sub(",", "", $2); print $2}') (the AEA key fetch)" \
-  || bad "no ipsw: brew install blacktop/tap/ipsw (the AEA key fetch of tooling/k273/decrypt-aea.py)"
-have fastboot && ok "fastboot ($(command -v fastboot))" || warn "no fastboot: brew install --cask android-platform-tools (needed for the tablet steps, not the build)"
+if have ipsw; then ok "ipsw $(ipsw version 2> /dev/null | awk 'NR == 1 {sub(",", "", $2); print $2}') (the AEA key fetch)"
+else bad "no ipsw: brew install blacktop/tap/ipsw (the AEA key fetch of tooling/k273/decrypt-aea.py)"; fi
+if have fastboot; then ok "fastboot ($(command -v fastboot))"
+else warn "no fastboot: brew install --cask android-platform-tools (needed for the tablet steps, not the build)"; fi
 
 # 5 disk: inputs ~32 GB at the peak, the root image 21 GB + SystemOS 6 GB, the k27 tree ~3 GB, builds and images ~20 GB
 FREE=$(df -k "$D" | awk 'NR == 2 {print int($4 / 1048576)}')
-[ "${FREE:-0}" -ge 90 ] && ok "${FREE} GiB free on the checkout's volume" || warn "${FREE:-?} GiB free: plan for about 90 GiB (IPSW inputs, root image, builds)"
+if [ "${FREE:-0}" -ge 90 ]; then ok "${FREE} GiB free on the checkout's volume"
+else warn "${FREE:-?} GiB free: plan for about 90 GiB (IPSW inputs, root image, builds)"; fi
 
 # 6 the local-only inputs (Known gaps)
+# shellcheck disable=SC1091 # Probe the checkout helper in a subshell so its exit does not stop the checks.
 K27=$(. "$D/tooling/k27/k27-tree.sh" 2> /dev/null && echo "$PIANO_K27_TREE")
 if [ -n "$K27" ] && [ -x "$K27/build-k27-piano.sh" ]; then ok "k27 tree at PIANO_K27_TREE"
-  [ -x "$K27/out/x12377/ldc/ld" ] && ok "ld-classic in the k27 tree (out/x12377/ldc/ld)" || gap "no out/x12377/ldc/ld in the k27 tree: the kernel links with ld-classic (ld64-957 of an older Command Line Tools)"
+  if [ -x "$K27/out/x12377/ldc/ld" ]; then ok "ld-classic in the k27 tree (out/x12377/ldc/ld)"
+  else gap "no out/x12377/ldc/ld in the k27 tree: the kernel links with ld-classic (ld64-957 of an older Command Line Tools)"; fi
 else gap "PIANO_K27_TREE: the k27 kernel tree (xnu-12377 + the baseline series) is local-only"; fi
-[ -f "$D/out/inputs/kernel.macho.trustcache" ] && ok "base trust bundle out/inputs/kernel.macho.trustcache" \
-  || gap "out/inputs/kernel.macho.trustcache: the 27.0.1 line's trust bundle whose own modules make-trust.py keeps (from the k27 tree)"
-[ -f "$D/out/inputs/scratch-data.img" ] || [ -n "${K273_SEED:-}" ] && ok "a Data seed (out/inputs/scratch-data.img or K273_SEED)" \
-  || gap "no Data seed (out/inputs/scratch-data.img or K273_SEED): the macOS Data volume the RAM images start from"
+if [ -f "$D/out/inputs/kernel.macho.trustcache" ]; then ok "base trust bundle out/inputs/kernel.macho.trustcache"
+else gap "out/inputs/kernel.macho.trustcache: the 27.0.1 line's trust bundle whose own modules make-trust.py keeps (from the k27 tree)"; fi
+if [ -f "$D/out/inputs/scratch-data.img" ] || [ -n "${K273_SEED:-}" ]; then ok "a Data seed (out/inputs/scratch-data.img or K273_SEED)"
+else gap "no Data seed (out/inputs/scratch-data.img or K273_SEED): the macOS Data volume the RAM images start from"; fi
 R=${UNIXNU_RESEARCH:-$HOME/Downloads/XiaomiPad8Pro-Ubuntu/unixnu-research}
-[ -d "$R/UniXNU" ] && [ -d "$R/Mu-Silicium-piano" ] && ok "UNIXNU_RESEARCH checkouts ($R)" \
-  || gap "UNIXNU_RESEARCH ($R): the unixnu.lock checkouts the UEFI FD is built from (public; clone them at their pins)"
+if [ -d "$R/UniXNU" ] && [ -d "$R/Mu-Silicium-piano" ]; then ok "UNIXNU_RESEARCH checkouts ($R)"
+else gap "UNIXNU_RESEARCH ($R): the unixnu.lock checkouts the UEFI FD is built from (public; clone them at their pins)"; fi
 
 echo "summary: $fails FAIL, $warns WARN, $gaps GAP"
 [ "$fails" = 0 ]

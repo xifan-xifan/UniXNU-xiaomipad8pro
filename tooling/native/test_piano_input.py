@@ -151,6 +151,7 @@ class FakeTablet(threading.Thread):
         self.path = os.ttyname(slave)
         self.slave = slave
         self.lines, self.count = [], 0
+        self.release_received = threading.Event()
 
     def run(self):
         buffer = b''
@@ -171,6 +172,8 @@ class FakeTablet(threading.Thread):
                 elif valid(line):
                     self.count += 1
                     answer = f'ok {self.count}'
+                    if line == 'R':
+                        self.release_received.set()
                 else:
                     answer = 'err verb'
                 os.write(self.master, answer.encode() + b'\n')
@@ -207,7 +210,9 @@ class EndToEnd(unittest.TestCase):
         code, _, err = self.run_main(tablet, 'raw', 'Z 1')
         self.assertEqual(code, 1)
         self.assertIn('refused', err)
-        self.assertEqual(tablet.lines[-1], 'R')   # nothing left pressed
+        # The error path sends R without waiting for a reply, so wait for the mock to read it.
+        self.assertTrue(tablet.release_received.wait(timeout=1), 'mock did not receive release after refusal')
+        self.assertEqual(tablet.lines, ['Z 1', 'R'])
 
     def test_unmapped_text_sends_nothing(self):
         tablet = FakeTablet()

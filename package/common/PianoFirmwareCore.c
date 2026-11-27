@@ -91,7 +91,7 @@ int pfw_addon_find(const uint8_t *addon, uint64_t bytes, const char *path, PfwAd
         return PIANO_FW_DAMAGED;
     const uint32_t count = le32(addon + 8);
     if (count > PFW_ADDON_MAX_ENTRIES) return PIANO_FW_DAMAGED;
-    int found = 0;
+    PfwAddonEntry found = {0};
     uint64_t at = PFW_ADDON_HEADER;
     for (uint32_t i = 0; i < count; ++i) {
         if (bytes - at < PFW_ADDON_ENTRY) return PIANO_FW_DAMAGED;
@@ -104,22 +104,19 @@ int pfw_addon_find(const uint8_t *addon, uint64_t bytes, const char *path, PfwAd
         const char *name = (const char *)(addon + name_at);
         for (uint32_t k = 0; k + 1 < name_bytes; ++k) if (!name[k]) return PIANO_FW_DAMAGED;
         if (name[name_bytes - 1]) return PIANO_FW_DAMAGED;
-        if (!found) {
+        if (!found.path) {
             uint32_t k = 0;
             while (k + 1 < name_bytes && path[k] && path[k] == name[k]) ++k;
             if (k + 1 == name_bytes && !path[k]) {
-                found = 1;
-                entry->path = name;
-                entry->mode = le32(e + 4);
-                entry->size = size;
-                entry->packed = addon + data_at;
-                entry->packed_bytes = packed;
+                found = (PfwAddonEntry){name, le32(e + 4), size, addon + data_at, packed};
             }
         }
         at = data_at + pad8(packed);
     }
     if (at != bytes) return PIANO_FW_DAMAGED;   /* the total covers the entries exactly */
-    return found ? PIANO_FW_OK : PIANO_FW_NOT_FOUND;
+    if (!found.path) return PIANO_FW_NOT_FOUND;
+    *entry = found;
+    return PIANO_FW_OK;
 }
 
 int pfw_from_addon(const uint8_t *addon, uint64_t bytes, const PianoFirmwarePin *pin, const PianoFwOps *ops, uint8_t **data)

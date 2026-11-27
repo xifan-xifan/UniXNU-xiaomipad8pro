@@ -1,18 +1,40 @@
 # The 27.3 line: macOS 27.3 (26C5035r) as Mac17,11 on piano
 
-Owner decision 2026-11-12 22:40: move off the VM identity. The first 27.3 line ran macOS 27.3 (26C5035r) from the UniversalMac
-restore IPSW of the UniXNU `macos-27.3-26C5035r` profile, with the profile's identity Mac17,11 / K114c / K114cAP, beside the
-then-installed 27.0.1 (26A434) VirtualMac2,1 line. **Since 2026-11-14 the installed daily system is macOS 27.3 only**: the
-27.0.1 line is retired and its old volume/store was cleared. The current root is on `linux_rootfs`; the owner's 200 GiB Data
-store spans `linux_data` (LBA 71859642, seed `9bd6f902`; [persistent-boot.md](persistent-boot.md) §13.8,
-[results-2026-11-14.md](results-2026-11-14.md)).
+## Current line (2026-11-27)
+
+The reference tablet's installed daily build is **v13.1y12q**, verified from disk on 2026-11-26. It boots macOS 27.3
+(26C5035r) from the UniXNU `macos-27.3-26C5035r` profile as Mac17,11 / K114c / K114cAP at EL1. Gunyah remains at EL2.
+The 27.3-only `macos-27.3` ESP entry uses the mac17j kernel collection base and `configs/k273-adt.toml`. The root is on
+`linux_rootfs`, and the 200 GiB direct Data store is on `linux_data`. The installed v5 FD and ADT pair provides a 13 GiB
+XNU window (13310 MiB measured on v13.1y12l). [Installed profile](USING.md#2-the-installed-profile) · [November 26 results](results-2026-11-26.md)
+
+- **Kernel.** The k273 build uses the pinned k27 tree (xnu-12377 with its baseline patch series), the native patch series
+  0053–0076, and `patches/k273`. `prepare-k27-tree.sh` relinks the native kernel at the 27.3 collection's segment addresses.
+  Patch 0074 provides the read-only App cryptex view used by the GPU plug-in. Patch 0075 provides the 47-bit user address
+  space used by Chrome WebGPU. Patch 0066 appends the ADT boot-argument tail, and 0076 exports the full merged line as
+  `kern.piano_bootargs` for the USB shell and other updated helpers. [Native kernel patches](../patches/k27/README.md) · [November 25 results](results-2026-11-25.md) · [November 26 results](results-2026-11-26.md)
+- **Daily profile.** Data switches to M4 concurrent mode after mount. M5 write-back and queue modes remain off. USB debug
+  network TX flow control is on by default and passed 66/66 exact transfers in qualification. Display stays at 60 Hz with
+  Night Shift routing, native panel sleep and refresh switching off. Fixed 120 Hz and 144 Hz have RAM scanout results.
+  [Support status](STATUS.md) · [Hardware backlog](BACKLOG-hardware.md)
+- **Build and install references.** [`scripts/fetch-pins.py`](../scripts/fetch-pins.py) fetches the pinned source checkouts. The k27 tree
+  comes from the macOS-DroidVM pin and `patches/k27-tree`. GitHub-hosted checks cover privacy, pins and host self-tests, including
+  the Adreno830 suite. The second-unit guide covers host prep, RAM qualification, guarded installation and the remaining
+  gaps in reproducing the daily profile.
+  [CI and releases](ci.md) · [Second-unit install guide](../skills/install-piano-macos/SKILL.md)
+
+## Historical migration (2026-11-12 to 2026-11-14)
+
+On 2026-11-12 the owner chose the UniversalMac 27.3 profile and its Mac17,11 identity. The first 27.3 build ran beside the
+then-installed 27.0.1 (26A434) VirtualMac2,1 line. On 2026-11-14 the 27.3-only ESP replaced the dual ESP and the 27.0.1 volume
+and store were cleared. [Install design](persistent-boot.md) §13.8 · [November 14 results](results-2026-11-14.md)
 
 Approach (owner, 2026-11-12): migrate everything at once (every native kext of configs/k27-native-kexts.txt, the k27 kernel with
 0053-0065, the ADT and board pieces, the image tooling, the Turnip plugin), build the first RAM image fast, then fix by booting.
 
-## 1. What differs from the 27.0.1 line, and what does not
+## 1. Historical comparison with the 27.0.1 line (2026-11-12 to 2026-11-14)
 
-| Piece | 27.0.1 line | 27.3 line | Where |
+| Piece | 27.0.1 line | Early 27.3 line | Where |
 |---|---|---|---|
 | Kernel | k27 tree: xnu-12377 + 0001-0052 + patches/k27 0053-0065, `K27_VARIANT=native` | the same source + `patches/k273` (0001: UniXNU's Darwin 26 system calls), relinked at the 27.3 collection's segment addresses | `tooling/k273/prepare-k27-tree.sh`, `patches/k273/`, `patches/k273-kc/` |
 | Apple kexts | vma2 kernelcache 26A434 (`$PIANO_K27_TREE/out/kc/kc27.bin`) | `kernelcache.release.mac17j` 26C5035r (sha256 d1003b51..., the profile's pin) | `tooling/k273/decompress-kernelcache.py` |
@@ -24,7 +46,7 @@ Approach (owner, 2026-11-12): migrate everything at once (every native kext of c
 | Data seed | out/inputs/scratch-data.img | first images: the same seed (the daily Data as before an update), volatile (`data-persist=0`) | `make-root-image.sh` (`K273_SEED` for another) |
 | GPU userland | Turnip on ABI v2 + NativeAdrenoMetal.bundle | the same bundle, staged into the 27.3 seed copy | `tooling/metal/build-turnip-a830.sh` |
 
-### Kernel collection findings (2026-11-12)
+### Historical kernel collection findings (2026-11-12)
 
 - mac17j is an SPTM collection: top-level `__DATA_SPTM` and `__TEXT_BOOT_EXEC` hold only Apple's kernel and dropped kexts; the
   KC builder leaves them out after checking that nothing kept or linked lies in them (`patches/k273-kc/0001`). Its header takes
@@ -44,7 +66,7 @@ Approach (owner, 2026-11-12): migrate everything at once (every native kext of c
   padding (no family code touches it): not read for 27.3. mac17j has no IOMobileFramebufferLegacy subclass to name the pure
   virtual slots, so the declarations come from the vma2 collection (same vtables) with mac17j's instance size.
 
-## 2. Plan and effort (2026-11-12)
+## 2. Historical migration plan and effort (2026-11-12)
 
 | # | Step | State | Effort left |
 |---|---|---|---|
@@ -56,7 +78,9 @@ Approach (owner, 2026-11-12): migrate everything at once (every native kext of c
 | 6 | A fresh 27.3 Data seed (UniXNU's `make-macos-data-seed.py` or the k27 recipe with the owner's account record) | open | 0.5 day |
 | 7 | The 27.3 line's installed profile (ESP with the 27.3 KC/ADT/seed, store at the end of linux_data) | after a stable desktop | 0.5-1 day |
 
-## 3. The root image and its write (owner's step)
+## 3. Historical first root image and disk layout (2026-11-12)
+
+The first 27.3 root went on `linux_data` beside the 27.0.1 system. Section 7 records the move to `linux_rootfs`.
 
 `tooling/k273/make-root-image.sh` -> `out/inputs/k273/root/root.img` and `root.json` (volumes, windows, sha256s, LBAs).
 2026-11-12: 20936916992 bytes, sha256 `2f8ef3550f5c94bb831676e1e8a3894416563c08297c0192f8e29971fd5db1b8`; manifest `089b937d...`;
@@ -68,14 +92,16 @@ block; the rest of linux_data (to LBA 124552186) is untouched; no GPT change. Fr
 `dd if=root.img of=/dev/sda36 bs=4M conv=fsync`, then read back 20936916992 bytes and compare the sha256. The old ext4 of
 linux_data is overwritten (owner decision).
 
-## 4. RAM images
+## 4. RAM images and the historical first boots
 
-`tooling/k273/build-k273-image.sh` builds the 27.3 KC, ADT and RAM images with `K273_KERNEL`. **2026-11-14 layout caveat:**
-its `K273_ROOT=k273` default still names `native-ufs-root-part=linux_data`, and `K273_ROOT=k27` names the cleared 27.0.1 root;
-neither describes the current installation. For the current root on `linux_rootfs` and store on `linux_data`, use
-`tooling/k273/build-k273-esp.py --root-part linux_rootfs` and the §13.8 recipe in [persistent-boot.md](persistent-boot.md),
-whose RAM test is `out/ram-k273-v2ro`. The old `K273_ROOT` choices and the desk-dev recipe below are retained only as the
-first-line build record; do not use them against the current layout.
+For a RAM build on the reference layout, set `K273_ROOT_PART=linux_rootfs` with `tooling/k273/build-k273-image.sh`.
+`K273_KERNEL` selects a specific prepared kernel when needed. To test the exact ESP payload, see the
+`build-k273-esp.py --root-part linux_rootfs` recipe and its RAM test in §13.8 of the install design.
+[RAM build guide](USING.md#4-test-a-change-ram-boot-nothing-written) · [Install design](persistent-boot.md)
+
+### Historical desk-dev images (2026-11-13)
+
+The commands and checks below describe the first 27.3 RAM images, with the root on `linux_data` and volatile Data.
 
 ```sh
 PIANO_GPU=2 tooling/k273/build-k273-image.sh            # KC, ADT, Turnip stage (27.3 trust) in out/
@@ -110,9 +136,6 @@ lossless-compressed BGRA spelling, one plane), which NativeGopDisplay refused (`
 non-blocking polls, as on 27.0.1), so the ABI=2 offsets held. Fix: '&BGA' read as BGRA from its plane 0, which the Metal plugin
 renders linearly (`ram-k273-desk-dev-s1c`, sha256 `43a25f0c56d40178b6a9a9b96d904765904418f32692b2a564273701b83aa61b`).
 
-The large inputs live on the external SSD (`/Volumes/ExtSSD/k273/`: the IPSW members, `root/root.img`, `root/systemos.img`), with
-links at their `out/inputs/k273/` paths.
-
 Checklist of the first 27.3 boot (each with the console line that answers it):
 
 1. The collection links and starts: `kc-build` log `wrote ...`; on the console the native kexts' start lines (`NativeUfs: start ...
@@ -128,8 +151,8 @@ Checklist of the first 27.3 boot (each with the console line that answers it):
 7. Login with the debug account; Dock, Finder; Metal clients (`log show` of WindowServer for Metal plugin errors: new MTLDevice
    selectors in 27.3 abort here).
 
-**The boot-args beyond 1023 bytes (k27 0066, 2026-11-13; [bringup-debugging.md](bringup-debugging.md) §5.2).** The installed 27.3
-entry's line is 989 bytes; with 0066 in the kernel the `piano-*` driver arguments move into the ADT (`/chosen/piano-boot-args-NAME`,
+**Historical ADT boot-args test (k27 0066, 2026-11-13; [bringup-debugging.md](bringup-debugging.md) §5.2).** The first installed 27.3
+entry's line was 989 bytes. With 0066 in the kernel the `piano-*` driver arguments move into the ADT (`/chosen/piano-boot-args-NAME`,
 the line says `piano-boot-args=NAME`) and the kernel appends them to the boot-args before anything reads them. Kernel:
 `tooling/k273/prepare-k27-tree.sh` on a k27 tree with 0066 applied (`kernel-k273-0066-s0001-native.macho`, sha256 `8b70f531...`).
 First RAM test `ram-k273-bootargs` (sha256 `48bbc4ac...`, 237281280 bytes): the installed entry's line with `data-persist=0` plus
@@ -144,7 +167,10 @@ come up as on the installed entry: the USB console (`piano-usb=2`), the root she
 level 6; (4) on the USB console `args` prints the 1071-byte line; `sysctl kern.bootargs` its first 1017 bytes (cut after the last whole argument under 1024: it ends at `piano-power-delay=0`); (5) the
 reset after 900 s (it stayed on the line) or `reset fastboot`.
 
-## 5. Open questions and blockers
+## 5. Historical open questions from the first 27.3 builds (2026-11-12 to 2026-11-14)
+
+These notes record the migration's initial trust, firmlink, kext and seed questions. The current hardware and release follow-ups
+are tracked in the [hardware backlog](BACKLOG-hardware.md) and [CI guide](ci.md#open-items).
 
 - Trust/signing: the System volume of the IPSW is unsealed ("Sealed: No") and the k27 dev build publishes the windows unverified
   (`NATIVE_UFS_UNVERIFIED_ROOT`), as for 27.0.1; the profile's owner-signed root policies are not used by the k27 chain.
@@ -154,7 +180,7 @@ reset after 900 s (it stayed on the line) or `reset fastboot`.
   EndpointSecurity, AppleHIDKeyboard ...); this line keeps the 27.0.1 line's set, whose drivers stand in for the hardware ones.
 - The 27.0.1 seed with the 27.3 system skips the Data migration of an update; a fresh 27.3 seed is step 6.
 
-## 6. The dual-boot entry on the installed ESP (2026-11-13)
+## 6. Historical dual-boot entry on the installed ESP (2026-11-13)
 
 `tooling/k273/build-dual-esp.py` makes the installed ESP (its build record, default `out/persistent/installed.json`'s image) with
 one entry more, `macos-27.3`, and nothing else changed: every file and every entry of the base (the default `macos`, its timeout,
@@ -180,12 +206,12 @@ k273-store` reads both store headers (the 27.3 one blank or bound to its LBA wit
 
 The 27.3 store's seed was its base for the first installed line: every later ESP of that step took the same seed file
 (`out/inputs/k273/store-seed/scratch-data.img`, then identity 89860516...). **2026-11-14:** that seed was grown to 200 GiB and
-carried over with the owner's store; the current identity is `9bd6f902` at LBA 71859642 on `linux_data`
+carried over with the owner's store under identity `9bd6f902` at LBA 71859642 on `linux_data`
 ([persistent-boot.md](persistent-boot.md) §13.8). The retired 27.0.1 line no longer keeps a base store.
 Its RAM test: `build-ram-images.py` with `PIANO_EXACT_ARGS` = the entry's line (`out/ram-k273-entry`): the same payload and the same
 arguments, `data-persist=2` on the new store (its first boot creates the store; the installed entry then resumes it).
 
-## 7. 27.3 only (2026-11-14): the 27.3-only ESP, then linux_rootfs retired
+## 7. Historical 27.3-only installation (2026-11-14)
 
 Owner decision 2026-11-14: the 27.0.1 line goes. First the installed dual ESP is replaced by one with the 27.3 entry alone, then,
 once that has booted, linux_rootfs (the 27.0.1 system volume and its Data store) is backed up and cleared. The recipe, its checks
@@ -201,7 +227,7 @@ installed kernel has it).
 
 For the first 27.3-only ESP, the store facts came from the inputs: the partition and LBA from the line
 (`native-ufs-root-part=linux_data data-store-lba=117998394`), the window's size from the seed (89860516, 24 GiB: 6291649 blocks).
-That was the superseded step-1 layout. **The installed v2/v3 line uses `native-ufs-root-part=linux_rootfs`,
+That was the superseded step-1 layout. **The v2/v3 installation moved to `native-ufs-root-part=linux_rootfs`,
 `data-store-part=linux_data`, LBA 71859642, 52430401 blocks and seed `9bd6f902` (200 GiB)** ([persistent-boot.md](persistent-boot.md)
 §13.8). The record's `seed` and `store` are the installed store's; `maint-session.py` checks that store on the tablet before it writes the ESP
 (bound to its LBA, of that seed, at NativeUfs's place in linux_data as mapped), and `rootfs-clear` accepts only such an ESP on the

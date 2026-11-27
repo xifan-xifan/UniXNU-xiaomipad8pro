@@ -1,5 +1,22 @@
 # Keyboard cover: Nanosic WN8030 over bit-banged I2C (PianoKeyboard), and the folio hall sensor
 
+## Daily status (2026-11-27)
+
+- **Installed v13.1y12q.** Typing and the trackpad work, and the login window recognizes the cover. The cover and trackpad
+  were checked hands-on on installed v12 on November 19 and checked again on v13.1y12l on November 26. PianoPolicy has
+  armed the cover and power-key policy on the daily line since v13.1y12m.
+  [Support status](../STATUS.md) · [November 26 policy results](../results-2026-11-26.md#also-on-the-daily-line)
+- **RAM qualification, `v131y12t-qual1`, November 27.** Suspend-to-idle with timer wake and the simulated power-key and
+  lid policies passed. The earlier v13.1y12m RAM check covered locking without suspend on charger power and simulated
+  power-key sleep and wake.
+  [November 26 policy results](../results-2026-11-26.md#also-on-the-daily-line) · [November 27 RAM results](../results-2026-11-27.md#ram-qualification)
+- **Attended checks pending.** Closing the cover on battery and using the physical power key still need hands-on checks.
+  [Hardware backlog, B2](../BACKLOG-hardware.md#2-backlog-b1b15)
+
+## Historical bring-up notes
+
+The design, boot arguments, test plans and measurements below describe the builds under test at the time.
+
 Status, 2026-11-11: built and linked (inert without `piano-keyboard`). Level 1 ran once on the tablet (240 s, nobody typed):
 MCU booted, cover attached, commands acknowledged. No key or touchpad report seen yet; level 2, the hall sensor and the
 DRV-2 lock not run. 2026-11-12 (offline, host-tested, not run): the touchpad tuned for macOS (§6a), the battery work (§6b), the
@@ -10,13 +27,13 @@ and desk1 images had none ([attended-desktop.md](../attended-desktop.md) §1.6).
 Sources: `package/PianoKeyboard` (design and boot arguments at the top of `PianoKeyboard.cpp`, the codec in `Wn8030Piano.h`, the
 descriptors in `HidDescriptors.h`, provenance in `UPSTREAM`). Template: `README.md`.
 
-## 1. Purpose and gate
+### 1. Purpose and gate
 
 The magnetic keyboard cover with touchpad as a macOS keyboard (with consumer keys) and pointer: the quickest way to type the
 login password natively (plan §4(d).3; touch, `touch.md`, comes later). It gates "login typed on the tablet itself". The USB
 HID from the Mac (`usb-device-debug.md` §12) is the fallback in the same image.
 
-## 2. Hardware facts
+### 2. Hardware facts
 
 | Item | Value | Source | State |
 |---|---|---|---|
@@ -31,7 +48,7 @@ HID from the Mac (`usb-device-debug.md` §12) is the fallback in the same image.
 | Commands | `32 00 4e 31 80 38 cmd 01 value sum` to register 0x4c: 25 keyboard power (repeated every 12 s), 2e LEDs (fd/fc Caps, f7/f3 mic), 21 touchpad on, 23 backlight 0..100 | v1.1.0 module; capture (acks) | verified (ran) |
 | Hall sensor | folio lid switch, TLMM gpio80, gpio-keys `switch-lid`, SW_LID, active low (low = closed); separate from the attach bit | v1.1.0 `piano-boot.dtb` | *needs-boot* |
 
-## 3. Ubuntu as the specification
+### 3. Ubuntu as the specification
 
 `drivers/hid/hid-nanosic-wn8030.c` (GPL-2.0), read as behaviour only: the v1.1.0 module piano's Ubuntu runs (`UPSTREAM`
 pins it), and the newer port with the touchpad made at attach (embedded in Project-SunUEFI's 7.3 patch set). Per path:
@@ -49,12 +66,12 @@ pins it), and the newer port with the touchpad made at attach (embedded in Proje
   32 (challenge) → the helper's token. Ubuntu runs without the helper, so nothing is answered by default.
 - **hall**: Linux turns input off while SW_LID is closed (touchpad 0, LEDs off, reports dropped). Not done here.
 
-## 4. UniXNU template
+### 4. UniXNU template
 
 UniXNU-sheng's WN8030 driver (`Wn8030.c`, `KeyboardCover.cpp`) for the boot ROM protocol and the touchpad-as-pointer design;
 PianoInput's IOHIDDevice pattern; PianoPower's software I2C and RPMh vote; PianoA830's DRV-2 lock. Details in `UPSTREAM`.
 
-## 5. IOKit family / ABI
+### 5. IOKit family / ABI
 
 Two `PianoKeyboardHID` (IOHIDDevice) under the service, vendor 0x1af4 product 0x504b: "Piano Keyboard Cover" (keyboard report 5
 + consumer report 6, LED output report 5 → Caps LED; also the gestures' Control + arrow) and "Piano Keyboard Touchpad" (7-byte
@@ -63,7 +80,7 @@ relative mouse: three buttons, X, Y, wheel, AC Pan, with physical extents that d
 (a library of the descriptor). PianoDwc3's USB keyboard/pointer share `HidDescriptors.h`'s keyboard and plain pointer descriptors,
 which are unchanged.
 
-## 6. Boot args
+### 6. Boot args
 
 | Argument | Default | Meaning |
 |---|---|---|
@@ -99,7 +116,7 @@ which are unchanged.
 | `piano-backlight-keys=1` | 0 | (PianoBacklight's) the cover's 0x6F/0x70 and Right Ctrl + 1 / 2 also step the panel backlight |
 | `piano-keyboard-raw=0`, `-invert=B`, `-mouse=0`, `-halfbit=US`, `-rails=0` | | see `PianoKeyboard.cpp` |
 
-## 6a. The touchpad on macOS (2026-11-12)
+### 6a. The touchpad on macOS (2026-11-12)
 
 macOS (IOHIDFamily, read as a reference) takes a HID pointer's resolutions from the descriptor: `IOHIDEventService::
 determineResolution` divides the relative X element's and the Wheel's logical range by their physical range (counts per inch;
@@ -137,7 +154,7 @@ determineResolution` divides the relative X element's and the Wheel's logical ra
   scroll, and every touch line still names a recognised swipe (`three-finger swipe up (...)`): when tonight's (a) shows three
   fingers counted cleanly, `piano-keyboard-gestures=1` (and later the default) is safe. Four fingers: not done (three slots).
 
-## 6b. Battery (2026-11-12)
+### 6b. Battery (2026-11-12)
 
 The serving loop has no interrupt; it sleeps, then reads gpio97's latch, which keeps an edge that comes during the sleep. It
 sleeps 4 ms while reports flow (2 s after the last frame or edge), 30 ms while the cover is attached and open (the first
@@ -158,7 +175,7 @@ clears the latch as before; an LED report from IOHIDFamily ends the wait early. 
 and the first keystroke after a pause is read on its edge. A wait that timed out with the edge latched is a miss; three in a row,
 or the line's storm guard, and the loop polls again (logged once). The wake-up line reads `idle: N wakeups in 60 s, irq M (...)`.
 
-## 6c. The panel's brightness keys; state for other drivers; the wake rules for later (B2)
+### 6c. The panel's brightness keys; state for other drivers; the wake rules for later (B2)
 
 With PianoBacklight's `piano-backlight-keys=1` the cover's display-brightness usages (consumer 0x6F up, 0x70 down) and Right Ctrl +
 1 / 2 step the panel backlight (`package/PianoBacklight/PianoBacklightClient.h`'s KeyWatch, fed the report as the cover sent it,
@@ -176,7 +193,7 @@ off and the lid open; never gpio97; the lid (gpio80, PDC 122 → SPI 633) wakes 
 the panel's blank / unblank; check the PDC's SPI-interface bit for SPI 639 first (it caused Ubuntu's early wakes). Ubuntu also
 dropped the community 12 s keep-alive (`docs/power-irq.md` §6.11): a candidate once the cover's behaviour without it is measured.
 
-## 6d. Power: the closed cover, the MCU following the display, system sleep (2026-11-11)
+### 6d. Power: the closed cover, the MCU following the display, system sleep (2026-11-11)
 
 `CoverPower.h` (portable, host-tested in `tests/keyboard_host.cpp` `testCoverPower`), wired in `PianoKeyboard.cpp`:
 
@@ -215,13 +232,22 @@ dropped the community 12 s keep-alive (`docs/power-irq.md` §6.11): a candidate 
 - Without these arguments and without a system sleep nothing changes: no lookup of PianoPolicy or NativeGopDisplay, no gpio95
   write; the power-tree join only answers.
 
-## 7. Build, kernel collection, RAM image
+### 7. Build, kernel collection, RAM image
 
 `tooling/k27/build-native-piano-keyboard.sh` runs the host tests (`tests/keyboard_host.cpp`: the captured frames, key/touch/
 attach/auth frames of the same shape, the pointer, the I2C engine, cmd-db, descriptors), stages the pinned image, builds the
 objects and prints `out/k27/kext/PianoKeyboard.json` for `PIANO_EXTRA_KEXTS` (after the kext list, so PianoA830 links first).
 
-## 8. Hardware test plan (tonight, owner present, cable to the Mac, RAM boots only)
+`python3 scripts/ci/self-tests.py --only package/PianoKeyboard/tests/` also runs the standalone ASan/UBSan
+[cover HID suite](../../package/PianoKeyboard/tests/cover_hid_gestures_model_host.cpp). It exercises the keyboard and consumer
+reports, Caps Lock LED commands, clickpad gestures, and input release on detach, fold and suspend. Four- and five-contact packets
+exercise the three primary slots and the ignored continuation. Strict additive-checksum rejection, coordinate clamping and
+UART-style resynchronization of replayed I²C frames are policies of the offline fixture.
+
+Goal 3 hardware verification remains **HOLD** for the physical brightness keys, Caps Lock LED and hall fold state pending
+hands-on checks. Daily boot defaults are unchanged.
+
+### 8. Hardware test plan (tonight, owner present, cable to the Mac, RAM boots only)
 
 Build all three images first (each `build-native-image.sh` rewrites `out/ram` and `out/ram-dump`, so copy each away):
 
@@ -307,12 +333,12 @@ Failure lines and what they mean:
   tells whether the login field takes input at all.
 - `hall: cover closed` with the folio open → polarity; never run `piano-keyboard-lid=1` before that is right.
 
-## 9. Fallback
+### 9. Fallback
 
 Without `piano-keyboard` the service does not probe. The Mac's keyboard and pointer over USB (`piano-usb-hid=1`), then the
 volume/power keys (PianoInput). A hang is a reset (`piano-reset-after`, the Gunyah watchdog) back to ABL.
 
-## 10. Open questions
+### 10. Open questions
 
 1. Key and touchpad reports on the wire (shape, type byte, contact count): tonight's (a).
 2. Whether the cover needs authentication for anything (backlight?): (c).
@@ -330,7 +356,7 @@ volume/power keys (PianoInput). A hang is a reset (`piano-reset-after`, the Guny
 11. Does the MCU come back from the sleep line with its RAM image (no firmware reload) and answer `0x25 = 1` after the unblank? (§6d,
     the first `piano-keyboard-blank=1` run: `unblank ... gpio97 high ..., keyboard power 0x25 = 1 sent`, then keys.)
 
-## 11. Licence note
+### 11. Licence note
 
 The Linux driver (GPL-2.0) is a specification only; nothing of it is in this repository. PianoKeyboard is BSD-2-Clause-Patent
 (`package/PianoKeyboard/LICENSE`); the MCU image is Xiaomi/Nanosic's, never committed.

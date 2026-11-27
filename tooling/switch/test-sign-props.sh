@@ -5,6 +5,7 @@
 set -u
 S=$(cd "$(dirname "$0")/../bootimg" && pwd)/sign-on-remote.sh
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+export HOME="$T"
 fails=0
 ok() { if [ "$1" = 0 ]; then echo "PASS $2"; else echo "FAIL $2"; fails=$((fails+1)); fi; }
 mk() { python3 -c "import json,sys;json.dump({'avb':{'partition_name':sys.argv[2],'partition_size':int(sys.argv[3]),'rollback_index':int(sys.argv[4]),'props':json.loads(sys.argv[5])}},open(sys.argv[1],'w'))" "$@"; }

@@ -1,14 +1,15 @@
-RNNoise, vendored unmodified for package/PianoMicNS ("Mic (noise reduced)").
+RNNoise, vendored for package/PianoMicNS ("Mic (noise reduced)").
 
 Upstream: https://github.com/xiph/rnnoise
 Tag:      v0.1.1
 Commit:   6cbfd53eb348a8d394e0757b4025c6ded34eb2b6 ("use rnn_ prefix for non-exported symbols")
 Licence:  BSD-3-Clause (COPYING: Mozilla, Jean-Marc Valin, Xiph.Org Foundation, Mark Borgerding)
 
-Taken, byte for byte (sha256 below): COPYING, AUTHORS, README, include/rnnoise.h, and from src/: denoise.c, rnn.c, rnn_data.c
+Taken from upstream (original sha256 below): COPYING, AUTHORS, README, include/rnnoise.h, and from src/: denoise.c, rnn.c, rnn_data.c
 (the model's weights as the project publishes them), pitch.c, kiss_fft.c, celt_lpc.c and their headers. Not taken: rnn_reader.c
 (models from a file), the training tools (training/, src/rnn_train.py, src/compile.sh), the autotools files, examples/, doc/.
-No local change; the build compiles these files with their own warning set (tooling/k27/build-piano-micns.sh).
+Local changes in denoise.c and kiss_fft.c propagate allocation failure during setup so the driver can fall back to passthrough.
+denoise.c and rnnoise.h also provide an allocation-free reset for a discontinuity in the tap.
   e2f59ff41d9d03adc3dcf3deff170f8c8cf4a6eb4a9b174762a7656d23200ffa  COPYING
   348b0956050157b718a11e1464633619b709b19b45172f336cef2205aa0cec63  AUTHORS
   ab97c68d2b59aeca4ccc7df2be1a4d2af03ebaa9ec5e51aca93b8d12233069db  README

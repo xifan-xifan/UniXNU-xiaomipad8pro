@@ -15,6 +15,7 @@ the FAT payload (UniXNU payload layout, written with UniXNU's payload.write_volu
   build-ram-images.py --fd FD --fd-name NAME --out DIR [--kc KC --trust T --seed S --adt ADT] [--utc SECONDS] [--extra-ram]
 
 --extra-ram adds the shared extra-RAM reservation placeholder to the payload ADT (docs/extra-ram.md).
+Add piano-long-boot-args=1 to PIANO_EXTRA_ARGS for the loader/ADT layout in docs/boot-args-length.md.
 
 The Data store (docs/data-store.md): a macOS image opens the tablet's store (data-persist=2) only when its seed is the installed one
 (PIANO_INSTALLED_SEED in ~/.config/piano/env, or out/persistent/installed.json), else it runs Data volatile (data-persist=0), with a
@@ -51,12 +52,19 @@ import tempfile
 import time
 from pathlib import Path
 
+try:
+    import tomllib
+except ModuleNotFoundError:
+    try:
+        import tomli as tomllib
+    except ModuleNotFoundError:
+        from pip._vendor import tomli as tomllib
+    # UniXNU imports tomllib by name.
+    sys.modules['tomllib'] = tomllib
+
 DEVICE = Path(__file__).resolve().parents[2]
 RESEARCH = Path(os.environ.get('UNIXNU_RESEARCH', Path.home() / 'Downloads/XiaomiPad8Pro-Ubuntu/unixnu-research'))
 sys.path.insert(0, str(RESEARCH / 'UniXNU/scripts'))
-from unixnu.bootimg import compile_shim  # noqa: E402
-from unixnu.config import load_toml  # noqa: E402
-from unixnu.payload import write_volume  # noqa: E402
 
 MU = RESEARCH / 'Mu-Silicium-piano'
 # UniXNU's BootShim (uefi-sheng 66421cb): image size covers shim + FD, the copied FD is cleaned to PoC and the I-cache
@@ -247,13 +255,25 @@ def boot_args_module():
     return module
 
 
-# k27 0066 (tooling/adt/boot_args.py): when a line would reach DarwinBoot's budget (or PIANO_BOOT_ARGS_SPLIT=1), the piano-* arguments
-# but the reset and guard ones go into the payload ADT's /chosen/piano-boot-args-ram and both lines say piano-boot-args=ram; the
-# kernel appends the set to the boot-args before anything reads them. Needs 0066 in the collection's kernel (checked).
+# k27 0066 (tooling/adt/boot_args.py): fit the loader line by moving arguments into the payload ADT's /chosen/piano-boot-args-ram.
+# PIANO_BOOT_ARGS_SPLIT=1 forces the split, and piano-long-boot-args=1 selects the layout in docs/boot-args-length.md.
 BOOT_ARGS_SET = 'ram'
 
 
-def data_store_args(seed, kc, extra=()):
+def boot_entry_args(ba, base, *, force=False):
+    """Two loader lines sharing one ADT tail. Reserve the longer CPU suffix when sizing the prefix."""
+    base, tail = ba.fit(base, BOOT_ARGS_SET, reserve=len(' sheng-smp=1'), force=force)
+    one = ' '.join(base + ['cpus=1'])
+    smp = ' '.join(base + ['sheng-smp=1'])
+    limit = ba.line_max(base)
+    for line in (one, smp):
+        size = len(line.encode())
+        if size > limit:
+            raise SystemExit(f'kernel command line is {size} bytes; the builder allows {limit} (DarwinBoot allows 1023)')
+    return one, smp, tail
+
+
+def data_store_args(seed, kc, extra=(), *, exact_mode=None):
     """The Data store arguments of a RAM test image (docs/data-store.md): (arguments, record).
     PIANO_DATA_PERSIST=0|1|2 when set; else 2 only when the image's seed is the installed one (PIANO_INSTALLED_SEED, or
     out/persistent/installed.json), 0 when it is another seed's, and when the installed seed is unknown 2 with a kernel collection that
@@ -268,6 +288,10 @@ def data_store_args(seed, kc, extra=()):
     same = common.same_seed(identity, installed)
     guard = common.kc_has_store_guard(kc)
     explicit = os.environ.get('PIANO_DATA_PERSIST')
+    if exact_mode is not None:
+        if explicit is not None and explicit != exact_mode:
+            raise SystemExit(f'PIANO_EXACT_ARGS says data-persist={exact_mode}, PIANO_DATA_PERSIST={explicit}')
+        explicit = exact_mode
     replace = os.environ.get('PIANO_DATA_STORE_REPLACE', '').strip().lower().removeprefix('0x')
     flatten = os.environ.get('PIANO_DATA_STORE_FLATTEN', '') == '1'
     if explicit is not None and explicit not in ('0', '1', '2'):
@@ -281,7 +305,22 @@ def data_store_args(seed, kc, extra=()):
     if (replace or flatten) and not guard:
         raise SystemExit(f'{kc}: no store guard in this kernel collection (NativeRamBlock before docs/data-store.md): it knows neither '
                          'data-store-replace nor data-store-flatten')
-    if mode == '2':
+    # PIANO_SCRATCH_PLAN (M5 durability, docs/tools/durability.md): a confirmed scratch plan replaces the size gate for a bound
+    # store on linux_rootfs's unused tail; RAM images only, never with replace/flatten, never the installed seed (check_scratch_plan).
+    plan = os.environ.get('PIANO_SCRATCH_PLAN', '').strip()
+    scratch = None
+    if plan:
+        if mode != '2':
+            raise SystemExit('PIANO_SCRATCH_PLAN: the scratch store needs data-persist=2')
+        if replace or flatten:
+            raise SystemExit('PIANO_SCRATCH_PLAN: no PIANO_DATA_STORE_REPLACE / PIANO_DATA_STORE_FLATTEN on a scratch store')
+        if os.environ.get('PIANO_BOOT_ARGS_SPLIT', '0') != '1':
+            raise SystemExit('PIANO_SCRATCH_PLAN: PIANO_BOOT_ARGS_SPLIT=1 (the RAM selector piano-boot-args=ram on the image)')
+        binding = list(extra)
+        if not any(x.split('=', 1)[0] == 'data-persist' for x in binding):
+            binding.append(f'data-persist={mode}')
+        scratch = common.check_scratch_plan(plan, info, binding, kc)
+    elif mode == '2':
         common.check_store_size(info, extra)
     if mode == '2' and not same and not guard and not replace:
         raise SystemExit(f'data-persist=2 with seed {this} and a kernel collection WITHOUT the store guard: its NativeRamBlock would '
@@ -302,6 +341,11 @@ def data_store_args(seed, kc, extra=()):
                 'Data is volatile. PIANO_DATA_PERSIST=2 opens the store (the guard keeps another seed\'s store: the RAM test of the guard)')
     else:
         note = f'data-persist={mode} (asked for): seed {this}'
+    if scratch:
+        note = (f'data-persist=2 on the M5 SCRATCH store: seed {this}, window LBA {scratch["window"][0]}+{scratch["window"][1]} on '
+                f'linux_rootfs (plan {Path(scratch["plan"]).name} {scratch["plan_sha256"][:16]}, confirmed by '
+                f'{(scratch.get("confirmed_by") or {}).get("map_set")}); the owner store {scratch["owner_store"]} is protected and '
+                'never opened by this image')
     if replace:
         note += (f'\nPIANO_DATA_STORE_REPLACE={replace}: data-store-replace: a store of another seed is STARTED OVER for seed {this}: '
                  'the owner\'s Data changes of that store are dropped')
@@ -314,7 +358,8 @@ def data_store_args(seed, kc, extra=()):
     if flatten:
         args.append('data-store-flatten=1')
     return args, {'data_persist': int(mode), 'seed_identity': identity, 'installed_seed': installed, 'installed_seed_from': source,
-                  'same_seed': same, 'kc_has_store_guard': guard, 'replace': replace or None, 'flatten': flatten}
+                  'same_seed': same, 'kc_has_store_guard': guard, 'replace': replace or None, 'flatten': flatten,
+                  'scratch': scratch}
 
 
 def sha(path):
@@ -355,6 +400,8 @@ def sensor_pack_addon(adt):
 
 
 def payload(stage, image, label, size_mib):
+    from unixnu.payload import write_volume
+
     # mtools stamps the directories it creates with the current time unless SOURCE_DATE_EPOCH is set (mtools 4.0.50):
     # without it two builds a minute apart differ in two bytes of the FAT.
     os.environ['SOURCE_DATE_EPOCH'] = str(EPOCH)
@@ -378,6 +425,19 @@ def uefi_payload(work):
     image = work / 'payload-uefi.img'
     payload(stage, image, 'PIANOUEFI', 8)
     return image
+
+
+def exact_store_mode(args):
+    modes = []
+    for arg in args:
+        key, _, value = arg.partition('=')
+        if key in ('data-store-replace', 'data-store-flatten'):
+            raise SystemExit(f'PIANO_EXACT_ARGS: {key} needs its checked PIANO_DATA_STORE_REPLACE / PIANO_DATA_STORE_FLATTEN option')
+        if key == 'data-persist':
+            modes.append(value)
+    if len(modes) > 1 or (modes and modes[0] not in ('0', '1', '2')):
+        raise SystemExit('PIANO_EXACT_ARGS: data-persist must occur at most once with mode 0, 1 or 2')
+    return modes[0] if modes else '0'
 
 
 def macos_payload(work, kc, trust, seed, adt, utc, extra_ram=False):
@@ -416,24 +476,20 @@ def macos_payload(work, kc, trust, seed, adt, utc, extra_ram=False):
     if any(x.split('=', 1)[0] == ba.PROP for x in exact + extra):
         raise SystemExit(f'PIANO_EXACT_ARGS / PIANO_EXTRA_ARGS: no {ba.PROP}= (give the whole arguments: an entry record\'s merged line; '
                          'this tool makes the selector and the ADT set)')
+    scratch_plan = os.environ.get('PIANO_SCRATCH_PLAN', '').strip()
+    if scratch_plan and not exact:
+        raise SystemExit('PIANO_SCRATCH_PLAN needs PIANO_EXACT_ARGS (the merged profile with the plan\'s binding; docs/tools/durability.md)')
     if exact:
-        mode = dict(x.split('=', 1) for x in exact if '=' in x).get('data-persist', '0')
-        if os.environ.get('PIANO_DATA_PERSIST', mode) != mode:
-            raise SystemExit(f'PIANO_EXACT_ARGS says data-persist={mode}, PIANO_DATA_PERSIST={os.environ["PIANO_DATA_PERSIST"]}')
-        os.environ['PIANO_DATA_PERSIST'] = mode
-        persist, store_record = data_store_args(seed, kc, exact + extra)
-        names = {x.split('=', 1)[0] for x in extra}
+        mode = exact_store_mode(exact)
+        names = {'data-persist'} | {x.split('=', 1)[0] for x in extra}
         base = [x for x in exact if x != 'sheng-smp=1' and x.split('=', 1)[0] not in names] + extra
+        persist, store_record = data_store_args(seed, kc, base, exact_mode=mode)
+        base += persist
     else:
         persist, store_record = data_store_args(seed, kc, extra)
         base = deny_exec(fast_boot(K27_ARGS, extra), extra, deny_exec_env())
         base = [x for x in base if not x.startswith('data-persist=')] + persist + [f'droidvm-utc={utc}'] + extra
-    base, tail = ba.fit(base, BOOT_ARGS_SET, reserve=len(' sheng-smp=1'), force=os.environ.get('PIANO_BOOT_ARGS_SPLIT', '0') == '1')
-    one = ' '.join(base + ['cpus=1'])
-    smp = ' '.join(base + ['sheng-smp=1'])
-    for line in (one, smp):
-        if len(line) >= ba.LINE_MAX:
-            raise SystemExit(f'kernel command line is {len(line)} bytes; DarwinBoot passes at most 1023')
+    one, smp, tail = boot_entry_args(ba, base, force=os.environ.get('PIANO_BOOT_ARGS_SPLIT', '0') == '1')
     boot_args = None
     if tail:
         if not ba.kc_has_boot_args(kc):
@@ -443,6 +499,12 @@ def macos_payload(work, kc, trust, seed, adt, utc, extra_ram=False):
         merged, status = ba.merged(smp, adt_file.read_bytes())
         if status != 'appended':
             raise SystemExit(f'piano-boot-args: the payload ADT does not give the kernel its set ({status})')
+        if scratch_plan:
+            pc = persist_common()
+            effective = pc.check_scratch_plan(scratch_plan, pc.seed_info(payloads / 'scratch-data.img'), merged.split(),
+                                              payloads / 'kernel.macho')
+            if effective != store_record['scratch']:
+                raise SystemExit('PIANO_SCRATCH_PLAN: the effective payload differs from the checked scratch plan')
         boot_args = {'set': BOOT_ARGS_SET, 'property': ba.prop_name(BOOT_ARGS_SET), 'tail': ' '.join(tail),
                      'tail_bytes': len(' '.join(tail)), 'boot_args_8cpu': merged, 'boot_args_bytes_8cpu': len(merged),
                      'adt_sha256': sha(adt_file)}
@@ -450,7 +512,10 @@ def macos_payload(work, kc, trust, seed, adt, utc, extra_ram=False):
               f'{len(one)}/{len(smp)} bytes, boot-args {len(merged)} bytes (8 CPUs)', file=sys.stderr)
     resumes = store_record['data_persist'] == 2
     seed_reader_source = seed if not resumes or not store_record['same_seed'] else None
-    ba.check_userland({'macos-1cpu': one, 'macos-8cpu': smp}, adt_file.read_bytes(), kc, seed=seed_reader_source, live=resumes)
+    # a scratch store (PIANO_SCRATCH_PLAN) holds only its own seed's userland: no installed layer is ever applied to it, so the
+    # seed's record alone tells which boot-argument readers run (the owner store's live layer is not on this boot)
+    live = resumes and not store_record.get('scratch')
+    ba.check_userland({'macos-1cpu': one, 'macos-8cpu': smp}, adt_file.read_bytes(), kc, seed=seed_reader_source, live=live)
     entry = ('[[entry]]\nid = "{id}"\ntitle = "{title}"\ntype = "xnu"\npath = "Payloads/kernel.macho"\n'
              'initrd = "Payloads/scratch-data.img"\nargs = "{args}"\n')
     (stage / 'EFI/UniXNU/unixnu.toml').write_text(
@@ -479,6 +544,9 @@ def macos_payload(work, kc, trust, seed, adt, utc, extra_ram=False):
 
 def kernel_field(fd, dtb, work, name):
     """The kernel field every piano boot image carries (RAM images and tooling/persist's flashed boot_a): BootShim + FD + DTB."""
+    from unixnu.bootimg import compile_shim
+    from unixnu.config import load_toml
+
     config = load_toml(MU / 'Resources/Configs/piano.toml')
     base, size = config['uefi_fd']['base'], config['uefi_fd']['size']
     firmware = Path(fd).read_bytes()
@@ -501,7 +569,7 @@ def kernel_field(fd, dtb, work, name):
 def pack(out, fd, dtb, ramdisk, work, name):
     kernel, info = kernel_field(fd, dtb, work, name)
     image = out / f'{name}.img'
-    subprocess.run(['python3', str(MKBOOTIMG), *V2, '--kernel', str(kernel), '--ramdisk', str(ramdisk),
+    subprocess.run([sys.executable, str(MKBOOTIMG), *V2, '--kernel', str(kernel), '--ramdisk', str(ramdisk),
                     '--dtb', str(dtb), '--output', str(image)], check=True)
     return image, info
 
@@ -519,7 +587,10 @@ def main():
     p.add_argument('--extra-ram', action='store_true', help='add the shared extra-RAM reservation placeholder to the payload ADT')
     p.add_argument('--utc', type=int, default=int(time.time()))
     a = p.parse_args()
-    if a.extra_ram and not all((a.kc, a.trust, a.seed, a.adt)):
+    macos_inputs = (a.kc, a.trust, a.seed, a.adt)
+    if any(macos_inputs) and not all(macos_inputs):
+        p.error('--kc, --trust, --seed and --adt must be supplied together')
+    if a.extra_ram and not all(macos_inputs):
         p.error('--extra-ram requires --kc, --trust, --seed and --adt')
     if sha(MKBOOTIMG) != MKBOOTIMG_SHA256:
         raise SystemExit(f'{MKBOOTIMG} is not the Ubuntu RAM set\'s mkbootimg.py')

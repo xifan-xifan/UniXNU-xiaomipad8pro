@@ -105,6 +105,7 @@ int main(void)
     apps[qtChoice] = PIANO_FRONT_ID.lowercaseString; assert(checkTargets(read, app));
     map = both(history(PIANO_FRONT_ID)); apps[qtChoice] = PIANO_REAR_ID; assert(!checkTargets(read, app));   // the app's choice wins
     apps[qtChoice] = @""; assert(checkTargets(read, app));
+    apps[qtChoice] = @YES; assert(!checkTargets(read, app));
     [apps removeAllObjects];
     map = both(@YES); assert(!checkTargets(read, app));
     map = both(history(PIANO_PATTERN_ID)); assert(!checkTargets(read, app));

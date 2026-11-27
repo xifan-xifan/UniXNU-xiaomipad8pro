@@ -20,31 +20,6 @@ constexpr m::Options kAllTimings{.allowUnqualified = true};
 unsigned checks, failures;
 #define CHECK(expr) do { ++checks; if (!(expr)) { ++failures; std::printf("FAIL line %d: %s\n", __LINE__, #expr); } } while (0)
 
-model::Dpu m1()
-{
-  model::Dpu io;
-  io.modeWrites = true;
-  io.blockDma = false;
-  for (unsigned l = 0; l < 2; ++l) {
-    const unsigned i = l + 1;
-    io.regs[intfReg(i, kIntfConfig)] = 0x80800000;
-    io.regs[intfReg(i, kIntfVsyncWidth)] = 0x480;
-    io.regs[intfReg(i, kIntfDispVStart)] = 0xee80;
-    io.regs[intfReg(i, kIntfDispVEnd)] = 0x13b47f;
-    io.regs[intfReg(i, kIntfDispHctl)] = 0x01ca0020;
-    io.intf[i].fetch = io.regs[intfReg(i, kIntfProgFetch)] = 0x13b6c1;
-    io.intf[i].counting = false;
-    io.regs[intfReg(i, kIntfCountEn)] = 0;
-    io.regs[dsiReg(l, kDsiActiveH)] = 0x01cb0020;
-    io.regs[dsiReg(l, kDsiActiveV)] = 0x08c2006a;
-    io.regs[dsiReg(l, kDsiCtrl)] = 0x000001f7;
-    io.regs[dsiReg(l, kDsiCmdDmaCtrl)] = 0x14000000;
-    io.regs[dsiReg(l, kDsiDmaCtrl1)] = 0;
-    io.dsi[l].intr = 0x00010000;
-  }
-  return io;
-}
-
 bool switchOk(model::Dpu &io, unsigned hz, const m::Options &options = kAllTimings)
 {
   const auto r = m::switchTiming(io, hz, options);
@@ -86,7 +61,7 @@ void allPairs()
     options.db = boe ? refresh::Db::sunuefi : refresh::Db::downstream;
     for (const auto &from : kModes) {
       for (const auto &to : kModes) {
-        auto io = m1();
+        auto io = model::modeSwitchFixture();
         if (!boe) io.dbHw = model::DbHw::downstream;
         CHECK(switchOk(io, from.hz, options));
         io.dcs.clear();
@@ -117,7 +92,7 @@ void allPairs()
 
 void repeatedSwitches()
 {
-  auto io = m1();
+  auto io = model::modeSwitchFixture();
   unsigned hz = 120;
   const unsigned sequence[] = {60, 90, 144, 120};
   for (unsigned i = 0; i < 100; ++i) {
@@ -130,21 +105,26 @@ void repeatedSwitches()
 
 void refusals()
 {
-  auto io = m1();
+  auto io = model::modeSwitchFixture();
+  bool transmitted = false;
+  const auto timing = m::plan(m::geometry(m::readTiming(io, readPath(io).link[0], 0)), *m::modeByHz(120));
+  CHECK(m::sendRateGroup(io, m::rateGroup(*m::modeByHz(144), true), {}, transmitted));
+  CHECK(m::sendRateGroup(io, {}, timing, transmitted));
+  CHECK(!transmitted && io.stores.empty());
   CHECK(m::switchTiming(io, 75, kAllTimings).why);
   CHECK(m::switchTiming(io, 60, {refresh::Db::direct}).why);
   io.regs[kGcc + kGccDispAhb] = 0x80000000;
   CHECK(m::switchTiming(io, 90, kAllTimings).why);
-  io = m1();
+  io = model::modeSwitchFixture();
   io.regs[kDispCc + kCcPclk1] = 0x80000000;
   CHECK(m::switchTiming(io, 90, kAllTimings).why);
-  io = m1();
+  io = model::modeSwitchFixture();
   io.regs[intfReg(1, kIntfProgFetch)] = 0;
   CHECK(m::switchTiming(io, 90, kAllTimings).why);
-  io = m1();
+  io = model::modeSwitchFixture();
   io.dsi[0].total ^= 1;
   CHECK(m::switchTiming(io, 90, kAllTimings).why);
-  io = m1();
+  io = model::modeSwitchFixture();
   io.regs[dsiReg(0, kDsiTpgCtrl)] = 1;
   CHECK(m::switchTiming(io, 90, kAllTimings).why);
   CHECK(io.stores.empty() && io.dcs.empty());
@@ -158,7 +138,7 @@ void refusals()
 
 void counterAndFlushGate()
 {
-  auto io = m1();
+  auto io = model::modeSwitchFixture();
   for (unsigned l = 0; l < 2; ++l) {
     io.countEnableIgnored[l] = true;
     io.intf[l + 1].counting = true;
@@ -169,6 +149,21 @@ void counterAndFlushGate()
   checkMode(io, 144);
   CHECK(io.rd(intfReg(1, kIntfCountEn)) == 0 && io.rd(intfReg(2, kIntfCountEn)) == 0);
   CHECK(io.glitches == 0 && io.commandsInFrame == 0 && io.refused.empty());
+
+  auto wrapped = model::modeSwitchFixture();
+  for (unsigned i = 1; i <= 2; ++i) wrapped.intf[i].frames = UINT32_MAX - 1;
+  const auto acrossWrap = m::switchTiming(wrapped, 60, {});
+  CHECK(!acrossWrap.why && acrossWrap.counters.moving && acrossWrap.rate.lockstep);
+  CHECK(wrapped.intf[1].frames < 10 && wrapped.intf[2].frames < 10);
+
+  auto disabled = model::modeSwitchFixture();
+  const m::Options off{.fixedHz = m::bootModeHz(0)};
+  const auto unexpected = [] { CHECK(false); };
+  for (unsigned hz : {0u, 60u, 120u, 144u}) {
+    const auto r = m::switchTo(disabled, hz, off, unexpected, unexpected);
+    CHECK(r.why && !r.timingTouched && !r.counters.sampled);
+  }
+  CHECK(disabled.stores.empty() && disabled.dcs.empty() && disabled.bandwidthVotes.empty() && disabled.ns == 0);
 
   auto checkRefusal = [](model::Dpu &blocked, const char *expected) {
     const auto unexpected = [] { CHECK(false); };
@@ -184,22 +179,37 @@ void counterAndFlushGate()
     checkMode(blocked, 120);
   };
 
-  io = m1();
+  io = model::modeSwitchFixture();
   for (unsigned i = 1; i <= 2; ++i)
     io.regs[intfReg(i, kIntfCountEn)] = 3;  // enable bits read back, both counters still frozen
   checkRefusal(io, "mode: 120 -> 60 Hz: INTF counters not advancing in lockstep "
                    "(count-en 3/3, frame deltas 0/0, lines 0/0 -> 0/0, line moved 0/0); refused");
 
-  io = m1();
+  io = model::modeSwitchFixture();
   io.intf[1].counting = io.intf[2].counting = true;
   io.ctlFlush = kFlushIntf;
   io.flushStuck = true;
   checkRefusal(io, "mode: 120 -> 60 Hz: CTL flush is pending (CTL0, CTL_FLUSH 0x80000000); refused");
 }
 
+void commandClockWrap()
+{
+  struct WrappedDpu : model::Dpu {
+    uint64_t nowUs() { return (UINT64_MAX - 8250) + model::Dpu::nowUs(); }
+  } io;
+  static_cast<model::Dpu &>(io) = model::modeSwitchFixture();
+  io.intf[1].counting = io.intf[2].counting = true;
+  const auto &mode = *m::modeByHz(120);
+  const auto path = readPath(io);
+  const auto timing = m::plan(m::geometry(m::readTiming(io, path.link[0], 0)), mode);
+  bool transmitted = false;
+  CHECK(!m::sendRateGroup(io, m::rateGroup(mode, true), timing, transmitted));
+  CHECK(transmitted && io.dcs.size() == 8 && io.commandsInFrame == 0);
+}
+
 void rollback()
 {
-  auto io = m1();
+  auto io = model::modeSwitchFixture();
   io.dropStore = intfReg(2, kIntfProgFetch);
   io.dropValue = 0x106da1;
   io.dropCount = 1;
@@ -208,7 +218,7 @@ void rollback()
   CHECK(io.dcs.empty());  // timing read-back failed before the command
   checkMode(io, 120);
 
-  io = m1();
+  io = model::modeSwitchFixture();
   io.dropStore = dsiReg(1, kDsiTotal);
   io.dropValue = 0x120b023f;
   io.dropCount = 1;
@@ -216,7 +226,7 @@ void rollback()
   CHECK(r.why && r.reverted && !r.restoreWhy);
   checkMode(io, 120);
 
-  io = m1();
+  io = model::modeSwitchFixture();
   CHECK(switchOk(io, 144));
   io.underrunAfterDma = 1;   // both halves accepted the new group before the timing check failed
   io.handleUnderrunIrq = true;
@@ -224,7 +234,7 @@ void rollback()
   CHECK(r.why && r.reverted && !r.restoreWhy);
   checkMode(io, 144);
 
-  io = m1();
+  io = model::modeSwitchFixture();
   io.dmaHang[1] = true;
   r = m::switchTiming(io, 144, kAllTimings);
   CHECK(r.why && r.reverted && r.restoreWhy);
@@ -233,13 +243,13 @@ void rollback()
   CHECK(io.dsi[1].dmaPending);  // still owned by hardware
   CHECK(io.glitches == 0 && io.commandsInFrame == 0);
 
-  io = m1();
+  io = model::modeSwitchFixture();
   io.lateDmas = 2;
   r = m::switchTiming(io, 144, kAllTimings);
   CHECK(r.why && std::strstr(r.why, "front porch") && r.reverted && !r.restoreWhy);
   checkMode(io, 120);
 
-  io = m1();
+  io = model::modeSwitchFixture();
   io.flushStuck = true;
   r = m::switchTiming(io, 90, kAllTimings);
   CHECK(r.why && r.reverted && r.restoreWhy);
@@ -248,7 +258,7 @@ void rollback()
 
 void qual1Underrun()
 {
-  auto io = m1();
+  auto io = model::modeSwitchFixture();
   for (unsigned l = 0; l < 2; ++l) {
     io.countEnableIgnored[l] = true;
     io.intf[l + 1].counting = true;
@@ -281,7 +291,7 @@ void qual1Underrun()
   checkMode(io, 60);
 
   // Also exercise an accepted VFP-only boot switch with a missing latch on one link.
-  io = m1();
+  io = model::modeSwitchFixture();
   io.dropStore = intfReg(2, kIntfProgFetch);
   io.dropValue = 0x280441;
   io.dropCount = 1;
@@ -290,14 +300,14 @@ void qual1Underrun()
   CHECK(restoredBoot.from == m::kInheritedModeHz && io.dcs.empty());
   checkMode(io, m::kInheritedModeHz);
 
-  io = m1();
+  io = model::modeSwitchFixture();
   io.minFetchLineNs = 3700;  // a fault that continues after restoring the old timing
   const auto brokenBoot = m::switchTiming(io, m::kBootModeHz, {});
   CHECK(brokenBoot.why && brokenBoot.reverted && brokenBoot.restoreTransitionUnderruns);
   CHECK(brokenBoot.restoreWhy && std::strcmp(brokenBoot.restoreWhy, "an INTF underran") == 0);
   CHECK(io.modeUnderruns() && io.dcs.empty());
 
-  io = m1();
+  io = model::modeSwitchFixture();
   CHECK(switchOk(io, 90));
   const auto inheritedStores = io.stores.size();
   const auto wrongBootMode = m::switchTiming(io, m::kBootModeHz, {});
@@ -310,7 +320,7 @@ void fixed120Boot()
   static_assert(m::bootModeHz(1) == 60 && m::bootModeHz(120) == 120);
   static_assert(!m::bootModeHz(0) && !m::bootModeHz(60) && !m::bootModeHz(90));
   const m::Options options{.fixedHz = m::bootModeHz(120)};
-  auto io = m1();
+  auto io = model::modeSwitchFixture();
   for (unsigned l = 0; l < 2; ++l) {
     io.countEnableIgnored[l] = true;
     io.intf[l + 1].counting = true;
@@ -337,7 +347,7 @@ void fixed120Boot()
   CHECK(starved.why && std::strcmp(starved.why, "an INTF underran") == 0);
   CHECK(!starved.timingTouched && !starved.reverted && starved.rate.lockstep);
 
-  io = m1();
+  io = model::modeSwitchFixture();
   io.minFetchLineNs = 3300;
   CHECK(switchOk(io, 60, {}));
   auto fail = io;
@@ -370,7 +380,7 @@ void fixed144Boot()
 
   const m::Options options{.fixedHz = m::kHighModeHz};
   for (unsigned from : {60u, 120u}) {
-    auto io = m1();
+    auto io = model::modeSwitchFixture();
     io.minFetchLineNs = 3300;
     if (from == 60) CHECK(switchOk(io, from, {}));
     const size_t start = io.stores.size();
@@ -409,7 +419,7 @@ void fixed144Boot()
     CHECK(io.bandwidthVotes.size() == 1 && !io.modeUnderruns());
   }
 
-  auto io = m1();
+  auto io = model::modeSwitchFixture();
   io.ctlFlush = 0x10;
   const auto pending = m::switchTiming(io, 144, options);
   CHECK(pending.why && !pending.timingTouched && io.bandwidthVotes.empty());
@@ -418,7 +428,7 @@ void fixed144Boot()
 void sleepAndFetch()
 {
   for (bool stopEngines : {true, false}) {
-    auto io = m1();
+    auto io = model::modeSwitchFixture();
     CHECK(switchOk(io, 90));
     const auto path = readPath(io);
     panel::Options options;
@@ -448,12 +458,16 @@ void sleepAndFetch()
 
 void nightShiftAndCleanEpochs()
 {
-  auto io = m1();
+  auto io = model::modeSwitchFixture();
   io.resetPccOnTimingChange = true;
   pcc::PanelPcc base;
   CHECK(pcc::capturePanelPcc(io, readPath(io), base));
   pcc::PanelPcc last = base;
   pcc::NightShift state;
+  // ns-base: the first location-9 matrix is the boot reference (cancelled); send an identity reference first so the
+  // white point below is applied as a relative change, as with Night Shift turned on after boot.
+  const uint64_t identityRef[9] = {1ull << 32, 0, 0, 0, 1ull << 32, 0, 0, 0, 1ull << 32};
+  CHECK(state.setMatrix(identityRef) == pcc::NightShift::Input::accepted);
   const uint64_t whitePoint[9] = {1ull << 32, 1ull << 29, 0, 0, 3ull << 30, 0, 0, 0, 1ull << 31};
   CHECK(state.setMatrix(whitePoint) == pcc::NightShift::Input::accepted);
   state.setCorrection(pcc::kOne / 2);
@@ -525,6 +539,7 @@ int main()
   repeatedSwitches();
   refusals();
   counterAndFlushGate();
+  commandClockWrap();
   rollback();
   qual1Underrun();
   fixed120Boot();

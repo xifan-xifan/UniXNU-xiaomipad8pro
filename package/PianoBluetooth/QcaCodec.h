@@ -248,7 +248,7 @@ struct NvmInfo {
   size_t addressAt = 0;   // offset of the default address's six bytes in the file (little endian, as Read BD_ADDR returns it)
 };
 // Patches the tags in place. ibs / deepSleep: 1 set the bit (what Linux always does), 0 clear it, -1 leave the file's value. The
-// baud code is the speed the host will run at (Linux writes it unconditionally). Bounds as btqca's qca_tlv_check_data.
+// baud code is the speed the host will run at (Linux writes it unconditionally). The tag layout follows btqca's qca_tlv_check_data.
 inline NvmInfo patchNvm(uint8_t *f, size_t n, uint8_t baud, int ibs, int deepSleep)
 {
   NvmInfo r;
@@ -263,6 +263,10 @@ inline NvmInfo patchNvm(uint8_t *f, size_t n, uint8_t baud, int ibs, int deepSle
       r.why = "an enclosing header without a second one";
       return r;
     }
+    if ((typeLen >> 8) != n - 4) {
+      r.why = "the enclosing length does not match the file";
+      return r;
+    }
     at = 4;
     typeLen = le32(f + 4);
   }
@@ -272,11 +276,16 @@ inline NvmInfo patchNvm(uint8_t *f, size_t n, uint8_t baud, int ibs, int deepSle
     return r;
   }
   const size_t length = typeLen >> 8, data = at + 4;
+  if (!length) {
+    r.why = "empty tag list";
+    return r;
+  }
   if (n < data + length) {
     r.why = "the tag list is longer than the file";
     return r;
   }
-  for (size_t idx = 0; idx + 12 <= length;) {
+  size_t idx = 0;
+  for (; idx + 12 <= length;) {
     uint8_t *t = f + data + idx;
     const uint16_t id = le16(t), tagLen = le16(t + 2);
     if (length < idx + 12 + tagLen) {
@@ -317,6 +326,10 @@ inline NvmInfo patchNvm(uint8_t *f, size_t n, uint8_t baud, int ibs, int deepSle
       r.sleepAfter = d[0];
     }
     idx += 12 + tagLen;
+  }
+  if (idx != length) {
+    r.why = "truncated tag header";
+    return r;
   }
   r.ok = true;
   return r;

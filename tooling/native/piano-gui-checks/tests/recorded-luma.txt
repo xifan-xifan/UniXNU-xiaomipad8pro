@@ -1,0 +1,6 @@
+frame:0    pts:0       pts_time:0
+lavfi.signalstats.YAVG=10.4933
+frame:0    pts:0       pts_time:0
+lavfi.signalstats.YAVG=24.8314
+frame:0    pts:0       pts_time:0
+lavfi.signalstats.YAVG=122.34

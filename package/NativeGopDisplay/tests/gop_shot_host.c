@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// cc -std=c11 -Wall -Wextra -Werror gop_shot_host.c -o /tmp/gop_shot_host && /tmp/gop_shot_host
+// cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all gop_shot_host.c -o /tmp/gop_shot_host && /tmp/gop_shot_host
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,7 +48,18 @@ static void check_replies(void)
     check_reply(reply, GOP_SHOT_FLIP, 0x6c313072u, GOP_SHOT_LAYOUT_BGRA8, GOP_SHOT_LAYOUT_BGRA8);
 
     GopShotLayout layout;
+    assert(gop_shot_decode_reply(NULL, 0, GOP_SHOT_LAYOUT_AUTO, &layout) == EPROTO);
+    assert(gop_shot_decode_reply(NULL, GOP_SHOT_BYTES, GOP_SHOT_LAYOUT_AUTO, &layout) == EINVAL);
+    assert(gop_shot_decode_reply(reply, GOP_SHOT_BYTES, GOP_SHOT_LAYOUT_AUTO, NULL) == EINVAL);
+    assert(gop_shot_decode_reply(reply, GOP_SHOT_BYTES, (GopShotLayout)99, &layout) == EINVAL);
     assert(gop_shot_decode_reply(reply, GOP_SHOT_BYTES - 1, GOP_SHOT_LAYOUT_AUTO, &layout) == EPROTO);
+    assert(gop_shot_decode_reply(reply, SIZE_MAX, GOP_SHOT_LAYOUT_AUTO, &layout) == EPROTO);
+    reply->width = UINT32_MAX;
+    assert(gop_shot_decode_reply(reply, GOP_SHOT_BYTES, GOP_SHOT_LAYOUT_AUTO, &layout) == EPROTO);
+    reply->width = GOP_SHOT_WIDTH;
+    reply->height = UINT32_MAX;
+    assert(gop_shot_decode_reply(reply, GOP_SHOT_BYTES, GOP_SHOT_LAYOUT_AUTO, &layout) == EPROTO);
+    reply->height = GOP_SHOT_HEIGHT;
     reply->version = 2;
     assert(gop_shot_decode_reply(reply, GOP_SHOT_BYTES, GOP_SHOT_LAYOUT_AUTO, &layout) == EPROTO);
     reply->version = 1;
@@ -102,6 +113,7 @@ int main(void)
 
     check_chunks(GOP_SHOT_ROW_BYTES);
     check_chunks(GOP_SHOT_ROW_BYTES + 64);
+    check_chunks(UINT16_MAX);
     assert(gop_shot_bounds(1, UINT64_MAX, 0, GOP_SHOT_ROW_BYTES - 1) == EINVAL);
     assert(gop_shot_bounds(1, UINT64_MAX, 0, UINT64_MAX) == EINVAL);
     assert(gop_shot_bounds(1, 1, UINT64_MAX, GOP_SHOT_ROW_BYTES) == EINVAL);

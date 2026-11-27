@@ -2,17 +2,32 @@
 (package/NativeUfs, package/NativeRamBlock/PersistOverlay.h), the seed identity NativeRamBlock writes into the store header, a small
 independent FAT32 reader for checking the ESP image, and build-ram-images.py loaded as a module (K27_ARGS, kernel_field, mkbootimg).
 Nothing here touches a device."""
+import argparse
+import contextlib
 import hashlib
 import importlib.util
 import json
 import os
 import re
 import struct
+import tempfile
 import zlib
 from pathlib import Path
 
 DEVICE = Path(__file__).resolve().parents[2]
 BACKUP = Path.home() / 'Downloads/XiaomiPad8Pro-Ubuntu/CRITICAL-BACKUP'
+
+
+def toml_loads(text):
+    """Parse a boot menu. Python 3.9 and 3.10 use the tomli backport."""
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        try:
+            import tomli as tomllib
+        except ModuleNotFoundError:
+            from pip._vendor import tomli as tomllib
+    return tomllib.loads(text)
 
 # LUN 0 (4096-byte LBAs), CRITICAL-BACKUP/gpt-after.json = new-primary.bin / new-backup.bin (the tables on the tablet since
 # 2026-11-08). Entry indexes are 0-based (index 34 is partition 35).
@@ -295,6 +310,14 @@ def k273_store_first(seed):
     return store_first(DATA_LAST, seed['store_blocks'])
 
 
+def boot_arg_edit(value):
+    """An ESP command-line edit replaces one whole boot argument."""
+    name, sep, _ = value.partition('=')
+    if not name or not sep or any(c.isspace() or not c.isprintable() or c in '"\\' for c in value):
+        raise argparse.ArgumentTypeError(f'expected one NAME=VALUE boot argument, got {value!r}')
+    return value
+
+
 def store_args_of(args):
     """(the Data store's partition, data-store-lba or None) of a kernel argument list: data-store-part when given (NativeUfs,
     2026-11-14: the store in another partition than the root image), else the root's (native-ufs-root-part, default linux_rootfs)."""
@@ -410,6 +433,130 @@ def check_store_size(seed, args=()):
                          'pages: its store window would start elsewhere, inside the installed store, and a first boot with '
                          'data-persist=2 would initialise it over the owner\'s pages (the store guard cannot see that). '
                          'data-persist=0, or PIANO_DATA_STORE_RELAYOUT=1 for a deliberate re-layout (docs/data-store.md section 8)')
+
+
+# The M5 durability scratch store (docs/tools/durability.md, "Store and boot preflight"): a disposable bound Data window in the unused
+# tail of linux_rootfs, for RAM qualification images only. check_store_size above keeps refusing any bound window on linux_rootfs;
+# build-ram-images.py takes this path instead only with PIANO_SCRATCH_PLAN (a plan confirmed against a fresh maintenance map).
+SCRATCH_KC_STRINGS = (b'data-store-lba', b'data-store-part', b'data-store-replace', b'piano-durability', b'data-store-write-back',
+                      b'data-store-queue', b'data-store-concurrent')
+
+
+def scratch_window(plan):
+    """(first LBA, blocks) of the only window a scratch plan allows; SystemExit otherwise. The same rules as
+    tooling/native/piano-durability/run_durability.py scratch_window: extents [first, count] in 4 KiB blocks, the window
+    W = 1 + ceil(P / 32768) + P at partition end - 256 * reserve_mib - W, inside the approved interval, which starts after the root
+    image and its 1024-block guard; clear of every protected extent."""
+    def extent(name, value):
+        if not (isinstance(value, list) and len(value) == 2 and all(type(x) is int for x in value) and
+                0 < value[0] < value[0] + value[1] <= 0xFFFFFFFF):
+            raise SystemExit(f'scratch plan: invalid {name} extent {value}')
+        return value[0], value[0] + value[1]
+
+    if not isinstance(plan, dict):
+        raise SystemExit('scratch plan: not an object')
+    part_first, part_end = extent('linux_rootfs', plan.get('linux_rootfs'))
+    approved_first, approved_end = extent('approved', plan.get('approved'))
+    root, pages, reserve = (plan.get(k) for k in ('root_blocks', 'seed_pages', 'reserve_mib'))
+    if not (all(type(x) is int and x > 0 for x in (root, pages, reserve)) and 288 <= reserve <= 16384):
+        raise SystemExit('scratch plan: invalid root_blocks, seed_pages or reserve_mib')
+    protected = plan.get('protected')
+    if not isinstance(protected, list) or not protected:
+        raise SystemExit('scratch plan: no protected extents (the owner store must be one)')
+    size = store_blocks(pages)
+    end = part_end - reserve * 256
+    start = end - size
+    if not part_first + root + 1024 <= approved_first <= start < end <= approved_end <= part_end:
+        raise SystemExit(f'scratch plan: the window {start}+{size} does not fit the approved interval {plan["approved"]} after the '
+                         f'root ({root} blocks + 1024) inside linux_rootfs {plan["linux_rootfs"]}')
+    for value in protected:
+        lo, hi = extent('protected', value)
+        if not (end <= lo or hi <= start):
+            raise SystemExit(f'scratch plan: the window {start}+{size} overlaps the protected extent {value}')
+    return start, size
+
+
+def installed_store(out=None):
+    """The installed ESP's Data store (its build record's "store": partition, first_lba, blocks), from OUT/installed.json and the
+    record beside it; None when unknown."""
+    base = Path(out or os.environ.get('PIANO_PERSIST_OUT', DEVICE / 'out/persistent'))
+    try:
+        name = json.loads((base / 'installed.json').read_text())['image']
+        return json.loads((base / (Path(name).stem + '.json')).read_text()).get('store')
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def check_scratch_plan(path, seed, args, kc, out=None):
+    """The record of a RAM image's scratch store, or SystemExit. PATH: the plan JSON (status CONFIRMED by the M5 confirm-map step
+    against a fresh maintenance map); SEED: seed_info of the image's seed; ARGS: the image's kernel arguments; KC: its collection.
+    Refused unless: the window is scratch_window's; the seed is the plan's pinned seed (page count and identity) and not the
+    installed store's; the arguments bind exactly that window (native-ufs-root=1, root and store on linux_rootfs, data-store-lba,
+    log-reserve = reserve_mib, log off, data-persist=2, data-store-concurrent=1|2, piano-durability=1, a piano-reset-after deadline
+    to the bootloader) with no data-store-replace / -flatten / sheng-data-reset; the installed store is known and lies inside one
+    protected extent; the collection knows the binding and the M5 switches."""
+    path = Path(path)
+    try:
+        raw = path.read_bytes()
+        plan = json.loads(raw)
+    except (OSError, ValueError) as e:
+        raise SystemExit(f'PIANO_SCRATCH_PLAN={path}: {e}')
+    if not isinstance(plan, dict):
+        raise SystemExit('scratch plan: not an object')
+    if plan.get('status') != 'CONFIRMED':
+        raise SystemExit(f'PIANO_SCRATCH_PLAN={path.name}: status {plan.get("status")!r}, not CONFIRMED (confirm-map.py on a fresh '
+                         'maintenance map first)')
+    start, size = scratch_window(plan)
+    if plan.get('window') not in (None, [start, size]):
+        raise SystemExit(f'scratch plan: its recorded window {plan.get("window")} is not the computed {start}+{size}')
+    want = (plan.get('seed') or {}).get('identity_sha256')
+    if seed['pages'] != plan['seed_pages'] or seed['identity_sha256'] != want:
+        raise SystemExit(f'scratch plan: the image\'s seed ({seed["pages"]} pages, {seed["identity_sha256"][:16]}) is not the plan\'s '
+                         f'({plan["seed_pages"]} pages, {str(want)[:16]})')
+    installed, _ = installed_seed(out)
+    if installed and seed['identity_sha256'].startswith(installed.lower()[:64]):
+        raise SystemExit('scratch plan: the seed is the installed store\'s seed: a scratch store needs its own seed')
+    need = {'data-persist': '2', 'native-ufs-root': '1', 'native-ufs-root-part': 'linux_rootfs', 'data-store-part': 'linux_rootfs',
+            'data-store-lba': str(start), 'log-reserve': str(plan['reserve_mib']),
+            'piano-durability': '1', 'piano-reset-to': 'bootloader'}
+    checked = need.keys() | {'log', 'data-store-concurrent', 'piano-reset-after', 'data-store-write-back', 'data-store-queue'}
+    forbidden = {'data-store-replace', 'data-store-flatten', 'sheng-data-reset'}
+    named = {}
+    for arg in args:
+        key, sep, value = arg.partition('=')
+        if key in forbidden:
+            raise SystemExit(f'scratch plan: {key} is refused on a scratch store')
+        if key in checked:
+            if key in named or not sep:
+                raise SystemExit(f'scratch plan: {key} must have a single explicit value')
+            named[key] = value
+    wrong = {k: named.get(k) for k, v in need.items() if named.get(k) != v}
+    if wrong:
+        raise SystemExit(f'scratch plan: the arguments must bind the window: {", ".join(f"{k}={need[k]} (has {v})" for k, v in wrong.items())}')
+    # 1 starts concurrent before Data mounts; 2 (the daily line's) arms the switch and starts serial: the qualification turns
+    # machdep.piano_data_concurrent on at run time before it measures (the durability tool refuses anything but mode=concurrent)
+    if named.get('data-store-concurrent') not in ('1', '2'):
+        raise SystemExit(f'scratch plan: data-store-concurrent=1 or =2 (has {named.get("data-store-concurrent")})')
+    if named.get('log', '0') != '0':
+        raise SystemExit('scratch plan: log must stay off (log=0): the log writes inside the reserve')
+    if not re.fullmatch(r'[1-9][0-9]{0,4}', named.get('piano-reset-after', '')):
+        raise SystemExit('scratch plan: piano-reset-after=N (the direct PSCI reset deadline) is required')
+    owner = installed_store(out)
+    if (not isinstance(owner, dict) or owner.get('partition') != 'linux_data' or
+            any(type(owner.get(k)) is not int or owner[k] <= 0 for k in ('first_lba', 'blocks'))):
+        raise SystemExit('scratch plan: the installed store is unknown (PIANO_PERSIST_OUT with installed.json and its ESP record)')
+    lo, hi = owner['first_lba'], owner['first_lba'] + owner['blocks']
+    if not any(p[0] <= lo and hi <= p[0] + p[1] for p in plan['protected']):
+        raise SystemExit(f'scratch plan: the installed store {lo}+{owner["blocks"]} is not inside a protected extent')
+    if not (start + size <= lo or hi <= start):
+        raise SystemExit('scratch plan: the window overlaps the installed store')
+    blob = Path(kc).read_bytes()
+    missing = [s.decode() for s in SCRATCH_KC_STRINGS if s not in blob]
+    if missing:
+        raise SystemExit(f'{kc}: the collection lacks {", ".join(missing)} (the scratch binding and the M5 switches)')
+    return {'plan': str(path), 'plan_sha256': hashlib.sha256(raw).hexdigest(), 'partition': 'linux_rootfs', 'window': [start, size],
+            'reserve_mib': plan['reserve_mib'], 'seed_identity': seed['identity_sha256'], 'seed_pages': seed['pages'],
+            'owner_store': [lo, owner['blocks']], 'protected': plan['protected'], 'confirmed_by': plan.get('confirmed_by')}
 
 
 def store_header(raw):
@@ -564,6 +711,8 @@ def kc_has_store_guard(kc):
 def fat32_read(image):
     data = Path(image).read_bytes() if not isinstance(image, (bytes, bytearray)) else image
     bs = data[:512]
+    if len(bs) != 512:
+        return {'files': {}, 'problems': ['truncated FAT32 boot sector']}
     (sector, spc, reserved, nfats, root_entries, small, media, fat16_len, _spt, _heads, hidden, big,
      fat_len, ext_flags, fs_version, root_cluster, fsinfo, backup) = struct.unpack_from('<HBHBHHBHHHIIIHHIHH', bs, 11)
     problems = []
@@ -573,15 +722,25 @@ def fat32_read(image):
         problems.append(f'sector size {sector}')
     if spc & (spc - 1) or not spc:
         problems.append(f'sectors per cluster {spc}')
+    if not reserved or not nfats or not fat_len:
+        problems.append('missing reserved sectors or FAT')
     if fat16_len or root_entries or fs_version or ext_flags & 0x80 or media < 0xf8:
         problems.append('not a mirrored FAT32 EDK2 mounts (FsVersion 0, ExtendedFlags bit 7 clear, media >= 0xf8)')
     sectors = small or big
     first_data = reserved + nfats * fat_len
+    if first_data >= sectors or sectors * sector > len(data):
+        problems.append('FAT32 layout exceeds the image or leaves no data sectors')
+    if problems:
+        return {'files': {}, 'problems': problems}
     clusters = (sectors - first_data) // spc
     if clusters < 65525:
         problems.append(f'{clusters} clusters: too few for FAT32')
     if fat_len * sector // 4 < clusters + 2:
         problems.append('FAT shorter than the cluster count')
+    if not 2 <= root_cluster < clusters + 2:
+        problems.append('root cluster outside the data region')
+    if problems:
+        return {'files': {}, 'problems': problems}
     info = data[fsinfo * sector:fsinfo * sector + 512]
     if info[:4] != b'RRaA' or info[484:488] != b'rrAa' or info[508:512] != b'\x00\x00\x55\xaa':
         problems.append('FSInfo signatures')
@@ -593,23 +752,29 @@ def fat32_read(image):
 
     def chain(first):
         out, c, seen = [], first, set()
-        while 2 <= c < 0x0ffffff8:
-            if c in seen or c >= clusters + 2:
+        while True:
+            if c in seen or not 2 <= c < min(clusters + 2, 0x0ffffff0):
                 problems.append(f'bad cluster chain at {c}')
                 break
             seen.add(c)
             out.append(c)
             c = struct.unpack_from('<I', fat, c * 4)[0] & 0x0fffffff
+            if c >= 0x0ffffff8:
+                break
         return out
 
     def read(first, size=None):
         blob = b''.join(data[(first_data + (c - 2) * spc) * sector:(first_data + (c - 1) * spc) * sector] for c in chain(first))
         return blob if size is None else blob[:size]
 
-    files, label = {}, None
+    files, label, directories = {}, None, set()
 
-    def walk(cluster, prefix):
+    def walk(cluster, prefix, depth=0):
         nonlocal label
+        if cluster in directories or depth > 64:
+            problems.append(f'repeated or deeply nested directory at cluster {cluster}')
+            return
+        directories.add(cluster)
         raw, lfn = read(cluster), []
         for off in range(0, len(raw), 32):
             e = raw[off:off + 32]
@@ -636,7 +801,7 @@ def fat32_read(image):
             first = struct.unpack_from('<H', e, 20)[0] << 16 | struct.unpack_from('<H', e, 26)[0]
             size = struct.unpack_from('<I', e, 28)[0]
             if attr & 0x10:
-                walk(first, prefix + name + '/')
+                walk(first, prefix + name + '/', depth + 1)
             else:
                 content = read(first, size) if size else b''
                 if len(content) != size:
@@ -652,3 +817,33 @@ def fat32_read(image):
 
 def write_json(path, obj):
     Path(path).write_text(json.dumps(obj, indent=2) + '\n')
+
+
+def checked_esp_base(record_path, record):
+    image = record_path.with_name(record['image'])
+    size = ESP_BLOCKS * LBA
+    if not image.is_file():
+        raise SystemExit(f'{image}: base ESP image is missing')
+    if image.stat().st_size != size or record.get('bytes') != size:
+        raise SystemExit(f'{image}: base ESP image and record must both be {size} bytes')
+    if sha(image) != record['sha256']:
+        raise SystemExit(f'{image}: not the image its record {record_path.name} names')
+    return image
+
+
+@contextlib.contextmanager
+def stage_esp_output(out, name, base_image, base_record):
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', name):
+        raise SystemExit('the output name must be a single file stem')
+    image, record = out / f'{name}.img', out / f'{name}.json'
+    inputs = {base_image.resolve(), base_record.resolve()}
+    if image.resolve() in inputs or record.resolve() in inputs:
+        raise SystemExit('the ESP output would overwrite the rollback base')
+    if image.is_dir() or record.is_dir():
+        raise SystemExit('an ESP output path is a directory')
+    out.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='.esp-output-', dir=out) as scratch:
+        staged = Path(scratch) / image.name
+        yield staged
+        staged.replace(image)
+        staged.with_suffix('.json').replace(record)

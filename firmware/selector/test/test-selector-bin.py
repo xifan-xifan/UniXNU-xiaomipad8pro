@@ -6,10 +6,11 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path
 
 LLVM = os.environ.get('LLVM', '/opt/homebrew/opt/llvm/bin')
 obj, binf = sys.argv[1], sys.argv[2]
-data = open(binf, 'rb').read()
+data = Path(binf).read_bytes()
 fails = 0
 
 
@@ -19,9 +20,13 @@ def check(cond, msg):
     fails += 0 if cond else 1
 
 
-rel = subprocess.run([f'{LLVM}/llvm-objdump', '-r', obj], capture_output=True, text=True).stdout
+def objdump(flag):
+    return subprocess.run([f'{LLVM}/llvm-objdump', flag, obj], capture_output=True, text=True, check=True).stdout
+
+
+rel = objdump('-r')
 check('R_AARCH64' not in rel, 'no relocations')
-syms = subprocess.run([f'{LLVM}/llvm-objdump', '-t', obj], capture_output=True, text=True).stdout
+syms = objdump('-t')
 start = [l for l in syms.splitlines() if l.endswith(' _start')]
 check(len(start) == 1 and start[0].startswith('0000000000000000'), '_start at offset 0')
 check(not re.search(r'\bg\s+(F\s+)?\.text', syms), 'no global symbols (every reference resolved locally)')
@@ -38,7 +43,7 @@ check(all(b == 0 for b in data[m + 16:m + 80]), 'metadata fields zero before pac
 for s in (b'bootmonitor.bootmode=recovery\0', b'bootmonitor.bootmode=poweroff_cg\0'):
     check(data.count(s) == 1, f'bootargs string {s[:-1].decode()} present')
 check(8192 < len(data) <= 65536, f"size {len(data)} bytes (8 KiB stack included, under 64 KiB)")
-dis = subprocess.run([f'{LLVM}/llvm-objdump', '-d', obj], capture_output=True, text=True).stdout
+dis = objdump('-d')
 check(not re.search(r'\s(ldr|str|ldp|stp)\s+q|\sv[0-9]+\.', dis), 'no FP/SIMD instructions')
 check('smc\t#0' in dis or 'smc #0' in dis, 'PSCI smc present (fastboot path)')
 check('dc\tcivac' in dis or 'dc civac' in dis, 'splash framebuffer clean present')

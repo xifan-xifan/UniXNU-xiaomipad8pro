@@ -38,25 +38,28 @@ static CFDataRef encode_png(const uint8_t *pixels)
     return encoded ? png : NULL;
 }
 
+static int write_png_fd(int fd, CFDataRef png)
+{
+    const uint8_t *next = CFDataGetBytePtr(png);
+    size_t remaining = (size_t)CFDataGetLength(png);
+    while (remaining) {
+        const ssize_t count = write(fd, next, remaining);
+        if (count < 0 && errno == EINTR)
+            continue;
+        if (count <= 0)
+            return count < 0 ? errno : EIO;
+        next += count;
+        remaining -= (size_t)count;
+    }
+    return 0;
+}
+
 static int write_png(const char *path, CFDataRef png)
 {
     const int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (fd < 0)
         return errno;
-    const uint8_t *next = CFDataGetBytePtr(png);
-    size_t remaining = (size_t)CFDataGetLength(png);
-    int error = 0;
-    while (remaining) {
-        const ssize_t count = write(fd, next, remaining);
-        if (count < 0 && errno == EINTR)
-            continue;
-        if (count <= 0) {
-            error = count < 0 ? errno : EIO;
-            break;
-        }
-        next += count;
-        remaining -= (size_t)count;
-    }
+    int error = write_png_fd(fd, png);
     if (close(fd) && !error)
         error = errno;
     if (error)
@@ -85,9 +88,11 @@ int main(int argc, char **argv)
         override_layout = GOP_SHOT_LAYOUT_BGRA8;
     else if (argc == 3 && strcmp(argv[1], "--10bit") == 0)
         override_layout = GOP_SHOT_LAYOUT_PACKED10;
+    const char *output = argc > 1 ? argv[argc - 1] : "";
+    const bool to_stdout = strcmp(output, "--stdout") == 0;
     if ((argc != 2 && override_layout == GOP_SHOT_LAYOUT_AUTO) ||
-        argv[argc - 1][0] == '-' || !argv[argc - 1][0]) {
-        fputs("usage: gop-shot [--bga8|--10bit] OUTPUT.png\n", stderr);
+        (!to_stdout && output[0] == '-') || !output[0]) {
+        fputs("usage: gop-shot [--bga8|--10bit] {OUTPUT.png|--stdout}\n", stderr);
         return 2;
     }
     if (geteuid() != 0) {
@@ -120,14 +125,14 @@ int main(int argc, char **argv)
         fputs("gop-shot: PNG encoding failed\n", stderr);
         return 1;
     }
-    const int write_error = write_png(argv[argc - 1], png);
+    const int write_error = to_stdout ? write_png_fd(STDOUT_FILENO, png) : write_png(output, png);
     CFRelease(png);
     if (write_error) {
         fprintf(stderr, "gop-shot: cannot write output: %s\n", strerror(write_error));
         return 1;
     }
-    printf("source=%s format=%c%c%c%c layout=%s\n", source == GOP_SHOT_FLIP ? "flip" : "boot",
-           (uint8_t)(format >> 24), (uint8_t)(format >> 16), (uint8_t)(format >> 8), (uint8_t)format,
-           layout == GOP_SHOT_LAYOUT_PACKED10 ? "10-bit" : "8-bit");
+    fprintf(to_stdout ? stderr : stdout, "source=%s format=%c%c%c%c layout=%s\n",
+            source == GOP_SHOT_FLIP ? "flip" : "boot", (uint8_t)(format >> 24), (uint8_t)(format >> 16),
+            (uint8_t)(format >> 8), (uint8_t)format, layout == GOP_SHOT_LAYOUT_PACKED10 ? "10-bit" : "8-bit");
     return 0;
 }

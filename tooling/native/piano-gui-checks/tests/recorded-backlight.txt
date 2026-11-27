@@ -1,0 +1,7 @@
+      "piano-backlight-code" = 178
+      "piano-backlight-secondary-lit" = Yes
+      "piano-backlight-primary-code" = 178
+      "IODisplayParameters" = {"brightness"={"min"=178,"max"=1952,"value"=178},"BrightnessMilliNits"={"min"=2293,"max"=600000,"value"=2293}}
+      "piano-backlight-lit" = Yes
+      "piano-backlight-secondary-code" = 178
+      "piano-backlight-primary-lit" = Yes

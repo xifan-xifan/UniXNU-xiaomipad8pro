@@ -3,9 +3,8 @@
 // UniXNU-piano: the Data disk's part of a system sleep (native-ufs-suspend=1; NativeUfs is the disk's power parent, so IOPMrootDomain
 // takes the disk down before the UFS link and brings it up after: docs/power.md §4, docs/drivers/ufs.md §12).
 //
-// off() runs under the disk's gate, so no request is half done. Every request already completed is on the medium (the store's writes
-// are FUA: PersistOverlay.h writes a run of pages, then the bitmap blocks that name them, both durable before the request completes);
-// the store's SYNCHRONIZE CACHE then makes sure of anything the device might still cache. After it new requests wait (held) until
+// off() runs with admission fenced and drained. A SYNCHRONIZE CACHE makes earlier
+// cached overwrites durable before the UFS link can suspend. Then requests wait until
 // on(). A sync that fails vetoes the link's suspend (NativeUfs leaves the link up: its suspend is aborted) and the disk keeps
 // running, unheld, so this sleep goes on as without native-ufs-suspend. A second off() without an on() changes nothing.
 //   Store: bool sync(); void veto(const char *who);

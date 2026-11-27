@@ -201,6 +201,21 @@ class PolicyTests(unittest.TestCase):
             self.assertFalse(self.model(rig)['overrides']['com.apple.passd'])
             self.assertNotIn('disable gui/501/com.apple.passd', rig.calls)
 
+    def test_partial_or_inconsistent_unit_does_not_change_override(self):
+        unit, on, files = self.units()[0]
+        for staged in ([(unit, on, files[:1])],
+                       [(unit, on, files[1:])],
+                       [(unit, on, files[:1]), (unit, False, files[1:])]):
+            with self.subTest(staged=[(name, enabled, [f[0] for f in rows])
+                                      for name, enabled, rows in staged]), tempfile.TemporaryDirectory() as d:
+                rig = self.rig(Path(d), '/bin/sh', prior=False)
+                rig.files(staged)
+                rc, out = rig.run('--live')
+                self.assertEqual(rc, 1, out)
+                self.assertIn('incomplete or invalid unit', out)
+                self.assertFalse(self.model(rig)['overrides']['com.apple.passd'])
+                self.assertEqual(rig.calls, [])
+
 
 if __name__ == '__main__':
     unittest.main()

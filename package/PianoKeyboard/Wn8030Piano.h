@@ -214,7 +214,7 @@ inline unsigned reportSize(uint8_t id, unsigned rest)
 // The frame's trailer checksum (byte 67 = sum8 of bytes 2..66), seen on the captured frames; not a condition for anything.
 inline bool frameSumOk(const uint8_t frame[kFrameBytes]) { return sum8(frame + 2, kFrameBytes - 3) == frame[kFrameBytes - 1]; }
 
-// Splits one frame into its reports (at most capacity; a frame holds at most 21 of the smallest).
+// Splits one frame into its reports (at most capacity). The last byte belongs to the transport checksum.
 inline Frame unpackFrame(const uint8_t frame[kFrameBytes], Report *out, unsigned capacity, unsigned *count)
 {
   *count = 0;
@@ -223,10 +223,11 @@ inline Frame unpackFrame(const uint8_t frame[kFrameBytes], Report *out, unsigned
   const uint8_t type = frame[2];
   if (!type) return Frame::empty;
   if (type != 0x39 && type != 0x4a && type != 0x5b && type != 0x6c) return Frame::badType;
-  for (unsigned at = 3; at < kFrameBytes && frame[at];) {
-    const unsigned size = reportSize(frame[at], kFrameBytes - at);
+  constexpr unsigned end = kFrameBytes - 1;
+  for (unsigned at = 3; at < end && frame[at];) {
+    const unsigned size = reportSize(frame[at], end - at);
     if (!size) return Frame::unknownId;
-    if (size > kFrameBytes - at) return Frame::overrun;
+    if (size > end - at) return Frame::overrun;
     if (*count < capacity) out[(*count)++] = {frame[at], uint8_t(size), frame + at};
     at += size;
   }
@@ -312,7 +313,8 @@ constexpr uint8_t kModLeftCtrl = 1u << 0, kModRightCtrl = 1u << 4;
 class Keys {
  public:
   bool fnRow = false;
-  void filter(const uint8_t *in, uint8_t out[kKeyboardBytes])
+  // Returns true on rollover, when the input key slots cannot be used to detect new presses.
+  bool filter(const uint8_t *in, uint8_t out[kKeyboardBytes])
   {
     for (unsigned i = 0; i < kKeyboardBytes; ++i) out[i] = in[i];
     bool rollover = false;
@@ -337,6 +339,7 @@ class Keys {
     if (fn_) out[1] &= uint8_t(~kModRightCtrl);
     for (unsigned i = 0; i < 6; ++i) sent_[i] = out[3 + i];
     mods_ = out[1];
+    return rollover;
   }
   // A shortcut, Left Control + usage, on top of what is held: Control down, the key down, the key up, Control up (four reports,
   // so the system sees the modifier before the key). Returns 4.
@@ -489,9 +492,14 @@ class Pointer {
     unsigned seen = 0;
     uint8_t ids[kFingers] = {};
     int32_t xs[kFingers] = {}, ys[kFingers] = {};
+    bool palmFollowed = false;
     for (unsigned f = 0; f < slots; ++f) {
       const uint8_t *p = tp + 2 + 8 * f;
-      if ((p[0] & 1) == 0 || (p[0] & 4) == 0) continue;   // lifted, or a palm
+      if ((p[0] & 1) == 0) continue;   // lifted
+      if ((p[0] & 4) == 0) {   // a palm: if it was a finger, its disappearance cannot finish a tap
+        for (unsigned i = 0; i < fingers_; ++i) palmFollowed = palmFollowed || contacts_[i] == p[1];
+        continue;
+      }
       ids[seen] = p[1];
       xs[seen] = cfg_.invertX ? int32_t(kTouchXMax) - int32_t(le16(p + 4)) : int32_t(le16(p + 4));
       ys[seen] = cfg_.invertY ? int32_t(kTouchYMax) - int32_t(le16(p + 6)) : int32_t(le16(p + 6));
@@ -506,11 +514,10 @@ class Pointer {
       for (unsigned f = 0; f < seen; ++f)
         if (ys[f] >= kRestY) { keep[f] = false; rested = true; }
     unsigned fingers = 0;
-    uint8_t contact = 0;
     int32_t x = 0, y = 0, fx[2] = {}, fy[2] = {};
     for (unsigned f = 0; f < seen; ++f) {
       if (!keep[f]) continue;
-      if (!fingers) contact = ids[f];
+      ids[fingers] = ids[f];
       if (fingers < 2) { fx[fingers] = xs[f]; fy[fingers] = ys[f]; }
       x += xs[f];
       y += ys[f];
@@ -524,12 +531,14 @@ class Pointer {
       travel_ = 0;
       most_ = 0;
       pressed_ = false;
+      palm_ = false;
       ignored_ = cfg_.typingMs && typed_ && ms - lastKeyMs_ < cfg_.typingMs;
       g_ = Gesture();
       g_.x0 = x;
       g_.y0 = y;
       g_.typing = ignored_;
     }
+    if (palmFollowed) palm_ = true;
     if (fingers) { g_.x1 = x; g_.y1 = y; }
     if (fingers > most_) most_ = uint8_t(fingers);
     if (rested && touching_) g_.rested = true;
@@ -557,7 +566,7 @@ class Pointer {
       lock_ = 0;
       swipeX0_ = x;
       swipeY0_ = y;
-    } else if (fingers && (fingers > 1 || contact == contact_)) {
+    } else if (fingers && (fingers > 1 || ids[0] == contacts_[0])) {
       const int32_t dx = x - x_, dy = y - y_;
       travel_ += uint32_t((dx < 0 ? -dx : dx) + ((dy < 0 ? -dy : dy) * kYNum + kYDen / 2) / kYDen);
       if (!ignored_ && ms >= settleUntil_) {
@@ -574,7 +583,7 @@ class Pointer {
         }
       }
     }
-    bool tapped = !fingers && touching_ && cfg_.tap && !pressed_ && !ignored_ && ms - downMs_ <= cfg_.tapMs &&
+    bool tapped = !fingers && touching_ && cfg_.tap && !pressed_ && !ignored_ && !palm_ && ms - downMs_ <= cfg_.tapMs &&
                   travel_ <= cfg_.tapTravel;
     if (tapped && cfg_.tapVeto && cfg_.tapVeto(cfg_.tapVetoContext, uint32_t(ms - downMs_))) {
       tapped = false;
@@ -594,7 +603,7 @@ class Pointer {
       gestureDone_ = true;
     }
     fingers_ = uint8_t(fingers);
-    contact_ = contact;
+    for (unsigned f = 0; f < fingers; ++f) contacts_[f] = ids[f];
     x_ = x;
     y_ = y;
     // Until the scroll axis is decided nothing scrolls; then only the locked axis (a free one: both).
@@ -702,9 +711,10 @@ class Pointer {
     o[6] = uint8_t(int8_t(pan));
   }
   PointerConfig cfg_;
-  uint8_t fingers_ = 0, contact_ = 0, buttons_ = 0, most_ = 0, pressButton_ = 1, lock_ = 0;
+  uint8_t contacts_[kFingers] = {};
+  uint8_t fingers_ = 0, buttons_ = 0, most_ = 0, pressButton_ = 1, lock_ = 0;
   bool touching_ = false, pressed_ = false, pressing_ = false, second_ = false, continuation_ = false, countSeen_ = false;
-  bool gestureDone_ = false, ignored_ = false, typed_ = false, swipeDone_ = false;
+  bool gestureDone_ = false, ignored_ = false, typed_ = false, swipeDone_ = false, palm_ = false;
   int32_t x_ = 0, y_ = 0, moveX_ = 0, moveY_ = 0, scrollX_ = 0, scrollY_ = 0, swipeX0_ = 0, swipeY0_ = 0;
   uint32_t travel_ = 0, lockX_ = 0, lockY_ = 0;
   uint64_t downMs_ = 0, lastKeyMs_ = 0, settleUntil_ = 0;

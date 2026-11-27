@@ -9,7 +9,7 @@
 //     scratchpads handed over, no interrupt enabled, a No-Op completing with code 1 and its TRB's address, the command ring's link
 //     after a wrap, event ring wrap and ERDP, a wrong completion code and a silent controller reported;
 //   - the ports: power switched on, a connection seen, a USB 2 port reset to enabled + high speed, PED never stored as 1.
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. -I../../PianoDwc3 xhcihost_host.cpp -o /tmp/xhcihost_host && /tmp/xhcihost_host
+//   c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I.. -I../../PianoDwc3 xhcihost_host.cpp -o /tmp/xhcihost_host && /tmp/xhcihost_host
 #include "XhciHost.h"
 #include "AppleDmaReadback.h"
 #include <cstdio>
@@ -35,13 +35,14 @@ struct Model {
   uint32_t gctl = kPrtcapDevice << kGctlPrtcapShift, gsts = 0, guctl = 0x0c808010, gusb2 = kGusb2PhySusphy | kGusb2PhyEnblslpm | 0x1400,
            gusb3 = kGusb3PipeSusphy | 0x0100000, gevntsiz = 0x1000, dctl = kDctlRunStop, dsts = 0;
   int csftrstReads = 0, haltReads = 0;
-  bool deviceCanHalt = true;
+  bool deviceCanHalt = true, deviceRoleStuck = false;
   bool pipeClock = true;   // false: DCTL.CSFTRST never clears (no PIPE clock)
   uint32_t qsGeneral = 0, qsHs = kQsUtmiOtgVbusValid | kQsSwSessvldSel | 0x10, qsSs = kQsLane0PwrPresent;
   // xHCI
   uint32_t cap[8] = {0x01100020, 0x02000140, 0x0, 0x0, 0x0220fe6d, 0x480, 0x440, 0x0};   // 64 slots, 1 intr, 2 ports, PPC 1
   uint32_t usbcmd = 0, usbsts = kUsbStsHalted | kUsbStsCnr, pagesize = 1, config = 0, dnctrl = 0;
   int cnrReads = 3, hcrstReads = 0;
+  bool resetCnrStuck = false;
   uint64_t crcr = 0, dcbaap = 0, erstba = 0, erdp = 0;
   uint32_t iman = 0, imod = 0, erstsz = 0;
   uint32_t portsc[2] = {0, 0};
@@ -222,7 +223,7 @@ struct Model {
       return usbcmd;
     }
     if (pa == o + kOpUsbSts) {
-      if ((usbsts & kUsbStsCnr) && !(usbcmd & kUsbCmdHcrst) && --cnrReads <= 0) usbsts &= ~kUsbStsCnr;
+      if ((usbsts & kUsbStsCnr) && !(usbcmd & kUsbCmdHcrst) && !resetCnrStuck && --cnrReads <= 0) usbsts &= ~kUsbStsCnr;
       return usbsts;
     }
     if (pa == o + kOpPageSize) return pagesize;
@@ -252,7 +253,6 @@ struct Model {
   void wr(uint64_t pa, uint32_t v)
   {
     stores.push_back({pa, v});
-    if (dropClockAfterStores >= 0 && int(stores.size()) > dropClockAfterStores) aggre = false;
     if (!coreOn()) {
       violation("a store with the core unclocked");
       return;
@@ -267,7 +267,7 @@ struct Model {
     }
     if (pa == kDwc3 + kGctl) {
       gctl = v;
-      gsts = (gsts & ~kGstsCurmodMask) | (prtcap(v) == kPrtcapHost ? 1u : 0u);
+      gsts = (gsts & ~kGstsCurmodMask) | (prtcap(v) == kPrtcapHost || deviceRoleStuck ? 1u : 0u);
       return;
     }
     if (pa == kDwc3 + kGuctl) { guctl = v; return; }
@@ -370,6 +370,7 @@ struct TestHal {
   void sleepMs(uint32_t ms) { m.timeUs += 1000ull * ms; }
   bool glueClocked()
   {
+    if (m.dropClockAfterStores >= 0 && int(m.stores.size()) >= m.dropClockAfterStores) m.aggre = false;
     const uint32_t g = m.rd(kGcc + kGccUsb30Gdsc);
     return (g & kGdscPwrOn) && !(m.rd(kGcc + kGccUsb30Master) & kCbcrClkOff) && !(m.rd(kGcc + kGccUsb30Sleep) & kCbcrClkOff) &&
            !(m.rd(kGcc + kGccCfgNocUsb3Axi) & kCbcrClkOff) && !(m.rd(kGcc + kGccAggreUsb3Axi) & kCbcrClkOff);
@@ -443,7 +444,7 @@ void testSwitch()
   TestHal h{m};
   const SwitchResult sw = hostSwitch(h, HostPolicy{});
   CHECK(sw.ok);
-  CHECK(sw.wasRunning && sw.devHalted && sw.csftrst && !sw.gctlReset && sw.overrideCleared && sw.utmiSelected && sw.hostMode);
+  CHECK(sw.wasRunning && sw.devHalted && sw.csftrst && !sw.gctlReset && sw.ssOverrideCleared && sw.hsOverrideCleared && sw.utmiSelected && sw.hostMode);
   CHECK(prtcap(m.gctl) == kPrtcapHost && (m.gsts & 3) == 1);
   CHECK(!(m.gusb2 & (kGusb2PhySusphy | kGusb2PhyEnblslpm)) && (m.gusb2 & 0x1400) && !(m.gusb3 & kGusb3PipeSusphy));
   CHECK(m.guctl & kGuctlHstInAutoRetry);
@@ -535,6 +536,33 @@ void testGates()
   bool offClockStore = false;
   for (const auto &v : d.violations) offClockStore |= v.find("QSCRATCH") != std::string::npos;
   CHECK(!offClockStore);
+  // Losing the clock between the SS and HS writes leaves a partial override to restore.
+  Model partial;
+  partial.dropClockAfterStores = 3;
+  TestHal hp{partial};
+  const SwitchResult sp = hostSwitch(hp, HostPolicy{});
+  CHECK(!sp.ok && partial.glueStores == 1 && !(partial.qsSs & kOverrideSs));
+  partial.dropClockAfterStores = -1;
+  partial.aggre = true;
+  CHECK(backToDevice(hp, sp, HostPolicy{}).ok);
+  CHECK(partial.qsSs == sp.found.qsSs && partial.qsHs == sp.found.qsHs);
+  // Clock loss after disabling PIPE must not leave it disabled at device reclaim.
+  Model pipe;
+  pipe.dropClockAfterStores = 5;
+  TestHal hpipe{pipe};
+  const auto pipeSwitch = hostSwitch(hpipe, HostPolicy{});
+  CHECK(!pipeSwitch.ok && (pipe.qsGeneral & kQsPipeUtmiClkDis));
+  pipe.dropClockAfterStores = -1;
+  pipe.aggre = true;
+  CHECK(backToDevice(hpipe, pipeSwitch, HostPolicy{}).ok && pipe.qsGeneral == pipeSwitch.found.qsGeneral);
+  // A written PRTCAPDIR is insufficient while the controller still reports host mode.
+  Model role;
+  TestHal hrole{role};
+  const auto roleSwitch = hostSwitch(hrole, HostPolicy{});
+  CHECK(roleSwitch.ok);
+  role.deviceRoleStuck = true;
+  const auto back = backToDevice(hrole, roleSwitch, HostPolicy{});
+  CHECK(!back.ok && !back.glueStores && !(role.qsHs & kOverrideHs) && !(role.qsSs & kOverrideSs));
   // An unknown IP: nothing stored.
   Model i;
   i.gsnpsid = 0x12345678;
@@ -596,7 +624,7 @@ void testXhci()
   CHECK(clean(m));
   // Stop: halted and reset; then back to device.
   const StopResult st = xhciStop(h, x);
-  CHECK(st.ok && (m.usbsts & kUsbStsHalted) && !m.dcbaap);
+  CHECK(st.ok && (st.usbsts & (kUsbStsHalted | kUsbStsCnr)) == kUsbStsHalted && !m.dcbaap);
   CHECK(backToDevice(h, r.sw, HostPolicy{}).ok && prtcap(m.gctl) == kPrtcapDevice);
   CHECK(clean(m));
 }
@@ -640,6 +668,14 @@ void testXhciEdges()
   n.cnrReads = 1 << 30;
   const ResetResult rn = xhciReset(hn, readCaps(hn));
   CHECK(!rn.ok && std::strstr(rn.why, "CNR") != nullptr && n.xhciStores == 0);
+  // A reset command can clear before the controller is safe to hand back.
+  Model stalled;
+  const Run running = bringUp(stalled);
+  CHECK(running.run.ok);
+  TestHal hstalled{stalled};
+  stalled.resetCnrStuck = true;
+  const auto stopped = xhciStop(hstalled, running.x);
+  CHECK(!stopped.ok && (stopped.usbsts & kUsbStsCnr) && !(stalled.usbcmd & kUsbCmdHcrst));
   // No 4 KiB page size; a region not 64 KiB aligned.
   Model p;
   p.pagesize = 2;

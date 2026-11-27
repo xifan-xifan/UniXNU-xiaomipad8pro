@@ -16,6 +16,7 @@ INC=(-I "$P" -I "$D/package/PianoPower")
 mkdir -p "$O/host-tests"
 "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror "${INC[@]}" "$P/tests/torch_host.cpp" -o "$O/host-tests/torch_host"
 "$O/host-tests/torch_host" || { echo "Error: PianoTorch host tests failed" >&2; exit 1; }
+bash "$D/tooling/native/piano-torch/test-cli.sh"
 # The portable headers hold no store of their own: no str instruction and no assignment through a volatile pointer (the kext's
 # stores are the observer's read command and the flash APID's write channel, both through PianoTorch.cpp's wr32).
 if grep -nE '"str|volatile[^;]*\*[^;]*[^=!<>]=[^=]' "$P/FlashHw.h" "$P/TorchCore.h" "$P/TorchSpmi.h"; then

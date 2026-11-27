@@ -98,7 +98,6 @@ inline Call answer(const Config &config, const uint8_t *in, size_t inBytes, uint
   }
   c.key = getU32(in + kKeyAt);
   c.command = in[kCommandAt];
-  const uint32_t sizeIn = getU32(in + kDataSizeAt);
   if (out != in) {
     const size_t n = inBytes < outBytes ? inBytes : outBytes;
     for (size_t i = 0; i < n; ++i) out[i] = in[i];
@@ -120,13 +119,8 @@ inline Call answer(const Config &config, const uint8_t *in, size_t inBytes, uint
   c.mshp = true;
   putU32(out + kDataTypeAt, kTypeUi8);
   out[kDataAttrAt] = kAttrRead;
-  if (c.command == kCmdKeyInfo) {
-    putU32(out + kDataSizeAt, 1);
-  } else {
-    // The caller's size comes from command 9 (1); whatever it asked for, one byte is the key's value and the rest stays 0.
-    putU32(out + kDataSizeAt, sizeIn ? sizeIn : 1);
-    out[kBytesAt] = 1;
-  }
+  putU32(out + kDataSizeAt, 1);
+  if (c.command == kCmdRead) out[kBytesAt] = 1;
   out[kResultAt] = c.result = kSuccess;
   return c;
 }

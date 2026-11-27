@@ -825,7 +825,8 @@ void selectLightCurve(IOService *backlight)
   OSNumber *floor = d ? OSDynamicCast(OSNumber, d->getObject("floor")) : nullptr;
   if (curve && curve->unsigned64BitValue() <= PS_ALS_REFERENCE && revision && revision->unsigned32BitValue() &&
       floor && floor->unsigned64BitValue() >= PA_SDR_MIN_CODE && floor->unsigned64BitValue() <= 1024 &&
-      pal_select_curve(&gEngine->light, PsAlsCurve(curve->unsigned32BitValue()), revision->unsigned32BitValue(), floor->unsigned32BitValue())) {
+      pal_select_curve(&gEngine->light, PsAlsCurve(curve->unsigned32BitValue()), revision->unsigned32BitValue(),
+                       uint16_t(floor->unsigned32BitValue()))) {
     SsOutputs &out = gEngine->out;
     out.light_valid = 0;
     out.target = -1;
@@ -870,7 +871,7 @@ SsConditions readConditions(uint64_t now)
   }
   // The accelerometer: piano-rotated reads the edge (piano-rotate>=1) unless it tests with its own edges (piano-rotate-test=1).
   c.accel_consumer = gArgs.rotate >= 2 || (gArgs.rotate == 1 && gArgs.rotateAgent >= 1 && gArgs.rotateTest != 1);
-  c.accel_with_cover = gArgs.accelCover;
+  c.accel_with_cover = gArgs.accelCover != 0;
   gAccelWhy = gArgs.rotate == 0 ? "piano-sensors-rotate=0" : gArgs.rotate >= 2 ? "piano-sensors-rotate=2"
               : c.accel_consumer ? "piano-rotated" : "no rotation agent (piano-rotate=0 or piano-rotate-test=1)";
   static int lastDisplay = -2, lastLid = -2, lastAttached = -2, lastWanted = -1;

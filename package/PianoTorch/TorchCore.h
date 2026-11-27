@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // PianoTorch's portable part (docs/drivers/torch.md section 4): the SPMI write channel, the level 1 survey of the PM8550 flash
-// module, the only writes level 2 makes (an allowlist of ten registers of that one peripheral, each written read-modify-write
+// module, the only writes level 2 makes (an allowlist of registers of that one peripheral, each written read-modify-write
 // under its mask and read back), the torch on/off sequences, and the guard that turns the torch off (time limit, the module's own
 // fault and over-temperature bits, the SoC and battery temperatures other drivers publish, a lost or unreadable state).
 // No I/O of its own: reads and writes go through a Bus the kext (PianoTorch.cpp) or the host test (tests/torch_host.cpp) gives.
@@ -11,11 +11,30 @@
 #include <libkern/libkern.h>
 #else
 #include <stdio.h>
+#include <string.h>
 #endif
 #include "FlashHw.h"
 #include "../include/PianoSpmi.h"   // the SPMI lock and the transactions every kext shares
 
 namespace pianotorch {
+
+// A diagnostic switch needs an explicit =1 token. The last mention of the switch wins.
+inline bool bootSwitchEnabled(const char *args, const char *name)
+{
+  if (!args) return false;
+  const size_t keyLen = strlen(name);
+  bool enabled = false;
+  while (*args) {
+    while (*args == ' ' || *args == '\t') ++args;
+    const char *end = args;
+    while (*end && *end != ' ' && *end != '\t') ++end;
+    const size_t len = size_t(end - args);
+    if (len >= keyLen && memcmp(args, name, keyLen) == 0 && (len == keyLen || args[keyLen] == '='))
+      enabled = len == keyLen + 2 && args[keyLen + 1] == '1';
+    args = end;
+  }
+  return enabled;
+}
 
 // ------------------------------------------------------------------------------------------------- the SPMI write channel
 // The write channel of one APID: its 0x20 bytes at chnls + 0x1000 * APID (the kext maps that one page and nothing else of the
@@ -84,7 +103,7 @@ struct Survey {
   Faults faults() const { return decodeFaults(reg[kRegStatus1], reg[kRegStatus2], reg[kRegStatus3], kPianoChannelMask); }
 };
 
-inline Survey survey(const Bus &bus)
+inline Survey survey(const Bus &bus, bool stopOnFailure = false)
 {
   Survey s;
   uint8_t id[8] = {};
@@ -108,6 +127,7 @@ inline Survey survey(const Bus &bus)
       if (!bus.read(bus.ctx, uint8_t(at), b, 8)) {
         ++s.failures;
         s.complete = false;
+        if (stopOnFailure) return s;
         continue;
       }
       for (unsigned i = 0; i < 8; ++i) {
@@ -175,16 +195,29 @@ inline void formatFaults(const Faults &f, char *out, unsigned size)
   out[size - 1] = 0;
 }
 
-// The normal default remains Ubuntu's 100 mA total. The factory hardware permits 400 mA total (2 x 200 mA); the
-// higher limit is opt-in through piano-torch-max-ma and is used only for short guarded probes such as torch5.
-constexpr unsigned kFactoryTorchMaxMa = 400;
-constexpr unsigned kHardMaxMa = kFactoryTorchMaxMa;
-constexpr uint8_t kHardMaxItarget = itargetForMa(kHardMaxMa);
+constexpr unsigned kDefaultLevel = 0;
+constexpr unsigned kDefaultOnMa = kFactoryTorchMaxMa;   // 2 x 200 mA, configured lit setting (OWNER-0801)
+constexpr unsigned kDefaultMaxMa = kFactoryTorchMaxMa;  // 2 x 200 mA, ITARGET and TORCH_CLAMP 39 (OWNER-0801)
+constexpr unsigned kHardMaxMa = kFactoryTorchMaxMa;     // 2 x 200 mA, ITARGET and TORCH_CLAMP 39
+constexpr unsigned kLadderLevelsMa[] = {100, 200, 300, 400};
+constexpr unsigned kLadderWindowSeconds = 10, kLadderWindowMs = kLadderWindowSeconds * 1000;
+constexpr uint8_t kProbeFlashItarget = 1, kProbeFlashTicks = 8;
+constexpr unsigned kProbeFlashMs = kProbeFlashTicks * kTimerStepMs;
+constexpr unsigned kProbeFlashMa = (kProbeFlashItarget + 1) * kPianoChannels * kFlashStepUa / 1000;
+constexpr unsigned kProbeMaxSeconds = 60, kProbePollMs = 500, kPulsePollMs = 20;
+static_assert(kProbeFlashMa == 50 && kProbeFlashMa <= kHardMaxMa && kProbeFlashTicks == 8 && kProbeFlashMs == 80,
+              "bounded T4 pulse");
 inline unsigned clampMa(unsigned ma, unsigned maxMa)
 {
   if (maxMa > kHardMaxMa) maxMa = kHardMaxMa;
   if (maxMa < kTorchMinMa) maxMa = kTorchMinMa;
   return ma < kTorchMinMa ? kTorchMinMa : ma > maxMa ? maxMa : ma;
+}
+
+// Clamp at the ABI width so oversized arguments cannot wrap to OFF or to the default timeout.
+constexpr unsigned boundedRequest(uint64_t value, unsigned limit)
+{
+  return value > limit ? limit : unsigned(value);
 }
 
 struct StepResult {
@@ -197,8 +230,12 @@ struct StepResult {
 class Controller {
  public:
   Controller() = default;
-  explicit Controller(const Bus &bus) : bus_(bus) {}
-  void setBus(const Bus &bus) { bus_ = bus; }
+  explicit Controller(const Bus &bus, bool allowSpare = false) { setBus(bus, allowSpare); }
+  void setBus(const Bus &bus, bool allowSpare)
+  {
+    bus_ = bus;
+    channels_ = allowSpare ? kPianoChannelMask | kOtherChannelMask : kPianoChannelMask;
+  }
 
   // The survey's bytes as the last known values (a masked write whose read fails merges into these, so off() still writes).
   void seed(const Survey &s)
@@ -207,19 +244,24 @@ class Controller {
       if (s.valid[i]) remember(uint8_t(i), s.reg[i]);
   }
 
-  // A masked write: read (unless the mask is the whole byte; on a failed read the last known value), merge, write, read back,
-  // compare under the mask.
+  // A masked write: read (unless the mask is the whole byte), merge, write and compare the read-back.
   bool put(StepResult &r, uint8_t reg, uint8_t mask, uint8_t value)
   {
-    if (!writable(reg, mask) || (value & ~mask) || !bus_.write) {
+    return putMasked(r, reg, mask, value, false);
+  }
+
+ private:
+  bool putMasked(StepResult &r, uint8_t reg, uint8_t mask, uint8_t value, bool emergencyOff)
+  {
+    if (!writable(reg, mask) || (value & ~mask) || !bus_.write || !authorized(reg, mask)) {
       ++r.refused;
       return fail(r, reg, value, 0, "a write outside the allowlist was refused");
     }
     uint8_t old = 0;
     if (mask != 0xff) {
       if (bus_.read(bus_.ctx, reg, &old, 1)) remember(reg, old);
-      else if (known_[reg]) old = cache_[reg];
-      else return fail(r, reg, value, 0, "the read before a masked write failed and the register's value is not known");
+      else if (emergencyOff && known_[reg]) old = cache_[reg];
+      else return fail(r, reg, value, 0, "the read before a masked write failed");
     }
     const uint8_t next = uint8_t((old & ~mask) | value);
     if (!bus_.write(bus_.ctx, reg, next)) return fail(r, reg, value, 0, "the SPMI write failed (status error or timeout)");
@@ -233,27 +275,26 @@ class Controller {
     return true;
   }
 
+ public:
   // Torch on at itarget over the channels of mask (one bit a channel, piano's pair by default), with Linux's torch settings:
   // software strobe, 5 mA steps, no safety timer, the clamp set for maxMa. Stops at the first failure; the caller runs off().
   StepResult on(uint8_t itarget, uint8_t clamp, uint8_t mask = kPianoChannelMask)
   {
     StepResult r;
-    if (itarget > kHardMaxItarget) itarget = kHardMaxItarget;
-    if (clamp > kHardMaxItarget) clamp = kHardMaxItarget;
-    if (!mask || mask & 0xf0) {
-      ++r.refused;
-      fail(r, kRegChanEn, mask, 0, "the channel mask is not one to four of the module's channels");
-      return r;
-    }
+    if (!allowChannels(r, mask)) return r;
+    if (!channelsAvailable(r, mask)) return r;
+    const uint8_t maxItarget = maxItargetForMask(mask, kTorchStepUa, kHardMaxMa);
+    if (clamp > maxItarget) clamp = maxItarget;
+    if (itarget > clamp) itarget = clamp;
     bool ok = put(r, kRegChanEn, mask, 0) && put(r, kRegModuleEn, kModuleEnBit, 0);
     for (unsigned ch = 0; ok && ch < kChannels4ch; ++ch)
-      if (mask & (1u << ch)) ok = put(r, kRegStrobe0 + ch, kStrobeMask, kStrobeSoftwareLevelHigh);
+      if (mask & (1u << ch)) ok = put(r, uint8_t(kRegStrobe0 + ch), kStrobeMask, kStrobeSoftwareLevelHigh);
     ok = ok && put(r, kRegTorchClamp, kClampMask, clamp);
     for (unsigned ch = 0; ok && ch < kChannels4ch; ++ch)
-      if (mask & (1u << ch)) ok = put(r, kRegItarget0 + ch, kItargetMask, itarget);
+      if (mask & (1u << ch)) ok = put(r, uint8_t(kRegItarget0 + ch), kItargetMask, itarget);
     ok = ok && put(r, kRegIres, mask, mask);
     for (unsigned ch = 0; ok && ch < kChannels4ch; ++ch)
-      if (mask & (1u << ch)) ok = put(r, kRegTimer0 + ch, 0xff, 0);
+      if (mask & (1u << ch)) ok = put(r, uint8_t(kRegTimer0 + ch), 0xff, 0);
     ok = ok && put(r, kRegModuleEn, kModuleEnBit, kModuleEnBit) && put(r, kRegChanEn, mask, mask);
     return r;
   }
@@ -266,21 +307,24 @@ class Controller {
   StepResult flashPulse(uint8_t itarget, uint8_t timerTicks, uint8_t mask = kPianoChannelMask)
   {
     StepResult r;
-    if (itarget > kHardMaxItarget) itarget = kHardMaxItarget;
-    if (!timerTicks || timerTicks > kTimerValueMask || !mask || mask & 0xf0) {
+    if (!timerTicks || timerTicks > kProbeFlashTicks) {
       ++r.refused;
       fail(r, kRegTimer0, timerTicks, 0, "the FLASH pulse arguments are outside the bounded diagnostic range");
       return r;
     }
+    if (!allowChannels(r, mask)) return r;
+    if (!channelsAvailable(r, mask)) return r;
+    const uint8_t maxItarget = maxItargetForMask(mask, kFlashStepUa, kProbeFlashMa);
+    if (itarget > maxItarget) itarget = maxItarget;
     bool ok = put(r, kRegChanEn, mask, 0) && put(r, kRegModuleEn, kModuleEnBit, 0);
     for (unsigned ch = 0; ok && ch < kChannels4ch; ++ch)
-      if (mask & (1u << ch)) ok = put(r, kRegStrobe0 + ch, kStrobeMask, kStrobeSoftwareLevelHigh);
+      if (mask & (1u << ch)) ok = put(r, uint8_t(kRegStrobe0 + ch), kStrobeMask, kStrobeSoftwareLevelHigh);
     for (unsigned ch = 0; ok && ch < kChannels4ch; ++ch)
-      if (mask & (1u << ch)) ok = put(r, kRegItarget0 + ch, kItargetMask, itarget);
+      if (mask & (1u << ch)) ok = put(r, uint8_t(kRegItarget0 + ch), kItargetMask, itarget);
     // Clear IRESOLUTION for the selected channels: the flash path is 12.5 mA steps.
     ok = ok && put(r, kRegIres, mask, 0);
     for (unsigned ch = 0; ok && ch < kChannels4ch; ++ch)
-      if (mask & (1u << ch)) ok = put(r, kRegTimer0 + ch, 0xff, uint8_t(kTimerEnable | timerTicks));
+      if (mask & (1u << ch)) ok = put(r, uint8_t(kRegTimer0 + ch), 0xff, uint8_t(kTimerEnable | timerTicks));
     ok = ok && put(r, kRegModuleEn, kModuleEnBit, kModuleEnBit) && put(r, kRegChanEn, mask, mask);
     return r;
   }
@@ -289,36 +333,74 @@ class Controller {
   StepResult off(uint8_t mask = kPianoChannelMask)
   {
     StepResult r;
-    put(r, kRegChanEn, mask, 0);
-    put(r, kRegModuleEn, kModuleEnBit, 0);
+    if (!allowChannels(r, mask)) return r;
+    putMasked(r, kRegChanEn, mask, 0, true);
+    putMasked(r, kRegModuleEn, kModuleEnBit, 0, true);
     for (unsigned ch = 0; ch < kChannels4ch; ++ch)
-      if (mask & (1u << ch)) put(r, kRegItarget0 + ch, kItargetMask, 0);
+      if (mask & (1u << ch)) putMasked(r, uint8_t(kRegItarget0 + ch), kItargetMask, 0, true);
     return r;
   }
 
   // The live state while on: the three status bytes, the real-time fault byte, the enables, over the observer channel.
   struct Live {
     bool ok = false;
+    bool statusOk = false, rtOk = false, moduleOk = false, channelsOk = false;
     uint8_t status1 = 0, status2 = 0, status3 = 0, rt = 0, moduleEn = 0, chanEn = 0;
-    bool lit() const { return (moduleEn & kModuleEnBit) && chanEn; }
-    bool lit(uint8_t mask) const { return (moduleEn & kModuleEnBit) && (chanEn & mask) == mask; }
+    bool lit(uint8_t mask) const { return (moduleEn & kModuleEnBit) && (chanEn & 0x0f) == mask; }
   };
   Live live() const
   {
     Live l;
-    uint8_t st[4] = {}, rt = 0, en = 0, ch = 0;   // 0x06..0x09: STATUS1, STATUS2, (0x08), STATUS3
-    l.ok = bus_.read(bus_.ctx, kRegStatus1, st, 4) && bus_.read(bus_.ctx, kRegIntRtSts, &rt, 1) &&
-           bus_.read(bus_.ctx, kRegModuleEn, &en, 1) && bus_.read(bus_.ctx, kRegChanEn, &ch, 1);
+    uint8_t st[4] = {};   // 0x06..0x09: STATUS1, STATUS2, (0x08), STATUS3
+    l.statusOk = bus_.read(bus_.ctx, kRegStatus1, st, 4);
+    l.rtOk = bus_.read(bus_.ctx, kRegIntRtSts, &l.rt, 1);
+    l.moduleOk = bus_.read(bus_.ctx, kRegModuleEn, &l.moduleEn, 1);
+    l.channelsOk = bus_.read(bus_.ctx, kRegChanEn, &l.chanEn, 1);
+    l.ok = l.statusOk && l.rtOk && l.moduleOk && l.channelsOk;
     l.status1 = st[0];
     l.status2 = st[1];
     l.status3 = st[3];
-    l.rt = rt;
-    l.moduleEn = en;
-    l.chanEn = ch;
     return l;
   }
 
  private:
+  bool authorized(uint8_t reg, uint8_t mask) const
+  {
+    if (reg == kRegChanEn || reg == kRegIres) return (mask & ~channels_) == 0;
+    constexpr uint8_t bases[] = {kRegTimer0, kRegItarget0, kRegStrobe0};
+    for (const uint8_t base : bases) {
+      if (reg >= base && reg < base + kChannels4ch) return channels_ & (1u << (reg - base));
+    }
+    return true;
+  }
+
+  bool allowChannels(StepResult &r, uint8_t mask) const
+  {
+    if (mask && !(mask & ~channels_)) return true;
+    ++r.refused;
+    return fail(r, kRegChanEn, mask, 0, "the channel mask is outside the authorized set");
+  }
+
+  bool channelsAvailable(StepResult &r, uint8_t mask)
+  {
+    uint8_t enabled = 0;
+    if (!bus_.read(bus_.ctx, kRegChanEn, &enabled, 1))
+      return fail(r, kRegChanEn, 0, 0, "the channel enables could not be read before activation");
+    const uint8_t unexpected = enabled & 0x0f & ~mask;
+    if (unexpected)
+      return fail(r, kRegChanEn, 0, unexpected, "a channel outside the requested set is already enabled");
+    return true;
+  }
+
+  static uint8_t maxItargetForMask(uint8_t mask, unsigned stepUa, unsigned maxMa)
+  {
+    unsigned channels = 0;
+    for (unsigned ch = 0; ch < kChannels4ch; ++ch) channels += (mask >> ch) & 1u;
+    // Keep the pair's per-channel ceiling even when a single channel is selected.
+    if (channels < kPianoChannels) channels = kPianoChannels;
+    return uint8_t(maxMa * 1000 / (channels * stepUa) - 1);
+  }
+
   void remember(uint8_t reg, uint8_t value)
   {
     cache_[reg] = value;
@@ -336,6 +418,7 @@ class Controller {
     return false;
   }
   Bus bus_;
+  uint8_t channels_ = kPianoChannelMask;
   uint8_t cache_[256] = {};
   bool known_[256] = {};
 };
@@ -343,7 +426,7 @@ class Controller {
 // ----------------------------------------------------------------------------------------------------------- the guard
 enum class Reason : uint8_t {
   none, user, timeout, test, bootFoundOn, pmicThermal, pmicCurrent, pmicVoltage, shortCircuit, channelOpen, socHot, batteryHot,
-  statusUnreadable, lostState, writeFailed, sleep, shutdown
+  statusUnreadable, lostState, writeFailed, pmicFault, sleep, shutdown, pmicTimer
 };
 inline const char *reasonName(Reason r)
 {
@@ -360,11 +443,13 @@ inline const char *reasonName(Reason r)
     case Reason::channelOpen: return "a channel's open-circuit bit (the LED, its supply, or the wiring is absent: register-perfect but no light)";
     case Reason::socHot: return "the SoC temperature (PianoThermal)";
     case Reason::batteryHot: return "the battery temperature (PianoPower)";
-    case Reason::statusUnreadable: return "the status could not be read twice in a row";
-    case Reason::lostState: return "the enables no longer read on";
+    case Reason::statusUnreadable: return "the status could not be read";
+    case Reason::lostState: return "the module or channel enables differ from the requested state";
     case Reason::writeFailed: return "a write or its read-back failed";
+    case Reason::pmicFault: return "the PMIC real-time fault bit (open, short, or regulator not ready)";
     case Reason::sleep: return "system sleep";
     case Reason::shutdown: return "shutdown or restart";
+    case Reason::pmicTimer: return "the PMIC safety timer expired during the ladder";
   }
   return "?";
 }
@@ -384,26 +469,6 @@ struct Temperatures {
   int32_t socDeci = 0, batteryCenti = 0, flashDeci = 0;
 };
 
-// The decision on one poll of a lit torch. mask: the channels it is lit on.
-inline Reason judge(const Controller::Live &l, unsigned &unreadable, const Temperatures &t, const GuardConfig &c,
-                    uint8_t mask = kPianoChannelMask)
-{
-  if (!l.ok) return ++unreadable >= 2 ? Reason::statusUnreadable : Reason::none;
-  unreadable = 0;
-  const Faults f = decodeFaults(l.status1, l.status2, l.status3, mask);
-  if (f.thermal) return Reason::pmicThermal;
-  if (f.shortCircuit) return Reason::shortCircuit;
-  if (f.open) return Reason::channelOpen;
-  if (f.current) return Reason::pmicCurrent;
-  if (f.voltage) return Reason::pmicVoltage;
-  // f.timeout (STATUS3) is not a reason of its own: a torch runs with the safety timer off, and a timer that did fire turned the
-  // channel off, which the enables show (lostState).
-  if (!l.lit(mask)) return Reason::lostState;
-  if (t.socValid && t.socDeci >= c.socMaxDeci) return Reason::socHot;
-  if (t.batteryValid && t.batteryCenti >= c.batteryMaxCenti) return Reason::batteryHot;
-  return Reason::none;
-}
-
 // Why an on request is refused before any write (the temperatures), or Reason::none.
 inline Reason refuseOn(const Temperatures &t, const GuardConfig &c)
 {
@@ -411,10 +476,59 @@ inline Reason refuseOn(const Temperatures &t, const GuardConfig &c)
   if (t.batteryValid && t.batteryCenti >= c.batteryMaxCenti) return Reason::batteryHot;
   return Reason::none;
 }
+
+inline Reason supplyFault(uint8_t status2)
+{
+  if (status2 & kSts2Thermal) return Reason::pmicThermal;
+  if (status2 & kSts2Current) return Reason::pmicCurrent;
+  if (status2 & kSts2Voltage) return Reason::pmicVoltage;
+  return Reason::none;
+}
+
+// A known safety trip takes precedence over unreadable fields and pair-specific open faults.
+inline Reason judge(const Controller::Live &l, unsigned &unreadable, const Temperatures &t, const GuardConfig &c,
+                    uint8_t mask = kPianoChannelMask)
+{
+  const Reason hot = refuseOn(t, c);
+  if (hot != Reason::none) return hot;
+  if (l.statusOk) {
+    const Reason supply = supplyFault(l.status2);
+    if (supply != Reason::none) return supply;
+    const Faults f = decodeFaults(l.status1, l.status2, l.status3, mask);
+    if (f.shortCircuit) return Reason::shortCircuit;
+    if (f.open && l.ok) return Reason::channelOpen;
+  }
+  if (l.rtOk && (l.rt & kRtFault)) return Reason::pmicFault;
+  // STATUS3 timer expiry is diagnostic. Either enable read can establish lost state.
+  if ((l.moduleOk && !(l.moduleEn & kModuleEnBit)) || (l.channelsOk && (l.chanEn & 0x0f) != mask))
+    return Reason::lostState;
+  if (!l.ok) return ++unreadable >= 2 ? Reason::statusUnreadable : Reason::none;
+  unreadable = 0;
+  return Reason::none;
+}
+
+inline Reason ladderDarkFault(const Controller::Live &l, const Temperatures &t, const GuardConfig &c)
+{
+  const Reason hot = refuseOn(t, c);
+  if (hot != Reason::none) return hot;
+  if (l.statusOk) {
+    const Reason supply = supplyFault(l.status2);
+    if (supply != Reason::none) return supply;
+    const Faults f = decodeFaults(l.status1, l.status2, l.status3, kPianoChannelMask);
+    if (f.shortCircuit) return Reason::shortCircuit;
+    if (f.open) return Reason::channelOpen;
+    if (f.timeout) return Reason::pmicTimer;
+  }
+  if (l.rtOk && (l.rt & kRtFault)) return Reason::pmicFault;
+  if ((l.moduleOk && (l.moduleEn & kModuleEnBit)) || (l.channelsOk && (l.chanEn & 0x0f))) return Reason::lostState;
+  return l.ok ? Reason::none : Reason::statusUnreadable;
+}
+
 inline bool coolsDown(Reason r)
 {
   return r == Reason::pmicThermal || r == Reason::pmicCurrent || r == Reason::pmicVoltage || r == Reason::shortCircuit ||
-         r == Reason::channelOpen || r == Reason::socHot || r == Reason::batteryHot || r == Reason::writeFailed;
+         r == Reason::channelOpen || r == Reason::pmicFault || r == Reason::pmicTimer ||
+         r == Reason::socHot || r == Reason::batteryHot || r == Reason::writeFailed;
 }
 
 // ------------------------------------------------------------------------------------------------- the torch's state
@@ -423,86 +537,192 @@ class Torch {
  public:
   Torch() = default;
   Torch(const Bus &bus, const GuardConfig &c, unsigned maxMa) { configure(bus, c, maxMa); }
-  void configure(const Bus &bus, const GuardConfig &c, unsigned maxMa)
+  void configure(const Bus &bus, const GuardConfig &c, unsigned maxMa, bool allowSpare = false)
   {
-    ctl_.setBus(bus);
+    ctl_.setBus(bus, allowSpare);
+    allowSpare_ = allowSpare;
     cfg_ = c;
-    maxMa_ = clampMa(maxMa, maxMa);
+    maxMa_ = clampMa(maxMa, kHardMaxMa);
   }
 
   struct Outcome {
     bool lit = false;           // the torch is on after this
+    unsigned ma = 0;
     Reason reason = Reason::none;   // why it is off (or why an on was refused)
     StepResult steps;           // the writes of this action
-    Controller::Live live;      // the state read after an on
+    bool cleanedUp = false;
+    StepResult cleanup;         // explicit off after a failed activation
+    bool sampled = false;
+    Controller::Live live;      // the last sample taken before any cleanup
   };
+
+  Outcome checkBootState(uint64_t nowMs, const Survey &s)
+  {
+    ctl_.seed(s);
+    if (!s.moduleEn() && !s.chanEn()) return {};
+    if (operational()) return turnOff(nowMs, Reason::bootFoundOn);
+    // Startup may finish surveying while the power callback has control blocked.
+    mask_ = kPianoChannelMask;
+    lastReason_ = Reason::bootFoundOn;
+    return {};
+  }
 
   // On at ma (clamped) for seconds (0: the default; at most maxS), or off when ma is 0.
   Outcome request(uint64_t nowMs, unsigned ma, unsigned seconds, const Temperatures &t, Reason offReason = Reason::user)
   {
     if (!ma) return turnOff(nowMs, offReason);
+    if (!seconds) seconds = cfg_.defaultS;
+    if (seconds > cfg_.maxS) seconds = cfg_.maxS;
+    return activate(nowMs, ma, seconds * 1000, t, kPianoChannelMask, false, false);
+  }
+
+  Outcome requestProbe(uint64_t nowMs, unsigned ma, unsigned durationMs, const Temperatures &t, uint8_t mask, bool flash)
+  {
     Outcome o;
-    const Reason refused = nowMs < coolUntilMs_ ? lastReason_ : refuseOn(t, cfg_);
-    if (refused != Reason::none) {
-      o.reason = refused;
-      o.lit = lit_;
+    if (diagnosticAbort_ != Reason::none) {
+      o.reason = diagnosticAbort_;
       return o;
     }
-    ma = clampMa(ma, maxMa_);
-    const uint8_t itarget = itargetForMa(ma);
-    o.steps = ctl_.on(itarget, clampForMa(maxMa_));
-    if (!o.steps.ok) {
-      const StepResult undo = ctl_.off();
-      o.steps.writes += undo.writes;
-      o.steps.readbacks += undo.readbacks;
-      settleOff(nowMs, Reason::writeFailed);
+    if ((mask != kPianoChannelMask && !(allowSpare_ && mask == kOtherChannelMask)) ||
+        (flash && (mask != kPianoChannelMask || maxMa_ < kProbeFlashMa))) {
       o.reason = Reason::writeFailed;
       return o;
     }
-    o.live = ctl_.live();
+    return activate(nowMs, flash ? kProbeFlashMa : ma, flash ? kProbeFlashMs : boundedRequest(durationMs, kProbeMaxSeconds * 1000),
+                    t, mask, true, flash);
+  }
+
+ private:
+  Outcome activate(uint64_t nowMs, unsigned ma, unsigned durationMs, const Temperatures &t, uint8_t mask,
+                   bool diagnostic, bool flash)
+  {
+    Outcome o;
+    const Reason hot = refuseOn(t, cfg_);
+    if (hot != Reason::none && lit_) return turnOff(nowMs, hot);
+    // A confirmed open on the factory pair can leave the alternate pair worth testing. All module-wide faults stop T4.
+    const bool alternate = diagnostic && mask == kOtherChannelMask && lastMask_ == kPianoChannelMask &&
+                           coolReason_ == Reason::channelOpen;
+    Reason refused = hot;
+    if (powerBlock_ != Reason::none) refused = powerBlock_;
+    else if (needsOff()) {
+      // A stream of ON requests must not starve the OFF retry.
+      o = poll(nowMs, t);
+      refused = Reason::writeFailed;
+    } else if (nowMs < coolUntilMs_ && !alternate) refused = coolReason_;
+    if (refused != Reason::none) {
+      o.reason = refused;
+      o.lit = lit_;
+      o.ma = ma_;
+      return o;
+    }
+    if (diagnostic) {
+      o.live = ctl_.live();
+      o.sampled = true;
+      o.reason = o.live.ok ? supplyFault(o.live.status2) : Reason::statusUnreadable;
+      if (o.reason != Reason::none) return o;
+    }
+    ma = clampMa(ma, maxMa_);
+    const uint8_t itarget = flash ? kProbeFlashItarget : itargetForMa(ma);
+    mask_ = mask;
+    o.steps = flash ? ctl_.flashPulse(itarget, kProbeFlashTicks, mask) : ctl_.on(itarget, clampForMa(maxMa_), mask);
     unsigned unreadable = 0;
-    const Reason bad = o.live.ok ? judge(o.live, unreadable, t, cfg_) : Reason::statusUnreadable;
+    Reason bad = Reason::writeFailed;
+    if (o.steps.ok) {
+      o.live = ctl_.live();
+      o.sampled = true;
+      bad = judge(o.live, unreadable, t, cfg_, mask);
+      if (bad == Reason::none && !o.live.ok) bad = Reason::statusUnreadable;
+    } else {
+      o.live = {};
+      o.sampled = false;
+    }
     if (bad != Reason::none) {
-      const StepResult undo = ctl_.off();
-      o.steps.writes += undo.writes;
-      o.steps.readbacks += undo.readbacks;
-      settleOff(nowMs, bad);
+      o.cleanup = turnOff(nowMs, bad).steps;
+      o.cleanedUp = true;
       o.reason = bad;
       return o;
     }
     lit_ = true;
-    ma_ = maForItarget(itarget);
+    ma_ = flash ? kProbeFlashMa : maForItarget(itarget);
     itarget_ = itarget;
     unreadable_ = 0;
-    if (!seconds) seconds = cfg_.defaultS;
-    if (seconds > cfg_.maxS) seconds = cfg_.maxS;
-    deadlineMs_ = nowMs + uint64_t(seconds) * 1000;
+    deadlineMs_ = nowMs + durationMs;
+    testMode_ = diagnostic;
+    flash_ = flash;
     o.lit = true;
+    o.ma = ma_;
     return o;
   }
 
-  // While lit, about once a second: the time limit, then the guard. Returns the reason it went off (Reason::none: still lit).
-  Outcome poll(uint64_t nowMs, const Temperatures &t)
+ public:
+  // Check the time limit and guards. The ladder additionally stops on the first unreadable sample or a timer fault.
+  Outcome poll(uint64_t nowMs, const Temperatures &t, bool ladder = false)
   {
     Outcome o;
-    if (!lit_) return o;
-    if (nowMs >= deadlineMs_) return turnOff(nowMs, testMode_ ? Reason::test : Reason::timeout);
+    if (powerBlock_ != Reason::none || !mask_) return o;
+    if (!lit_) {
+      // Retrying the writes keeps the original fault's cooldown.
+      const uint64_t until = coolUntilMs_;
+      o = turnOff(nowMs, lastReason_);
+      coolUntilMs_ = until;
+      return o;
+    }
+    if (nowMs >= deadlineMs_) {
+      // On the timed pulse only, sample the timer/enable result immediately before explicit off.
+      if (flash_) {
+        o.live = ctl_.live();
+        o.sampled = true;
+      }
+      o.reason = testMode_ ? Reason::test : Reason::timeout;
+      o.steps = turnOff(nowMs, o.reason).steps;
+      return o;
+    }
     o.live = ctl_.live();
-    const Reason bad = judge(o.live, unreadable_, t, cfg_);
-    if (bad != Reason::none) return turnOff(nowMs, bad);
+    o.sampled = true;
+    Reason bad = judge(o.live, unreadable_, t, cfg_, mask_);
+    if (bad == Reason::none && ladder) {
+      if (!o.live.ok) bad = Reason::statusUnreadable;
+      else if (decodeFaults(o.live.status1, o.live.status2, o.live.status3, mask_).timeout) bad = Reason::pmicTimer;
+    }
+    if (bad != Reason::none) {
+      o.steps = turnOff(nowMs, bad).steps;
+      o.reason = bad;
+      return o;
+    }
     o.lit = true;
+    o.ma = ma_;
     return o;
   }
 
   Outcome turnOff(uint64_t nowMs, Reason why)
   {
     Outcome o;
-    o.steps = ctl_.off();
-    settleOff(nowMs, o.steps.ok ? why : (why == Reason::user ? Reason::writeFailed : why));
+    if (!mask_) mask_ = kPianoChannelMask;
+    lastMask_ = mask_;
+    o.steps = ctl_.off(mask_);
+    if (!o.steps.ok) {
+      const StepResult first = o.steps;
+      o.steps = ctl_.off(mask_);
+      o.steps.writes += first.writes;
+      o.steps.readbacks += first.readbacks;
+    }
+    if (o.steps.ok) mask_ = 0;
+    settleOff(nowMs, why == Reason::user && !o.steps.ok ? Reason::writeFailed : why);
     o.reason = lastReason_;
     return o;
   }
 
+  // Called under the same lock as both request paths. A wake never resumes an interrupted boot test.
+  Outcome quiesce(uint64_t nowMs, Reason why)
+  {
+    if (powerBlock_ != Reason::shutdown) powerBlock_ = why;
+    diagnosticAbort_ = powerBlock_;
+    return mask_ ? turnOff(nowMs, powerBlock_) : Outcome();
+  }
+  void resume() { if (powerBlock_ == Reason::sleep) powerBlock_ = Reason::none; }
+  bool operational() const { return powerBlock_ == Reason::none; }
+  Reason diagnosticAbort() const { return diagnosticAbort_; }
+  bool needsOff() const { return mask_ && !lit_; }
   void setTestMode(bool on) { testMode_ = on; }
   bool lit() const { return lit_; }
   unsigned ma() const { return lit_ ? ma_ : 0; }
@@ -520,6 +740,8 @@ class Torch {
     if (lit_) {
       const uint64_t left = deadlineMs_ > nowMs ? (deadlineMs_ - nowMs + 999) / 1000 : 0;
       snprintf(out, size, "on %u mA (2 x %u mA, itarget %u), off in %llu s", ma_, ma_ / 2, itarget_, (unsigned long long)left);
+    } else if (needsOff()) {
+      snprintf(out, size, "off unconfirmed (%s)", reasonName(lastReason_));
     } else if (lastReason_ == Reason::none) {
       snprintf(out, size, "off");
     } else {
@@ -534,17 +756,22 @@ class Torch {
     ma_ = 0;
     lastReason_ = why;
     testMode_ = false;
-    if (coolsDown(why)) coolUntilMs_ = nowMs + cfg_.coolDownMs;
+    flash_ = false;
+    if (coolsDown(why)) {
+      coolReason_ = why;
+      coolUntilMs_ = nowMs + cfg_.coolDownMs;
+    }
   }
 
   Controller ctl_;
   GuardConfig cfg_;
-  unsigned maxMa_ = kTorchMinMa;
-  bool lit_ = false, testMode_ = false;
+  unsigned maxMa_ = kDefaultMaxMa;
+  bool lit_ = false, testMode_ = false, flash_ = false, allowSpare_ = false;
   unsigned ma_ = 0, unreadable_ = 0;
-  uint8_t itarget_ = 0;
+  uint8_t itarget_ = 0, mask_ = 0, lastMask_ = 0;
   uint64_t deadlineMs_ = 0, coolUntilMs_ = 0;
-  Reason lastReason_ = Reason::none;
+  Reason lastReason_ = Reason::none, coolReason_ = Reason::none;
+  Reason powerBlock_ = Reason::none, diagnosticAbort_ = Reason::none;
 };
 
 }  // namespace pianotorch

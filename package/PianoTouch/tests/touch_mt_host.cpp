@@ -11,10 +11,11 @@
 //     the right edge; a finger joining and one leaving; palms (a palm at the start, a finger turning palm mid-gesture); the two-finger
 //     tap's right click; one finger untouched by the path (tap and drag as before); disabled = no claim; the rotation's axes;
 //   - TouchInject.h: scripts parsed (errors at the right character), interpolation, palm areas, the bounding box.
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. touch_mt_host.cpp -o /tmp/touch_mt_host && /tmp/touch_mt_host
+// Build: c++ -std=c++20 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -I.. touch_mt_host.cpp -o /tmp/touch_mt_host && /tmp/touch_mt_host
 #include "TouchMt.h"
 #include "TouchInject.h"
 #include "TouchTrack.h"
+#include "TouchPower.h"
 #include "../PianoAuto/TouchRotation.h"
 #include <cmath>
 #include <cstdio>
@@ -354,6 +355,69 @@ static void testSwipeJoinLeave()
   CHECK(mtIdle(rig.r) && rig.rights == 0);
 }
 
+static void testFullContactReplacement()
+{
+  MtRouter r;
+  MtConfig cfg;
+  cfg.enabled = true;
+  mtReset(r, cfg);
+  Gesture g;
+  GestureContact c[kMaxTracks];
+  MtOut o;
+  for (unsigned i = 0; i < kMaxTracks; ++i)
+    c[i] = GestureContact{uint8_t(i + 1), false, int32_t(200 + 350 * i), 1000, cfg.minFrames};
+  mtUpdate(r, g, c, kMaxTracks, kPanelW, kPanelH, 0, o);
+  CHECK(o.frameCount == 1 && o.frames[0].n == kMaxTracks);
+  for (auto &finger : c) finger.id += kMaxTracks;
+  mtUpdate(r, g, c, kMaxTracks, kPanelW, kPanelH, 8, o);
+  CHECK(o.frameCount == 1 && o.frames[0].n == kMtMaxFingers);
+  for (unsigned i = 0; i < kMaxTracks; ++i) CHECK(o.frames[0].f[i].state == kMtStateLift);
+  CHECK(r.count == kMtMaxFingers - kMaxTracks);
+  mtUpdate(r, g, c, kMaxTracks, kPanelW, kPanelH, 16, o);
+  CHECK(o.frameCount == 1 && o.frames[0].n == kMaxTracks && r.count == kMaxTracks);
+  for (unsigned i = 0; i < kMaxTracks; ++i) {
+    CHECK(o.frames[0].f[i].state == (i < kMtMaxFingers - kMaxTracks ? kMtStateTouching : kMtStateStart));
+    for (unsigned j = 0; j < i; ++j) CHECK(o.frames[0].f[j].id != o.frames[0].f[i].id);
+  }
+  mtCancel(r, 24, o);
+  CHECK(o.frameCount == 3 && o.frames[0].n == kMaxTracks && o.frames[1].n == kMaxTracks && o.frames[2].n == 0);
+  CHECK(mtIdle(r) && !o.rightClick);
+  mtCancel(r, 25, o);
+  CHECK(o.frameCount == 0);
+  mtUpdate(r, g, c, 2, kPanelW, kPanelH, 32, o);
+  CHECK(o.warp && o.frameCount == 1 && o.frames[0].f[0].state == kMtStateStart);
+  c[1].id = c[2].id;
+  mtUpdate(r, g, c, 2, kPanelW, kPanelH, 40, o);
+  mtUpdate(r, g, nullptr, 0, kPanelW, kPanelH, 48, o);
+  CHECK(mtIdle(r) && !o.rightClick);
+}
+
+static void testPanelPark()
+{
+  Rig rig;
+  TouchPower power;
+  PanelPark park;
+  const std::vector<InjectContact> fingers{{1000, 1000, kFingerNodes}, {1300, 1000, kFingerNodes}};
+  for (unsigned i = 0; i < 6; ++i) rig.frame(fingers);
+  CHECK(rig.r.mode == MtMode::multi);
+  park.request();
+  CHECK(power.step(false, 1, true) == PowerStep::mute);
+  trackerCancel(rig.tr);
+  MtOut o;
+  mtCancel(rig.r, rig.now, o);
+  CHECK(park.acknowledge() && !power.reporting());
+  CHECK(o.frameCount == 3 && o.frames[0].n == 2 && o.frames[2].n == 0 && !o.rightClick);
+  CHECK(mtIdle(rig.r) && trackerLive(rig.tr) == 0 && gestureIdle(rig.g));
+  park.release();
+  CHECK(power.step(false, 1) == PowerStep::unmute && power.reporting());
+  const size_t before = rig.frames.size();
+  for (unsigned i = 0; i < 6; ++i) rig.frame(fingers);
+  CHECK(rig.warps == 2 && rig.frames.size() > before);
+  if (rig.frames.size() > before) CHECK(rig.frames[before].f[0].state == kMtStateStart);
+  rig.lift();
+  CHECK(mtIdle(rig.r) && trackerLive(rig.tr) == 0);
+}
+
 static void testPalms()
 {
   {  // a palm resting while two fingers pinch: the palm never becomes a contact (TouchTrack.h), never in a frame
@@ -385,6 +449,21 @@ static void testPalms()
     CHECK(rig.frames.size() == n);   // nothing more
     rig.lift();
     CHECK(mtIdle(rig.r) && rig.g.taps == 0);
+  }
+  for (bool rotate : {false, true}) {
+    Rig rig;
+    for (int i = 0; i < 12; ++i) {
+      const int dx = rotate ? 210 - 10 * i : 210, dy = 14 * i;
+      rig.frame({{1500 - dx, rotate ? 1000 - dy : 1000 + dy, kFingerNodes},
+                 {1500 + dx, 1000 + dy, kFingerNodes}, {2700, 1600, 80}});
+    }
+    CHECK(rig.r.mode == MtMode::multi && rig.r.most == 2);
+    for (const auto &f : rig.frames) CHECK(f.n == 2);
+    const size_t beforePalm = rig.frames.size();
+    rig.frame({{rotate ? 1400 : 1290, rotate ? 846 : 1154, 90}, {rotate ? 1600 : 1710, 1154, kFingerNodes}});
+    CHECK(rig.r.mode == MtMode::inert && rig.frames.size() == beforePalm + 3 && rig.frames.back().n == 0);
+    rig.lift();
+    CHECK(mtIdle(rig.r) && rig.rights == 0 && rig.g.taps == 0);
   }
 }
 
@@ -477,6 +556,8 @@ int main()
   testPinch();
   testRotateAndEdge();
   testSwipeJoinLeave();
+  testFullContactReplacement();
+  testPanelPark();
   testPalms();
   testTwoTapAndOneFinger();
   testRotation90();

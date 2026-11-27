@@ -9,8 +9,13 @@ using namespace slices;
 enum class TraceStep {
   displayOff, displayOffDone, sleepIn, sleepInDone, stopSlave, stopMaster, fetchOff,
   undo, fetchOn, enable, align, start, flush, rate, sleepOut, displayOn,
-  drain, ctlReset, handoff, routeOn, dsiReset, end
+  drain, ctlReset, handoff, routeOn, dsiReset, after29, afterMode, afterRoute, afterEnable, end
 };
+
+inline bool isHostTraceStep(TraceStep step)
+{
+  return step >= TraceStep::after29 && step <= TraceStep::afterEnable;
+}
 
 inline const char *traceStepName(TraceStep step)
 {
@@ -36,6 +41,10 @@ inline const char *traceStepName(TraceStep step)
   case TraceStep::handoff:        return "handoff";
   case TraceStep::routeOn:        return "route-on";
   case TraceStep::dsiReset:       return "dsi-reset";
+  case TraceStep::after29:        return "after-29";
+  case TraceStep::afterMode:      return "after-mode";
+  case TraceStep::afterRoute:     return "after-route";
+  case TraceStep::afterEnable:    return "after-enable";
   case TraceStep::end:            return "end";
   }
   return "?";
@@ -45,13 +54,25 @@ struct TraceLink {
   uint32_t en, status, frame, line;
 };
 
-struct TraceSample {
-  uint64_t us;
+struct TraceTiming {
   TraceLink link[2];
   uint32_t top, active, flush, intfFlush;
+};
+
+struct TraceHost {
+  uint32_t ctrl, status, fifo, lane, clk;
+};
+
+struct TraceSample {
+  uint64_t us;
+  union {
+    TraceTiming timing;
+    TraceHost host[2];   // isHostTraceStep(step), in DSI0/DSI1 order
+  };
   TraceStep step;
   bool boundary;
 };
+static_assert(sizeof(TraceSample) == 64);
 
 struct TraceRing {
   static constexpr unsigned kCapacity = 2048;
@@ -83,13 +104,13 @@ struct Trace {
       return io.rd(pa);
     };
     for (unsigned i = 1; i <= 2; ++i) {
-      s.link[i - 1] = {read(intfReg(i, kIntfEn)), read(intfReg(i, kIntfStatus)),
-                       read(intfReg(i, kIntfFrameCount)), read(intfReg(i, kIntfLineCount))};
+      s.timing.link[i - 1] = {read(intfReg(i, kIntfEn)), read(intfReg(i, kIntfStatus)),
+                             read(intfReg(i, kIntfFrameCount)), read(intfReg(i, kIntfLineCount))};
     }
-    s.top = read(ctlReg(ctl, kCtlTop));
-    s.active = read(ctlReg(ctl, kCtlIntfActive));
-    s.flush = read(ctlReg(ctl, kCtlFlush));
-    s.intfFlush = read(ctlReg(ctl, kCtlIntfFlush));
+    s.timing.top = read(ctlReg(ctl, kCtlTop));
+    s.timing.active = read(ctlReg(ctl, kCtlIntfActive));
+    s.timing.flush = read(ctlReg(ctl, kCtlFlush));
+    s.timing.intfFlush = read(ctlReg(ctl, kCtlIntfFlush));
   }
 
   template <class Io>
@@ -97,6 +118,19 @@ struct Trace {
   {
     step = next;
     capture(io, true);
+  }
+
+  template <class Io>
+  void hostBoundary(Io &io, TraceStep next) const
+  {
+    if (!ring) return;
+    TraceSample &s = ring->next();
+    s.us = io.nowUs();
+    s.step = next;
+    s.boundary = true;
+    for (unsigned l = 0; l < 2; ++l)
+      s.host[l] = {io.rd(dsiReg(l, kDsiCtrl)), io.rd(dsiReg(l, kDsiStatus0)), io.rd(dsiReg(l, kDsiFifoStatus)),
+                   io.rd(dsiReg(l, kDsiLaneStatus)), io.rd(dsiReg(l, kDsiClkStatus))};
   }
 
   template <class Io>

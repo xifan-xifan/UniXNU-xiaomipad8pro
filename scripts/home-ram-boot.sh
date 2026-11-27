@@ -115,7 +115,7 @@ alias_to_name() {
   esac
 }
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname "$0")" && pwd)
 CANDIDATES=()
 [ -n "${PIANO_RAM_DIR:-}" ] && CANDIDATES+=("$PIANO_RAM_DIR")
 CANDIDATES+=(
@@ -130,27 +130,19 @@ RAM_DIR=""
 for d in "${CANDIDATES[@]}"; do
   [ -n "$d" ] || continue
   if [ -d "$d" ] && [ -f "$d/boot-piano-uefi-ram-B-own303.img" ]; then
-    RAM_DIR=$(CDPATH= cd -- "$d" && pwd)
+    RAM_DIR=$(CDPATH='' cd -- "$d" && pwd)
     break
   fi
 done
 [ -n "$RAM_DIR" ] || die "找不到 RAM 镜像目录（需要其中有 boot-piano-uefi-ram-B-own303.img）。可设置 PIANO_RAM_DIR。"
-
-SUMS="$RAM_DIR/SHA256SUMS"
-[ -f "$SUMS" ] || die "缺少哈希清单: $SUMS"
 
 if [ -n "$IMAGE_ARG" ]; then
   mapped=$(alias_to_name "$IMAGE_ARG" || true)
   if [ -n "$mapped" ]; then
     IMAGE_NAME="$mapped"
   elif [ -f "$IMAGE_ARG" ]; then
-    IMAGE_PATH=$(CDPATH= cd -- "$(dirname "$IMAGE_ARG")" && pwd)/$(basename "$IMAGE_ARG")
-    IMAGE_NAME=$(basename "$IMAGE_PATH")
-    # If the file lives outside RAM_DIR, still allow it but require a matching SUMS hash if present.
-    if [ ! -f "$RAM_DIR/$IMAGE_NAME" ]; then
-      RAM_DIR=$(dirname "$IMAGE_PATH")
-      SUMS="$RAM_DIR/SHA256SUMS"
-    fi
+    RAM_DIR=$(CDPATH='' cd -- "$(dirname -- "$IMAGE_ARG")" && pwd)
+    IMAGE_NAME=${IMAGE_ARG##*/}
   elif [ -f "$RAM_DIR/$IMAGE_ARG" ]; then
     IMAGE_NAME="$IMAGE_ARG"
   else
@@ -160,9 +152,19 @@ else
   IMAGE_NAME=$(alias_to_name "$IMAGE_KEY")
 fi
 IMAGE_PATH="$RAM_DIR/$IMAGE_NAME"
+SUMS="$RAM_DIR/SHA256SUMS"
 [ -f "$IMAGE_PATH" ] || die "镜像不存在: $IMAGE_PATH"
+[ -f "$SUMS" ] || die "缺少哈希清单: $SUMS"
 
-expected=$(awk -v n="$IMAGE_NAME" '$2==n || $NF==n {print $1; found=1} END{exit !found}' "$SUMS" 2>/dev/null || true)
+expected=$(
+  while read -r hash name || [ -n "${hash:-}${name:-}" ]; do
+    case "$hash" in (''|\#*) continue ;; esac
+    name=${name#\*}
+    if [ "${name#./}" = "$IMAGE_NAME" ]; then
+      printf '%s\n' "$hash"
+    fi
+  done < "$SUMS"
+)
 [ -n "$expected" ] || die "SHA256SUMS 中没有 $IMAGE_NAME"
 
 if [ "$MODE" = list ]; then
@@ -197,9 +199,10 @@ if [ "${PIANO_CHECK_ALL:-1}" = 1 ]; then
   bad=0
   good=0
   missing=0
-  while read -r hash name; do
+  while read -r hash name || [ -n "${hash:-}${name:-}" ]; do
     [ -n "${hash:-}" ] || continue
     case "$hash" in \#*) continue ;; esac
+    name=${name#\*}
     name=${name##*/}
     f="$RAM_DIR/$name"
     if [ ! -f "$f" ]; then
@@ -221,16 +224,17 @@ fi
 
 FB=$(resolve_fastboot) || die "找不到 fastboot。请确认 platform-tools 在 PATH 中（建议 37.0.1）。"
 log "fastboot: $FB"
-log "$($FB --version 2>&1 | head -n 1)"
+log "$("$FB" --version 2>&1 | head -n 1)"
+printf -v BOOT_COMMAND '%q boot %q' "$FB" "$IMAGE_PATH"
 
-if command -v adb >/dev/null 2>&1; then
-  log "adb: $(command -v adb) ($($(command -v adb) version 2>&1 | head -n 1))"
+if ADB=$(command -v adb); then
+  log "adb: $ADB ($("$ADB" version 2>&1 | head -n 1))"
 else
   log "adb: 未在 PATH 中（RAM 启动不需要 adb）"
 fi
 
 # Parse `fastboot devices` — ignore empty / leftover header lines.
-DEV_OUT=$($FB devices 2>&1 || true)
+DEV_OUT=$("$FB" devices 2>&1 || true)
 DEV_LINES=$(printf '%s\n' "$DEV_OUT" | awk 'NF>=2 && $2 ~ /fastboot|device|recovery/ {print}' || true)
 DEV_COUNT=$(printf '%s\n' "$DEV_LINES" | awk 'NF{c++} END{print c+0}')
 if [ "$DEV_COUNT" -gt 0 ]; then
@@ -251,7 +255,7 @@ if [ "$MODE" = check ]; then
   log "准备好且 verify.sh 通过后，在现场执行:"
   log "  $0 --boot"
   log "完整等价命令:"
-  log "  $FB boot $IMAGE_PATH"
+  log "  $BOOT_COMMAND"
   if [ "$DEV_COUNT" -eq 0 ]; then
     exit 0
   fi
@@ -277,11 +281,11 @@ LOG="$LOGDIR/fastboot-boot.log"
 
 log
 log "即将执行（只进内存、不写分区）:"
-log "  $FB boot $IMAGE_PATH"
+log "  $BOOT_COMMAND"
 log "日志: $LOG"
 {
   echo "# $STAMP $(hostname)"
-  echo "# $FB boot $IMAGE_PATH"
+  echo "# $BOOT_COMMAND"
   echo "# sha256 $got"
   echo "# this is RAM boot only; no flash"
 } > "$LOG"

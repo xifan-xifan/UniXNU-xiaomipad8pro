@@ -170,6 +170,14 @@ struct Tables {
 };
 inline bool baseFormat(uint32_t format) {return format == kFormatBGRA || format == kFormatRGhA || format == kFormatB3A8;}
 inline unsigned bytesPerPixel(uint32_t format) {return format == kFormatRGhA ? 8 : 4;}
+
+// Only visible bytes of the final row need to be mapped.
+inline bool surfaceRowsFit(uint64_t length, uint64_t offset, uint64_t stride, uint64_t rowBytes, uint64_t height)
+{
+  if (!height || stride < rowBytes || offset > length || rowBytes > length - offset) return false;
+  return height == 1 || stride <= (length - offset - rowBytes) / (height - 1);
+}
+
 // count pixels as read from a base surface into out (0xAARRGGBB). 'BGRA' and 'b3a8' may convert in place (src == out).
 inline void convertSpan(uint32_t format, const void *src, uint32_t *out, uint32_t count, const Tables &t)
 {
@@ -178,9 +186,10 @@ inline void convertSpan(uint32_t format, const void *src, uint32_t *out, uint32_
     return;
   }
   if (format == kFormatB3A8) {   // blue in the low bits, as BGR10A2; alpha (the second plane) is not shown
-    const uint32_t *p = static_cast<const uint32_t *>(src);
+    const uint8_t *p = static_cast<const uint8_t *>(src);
     for (uint32_t x = 0; x < count; x++) {
-      const uint32_t bgr = p[x];
+      uint32_t bgr;
+      memcpy(&bgr, p + size_t(x) * sizeof(bgr), sizeof(bgr));
       out[x] = kBlack | uint32_t(t.xr10[bgr >> 20 & 1023]) << 16 | uint32_t(t.xr10[bgr >> 10 & 1023]) << 8 | t.xr10[bgr & 1023];
     }
     return;

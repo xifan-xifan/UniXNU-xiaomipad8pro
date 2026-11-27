@@ -37,7 +37,7 @@ static ArmSmmu4KStatus scan(const ArmSmmu4KIo *io,const ArmSmmu4KStream *s,unsig
         unsigned own=n;
         for(unsigned i=0;i<n;++i)if(s[i].slot==slot){own=i;break;}
         if(own<n) {
-            unsigned live=valid(r->id0,smr,s2cr);
+            const int live=valid(r->id0,smr,s2cr);
             if(attached) {
                 if(smr!=(valid_smr(r->id0)|s[own].sid) || s2cr!=(bank|valid_s2cr(r->id0)))return ArmSmmu4KStateMismatch;
             } else if((s2cr&~valid_s2cr(r->id0))!=FAULT ||

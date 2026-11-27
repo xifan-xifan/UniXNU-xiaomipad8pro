@@ -59,6 +59,7 @@
 #include "GopRefresh.h"                        // the fixed refresh contract (native-gop-display-120=1; tests/gop_host.cpp)
 #include "GopColorLog.h"                       // the Night Shift observer (native-gop-display-color-log=1; tests/gop_host.cpp)
 #include "GopShot.h"
+#include "GopShotDiagnostics.h"
 #include "CopyRows.h"
 #include "../include/PianoGpuQualificationDisplay.h"
 static void qualificationDisplay(const PianoGpuQualificationDisplay *evidence) {
@@ -383,8 +384,9 @@ private:
     uint64_t fVideoPhys;
     IOMemoryMap *fScanoutMap;
     uint8_t *fScanout;
-    bool fShotEnabled, fShotRegistered;
+    bool fShotEnabled, fShotRegistered, fShotDiagnostics;
     uint64_t fShotEpoch;   // odd during a copy-thread presentation, even when idle
+    gopshot::BusyCounts fShotBusy;
     struct sysctl_oid fShotOid;
     void registerShot();
     static int shotSysctl(struct sysctl_oid *, void *, int, struct sysctl_req *);
@@ -674,7 +676,7 @@ static void registerFlipLosslessSysctl()
     struct sysctl_oid &o = gOidFlipLossless;
     o.oid_parent = &sysctl__machdep_children;
     o.oid_number = OID_AUTO;
-    o.oid_kind = CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_OID2;
+    o.oid_kind = static_cast<int>(CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_OID2);
     o.oid_arg1 = nullptr;
     o.oid_arg2 = 0;
     o.oid_name = "native_gop_flip_lossless";
@@ -1088,8 +1090,11 @@ bool NativeGopDisplay::start(IOService *provider)
     }
     unsigned shot = 0;
     fShotEnabled = !fExternal && PE_parse_boot_argn("native-gop-display-shot", &shot, sizeof shot) && shot == 1;
+    unsigned snapshot = 0;
+    fShotDiagnostics = fShotEnabled && PE_parse_boot_argn("piano-dpu-snapshot", &snapshot, sizeof snapshot) && snapshot == 1;
     fShotRegistered = false;
     fShotEpoch = 0;
+    fShotBusy = {};
     fCopyLock = IOLockAlloc();
     thread_t copier = nullptr;
     if (!fCopyLock || kernel_thread_start(copyThreadMain, this, &copier) != KERN_SUCCESS) {
@@ -1123,7 +1128,7 @@ bool NativeGopDisplay::start(IOService *provider)
         auto &oid = fGpuFencePollOid;
         oid.oid_parent = &sysctl__machdep_children;
         oid.oid_number = OID_AUTO;
-        oid.oid_kind = CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_OID2;
+        oid.oid_kind = static_cast<int>(CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_OID2);
         oid.oid_arg1 = &fGpuFencePollMode;
         oid.oid_name = "native_gop_fence_deadline";
         oid.oid_handler = gpuFenceDeadlineSysctl;
@@ -1412,12 +1417,13 @@ IOReturn NativeGopDisplay::swap_begin_gated()
               fIdleStops, fVblIdleStop || fFlipMode ? "" : " (native-gop-display-vbl < 2: it runs while the display is on)");
         fTickRuns = fIdleStops = 0;
         if (fDamageMode) {
-            const uint64_t frames = fDamageCopies + fDamageNothing + fWholeNoRegion + fWholeUncovered + fWholePeriodic + fWholeOther;
+            const uint64_t damageFrames = fDamageCopies + fDamageNothing + fWholeNoRegion + fWholeUncovered + fWholePeriodic + fWholeOther;
             GOPLOG("damage: %llu of %llu frames from their dirty regions, mean %llu.%llu%% of the panel, %llu us mean, %llu us max "
                   "(%llu with nothing of the frame to draw, %llu refreshes of what was drawn); whole: %llu without a region, %llu not "
                   "fence-covered, %llu periodic, %llu other (first, after a flip or an undrawn frame, damage off); %llu of %llu new "
                   "frames named a region; audit %llu points, %llu differed%s\n",
-                  fDamageCopies, frames, fDamageCopies ? fDamagePixels * 1000 / fDamageCopies / (fVideo.v_width * fVideo.v_height) / 10 : 0,
+                  fDamageCopies, damageFrames,
+                  fDamageCopies ? fDamagePixels * 1000 / fDamageCopies / (fVideo.v_width * fVideo.v_height) / 10 : 0,
                   fDamageCopies ? fDamagePixels * 1000 / fDamageCopies / (fVideo.v_width * fVideo.v_height) % 10 : 0,
                   fDamageCopies ? fDamageNs / fDamageCopies / 1000 : 0, fDamageMaxNs / 1000, fDamageNothing, fDamageRefreshes,
                   fWholeNoRegion, fWholeUncovered, fWholePeriodic, fWholeOther, fDirtyFrames, fPeriodFrames,
@@ -2486,6 +2492,7 @@ static void invalidateForRead(const uint8_t *start, uint64_t length, bool barrie
 struct GopShotRead {
     NativeGopDisplay *display;
     struct sysctl_req *req;
+    size_t *pixelBytes;
 };
 
 int NativeGopDisplay::shotRead(void *context, const OSObject *surface, IOMemoryMap *map, uint64_t offset, uint32_t stride)
@@ -2513,9 +2520,10 @@ int NativeGopDisplay::shotRead(void *context, const OSObject *surface, IOMemoryM
     const GopShotHeader header{GOP_SHOT_VERSION, GOP_SHOT_WIDTH, GOP_SHOT_HEIGHT, format,
                                surface ? GOP_SHOT_FLIP : GOP_SHOT_BOOT};
     int error = SYSCTL_OUT(read->req, &header, sizeof header);
-    for (size_t position = 0; !error;) {
+    size_t position = 0, count = 0;
+    while (!error) {
         uint64_t at = 0;
-        const size_t count = gop_shot_chunk(position, stride, &at);
+        count = gop_shot_chunk(position, stride, &at);
         if (!count)
             break;
         if (cached)
@@ -2523,6 +2531,8 @@ int NativeGopDisplay::shotRead(void *context, const OSObject *surface, IOMemoryM
         error = SYSCTL_OUT(read->req, bytes + at, count);
         position += count;
     }
+    if (read->pixelBytes)
+        *read->pixelBytes = error ? position - count : position;   // completed pixel chunks
     return error;
 }
 
@@ -2536,23 +2546,55 @@ int NativeGopDisplay::shotSysctl(struct sysctl_oid *, void *arg, int, struct sys
         return SYSCTL_OUT(req, nullptr, GOP_SHOT_BYTES);
     if (req->oldlen < GOP_SHOT_BYTES)
         return ENOMEM;
+    const auto nowUs = [] {
+        uint64_t ns;
+        absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
+        return ns / 1000;
+    };
+    const bool diagnose = display->fShotDiagnostics;
+    const uint64_t startUs = diagnose ? nowUs() : 0;
     const uint64_t epoch = __atomic_load_n(&display->fShotEpoch, __ATOMIC_ACQUIRE);
-    if (epoch & 1)
+    PianoDpuScanoutDiagnostics dpuDiagnostics;
+    size_t pixelBytes = 0;
+    const auto busy = [&](gopshot::BusyReason reason, uint64_t endEpoch) {
+        if (diagnose) {
+            const uint64_t endUs = nowUs();
+            const auto wide = [](uint64_t value) { return static_cast<unsigned long long>(value); };
+            const auto &before = dpuDiagnostics.before;
+            const auto &after = dpuDiagnostics.after;
+            IOLog("NativeGopDisplay: gop-shot EBUSY reason=%s count=%llu start-us=%llu end-us=%llu epoch=%llu/%llu bytes=%zu "
+                  "before=%u target=%s/%08x/%u state=%u flips=%llu reshows=%llu to-boot=%llu "
+                  "after=%u target=%s/%08x/%u state=%u flips=%llu reshows=%llu to-boot=%llu\n",
+                  gopshot::busyReasonName(reason), wide(display->fShotBusy.record(reason)), wide(startUs), wide(endUs),
+                  wide(epoch), wide(endEpoch), pixelBytes,
+                  unsigned(before.available), before.surface ? "surface" : "boot", before.base, before.stride, before.state,
+                  wide(before.flips), wide(before.reshows), wide(before.toBoot),
+                  unsigned(after.available), after.surface ? "surface" : "boot", after.base, after.stride, after.state,
+                  wide(after.flips), wide(after.reshows), wide(after.toBoot));
+        }
         return EBUSY;
-    GopShotRead read{display, req};
+    };
+    if (epoch & 1)
+        return busy(gopshot::BusyReason::oddEpoch, diagnose ? __atomic_load_n(&display->fShotEpoch, __ATOMIC_ACQUIRE) : epoch);
+    GopShotRead read{display, req, diagnose ? &pixelBytes : nullptr};
     PianoDpuScanoutRequest request{shotRead, &read, 0};
     OSDictionary *match = IOService::serviceMatching(kPianoDpuServiceClass);
     IOService *dpu = match ? IOService::copyMatchingService(match) : nullptr;
     OSSafeReleaseNULL(match);
-    const IOReturn result = dpu ? dpu->callPlatformFunction(kPianoDpuScanoutFunction, false, &request, nullptr, nullptr, nullptr)
+    const IOReturn result = dpu ? dpu->callPlatformFunction(kPianoDpuScanoutFunction, false, &request,
+                                                          diagnose ? &dpuDiagnostics : nullptr, nullptr, nullptr)
                                 : kIOReturnNotFound;
     OSSafeReleaseNULL(dpu);
     if (result == kIOReturnNotFound)
         request.error = shotRead(&read, nullptr, nullptr, 0, 0);
+    else if (result == kIOReturnBusy)
+        return busy(gopshot::dpuBusyReason(dpuDiagnostics.busy),
+                    diagnose ? __atomic_load_n(&display->fShotEpoch, __ATOMIC_ACQUIRE) : epoch);
     else if (result != kIOReturnSuccess)
-        return result == kIOReturnBusy ? EBUSY : ENXIO;
+        return ENXIO;
     __atomic_thread_fence(__ATOMIC_ACQ_REL);
-    return epoch == __atomic_load_n(&display->fShotEpoch, __ATOMIC_ACQUIRE) ? request.error : EBUSY;
+    const uint64_t endEpoch = __atomic_load_n(&display->fShotEpoch, __ATOMIC_ACQUIRE);
+    return epoch == endEpoch ? request.error : busy(gopshot::BusyReason::finalEpoch, endEpoch);
 }
 
 void NativeGopDisplay::registerShot()
@@ -2684,8 +2726,8 @@ bool NativeGopDisplay::openSource(IOSurface *surface, gopcompose::RowSource *sou
         }
     }
     const uint64_t pixelBytes = gopcompose::bytesPerPixel(readFormat);
-    if (!memory || !usable || !width || !height || width > 16384 || height > 16384 || rowBytes < width * pixelBytes ||
-        offset + (height - 1) * rowBytes + width * pixelBytes > memory->getLength()) {
+    if (!memory || !usable || !width || !height || width > 16384 || height > 16384 ||
+        !gopcompose::surfaceRowsFit(memory->getLength(), offset, rowBytes, width * pixelBytes, height)) {
         static unsigned refused;
         if (refused++ < 8)
             GOPLOG("%s surface %llux%llu format %#x row %llu offset %llu (memory %llu bytes) is not read\n", base ? "a frame" : "a cursor",
@@ -2994,11 +3036,12 @@ bool NativeGopDisplay::compose(const gopcompose::Plan &plan, const Job &job, IOS
     fLastCenter = stats.centre;
     if (!fFirstLitLogged && stats.samples && fLastLitPerMille >= 500) {   // the login window (or a desktop) reached the panel
         fFirstLitLogged = true;
-        uint64_t ns = 0;
-        absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
+        uint64_t nowNs = 0;
+        absolutetime_to_nanoseconds(mach_absolute_time(), &nowNs);
+        const uint64_t nowMs = nowNs / 1000000ull;
         GOPLOG("first lit frame: frame %llu, %llu.%llu%% non-black, mean #%06llx, at %llu ms (%llu ms after the first frame)\n", fFrames,
-              fLastLitPerMille / 10, fLastLitPerMille % 10, fLastMean, ns / 1000000ull,
-              fFirstFrameMs && ns / 1000000ull >= fFirstFrameMs ? ns / 1000000ull - fFirstFrameMs : 0);
+              fLastLitPerMille / 10, fLastLitPerMille % 10, fLastMean, nowMs,
+              fFirstFrameMs && nowMs >= fFirstFrameMs ? nowMs - fFirstFrameMs : 0);
     }
     if (haveBase && format != gopcompose::kFormatBGRA && (fFrames <= 8 || fFrames % 50 == 0))
         GOPLOG("frame %llu: %llu of %llu sampled pixels non-black, %llu nonzero in the source, centre #%06x\n", fFrames,

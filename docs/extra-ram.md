@@ -1,12 +1,24 @@
 # RAM16G extra RAM for GPU and video
 
+## Status as of 2026-11-27
+
+- **Installed memory is partial.** The v13.1y12q daily line uses the 13 GiB XNU window, measured as 13310 MiB on installed
+  v13.1y12l on November 26. Region1 GPU tier and broader driver pool qualification remain open. [Support status](STATUS.md) · [Hardware backlog](BACKLOG-hardware.md)
+- **EFI ownership audit, RAM `m120c-120` (2026-11-26).** The audit classified 319/322 two-MiB slabs as non-runtime
+  (CMA 128/128, DXE 184/186, FD 7/8). It released 0 MiB and awaits owner verification. [November 26 memory results](results-2026-11-26.md#efi-memory-battery-and-video)
+- **Mixed HEVC backing, RAM `ram16g-hevc1` (2026-11-26).** The 684 MiB arena (274 MiB from region0 and 410 MiB from XNU)
+  passed its reservation self-test. All 24 decoded 4K Main10 frames matched the golden P010 hashes, 12 on first open and
+  12 on resident reopen, with zero video faults. This qualifies the tested arena and workload on RAM. [November 26 HEVC results](results-2026-11-26.md#efi-memory-battery-and-video)
+
+## RAM16G handoff design and original qualification plan (2026-11-26)
+
 The tablet has 16 GiB of DRAM. ABL hands the HLOS 15.34 GiB, and XNU manages one contiguous window of 13310 MiB at 0x8c0004000.
 About 1522 MiB of HLOS memory sits in region0, the 2 GiB bank at 0x80000000, split into 11 pieces between about 50 carve-outs.
 arm64 XNU cannot add that memory to its VM: it manages one range (one `physBase`/`memSize`, and `pa_valid` is one compare). Drivers
 can still use it as private DMA pools. R3 is that option. R1 is the sibling option: the region1 runs below the window for the GPU.
 DarwinBoot publishes both banks in the same ADT property.
 
-## The interface
+### The interface
 
 The opt-in `--extra-ram` stages a 384-byte placeholder at `/chosen/piano-extra-ram`. DarwinBoot fills it with up to
 16 little-endian records of 24 bytes each. An unused slot is all zeros. An FD without extra-RAM support leaves the entire
@@ -38,7 +50,7 @@ is skipped even if the boot requests a higher stage. `package/include/PianoExtra
 never-use spans, overlap with XNU's window and overlap with earlier records. `region0_allow_check.py` checks the JSON, firmware
 table and consumer table for agreement, and compares both copies of the region1 bounds.
 
-## Region0, run by run
+### Region0, run by run
 
 Sources:
 - ABL `/memory` as seen in Android's live DT and in the Ubuntu running DT (`docs/hyp-evidence/memory-map-running-dt.txt`).
@@ -61,12 +73,12 @@ The allow-list holds 600 MiB in 300 slabs: stage 1 has 344 MiB, stage 2 has 256 
 names: qdss, splash, Display_Demura, Piano_Log, cvp, cdsp and video. The host tests check each of these addresses.
 
 The modem run holds the AVC arena whole. Android treats it as System RAM, Ubuntu disables the modem, and UEFI keeps the run reserved.
-DarwinBoot can hand it off directly when the live map confirms that reservation. The RAM boot still needs to show that the CPU self-test
-and the Iris golden-frame decode both pass with this backing.
+DarwinBoot can hand it off directly when the live map confirms that reservation. The AVC gate below calls for the CPU self-test
+and an Iris golden-frame decode with the entire AVC arena in the modem run. The November 26 result above covers mixed HEVC backing.
 
-## Which drivers, and in which order
+### Which drivers, and in which order
 
-| driver | pool today (from XNU's window) | DMA path | CPU view | fit for region0 | risk |
+| driver | pool at design time (from XNU's window) | DMA path | CPU view | fit for region0 | risk |
 |---|---|---|---|---|---|
 | GPU (PianoA830) | 1 GiB BO pool + paged BOs | own SMMU bank, translated (client IOVA 0x20000000..0x3ffffe000) | WC/cached | R1 serves it from region1 | R1's |
 | **video (PianoVideo level 6)** | **256 MiB AVC arena, boot-lifetime reservation ("V9h"), 4 KiB pages; HEVC sessions up to 768 MiB** | own context bank, translated at 4 KiB (VideoSmmu.h/VideoArena.h); PA below the bank's output size | WC only (cached zero + clean, then never cached) | **yes: no contiguity, whole slabs, WC is the attribute already proven for out-of-window memory (cdsp slice)** | moderate: an active lane; the fallback is the XNU path unchanged |
@@ -81,11 +93,11 @@ Order:
    256 MiB of window RAM for the whole boot. Its CPU attribute and SMMU translation need nothing new.
 2. Camera, the 16 MiB early reserve, once a cacheable mapping of a region0 slab is proven, or with its view switched to WC.
 3. DSP (pil-tail), when audio or sensors outgrow the 25 MiB cdsp slice.
-4. Stage 2 (cma-block, use 0). This comes after the modem run passes on the tablet and DarwinBoot's map print shows the block as
-   conventional and reserved. Its likely owner is video, for HEVC: `piano-extra-ram-any=3`, but 274 + 256 MiB is still under the
-   768 MiB HEVC maximum, so HEVC also needs a mixed backing. That is an open item.
+4. Stage 2 (cma-block, use 0) requires firmware support and ownership verification. The proposed video use
+   (`piano-extra-ram-any=3`) would give HEVC 274 + 256 MiB, below its 768 MiB maximum. The RAM trial above used a mixed
+   region0/XNU arena within stage 1.
 
-## The helper
+### The helper
 
 The helper has three parts:
 - `package/include/PianoExtraRam.h` is portable. It parses the records, holds the allow, never and window checks, and decides
@@ -109,7 +121,7 @@ The GPU passes the same ADT bytes and XNU window bounds to the shared validator.
 It keeps its existing S8 GPU endpoint self-test, BO allocator, and `machdep.piano_gpu_tier` counters.
 
 Switches:
-- `piano-gpu-tier=1` enables eligible paged BOs of at least 2 MiB. Mode 2 also tries smaller BOs. Default is 0.
+- `piano-gpu-tier=1` enables explicitly GPU-private BOs of at least 2 MiB. Mode 2 also tries smaller private BOs. Default is 0.
 - `piano-extra-ram=1` enables shared kernel pools, including PianoVideo. Default is 0.
 - `piano-video-extra-ram=1` turns on video's use. Default is 0.
 - `piano-extra-ram-any=<use>` names the one use served the use-0 runs.
@@ -121,14 +133,14 @@ Tests:
 - `PianoVideo/tests/geometry_host.cpp` builds the arena on region0 slabs, in reverse slab order and mixed with XNU pages. It also checks
   that pages just outside the run, and the video and cdsp carve-outs, are refused.
 
-## Fix-image gate
+### Fix-image gate
 
 Path: ABL `/memory` and carve-outs → pianoPkg `MemoryMapLib` and RamManagerDxe UEFI descriptors → DarwinBoot allocates
 the XNU window and qualifies region1 GPU runs plus the region0 stage-1 allow-list → fixed-size `/chosen/piano-extra-ram`
 array → `PianoExtraRam.h` validation.
 - GPU → PianoA830 S8 `CP_MEM_WRITE`, fence and physical readback at both run endpoints → S9 Metal publication →
-  macOS 27.3 WindowServer/Metal via NativeAdrenoMetal and the AGX IOKit ABI → `BoAlloc`, qualified slabs, WC Physical64
-  view and CB0 SMMU leaves → fence retirement and `BoFree`. The Linux msm GEM and sheng Adreno740 paths establish the
+  macOS 27.3 Metal via NativeAdrenoMetal and the AGX IOKit ABI → Turnip 0015 private scratch `BoAlloc`, qualified slabs and
+  CB0 SMMU leaves → fence retirement and `BoFree`. The Linux msm GEM and sheng Adreno740 paths establish the
   scatter/gather mapping and descriptor model. See [GPU reference path](drivers/ram-extra.md#reference-path).
 - Video → PianoVideo level 6 `KernelPool::start`, CPU self-test via WC maps, AVC arena takes 128 slabs →
   `kIOMemoryTypePhysical64` WC descriptor → `rememberPage` and `buildArena` Iris SMMU leaves → decoded NV12 →
@@ -141,9 +153,9 @@ Checks:
 - **ours-OK** — GPU tests cover both endpoint probes, failed runs, paged BO fallback, CPU and SMMU mapping constraints and
   tier counters. Video tests cover self-test failures, slab accounting, AVC L3 leaves for region0 and mixed backing,
   guard pages and XNU fallback. Both kext builds have zero unresolved imports.
-- **ours-missing** — Stage-2 publication, DSP and camera consumers, and mixed HEVC backing.
-- **unknown** — The live UEFI map and reservation results, Gunyah stage-2 access from each device, WC map and zeroing
-  behavior on both banks, actual slab use and release, and the effect on memory pressure and frame cadence.
+- **ours-missing** — Stage-2 publication and DSP and camera consumers.
+- **open** — Owner verification of the EFI map, GPU endpoint and slab qualification, and the effect of wider pool use on
+  memory pressure and frame cadence. The RAM video evidence above covers the 684 MiB mixed HEVC arena.
 
 Root cause: XNU manages one contiguous physical window, so the region1 runs below it and region0's eligible fragments
 require explicit driver ownership. R1 carried a 136-byte version/count and GPU pair table. R3 consumed tagged 24-byte
@@ -153,9 +165,9 @@ ONE change: Standardize one DarwinBoot-to-driver ADT handoff with bank and use t
 route bank-1/use-1 records into the existing GPU tier and bank-0/use-3 into the existing AVC arena pool, and retain
 both drivers' fallback allocation paths.
 
-## RAM-boot read list
+### RAM-boot read list
 
-Use one 27.3 RAM image with DarwinBoot patches 0001 and 0002, both kexts, their firmware, `PIANO_EXTRA_RAM=1` and the
+Use one 27.3 RAM image with DarwinBoot patches 0001 and 0002, kernel 0077, both kexts, their firmware, `PIANO_EXTRA_RAM=1` and the
 volatile Data profile with its boot guard. Start from the desktop paged GPU profile with
 `piano-gpu=2 piano-gpu-mem=paged piano-gpu-user-vm=1 piano-video=6 piano-video-vt=1`. The enabled boot adds
 `piano-gpu-tier=1 piano-extra-ram=1 piano-video-extra-ram=1`. Use the same payload and adjust one argument per control boot.
@@ -173,7 +185,7 @@ the kernel read is clipped, successful login and nonempty captures from this boo
 |---|---|---|
 | Firmware ownership | `DARWINBOOT: window` and `DARWINBOOT: extra-ram` lines, plus `NativeRamBlock: RAM window` | Same XNU window across boots. For each published GPU run, record its successful reservation. Record modem, pil-tail and cma-block decisions. Expect modem and pil-tail to be wholly covered by PIL_Reserved (type 0), and a stage skip for cma-block. |
 | ADT handoff | `ioreg -p IODeviceTree -r -n chosen -d 1 -l -w0 \| grep piano-extra-ram` | Decode the 384-byte value in 24-byte little-endian slots. Match the console reservations to bank 1/use 1, modem `0x89e00000 + 0x11200000` to bank 0/use 3 and pil-tail `0x9ee00000 + 0x04600000` to bank 0/use 2. Unused slots zero. |
-| GPU admission and allocations | Console `PianoA830: gpu tier:` and `adreno830_start:`; `sysctl machdep.piano_gpu_tier machdep.piano_gpu_paged machdep.piano_gpu_pt machdep.piano_gpu_state machdep.piano_gpu_recovery` at desktop idle, under a fixed textured 3D workload, after close and at +10 min | Both endpoints qualify each accepted run and at least one run passes. Match `pass-mask` to console. `allocs` and `used-mib` rise, `free-mib` falls, and workload slabs return on close. Record refusals, faults and recovery counters. |
+| GPU admission and allocations | Console `PianoA830: gpu tier:` and `adreno830_start:`; `sysctl machdep.piano_gpu_tier machdep.piano_gpu_paged machdep.piano_gpu_pt machdep.piano_gpu_state machdep.piano_gpu_recovery` at desktop idle, during [piano-tier-workload](drivers/ram16g-tier-crash.md#positive-tier-workload-piano-tier-workload), after close and at +10 min | Both endpoints qualify each accepted run and at least one run passes. Match `pass-mask` to console. Expect `mode=1 state=ready`. `private-req`, `allocs` and `used-mib` rise, `free-mib` falls, and workload slabs return on close. Record refusals, faults and recovery counters. |
 | AVC admission and DMA | `sudo sysctl machdep.piano_extra_ram_video`; console `RAM16G arena from extra RAM` and `V9h boot reservation ready`; run the [level-6 VT AVC qualification](drivers/video.md#14-v5a-bounded-native-avc-vt-bridge-tablet-qualification-pending) | Modem is `state=ours`, `self-test=pass pages=70144 bad=0`, `used=128 free=9`. The arena line says `128 slabs` and first PA `0x89e00000`. Active NV12 matches `bd230ec4a9cd22c274831d1b526c43d3ceb39a089257c3cb4114fbea0a8102dc`. |
 | Memory and presentation | `sysctl hw.memsize hw.pagesize vm.swapusage`, `vm_stat`, `memory_pressure`; timed presentation intervals and C920 capture during the same GPU workload | Record free and wired memory on the video control (approximately 256 MiB effect) and the GPU control. Compare p50/p95/p99 intervals and frames over 16.67 ms at the same refresh rate. Retain SMMU fault logs and inspect the capture for pixel errors. |
 | Composite smoke | Boot, login, Wi-Fi lease, audio, charging and panic log | The smoke passes with both consumers enabled and on each control. |

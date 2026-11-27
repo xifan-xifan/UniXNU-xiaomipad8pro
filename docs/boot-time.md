@@ -1,9 +1,26 @@
-# Boot time to the login screen (native k27, 2026-11-11)
+# Boot time to the login screen
 
-Status: offline analysis of the native runs' logs, a build switch (`PIANO_FAST_BOOT`, off by default) and a timeline tool. **Not
-run on the tablet.** Every saving below is an estimate until the test in §6 has run.
+## Installed baseline (2026-11-27)
 
-## 0. The answer
+**v13.1y12q booted from disk to the login window on 2026-11-26.** The daily profile runs native macOS 27.3 (26C5035r) with
+k27 patches 0053–0076 and the 13 GiB memory window. Data switches to concurrent mode after mount, and USB debug network
+TX flow control is on by default. Patch 0076 exposes the full merged boot line through `kern.piano_bootargs`.
+[Support status](STATUS.md) · [November 26 results](results-2026-11-26.md) · [27.3 build and profile](k273-line.md)
+
+The roughly **32 s** login-window time and the installed `cs-native4k-skip` setting still need confirmation in a documented
+v13.1y12q disk boot. The November 14 RAM comparison measured `loginwindow` opening at about **72 s** with the baseline,
+**36 s** with the skip and **43 s** with six verification threads, all from XNU start. The visible login frame and the desktop
+are separate milestones. [Hardware backlog](BACKLOG-hardware.md) · [Historical RAM comparison](#91-historical-ufs4-ram-comparison-2026-11-14)
+
+k27 0067 provides `cs-native4k-skip` and `cs-native4k-threads`. The kernel defaults to verification enabled. Six threads
+parallelize the pre-hash while keeping verification on. With the skip enabled, 0070 limits acceptance of unhashed pages to
+signature blobs published through the skip path. Code directory, cdhash, and trust-cache checks still run.
+[Kernel patch index](../patches/k27/README.md)
+
+## 0. Historical native k27 baseline (2026-11-11)
+
+Sections 0–8 record the early native k27 logs and proposed A/B tests from 2026-11-11 and 2026-11-12. The proposed savings
+in those sections were estimates at the time. Sections 9–11 record later 27.3 measurements and follow-ups.
 
 - The 07:44 login run reached the login screen at about T 140-150 s (T: seconds from XNU's start, which comes 20 s after `fastboot
   boot`). It was also the first boot of a new Data seed (`NativeRamBlock: Data store state 3`, fresh), so every cache was cold.
@@ -29,8 +46,8 @@ run on the tablet.** Every saving below is an estimate until the test in §6 has
 
 | Source | What it gives | Caveat |
 |---|---|---|
-| `logs/native-runs/20261111-074440-loop/dump.bin` decoded with `tooling/native/xnu-log.py decode` (5653 lines) | the login run: exec-log, stderr-log, GPU trace, display lines | heavy DRAM decay (vote threshold 3 of 11): names were matched fuzzily, with decay-aware matching (a bit 1 → 0 costs less); a decayed digit can change a pid |
-| `logs/usb-console/20261111-0{65641,71439,72646}-port0.txt`, the mailboxes of the 04:30-06:29 runs | clean exec order (exec-log=1), launchd's boot tasks | no Mac-side times yet (`usb-console.py` stamps lines only since the evening of 2026-11-11). The USB console replays the mailbox from its start on every (re)open, so a capture holds several copies |
+| 2026-11-11 07:44 login run, decoded mailbox (5653 lines) | exec-log, stderr-log, GPU trace, display lines | heavy DRAM decay (vote threshold 3 of 11): names were matched fuzzily, with decay-aware matching (a bit 1 → 0 costs less); a decayed digit can change a pid |
+| USB console and mailboxes of the 04:30–06:29 runs | clean exec order (exec-log=1), launchd's boot tasks | no Mac-side times yet (`usb-console.py` stamps lines only since the evening of 2026-11-11). The USB console replays the mailbox from its start on every (re)open, so a capture holds several copies |
 | launchd's own lines (`com.apple.xpc.launchd|1970-01-01 07:MM:SS`, verbose boot only) | event times | the calendar starts at XNU's uptime when there is no RTC (`clock_initialize_calendar` takes the larger of the RTC and the uptime), so 1970 07:30:00 (the 1970 Asia/Singapore offset) is T 0. launchd writes these lines in batches, so a line's position in the log says nothing |
 | PianoA830's trace (`t=` µs) and its meter lines (one 60-period window each, from S10 at T 28.4) | the GPU's times; the first window's `rs 2` dates WindowServer's first jobs before T ~88 | printed by PianoA830's logger thread, behind the events |
 | `settime: <date>` (the seed's boot job) and `droidvm-utc` | an exact T: `date - droidvm-utc` (07:44: 23:46:45 UTC - 1794354270 = T 135.0) | the boot job runs late (§3.3) |
@@ -88,7 +105,7 @@ What the code does:
 - NativeGopDisplay calls `PE_initialize_console(nullptr, kPEDisableScreen)` at WindowServer's first frame. That sets
   `disableConsoleOutput` and ends the drawing. In graphics mode it is set from the start, by `gc_enable(FALSE)`.
 
-What the logs show (`logs/native-runs/*/xnu-console.txt`, every run with a launchd `hello`):
+What the console logs show (every run with a launchd `hello`):
 - Kernel phase: over 41 runs without the GPU, launchd's `hello` = 26.5 s + 75 ms × the console lines before launchd's exec. Plain
   runs have about 290 of those lines and say `hello` at 47.8-50.2 s. `piano-usb=2` adds 45-185 lines (51.7-60.9 s), and
   `piano-keyboard=1` brings it to 515-546 lines (66.0-67.5 s). The added drivers also do real work, so the slope is an upper bound
@@ -115,12 +132,10 @@ bound.
 
 ### 3.3 WindowServer → loginwindow → SecurityAgent → the lit frame (T 66 to ~150)
 
-- logind (pid 88) starts the console session, and launchd spawns the `loginwindow console` instance on its request
-  (the local bring-up notes, `loginwindow-launch.md` §2, not published). In the 07:44 run loginwindow came 84 pids after
-  WindowServer. In the 05:22 run it came 4 pids after. The trigger is not in doubt; what delays the request is not visible in the
-  console. The diagnostic run (§6, run D) samples logind and loginwindow.
-- **loginwindow's MobileGestalt wait** (05:40 run, `logs/native-runs/20261111-054010-loop`, its log loop printed loginwindow's
-  unified log). For loginwindow 616, a warm relaunch:
+- logind (pid 88) starts the console session, and launchd spawns the `loginwindow console` instance on its request.
+  In the 07:44 run loginwindow came 84 pids after WindowServer, and in the 05:22 run it came 4 pids after. The console did
+  not show what delayed the request. The diagnostic run (§6, run D) samples logind and loginwindow.
+- **loginwindow's MobileGestalt wait** (05:40 run, from loginwindow's unified log). For loginwindow 616, a warm relaunch:
   - 39.347 `Login Window Application Started`; 39.509 `WindowServerConnectionMade`;
   - 39.554 `Unable to read diagnostic data from service`, then **5.0 s** of nothing;
   - 44.555 `copySyscfgDictionary(void) enumeration of <private> failed` and `giving up waiting for match - runloop result is 3`
@@ -173,8 +188,8 @@ bound.
   writes the listed labels into launchd's `disabled.plist` before launchd starts. k27's patches (0001-0060) have no such hook:
   `droidvm-disable-jobs` has 0 matches in `kernel-k27-0059-native.macho`, `kernel-k27-0060-native.macho` and
   `out/k27/kc-k27-native.bin`. The only userland that touches it is settime.sh's `sysctl kern.bootargs | tr` (seen in stderr-log).
-- Effect: bluetoothd (07:44 pid 94), locationd and watchdogd run in every native run checked (06:56, 07:14, 07:26, 07:44, and the
-  earlier ones of loginwindow-launch.md §7). So the argument is inert, and `panic_on_crash_disabled=1` is what keeps watchdogd's
+- Effect: bluetoothd (07:44 pid 94), locationd and watchdogd run in every native run checked (including 06:56, 07:14, 07:26,
+  and 07:44). So the argument is inert, and `panic_on_crash_disabled=1` is what keeps watchdogd's
   exits from panicking.
 - What does work natively:
   - the seed's own `disabled.plist`: stage-piano.sh's `--disable-job` (AppSSODaemon, cryptexd, fskitd, mds index/scan, msrpc).
@@ -210,10 +225,10 @@ Not changed: TimeSync, opendirectoryd, securityd, configd, WindowServer and logi
 as they are (an OS image change). bluetoothd and locationd keep running: denying a daemon that is up and answering could make its
 clients wait.
 
-## 6. The test
+## 6. Historical A/B test plan
 
-Build and run. build-native-image.sh stages the seed again only when its inputs change; with the seed the tablet booted last, the
-store resumes (check point 1 below). Record the USB console with the Mac's times:
+The test plan compared boots with a resumed store and the same staged seed. These were the proposed capture and timeline
+commands.
 
 ```sh
 # run B (the change); run A is the same with PIANO_FAST_BOOT=0 (the baseline on a resumed store)
@@ -262,14 +277,14 @@ Reading a failure: if nothing follows `exec: pid 1 launchd`, run A (with `-v`) t
 expected: in the xnu tree only PE_create_console reads `-v`). A panic's text is in the mailbox and the USB capture; the panel may
 stay dark.
 
-## 7. Making it the default
+## 7. Historical proposal for boot defaults
 
 After runs A and B (and C) have measured the saving: take `-v` and `droidvm-disable-jobs` out of `K27_ARGS` (build-ram-images.py;
 build-esp.py's profiles follow, and `--fast-boot` stays for level 2). `-v` stays available for a bring-up image through
 `PIANO_EXTRA_ARGS="-v"` or `build-esp.py --arg=-v`. Correct docs/bringup-debugging.md's panic-photo note at the same time. The
 installed ESP keeps its arguments until it is rebuilt (`build-esp.py --profile daily [--fast-boot 1]`).
 
-## 8. Open
+## 8. Open questions from the early k27 analysis
 
 - loginwindow's MobileGestalt service (§3.3); the logind → loginwindow delay (run D).
 - The ~40-45 s kernel phase without the console's share (run B shows how much is left): the kexts' start (NativeUfs's stages,
@@ -278,7 +293,7 @@ installed ESP keeps its arguments until it is rebuilt (`build-esp.py --profile d
 - launchd's boot tasks: fips (cc_fips_test) and dirhelper take about 6 s each in text mode. They are part of the OS image.
 - CPU frequency: XNU has no CPU DVFS natively, so the cores run at whatever the firmware left. Not measured.
 
-## 9. The 27.3 dyld stretch: the native 4K code-signing pre-hash of the compressed shared cache (2026-11-14)
+## 9. Historical 27.3 dyld and pre-hash analysis (2026-11-14)
 
 **Measured (bt1 18:20, ufs1 19:36, RAM boots of the installed line).** Between launchd's exec and `dyld cache mapped
 system-wide` the root windows hand up ~2.4 GB, mostly 512 KiB reads (the cluster layer's SSD read-ahead size). With the old read
@@ -309,7 +324,7 @@ samples in that stretch, its hottest kernel pcs in corecrypto's SHA-256 block fu
 - On a 16 KiB-page Mac none of this runs at map time: each page is validated (and decompressed) when it is first touched.
 
 **Where exactly the ~84 us per 16 KiB goes** (decompression, the two hash passes, the per-call VFS/decmpfs overhead, waits) is the
-one open number. Probe **ufs3** (`private/host-checks/20261114-ufs1/CHECKLIST-ufs3.txt`): ufs1's switches plus
+one open number. Probe **ufs3** used ufs1's switches plus
 `pc-sample=2 pc-sample-hz=500 sample-name=launchd sample-period=2` (the k27 profilers, `osfmk/kern/exception.c:273-771`: the CPU
 split per task, the hottest kernel pcs, launchd's threads and their kernel stacks every 2 s) and NativeUfs's third perf line, the
 `cs native4k` counters per second (16 KiB blocks pre-hashed and their MiB: compare with the iolog's MiB, x2.8 for the compression).
@@ -344,7 +359,7 @@ samples per 2 s (one CPU busy), its hottest pcs corecrypto's SHA-256 (~87 %), th
    error, as before. Default 1: the original loop. `cs-native4k-log=MiB` logs each signature's time. The work split is host-tested
    with real threads (`tooling/k27/test-cs-native4k.sh`: the same table as one thread for 1-16 threads, every block verified once,
    bad blocks and read errors fail the pass; plain, ASan/UBSan, TSan). Inferred ~37 s -> ~7-10 s with 6 threads (decompression and
-   hashing spread over the CPUs; the disk has 15x headroom). Probe ufs4 (`private/host-checks/20261114-ufs1/CHECKLIST-ufs4.txt`).
+   hashing spread over the CPUs; the disk has 15x headroom). The ufs4 results are in §9.1.
 2. **Design note only: validate lazily, per 16 KiB block, at fault time** (what a 16 KiB-page kernel does per page). Today the 4 KiB
    table must exist before the signature is published because the fault path (`vm_fault_enter` -> `vm_page_validate_cs` ->
    `cs_validate_hash`) runs with the VM object locked and the page busy, where no vnode I/O is allowed. The lazy form:
@@ -365,7 +380,7 @@ samples per 2 s (one CPU busy), its hottest pcs corecrypto's SHA-256 (~87 %), th
 `native-ufs-fast` alone gave ~3 s (dyld mapped at iolog 36 vs 39, `Early boot complete` T 38.7 vs 41.8 s) and nothing after
 launchd (loginwindow at iolog 70 vs 73: the same ~31 s after `Early boot complete`; the windows busy 5-30 % of each second there).
 
-### 9.1 The ufs4 boots: measured milestones, the seconds saved, and what to install (2026-11-14; `private/host-checks/20261114-ufs1/SCORE-ufs4.md`)
+### 9.1 Historical ufs4 RAM comparison (2026-11-14)
 
 Three single boots of the probes on the tablet — ufs3 (baseline), ufs4a (`cs-native4k-skip=1`), ufs4b
 (`cs-native4k-threads=6 cs-native4k-log=1`). All figures below are quoted from the console captures
@@ -401,17 +416,15 @@ introduced by either switch. Health on both 0067 boots: `NativeUfs: FAILED` 0 hi
 with the Finder launch confirmed by its console line (post-login the webcam showed the clock/lock face ~40-45 s later on
 both boots — same on both, so not introduced by either switch; fast auto-lock or desktop-not-drawn yet, **inferred**).
 
-Recommendation, **inferred** (the score's): put `cs-native4k-threads=6` without the skip in the installed ESP's boot line
-— ≈28.5 s saved to the login window while keeping full verification (472k blocks verified, every file `ok 0`); leave
-`cs-native4k-log` off in the installed profile. `cs-native4k-skip=1` saves ~7 s more but is a verification-off window
-(300,772 pages accepted without a hash, zero demand checks all boot) — keep it for dev/test RAM boots only, drop it after
-any install. The two switches are orthogonal. And before arguing over the last 7 s between a and b, chase the ~32 s
-post-EBC launch wave.
-## 10. The halt/restart timeout: result of probe halt1 (2026-11-14, confirmed on the tablet)
+The November 14 comparison favored `cs-native4k-threads=6` for saving about 29 s to `loginwindow` while keeping page
+verification. The skip saved about 7 s more and accepted 300,772 pages without a hash during the RAM probe. The roughly 32 s
+from `Early boot complete` to `loginwindow` in these probes was the next launch phase to investigate.
 
-This belongs here because every console `reset fastboot` pays for the halt bug: the restart hangs 30 s, panics, and the panic
-reboot reaches ABL only seconds later (halt1: 159 s from the reset command to fastboot). On the installed system it can also
-land in macOS instead of fastboot (§10.3).
+## 10. Historical halt/restart timeout (halt1, 2026-11-14)
+
+On the November 14 build the console reset hung until the 30 s halt timer panicked. The halt1 run reached ABL fastboot 159 s
+after the reset command. The same hang also exposed a restart-reason race on the installed build (§10.3). The PSCI handler
+in k27 0069 is part of the current patch series (§10.4). [November 14 results](results-2026-11-14.md) · [Halt and restart](halt.md)
 
 ### 10.1 What halt1 answered
 
@@ -434,20 +447,16 @@ power-tree wait.** The sequence:
   Total 30000 ms @IOPMrootDomain.cpp:6289` survives only in the run log's corrected copy). The panic path called
   `haltRestart` again (-1) and then reached `piano-halt: PSCI SYSTEM_RESET (0x84000009) through smc` — the last marker, with
   no return line — and that one **did** take the reset: the tablet was back in ABL fastboot 159 s after the command
-  (confirmed: `logs/native-runs/20261114-213805-loop/loop.log`). Inferred: the SMC reset wins the race with the return print.
+  (confirmed in the loop log). Inferred: the SMC reset wins the race with the return print.
 - PianoWifi's halt watch at +8 s and +20 s still read `0 service(s) with the shutdown not acknowledged` and
   `0 of 15 power-plane service(s) with a power change in progress`: nothing was pending on the driver side while it hung.
 
-Evidence: the clean copy of the marker sequence is the dump boot's console replay
-`logs/usb-console/20261114-214008-port0.txt:15-83`, which cuts off at `haltRestart returned -1`; the tail (the 30 s timeout,
-the second attempt, the PSCI line) is in `private/host-checks/20261114-halt/halt1-mailbox.txt:4480-4597` with single-character
-bit flips (batch-wide), repaired, and in its majority-corrected copy `logs/native-runs/20261114-213805-loop/loop.log`. The
-live capture `halt1-console.out` ended before the reset and holds no halt markers.
+The dump boot's console replay was clean through `haltRestart returned -1`. The repaired mailbox supplied the later
+30 s timeout, second restart attempt and PSCI marker. The live capture ended before the reset. [November 14 results](results-2026-11-14.md)
 
 ### 10.2 The same shape in 10p — the mystery it resolves
 
-10p's clean console line (`logs/usb-console/20261114-211416-port0.txt:92`):
-`PianoDwc3: reset: PEHaltRestart returned -1 after 242 ms: the shutdown notifications are done and the platform did not
+10p's console printed `PianoDwc3: reset: PEHaltRestart returned -1 after 242 ms: the shutdown notifications are done and the platform did not
 restart`, then the bare `Halt/Restart Timed Out @IOPlatformExpert.cpp:884`. Same -1, same "platform did not restart", same
 30 s timeout and panic reboot to fastboot — only the notifications' share differed (242 ms vs halt1's 38 ms). 10p could only
 place the blocker downstream of the notifications; halt1 pins it to `ArmDTPlatform::haltRestart` (the class method) answering
@@ -455,26 +464,22 @@ place the blocker downstream of the notifications; halt1 pins it to `ArmDTPlatfo
 
 ### 10.3 The guard race during the hang (inferred)
 
-During a hang of this kind on the **installed** boot, the boot guard's 180 s health check can still run (the kernel is alive)
-and reset the restart reason back to normal, so the eventual panic reboot lands in macOS, not ABL fastboot. Inferred from the
-console: the 2026-11-14 20:39:50 `reset fastboot` on installed boot #1 reached the halt hang, and `piano-boot-guard: SDAM
-restart reason 0x04 -> 0x00 ... healthy after 180 s, restart reason normal` printed after the shutdown handoff lines
-(`logs/usb-console/20261114-203949-port0.txt:4915-4917`); the follow-on boot's launchd at 20:41:31
-(`logs/usb-console/20261114-210211-port0.txt:1292-1296`) shows it booted the installed system instead. Full analysis:
-`private/host-checks/20261114-a2run/WHY.md`. Practical rule (already in `boot-guard.md`): on the installed boot, send
-`reset fastboot` only after the guard has printed `healthy after N s`.
+During the 2026-11-14 20:39:50 halt hang, the boot guard's 180 s health check still ran. The console printed `restart
+reason 0x04 -> 0x00 ... healthy after 180 s, restart reason normal` after the shutdown handoff. The next boot's launchd at
+20:41:31 showed a return to the installed macOS. The analysis attributed that return to the health check clearing the
+restart reason during the hang. At the time the workaround was to wait for the guard's health decision before requesting
+the restart. [November 14 results](results-2026-11-14.md) · [Boot guard](boot-guard.md)
 
-### 10.4 Fix direction
+### 10.4 PSCI halt and restart fix (k27 0069)
 
-k27 0069 `piano-psci-halt`: give `PE_halt_restart` a real handler that performs PSCI `SYSTEM_RESET` itself (logging the
-reason), so `haltRestart` resets instead of answering -1. Target: `reset fastboot` reaches ABL fastboot without the 30 s
-hang and panic, which also removes the guard race of §10.3.
-## 11. The second half after the skip: launchd to the desktop (2026-11-14)
+k27 0069 adds a default-enabled native `PE_halt_restart` handler using PSCI `SYSTEM_RESET` for restart and `SYSTEM_OFF`
+for power-off. The boot guard preserves the restart reason once a restart has begun. [Halt and restart](halt.md#k27-0069-piano-psci-halt-the-restart-and-the-power-off-through-psci) · [Kernel patch index](../patches/k27/README.md)
 
-With `cs-native4k-skip=1` the kernel part is done at 3.8 s (`Early boot complete`, confirmed tick in ufs4a); what is left is
-userland. Sources: ufs4a's console (`private/host-checks/20261114-ufs1/ufs4a-console.out`, RAM boot, `data-persist=0`), ufs3's
-`pc-sample=2` boot (the same RAM userland with the pre-hash, its CPU split per task every 2 s), the installed boots of
-`private/host-checks/20261114-flash/desktop-time.md` (v4b6, v5b3: persistent Data).
+## 11. Historical launchd-to-desktop analysis (2026-11-14 to 2026-11-15)
+
+In ufs4a, launchd reached `Early boot complete` at 3.8 s with `cs-native4k-skip=1`. This analysis compares that volatile-Data
+RAM boot with ufs3 (the same RAM userland with the pre-hash and per-task CPU samples every 2 s) and the November 14 installed
+boots v4b6 and v5b3 with persistent Data.
 
 **Timeline, uptime in s** (ufs4a; the GUI lines bracketed by the per-second iolog, +-0.5 s; launchd lines carry their wall clock):
 
@@ -502,7 +507,7 @@ userland. Sources: ufs4a's console (`private/host-checks/20261114-ufs1/ufs4a-con
    sustained level until S s of uptime, PianoThermal's 90 C cluster ceiling on top in every mode, then the profile's own level
    (without `piano-cpufreq`: the boot stages' level again). Host-tested (`thermal_host` testBoost). Probe ufs5. Measured (ufs5,
    2026-11-15): the clocks were the lever — Installer Progress 22.4 s [33.5], Finder 59.8 s [85.8] — but the 120-s boost peaked
-   at **97.3 C against the 92 C line** (`private/host-checks/UFS5-HEAT-WHY.md`), so since 2026-11-15 the boost carries its own
+   at **97.3 C against the 92 C line**, so since 2026-11-15 the boost carries its own
    thermal back-off: the hottest CPU sensor steps it one level down at 88 C (never up again in that boot) and ends it at 90 C
    (`piano-cpufreq-boost-step` / `-end`, `thermal_host` testBoost; probe ufs5r3).
 2. **The LaunchServices database, on RAM boots only (confirmed timing, inferred cause).** In ufs3, lsd runs at one full core from
@@ -519,7 +524,7 @@ userland. Sources: ufs4a's console (`private/host-checks/20261114-ufs1/ufs4a-con
    after it (no CoreAudio output device). Power more than boot time; `power.md`'s fallback (the jobs off) stands.
 5. **password -> Finder: 25 s on the RAM boot, ~9 s installed** (the user's first-login caches on the seed; iconservicesagent and
    others at a core each, ufs3 76 s). Item 2's seed would cover it.
-6. **SecurityAgent -> visible login window**: <= 10 s here, 10-16 s installed (desktop-time.md F1). NativeGopDisplay's whole-frame
+6. **SecurityAgent -> visible login window**: <= 10 s here, 10-16 s on the November 14 installed boots. NativeGopDisplay's whole-frame
    copy costs ~21.5 ms, 17.5 ms of it reading the surface uncached (ufs4a: `read 17456 us`). Copy mode bit 1 (cacheable reads,
    DC CIVAC first) exists but never ran on the tablet: **`native-gop-display-copy-ab=1`** (2026-11-14) runs both on one boot, one
    report period each, and the period line gives each mode's read and copy means.
@@ -528,24 +533,21 @@ userland. Sources: ufs4a's console (`private/host-checks/20261114-ufs1/ufs4a-con
 GPU open with its uptime), NativeGopDisplay's `first frame (swap N) ... (at N ms)` and `first lit frame: frame N, P% non-black,
 mean #RRGGBB, at N ms (N ms after the first frame)` (once, at the first copied frame at least half lit).
 
-**ufs5** (`private/host-checks/20261114-ufs1/CHECKLIST-ufs5.txt`): ufs4a's switches + `piano-cpufreq-boost=120` + `pc-sample=2
+**ufs5** used ufs4a's switches + `piano-cpufreq-boost=120` + `pc-sample=2
 pc-sample-hz=500` + `native-gop-display-copy-ab=1`, kernel 0070 (0069's restart path, 0070's M4 hardening). The control is ufs4a
 (the same image line without the three); `ufs5b` (the same without the boost) separates the boost from the rest if needed.
 
-### 10.1 A warm RAM test seed (tooling/k27/warm-seed.py, 2026-11-14)
+### 11.1 Historical warm RAM test seed (2026-11-14)
 
 Item 2 above, built: the RAM images' seed (seed-200, identity `9bd6f902`) has an empty `private/var/folders`, no `private/var/db/lsd`,
 an empty `Library/Caches` and a home whose `Library` holds only Compositions, Favorites, FontCollections, Input Methods and Preferences
 (`warm-seed.py inspect`, confirmed on the host): every RAM boot rebuilds LaunchServices' databases and every first login the home's
 caches. The installed system keeps them in its store and needs none of this.
 
-- **collect** (one desktop RAM boot, the USB network up, the Finder open and a minute idle): `tooling/k27/warm-seed.py collect --out
-  out/warm-k273-N` runs, as root on the tablet (`sudo -S` with the debug account's password from `private/login.secret` on stdin;
-  never in argv), an xz tar with numeric owners of `private/var/folders` (without the temporary `T` folders), `private/var/db/lsd`,
-  `Library/Caches` and the homes' `Library` (without Keychains and Logs), streamed over `tooling/native/desk-ssh.sh` to
-  `warm.tar.xz`; `collect.json` lists the largest parts.
+- **collect** recorded the LaunchServices database and system and user caches from a desktop RAM boot. The archive preserved
+  numeric ownership and excluded temporary folders, Keychains and Logs. `collect.json` listed the largest parts.
 - **build**: `tooling/k27/warm-seed.py build --pack out/warm-k273-N/warm.tar.xz --out out/warm-k273-N/seed [--include GLOB]... [--all]`:
-  a copy of the seed (default `/Volumes/ExtSSD/k273/v2/seed-200.img`, trust cache the v4 layer's) with the pack, filtered (default:
+  a copy of the seed with the pack, filtered (default:
   LaunchServices' databases, lsd's, the font registry and the icon store; every parent directory and AppleDouble entry of a kept
   member kept, so each folder keeps the tablet's owner and mode), at `private/var/piano/warm/warm.tar.xz`, and a root-owned
   `private/etc/rc.server`: launchd's `rc.server` boot task (its log line `(rc.server) Doing boot task`, then `optional boot task not

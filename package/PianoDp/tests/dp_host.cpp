@@ -9,7 +9,7 @@
 //     leave USB 2 only), the link budget at piano's HBR2 cap, the DIO4485 words per pin and orientation, and the per-port HPD state
 //     machine on plug sequences (a USB stick, a monitor plugged and unplugged, a dock, flips, IRQ_HPD, repeats, mismatches);
 //   - D6 (DpFake.h): the arguments into a configuration and the plug schedule.
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. -I../../PianoDpu -I../../PianoUsbHost -I../../PianoDwc3 dp_host.cpp -o /tmp/dp_host
+//   c++ -std=c++20 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I.. -I../../PianoDpu -I../../PianoUsbHost -I../../PianoDwc3 dp_host.cpp -o /tmp/dp_host && /tmp/dp_host
 #include "DpSurvey.h"
 #include "DpPort.h"
 #include "DpFake.h"

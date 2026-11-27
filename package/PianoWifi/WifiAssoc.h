@@ -79,22 +79,14 @@ inline bool regParse(RegDomain &out, const uint8_t *payload, uint32_t length, bo
   out.alpha2[2] = 0;
   // The rules: an array of structures, each with its own header. The count the event gives is believed only as far as the
   // array really reaches (a firmware that says more rules than it sent must not walk us off the message).
-  const uint32_t wantRules = out.rules24 + out.rules5;
+  const uint64_t wantRules = uint64_t(out.rules24) + out.rules5;
   uint32_t arraySize = 0;
   const uint8_t *array = wmiFind(payload, length, kWmiTagArrayStruct, &arraySize);
-  if (!array || !wantRules) return true;
   const uint32_t words = extended ? kRegRuleExtWords : kRegRuleWords;
   const uint32_t stride = kWmiTlvHeaderBytes + words * 4;
-  for (uint32_t i = 0; i < wantRules; ++i) {
-    if ((i + 1) * stride > arraySize) {
-      out.rulesDropped = wantRules - i;
-      break;
-    }
+  const uint32_t present = array ? arraySize / stride : 0;
+  for (uint32_t i = 0; i < wantRules && i < present && i < sizeof out.rule / sizeof out.rule[0]; ++i) {
     const uint8_t *at = array + i * stride + kWmiTlvHeaderBytes;
-    if (out.ruleCount == sizeof out.rule / sizeof out.rule[0]) {
-      out.rulesDropped = wantRules - i;
-      break;
-    }
     RegRule &rule = out.rule[out.ruleCount++];
     const uint32_t freq = wmiGet(at, 0), power = wmiGet(at, 1), flags = wmiGet(at, 2);
     rule.startKhz = freq & 0xffffu;
@@ -103,6 +95,8 @@ inline bool regParse(RegDomain &out, const uint8_t *payload, uint32_t length, bo
     rule.powerDbm = int32_t(int8_t((power >> 16) & 0xffu));
     rule.flags = flags & 0xffffu;
   }
+  const uint64_t dropped = wantRules - out.ruleCount;
+  out.rulesDropped = dropped > UINT32_MAX ? UINT32_MAX : uint32_t(dropped);
   return true;
 }
 
@@ -119,11 +113,12 @@ inline bool regChannel(const RegDomain &reg, uint32_t freq, RegChannel &out)
 {
   renew(out);
   out.freq = freq;
+  if (freq < 10 || freq > UINT32_MAX - 10) return false;
   const uint32_t low = freq - 10, high = freq + 10;
   for (uint32_t i = 0; i < reg.ruleCount; ++i) {
     const RegRule &rule = reg.rule[i];
     if (low < rule.startKhz || high > rule.endKhz) continue;
-    if (rule.flags & kRegRuleFlagDisabled) return false;
+    if ((rule.flags & kRegRuleFlagDisabled) || rule.maxBwMhz < 20) return false;
     out.allowed = true;
     out.radar = (rule.flags & kRegRuleFlagRadar) != 0;
     // A channel the domain forbids transmitting on first (no initiating radiation) is a passive one, and so is a radar

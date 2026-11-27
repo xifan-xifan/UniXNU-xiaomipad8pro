@@ -1,15 +1,51 @@
-# A usable desktop: what hurt it, what changed, and the next attended session (2026-11-12)
+# Attended desktop checks
+
+## Installed baseline (2026-11-27)
+
+Both **v13.1y12q** disk boots reached the login window at **+32 s** and verified that the owner's Data store resumed. Data
+concurrency and USB debug TX flow control were active during the second boot. The display runs at 60 Hz with neutral colours.
+Daily Night Shift routing, native panel sleep and refresh switching stay off.
+[November 27 results](results-2026-11-27.md) · [Support status](STATUS.md)
+
+### Verified by installed or RAM checks
+
+| Area | Evidence |
+| --- | --- |
+| Desktop and input | The installed keyboard cover and trackpad work. Native touch published and was acquired on v13.1y12l. The same build passed automatic brightness and first-window launches of Calculator, TextEdit and Notes in under 2.5 s. |
+| Chrome | Installed v13.1y12q passed flags-free WebGPU (6/6 contexts with correct compute and exact readback), WebGL 2 (37.89 fps at 3200 × 1738) and the video playback checks. |
+| Bluetooth | Installed v13.1y12q reported `BT_PREFLIGHT READY`, 32/32 checks after 48 s. The controller published and powered on, LE event mask bits 6 and 11 were set, and all four runtime hashes verified. |
+| Lid and power key | The daily profile arms the cover and power-key policy. RAM qualification passed suspend-to-idle with timer wake and simulated lid and power-key events. Earlier RAM checks covered locking without suspending when the cover closed on AC. |
+| Brightness and Energy Mode | The brightness keys and the system slider path work. Low Power, Automatic and High Power selected with `pmset` reached policy on installed v13.1y12l. High Power is the daily setting. |
+| Camera and mic | On installed v13.1y12l, Photo Booth opened live front preview and effects. AVFoundation recorded 10 s H.264 movies from both cameras. FaceTime had camera and microphone permissions. The v13.1y12q audio check confirmed timing and readiness read-only. The RAM mic check captured the stimulus with clipping. |
+| Charging | Installed checks verified 5 V and fixed 9 V PD buck charging. The 80% hold is in the installed profile. |
+
+[November 26 results](results-2026-11-26.md) · [November 27 results](results-2026-11-27.md) · [Support status by feature](STATUS.md)
+
+### Remaining attended checks
+
+| Check | What to verify by hand |
+| --- | --- |
+| Bluetooth keyboard and mouse | In the owner's pending 20-minute session, pair both devices and confirm typing, pointer motion and clicks. |
+| Lid and power key | Close the cover on battery and verify sleep and wake. On AC, confirm a close locks the screen while charging continues. Use the physical power key to test sleep and wake. |
+| Brightness and Energy Mode | Drag the Control Center brightness slider and verify the panel follows. Check auto-brightness across a real light change. Select Low Power, Automatic and High Power in System Settings and verify each reaches policy. |
+| FaceTime, QuickTime and microphone | Open FaceTime self-view. Use QuickTime New Movie Recording, save the clip and play it back. Make and play back a hands-on microphone recording. The active duplex ledger and the clean RAM mic recheck are separate pending measurements. |
+| Charge pump / MiPPS | Run the attended Charge Pump retest. It stays off by default. The first attended run held at a 100 mA input limit and the fix awaits this retest. |
+| Wi-Fi and native touch | Join a network from the Wi-Fi menu and verify rejoin when a hotspot returns. Exercise native touch in longer ordinary use. |
+
+[Pending checks](STATUS.md#known-gaps) · [Bluetooth preflight](results-2026-11-27.md#bluetooth-preflight) ·
+[Audio duplex baseline](results-2026-11-27.md#audio-duplex-baseline) · [RAM qualification](results-2026-11-27.md#ram-qualification)
+
+## Historical desktop bring-up (2026-11-11 to 2026-11-12)
 
 Offline analysis of the attended runs with the owner on 2026-11-11/12 (attend1-4: `logs/usb-console/20261111-232732`,
 `20261111-234057`, `20261112-000758`, `20261112-002843`), the night's unattended GPU boots (`20261112-*`, among them fast1
 `041235` with `pc-sample=30`, and desk1 `081349`, the attend5 image from main, run unattended at 08:14) and the driver pages. T is
-seconds from XNU's start. **Evidence** is a quoted log line or measured count; **inference** says so. Nothing here ran on the
-tablet; the fixes are host-tested and built. Not covered: NativeGopDisplay's composition (the cursor layer, the fence rule, swap
-completion, bands and flicker), which is analysed separately; its findings are only referred to.
+seconds from XNU's start. The quoted logs and measurements describe those runs. The proposed fixes and checklists below reflect
+the stage of bring-up at the time.
 
-## 1. Findings, by symptom
+### 1. Findings, by symptom
 
-### 1.1 The wait between the password and the desktop (47-73 s)
+#### 1.1 The wait between the password and the desktop (47-73 s)
 
 Timed from the password's submit (`exec: pid N authorizationhos`) to the first desktop frame (NativeGopDisplay's status line
 with a lit, non-grey frame):
@@ -43,7 +79,7 @@ with a lit, non-grey frame):
   Y mirrored in that run (`orientation: flip X 0, Y 0`), tapping the password field or the user is unlikely to have worked
   (inference).
 
-### 1.2 The black phase and the garbled phase at login
+#### 1.2 The black phase and the garbled phase at login
 
 - Black: attend1 `381.911 ... last frame 0.0% non-black mean #000000` (372-382), attend2 black then an 11 %-lit frame: the stall of
   §1.1 with almost no new frames.
@@ -52,7 +88,7 @@ with a lit, non-grey frame):
   the panel for 10-40 s. These images had the old 50 ms copy-anyway rule; the current NativeGopDisplay never copies an unfinished
   frame (its own analysis and page).
 
-### 1.3 Crashes and restarts of the session
+#### 1.3 Crashes and restarts of the session
 
 | Process | Per boot | Reason (evidence) | State |
 |---|---|---|---|
@@ -66,7 +102,7 @@ are attend4's logout after WindowServer's abort, and universalaccessd/MenuBarAge
 replaced by the user's). SetStoreUpdateService (~30 a boot) and the `com.apple.audio.*` helpers exit with SIGKILL: idle XPC
 services stopped by launchd, as on any Mac.
 
-### 1.4 The respawn loop every few seconds
+#### 1.4 The respawn loop every few seconds
 
 Four spawns per 10 s at the idle login window, each through an xpcproxy (attend4, T 139-170, every cycle the same):
 
@@ -81,7 +117,7 @@ Four spawns per 10 s at the idle login window, each through an xpcproxy (attend4
 Also seen for every new process: `triggered unnest of range ... of DYLD shared region` (a private copy of the shared region's
 page tables per process; observation only).
 
-### 1.5 Clicks that did nothing, and the rest of the input
+#### 1.5 Clicks that did nothing, and the rest of the input
 
 - **Touch screen taps read as drags** (evidence, attend1): 61 touches, 31 taps, 16 drags of which 11 under 310 ms, most pressed
   25-100 ms before the lift and ending 6-70 px from their start (`drag ends after 100 ms, 32 px from its start`, `... 424 ms, 6 px`,
@@ -112,21 +148,21 @@ page tables per process; observation only).
   Mac's HID at ~1190.
 - **The Mac's keyboard and pointer (PianoDwc3)**: used once (attend2), `0 send errors`.
 
-### 1.6 The images: attend5 and desk1 have no keyboard cover
+#### 1.6 The images: attend5 and desk1 have no keyboard cover
 
 PianoKeyboard was never in `configs/k27-native-kexts.txt`; attend1-4 linked it through `PIANO_EXTRA_KEXTS`. The images built since
 (`out/ram-attend5`, `ram-attend5nt`, `ram-desk1`) do not contain it (no `piano-keyboard-typing` in them, no `PianoKeyboard: start`
 line in desk1's capture), although their arguments say `piano-keyboard=2`: **the owner could not type on the cover with them**,
 only through the Mac (`piano-input.py`). Fixed: it is in the list now (§2).
 
-### 1.7 Logging
+#### 1.7 Logging
 
 `stderr-log=1` puts every daemon's stderr on the console: attend2 35577 stderr lines (contextstored 13866: CoreData errors,
 dmd 4576, linkd 3475). desk1's capture (`stderr-log=1`) reached only T ≈ 195 s of a 1233 s run: the console never caught up, so
 the run says nothing about the login window. `-v` draws every console line into the Device-mapped boot framebuffer until the first
 frame ([boot-time.md](boot-time.md) §3.1). The desktop images have neither (§3); the diag image has `exec-log=1` only.
 
-## 2. Changes (2026-11-12, this branch)
+### 2. Changes (2026-11-12, this branch)
 
 | Change | Where | Tested |
 |---|---|---|
@@ -146,7 +182,7 @@ the cover, `20565-6900-0` PianoDwc3's: product-vendor-0 => 40), written by the b
 ask (inference: the preference administrators pre-set for the same purpose; checklist step 3 checks it). Risk (inference): a client that needs one of those daemons fails at once instead of finding a crashing or spinning one; none
 of them answered before either. The plain image is the A/B partner.
 
-## 3. The desktop image
+### 3. The desktop image
 
 Built from main, after these commits (the KC with the k27 0064 kernel for the RTC calendar):
 
@@ -197,13 +233,13 @@ Checked in an agent worktree (2026-11-12): the KC from this tree with the 0064 k
 | `ram-diag` | keyboard type + `desk-reports.sh` in the boot job | `exec-log=1 piano-policy=1` | one boot to name what §1.1 and §1.4 leave open: `grep -a 'desk-reports:' <capture>.txt` |
 | `ram-desk-dev` | desk's + the userland stage (pianousb-shell; its pmset defaults off) + `desk-dev.sh` in the boot job (sshd loaded, this Mac's key as each account's authorized_keys, the USB network's interface on DHCP and its address printed) | `piano-usb-shell=1 piano-usb-net=1`, reset 3600 s | the owner's desktop with ways in from the Mac: `grep -a 'desk-dev:' <capture>.txt` |
 
-**desk-dev** (2026-11-12 evening): the owner logs in (or `tooling/native/desk-login.sh` types the password he left in the ignored
-`private/login.secret`: it waits in the running console capture for `PianoA830: SecurityAgent opens the accelerator` and a lit
+**desk-dev** (2026-11-12 evening): the owner logs in or `tooling/native/desk-login.sh` uses a separately supplied credential.
+It waits in the running console capture for `PianoA830: SecurityAgent opens the accelerator` and a lit
 frame. Since 2026-11-18 it first wakes with Shift, requires a **new** lit-frame observation, uses the native
 `piano-login-readiness` AX probe to confirm the selected target account and focused secure field, clears that field,
 then types once on stdin to `piano-input.py type --stdin --enter`. Success requires a new Finder plus the matching console
-UID. AX denial or missing UI proof stops before password input. `--now` only skips the SecurityAgent wait; it never skips
-these guards. This transaction is host tested; its native login-window AX access awaits tablet qualification). Then, from the Mac:
+UID. AX denial or missing UI proof stops before password input. `--now` skips the SecurityAgent wait and preserves the other
+checks. Host tests covered the transaction at the time, with native login-window AX access awaiting tablet qualification. From the Mac:
 `tooling/native/usb-console.py --port 1` (the root shell), or `tooling/native/desk-ssh.sh` (ssh with the key, bound to the Mac's
 end of the cable, to the fixed 169.254.80.2, or to `-a <address>` of the `desk-dev: usb net: enN inet ...` line; the Mac's side of
 the USB network left at "Using DHCP" self-assigns a 169.254 address; Internet Sharing gives the tablet a lease instead,
@@ -231,14 +267,14 @@ DESK_RTC_OFFSET=1794397906 tooling/k27/build-desktop-images.sh desk     # after 
 Variants by environment: `DESK_TOUCH=0` (no touch screen: the fallback if it resets or its watchdog lines never stop),
 `DESK_EXTRA="piano-touch-idle=0"` (the touch screen's latch looked at every 1 ms at rest too: more power), `DESK_KEYBOARD_TYPE=41|42` (ISO, JIS).
 
-The owner's own Data (persistent: a still wallpaper, warm caches and answered setup dialogs survive the reboot) is ESP v3 with the
-system layer ([persistent-boot.md](persistent-boot.md) §11); its RAM test with `PIANO_DATA_PERSIST=2` keeps the installed base seed,
+The proposed ESP v3 layer would keep the owner's Data (still wallpaper, warm caches and answered setup dialogs).
+Its RAM test with `PIANO_DATA_PERSIST=2` kept the installed base seed,
 so no seed change: there the same quieting is the owner's, once, in Terminal (each `sudo` asks his password):
 `sudo launchctl disable system/com.apple.watchdogd` (likewise `com.apple.mobileactivationd`, `com.apple.security.xprotectd`,
 `com.apple.PerfPowerServices`; undone with `launchctl enable` and a reboot) and
 `sudo defaults write /Library/Preferences/com.apple.keyboardtype keyboardtype -dict-add 20555-6900-0 -int 40 20565-6900-0 -int 40`.
 
-## 4. The attended checklist (next session)
+### 4. The original attended checklist (2026-11-12)
 
 The owner types his password himself, on the cover. Console: `python3 tooling/native/usb-console.py --capture 3640` from the boot;
 afterwards `python3 tooling/native/boot-timeline.py logs/usb-console/<ts>-port0.times.txt --loop <loop.log>`.
@@ -290,7 +326,7 @@ afterwards `python3 tooling/native/boot-timeline.py logs/usb-console/<ts>-port0.
 Stop and report on: a reset or a hang (the capture's last lines and the loop's dump), WindowServer exits, `BoMap` refusals, touch
 watchdog lines that never stop, or clicks that still do not land (note where: screen or touchpad, which gesture line).
 
-## 5. Open
+### 5. Open questions from the 2026-11-12 runs
 
 - authorizationhost's 13 s (diag report first); the 26-56 s of CPU-side work after Dock starts (pipelines compiled from source:
   the plugin's binary archive support; a persistent store keeps caches).

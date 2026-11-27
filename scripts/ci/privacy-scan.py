@@ -3,7 +3,9 @@
 """Privacy scan for the public repository: generic pattern classes only.
 
     python3 scripts/ci/privacy-scan.py                 # every tracked text file
+    python3 scripts/ci/privacy-scan.py --staged        # only additions to the index
     python3 scripts/ci/privacy-scan.py --diff BASE     # only lines added since BASE (and the commit messages BASE..HEAD)
+    python3 scripts/ci/privacy-scan.py --staged        # only lines added to the index
 
 The maintainer's own pre-publish audit has a private list of literal values; it is not here and must never be. This scan only
 knows shapes: a user's home path, the maintainer's private notes folder, RFC 1918 LAN addresses, host names on local
@@ -13,6 +15,7 @@ Apple payloads or build outputs. A hit fails the scan; a line that is meant (an 
 """
 import argparse
 import fnmatch
+import os
 import re
 import subprocess
 import sys
@@ -23,8 +26,11 @@ ALLOW_FILE = ROOT / 'scripts/ci/privacy-scan.allow'
 MARK = 'privacy-scan: ok'
 
 HOME_OK = {'Shared', 'Guest', 'runner', 'user', 'u', 'me', 'NAME', 'name', 'USER', 'you', 'example'}
-EMAIL_OK = re.compile(r'(@users\.noreply\.github\.com|@[A-Za-z0-9.-]*\.(invalid|example|test)\b|@example\.(com|org|net)|noreply@|no-reply@'
-                      r'|@com\.apple\.)', re.I)
+EMAIL_OK = re.compile(
+    r'[^@]+@(?:users\.noreply\.github\.com|[A-Za-z0-9.-]+\.(?:invalid|example|test)|example\.(?:com|org|net)|com\.apple\.[A-Za-z0-9.-]+)'
+    r'|(?:noreply|no-reply)@[^@]+', re.I,
+)
+HUNK = re.compile(r'^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@')
 
 CLASSES = [
     # (name, regex, filter(match, line, path) -> bool: True = a real hit)
@@ -40,7 +46,7 @@ CLASSES = [
     ('MAC address', re.compile(r'(?<![0-9A-Fa-f:])([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}(?![0-9A-Fa-f:])'),
      lambda m, line, path: m.group(0).lower() not in ('00:00:00:00:00:00', 'ff:ff:ff:ff:ff:ff')),
     ('e-mail address', re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}'),
-     lambda m, line, path: not EMAIL_OK.search(m.group(0)) and not _email_in_header(line, path)),
+     lambda m, line, path: not EMAIL_OK.fullmatch(m.group(0)) and not _email_in_header(line, path)),
     ('private key', re.compile(r'-----BEGIN ([A-Z]+ )*PRIVATE KEY-----'), None),
     ('access token', re.compile(r'\b(ghp_[A-Za-z0-9]{36}|gho_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{40,}|AKIA[0-9A-Z]{16}|'
                                 r'xox[abprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9]{32,}|AIza[0-9A-Za-z_-]{35})\b'), None),
@@ -84,15 +90,82 @@ def allowed(allow, path, text):
 
 
 def git(*args):
-    return subprocess.run(['git', '-C', str(ROOT), *args], capture_output=True, text=True, errors='replace', check=True).stdout
+    return subprocess.run(['git', '-C', str(ROOT), *args], capture_output=True, check=True).stdout
 
 
-def is_text(path):
-    try:
-        data = (ROOT / path).read_bytes()[:8192]
-    except (FileNotFoundError, IsADirectoryError):
-        return False
-    return b'\0' not in data
+def is_text(data):
+    return b'\0' not in data[:8192]
+
+
+def changed_blobs(*revisions):
+    # NUL-delimited raw records preserve all path names and give us the blob IDs.
+    records = iter(git('diff', '--raw', '-z', '--no-abbrev', '--find-renames', '--no-ext-diff',
+                       '--diff-filter=AMRT', *revisions, '--').split(b'\0')[:-1])
+    for header, path in zip(records, records):
+        old_mode, new_mode, old_oid, new_oid, status = header.decode('ascii').split()
+        if status.startswith('R'):
+            path = next(records)
+        old = old_oid if old_mode in (':100644', ':100755', ':120000') else None
+        new = new_oid if new_mode in ('100644', '100755', '120000') else None
+        yield os.fsdecode(path), old, new
+
+
+def added_lines(old, new, data):
+    if old is None:
+        yield from enumerate(data.decode('utf-8', errors='replace').splitlines(), 1)
+        return
+    if old == new:
+        return
+    # Diff the blobs directly so attributes, diff drivers and the working tree cannot hide changes.
+    patch = git('diff', '--no-color', '--no-ext-diff', '--no-textconv', '--text', '-U0', old, new, '--')
+    lineno = None
+    for line in patch.decode('utf-8', errors='replace').split('\n'):
+        hunk = HUNK.match(line)
+        if hunk:
+            lineno = int(hunk[1])
+        elif lineno is not None:
+            if line.startswith('+'):
+                yield lineno, line[1:]
+            if line.startswith(('+', ' ')):
+                lineno += 1
+
+
+def scan_changed_files(revisions, allow, hits, bad):
+    for path, old, new in changed_blobs(*revisions):
+        data = git('cat-file', 'blob', new) if new else None
+        text = data is not None and is_text(data)
+        lower = path.lower()
+        if any(fnmatch.fnmatch(lower, g) for g in BAD_FILES) and not any(fnmatch.fnmatch(lower, g) for g in BAD_FILES_OK):
+            bad.append(path)
+        elif any(fnmatch.fnmatch(lower, g) for g in BAD_BINARIES) and not text:
+            bad.append(path)
+        if text:
+            for n, line in added_lines(old, new, data):
+                scan_line(path, n, line, allow, hits, diff=True)
+
+
+def scan_commit_messages(base, allow, hits):
+    log = git('log', '--no-notes', '--no-show-signature', '--format=%H%n%B%x00', f'{base}..HEAD', '--')
+    for msg in log.decode('utf-8', errors='replace').split('\0'):
+        if msg.strip():
+            sha, _, body = msg.lstrip('\n').partition('\n')
+            for n, line in enumerate(body.splitlines(), 1):
+                scan_line(f'commit {sha[:10]} message', n, line, allow, hits, diff=True)
+
+
+def scan_worktree(allow, hits):
+    for name in git('ls-files', '-z').split(b'\0'):
+        if not name:
+            continue
+        path = os.fsdecode(name)
+        file = ROOT / path
+        try:
+            data = os.fsencode(os.readlink(file)) if file.is_symlink() else file.read_bytes()
+        except (FileNotFoundError, IsADirectoryError):
+            continue
+        if is_text(data):
+            for n, line in enumerate(data.decode('utf-8', errors='replace').splitlines(), 1):
+                scan_line(path, n, line, allow, hits)
 
 
 def scan_line(path, lineno, line, allow, hits, diff=False):
@@ -115,45 +188,34 @@ def redact(s):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--diff', metavar='BASE', help='scan only what BASE..HEAD adds')
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument('--diff', metavar='BASE', help='scan only what BASE..HEAD adds')
+    mode.add_argument('--staged', action='store_true', help='scan only additions to the index')
     ap.add_argument('--show', action='store_true', help='print the matched text in full (local use only, never in CI logs)')
     a = ap.parse_args()
     allow = load_allow()
     hits, bad = [], []
-    if a.diff:
-        files = [f for f in git('diff', '--name-only', '--diff-filter=AMR', f'{a.diff}...HEAD').splitlines() if f]
-        diff = git('diff', '-U0', '--no-color', '--diff-filter=AMR', f'{a.diff}...HEAD')
-        path, lineno = None, 0
-        for line in diff.splitlines():
-            if line.startswith('+++ '):
-                path = line[6:] if line.startswith('+++ b/') else None
-            elif line.startswith('@@'):
-                lineno = int(re.search(r'\+(\d+)', line).group(1))
-            elif line.startswith('+') and path and is_text(path):
-                scan_line(path, lineno, line[1:], allow, hits, diff=True)
-                lineno += 1
-        for i, msg in enumerate(git('log', '--format=%H%n%B%x00', f'{a.diff}..HEAD').split('\0')):
-            msg = msg.strip()
-            if msg:
-                sha, _, body = msg.partition('\n')
-                for n, line in enumerate(body.splitlines(), 1):
-                    scan_line(f'commit {sha[:10]} message', n, line, allow, hits, diff=True)
-        for f in files:
-            if any(fnmatch.fnmatch(f, g) for g in BAD_FILES) and not any(fnmatch.fnmatch(f, g) for g in BAD_FILES_OK):
-                bad.append(f)
-            elif any(fnmatch.fnmatch(f, g) for g in BAD_BINARIES) and not is_text(f):
-                bad.append(f)
+    if a.diff is not None:
+        try:
+            base = git('rev-parse', '--verify', '--end-of-options', f'{a.diff}^{{commit}}').decode('ascii').strip()
+        except subprocess.CalledProcessError:
+            ap.error('--diff requires a valid base commit')
+        try:
+            merge_base = git('merge-base', base, 'HEAD').decode('ascii').strip()
+        except subprocess.CalledProcessError:
+            ap.error('--diff base and HEAD have no common ancestor')
+        scan_changed_files((merge_base, 'HEAD'), allow, hits, bad)
+        scan_commit_messages(base, allow, hits)
+    elif a.staged:
+        scan_changed_files(('--cached',), allow, hits, bad)
     else:
-        for path in git('ls-files').splitlines():
-            if not is_text(path):
-                continue
-            for n, line in enumerate((ROOT / path).read_text(errors='replace').splitlines(), 1):
-                scan_line(path, n, line, allow, hits)
+        scan_worktree(allow, hits)
     for path, n, name, text in hits:
         print(f'{path}:{n}: {name}: {text if a.show else redact(text)}')
     for f in bad:
         print(f'{f}: file type not allowed in the public repository (Apple payload, encrypted blob or build output)')
-    print(f'privacy scan: {len(hits)} hits, {len(bad)} refused files' + (f' (lines added since {a.diff})' if a.diff else ''))
+    suffix = f' (lines added since {a.diff})' if a.diff else ' (staged changes)' if a.staged else ''
+    print(f'privacy scan: {len(hits)} hits, {len(bad)} refused files{suffix}')
     return 1 if hits or bad else 0
 
 

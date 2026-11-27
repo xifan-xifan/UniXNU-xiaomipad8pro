@@ -1,7 +1,8 @@
 #!/bin/bash
 # Build package/PianoAudio (the speakers and microphones, docs/drivers/audio.md) as a k27 native kext: the host tests first, then the
 # objects in out/native-kexts/PianoAudio for tooling/k27/kext/PianoAudio.json. Inert without the boot argument piano-audio.
-#   host tests: tests/audio_host.cpp (level 1: what the survey loads and never loads, the facts tables, decoders, verdicts, the SMMU
+#   host tests (tests/run-audio-host.sh, with ASan and UBSan):
+#   tests/audio_host.cpp (level 1: what the survey loads and never loads, the facts tables, decoders, verdicts, the SMMU
 #   scan; levels 4-6: the pin values, the amplifier table, the bypass plan of the DSP's PCM streams), tests/gpr_host.c (the GPR codec,
 #   sheng's), tests/audioreach_host.c (piano's APM/PRM packets), tests/sequence_host.c (one command at a time, the reverse unwind, the
 #   speaker, PRM and microphone plans, the period pump), tests/fs19xx_host.c (the amplifiers against a register model: probe, a
@@ -18,7 +19,7 @@
 #   selector-2 scalar mappings), tests/va_host.c (the VA
 #   macro's DMIC path against a register model: values, order, waits), tests/tap_host.c (the microphone tap's ABI, AudioTap.h, shared
 #   with the "Mic (noise reduced)" plug-in: layout, wrap, lapped readers), tests/preset_host.c (the preset loader on an mtools FAT32
-#   image as build-esp.py makes the ESP; skipped without mtools)
+#   image as build-esp.py makes the ESP, with a verdict-only fallback without mtools)
 # The copies stay byte for byte their originals but for their provenance lines (FatVolume from PianoPower, SmmuStream from PianoDwc3,
 # BitI2c from PianoKeyboard). Then the import check (PianoPower's client functions, package/include/PianoAdspContract.h, and NativeUfs's
 # partition reader are the library imports) and tooling/k27/check-audio2-family.py: IOAudio2Family's classes in the KC base, which
@@ -39,50 +40,8 @@
 set -euo pipefail
 D=$(cd "$(dirname "$0")/../.." && pwd)
 . "$D/tooling/k27/k27-tree.sh"; K=$PIANO_K27_TREE
-P=$D/package/PianoAudio; O=$D/out/native-kexts/PianoAudio; T=$O/host-tests
-mkdir -p "$T"
-"${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -I "$P" "$P/tests/audio_host.cpp" -o "$T/audio_host"
-"$T/audio_host" || { echo "Error: PianoAudio host tests failed" >&2; exit 1; }
-"${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror "$P/tests/level_dictionary_host.cpp" -framework CoreFoundation -o "$T/level_dictionary_host"
-"$T/level_dictionary_host"
-C=("${CC:-cc}" -std=c11 -Wall -Wextra -Werror -I "$P")
-"${C[@]}" "$P/tests/gpr_host.c" "$P/PianoGpr.c" -o "$T/gpr_host"
-"${C[@]}" "$P/tests/audioreach_host.c" "$P/PianoAudioReach.c" "$P/PianoGpr.c" -o "$T/audioreach_host"
-"${C[@]}" "$P/tests/sequence_host.c" "$P/AudioSequence.c" "$P/PianoAudioReach.c" "$P/PianoGpr.c" -o "$T/sequence_host"
-"${C[@]}" "$P/tests/spkprot_host.c" "$P/AudioSpkProt.c" "$P/AudioSequence.c" "$P/PianoAudioReach.c" "$P/PianoGpr.c" -o "$T/spkprot_host"
-"${C[@]}" "$P/tests/fs19xx_host.c" "$P/Fs19xx.c" "$P/AudioSha256.c" -o "$T/fs19xx_host"
-"${C[@]}" "$P/tests/amps_host.c" "$P/AudioAmps.c" "$P/Fs19xx.c" "$P/AudioSha256.c" -o "$T/amps_host"
-"${C[@]}" "$P/tests/pcm_host.c" "$P/AudioSafety.c" -lm -o "$T/pcm_host"
-"${C[@]}" "$P/tests/control_host.c" -o "$T/control_host"
-"${C[@]}" "$P/tests/timing_host.c" -o "$T/timing_host"
-"${C[@]}" "$P/tests/dsplink_host.c" "$P/AudioDspLink.c" "$P/PianoGpr.c" -o "$T/dsplink_host"
-"${C[@]}" "$P/tests/session_host.c" "$P/AudioSession.c" "$P/AudioAmps.c" "$P/Fs19xx.c" "$P/AudioSha256.c" "$P/AudioSequence.c" \
-  "$P/PianoAudioReach.c" "$P/PianoGpr.c" "$P/AudioSafety.c" "$P/AudioDspLink.c" -o "$T/session_host"
-"${C[@]}" "$P/tests/preset_host.c" "$P/AudioPreset.c" "$P/AudioAmps.c" "$P/Fs19xx.c" "$P/AudioSha256.c" "$P/FatVolume.c" -o "$T/preset_host"
-"${C[@]}" "$P/tests/live_host.c" "$P/AudioLive.c" "$P/AudioSpkProt.c" "$P/AudioSession.c" "$P/AudioAmps.c" "$P/Fs19xx.c" "$P/AudioSha256.c" "$P/AudioSequence.c" \
-  "$P/PianoAudioReach.c" "$P/PianoGpr.c" "$P/AudioSafety.c" "$P/AudioDspLink.c" -lm -o "$T/live_host"
-"${C[@]}" "$P/tests/mic_fifo_host.c" "$P/AudioSpkProt.c" "$P/AudioSession.c" "$P/AudioAmps.c" "$P/Fs19xx.c" "$P/AudioSha256.c" "$P/AudioSequence.c" \
-  "$P/PianoAudioReach.c" "$P/PianoGpr.c" "$P/AudioSafety.c" "$P/AudioDspLink.c" -lm -o "$T/mic_fifo_host"
-"${C[@]}" "$P/tests/va_host.c" "$P/AudioVa.c" -o "$T/va_host"
-"${C[@]}" "$P/tests/tap_host.c" -o "$T/tap_host"
-"${C[@]}" "$P/tests/prime_host.c" "$P/AudioSpkProt.c" "$P/AudioSession.c" "$P/AudioAmps.c" "$P/Fs19xx.c" "$P/AudioSha256.c" "$P/AudioSequence.c" \
-  "$P/PianoAudioReach.c" "$P/PianoGpr.c" "$P/AudioSafety.c" "$P/AudioDspLink.c" -o "$T/prime_host"
-for t in gpr_host audioreach_host sequence_host spkprot_host fs19xx_host amps_host pcm_host control_host timing_host dsplink_host session_host live_host prime_host mic_fifo_host va_host tap_host; do
-  "$T/$t" || { echo "Error: PianoAudio $t failed" >&2; exit 1; }
-done
-# The preset loader on a FAT32 image with 4096-byte sectors, one per cluster, as build-esp.py makes the ESP (mtools).
-if command -v mformat >/dev/null && command -v mmd >/dev/null && command -v mcopy >/dev/null; then
-  rm -rf "$T/esp" "$T/esp.img"; mkdir -p "$T/esp"
-  "$T/preset_host" --write "$T/esp"
-  mformat -C -F -S 5 -M 4096 -T 70000 -h 1 -s 1 -c 1 -i "$T/esp.img" ::
-  mmd -i "$T/esp.img" ::/EFI ::/EFI/UniXNU
-  for f in "$T/esp"/*; do mcopy -i "$T/esp.img" "$f" "::/EFI/UniXNU/$(basename "$f")"; done
-  "$T/preset_host" "$T/esp.img" || { echo "Error: PianoAudio preset_host failed" >&2; exit 1; }
-  rm -f "$T/esp.img"
-else
-  "$T/preset_host" || { echo "Error: PianoAudio preset_host failed" >&2; exit 1; }
-  echo "SKIP the preset loader on a FAT image: no mtools (brew install mtools)" >&2
-fi
+P=$D/package/PianoAudio; O=$D/out/native-kexts/PianoAudio
+bash "$P/tests/run-audio-host.sh" --out "$O/host-tests"
 # The copies stay byte for byte their originals (but for their provenance lines), which their owners never have to change.
 for f in FatVolume.c FatVolume.h; do
   diff <(tail -n +4 "$P/$f") <(tail -n +2 "$D/package/PianoPower/$f") > /dev/null \

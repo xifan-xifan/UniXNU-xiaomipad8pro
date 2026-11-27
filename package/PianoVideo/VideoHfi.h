@@ -80,8 +80,9 @@ inline void initQueues(Mem &m)
 template <class Barrier>
 int write(Mem &m, unsigned q, const uint32_t *packet, uint32_t bytes, Barrier barrier)
 {
-  const uint32_t h = qhdr(q), w = m.ld(h + kQWrite) * 4, r = m.ld(h + kQRead) * 4;
-  if ((bytes & 3) || !bytes || w >= kHfiQueueBytes || r >= kHfiQueueBytes) return -2;
+  const uint32_t h = qhdr(q), writeWords = m.ld(h + kQWrite), readWords = m.ld(h + kQRead);
+  if ((bytes & 3) || !bytes || writeWords >= kHfiQueueBytes / 4 || readWords >= kHfiQueueBytes / 4) return -2;
+  const uint32_t w = writeWords * 4, r = readWords * 4;
   const uint32_t room = w < r ? r - w : kHfiQueueBytes - (w - r);
   if (room <= bytes) return -1;
   m.st(h + kQTxReq, 0);
@@ -102,9 +103,10 @@ int write(Mem &m, unsigned q, const uint32_t *packet, uint32_t bytes, Barrier ba
 template <class Barrier>
 int read(Mem &m, unsigned q, uint32_t *out, uint32_t cap, uint32_t *bytes, Barrier barrier)
 {
-  const uint32_t h = qhdr(q), w = m.ld(h + kQWrite) * 4, r = m.ld(h + kQRead) * 4, rxReq = q == kMsgq ? 1 : 0;
+  const uint32_t h = qhdr(q), writeWords = m.ld(h + kQWrite), readWords = m.ld(h + kQRead), rxReq = q == kMsgq ? 1 : 0;
   *bytes = 0;
-  if (w >= kHfiQueueBytes || r >= kHfiQueueBytes) return -3;
+  if (writeWords >= kHfiQueueBytes / 4 || readWords >= kHfiQueueBytes / 4) return -3;
+  const uint32_t w = writeWords * 4, r = readWords * 4;
   if (r == w) {
     m.st(h + kQRxReq, rxReq);
     barrier();
@@ -205,34 +207,34 @@ struct Reply {
   uint32_t errorType = 0, errorFlags = 0;
   char text[kHfiVersionChars] = {};   // the firmware's version string (NULs as spaces), NUL-terminated
 };
+inline bool validFraming(const uint32_t *buf, uint32_t bytes)
+{
+  if (!buf || bytes < kHfiHeaderBytes + kHfiPacketBytes || bytes > kHfiCorePacketBytes || (bytes & 3) || buf[0] != bytes)
+    return false;
+  const uint32_t count = buf[7];
+  if (!count || count > (bytes - kHfiHeaderBytes) / kHfiPacketBytes) return false;
+  uint32_t at = kHfiHeaderBytes;
+  for (uint32_t i = 0; i < count; ++i) {
+    if (bytes - at < kHfiPacketBytes) return false;
+    const uint32_t size = buf[at / 4];
+    if (size < kHfiPacketBytes || (size & 3) || size > bytes - at) return false;
+    at += size;
+  }
+  return at == bytes;
+}
 // iris_hfi_gen2_handle_response for one message: false when malformed (Linux then raises a system error).
 inline bool parse(const uint32_t *buf, uint32_t bytes, Reply &r)
 {
   ++r.headers;
-  if (bytes < kHfiHeaderBytes + kHfiPacketBytes || buf[0] != bytes || buf[0] < kHfiHeaderBytes + kHfiPacketBytes) {
+  if (!validFraming(buf, bytes)) {
     ++r.malformed;
     return false;
-  }
-  const uint32_t count = buf[7];
-  uint32_t at = kHfiHeaderBytes;
-  for (uint32_t i = 0; i < count; ++i) {   // validate_hdr_packet: every packet within the 4 KiB response buffer and the message
-    if (at + kHfiPacketBytes > bytes) {
-      ++r.malformed;
-      return false;
-    }
-    const uint32_t size = buf[at / 4];
-    if (size < kHfiPacketBytes || (size & 3) || at + size > bytes) {
-      ++r.malformed;
-      return false;
-    }
-    at += size;
   }
   if (buf[1]) {   // a session's message: none can come before a session is opened
     ++r.sessionHeaders;
     return true;
   }
-  at = kHfiHeaderBytes;
-  for (uint32_t i = 0; i < count; ++i) {
+  for (uint32_t at = kHfiHeaderBytes; at < bytes;) {
     const uint32_t *p = buf + at / 4, size = p[0], type = p[1], flags = p[2];
     ++r.packets;
     if ((flags & kHfiFwSystemError) || (type > kHfiSysErrorBegin && type < kHfiSysErrorEnd)) {

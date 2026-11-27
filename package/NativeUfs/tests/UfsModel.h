@@ -32,6 +32,8 @@ struct Model {
   std::vector<uint8_t> written;
   std::vector<std::string> events;             // "get", "uic17", "uic18", "ahit=<hex>", "nop", "sync", "read", "write"
   std::function<void (uintptr_t)> onSleep;     // a thread would sleep on this event: the test plays the other thread
+  // Optional backing media for READ(10), WRITE(10) and SYNCHRONIZE CACHE. Data uses the slot's bounce buffer.
+  std::function<void (uint8_t lun, const uint8_t *cdb, uint8_t *data)> onBlockCommand;
   // UniXNU-piano 2026-11-25 (RootDevice.h): the device's query state. Flags and attributes by IDN (index 0); a set bit of
   // queryRefused answers that IDN with response code 0xF5 (invalid IDN); flagSticky: SET FLAG answers success but the flag stays 0.
   std::array<uint32_t, 64> flags {}, attrs {};
@@ -141,6 +143,8 @@ static void doorbell (uint32_t value)
   } else {
     memset (m.device.data () + ufsSlotDataOffset (slot), 0x7b + slot, kDataMax);   // a write leaves its buffer
   }
+  if (m.onBlockCommand && (read || write || sync))
+    m.onBlockCommand (cmd[2], cmd + 16, m.device.data () + ufsSlotDataOffset (slot));
   *reinterpret_cast<uint32_t *> (m.device.data () + ufsSlotUtrdOffset (slot) + 8) = 0;
   if (m.fault == Fault::Empty) return;
   memcpy (rsp, cmd, 32);

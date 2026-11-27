@@ -151,6 +151,24 @@ static void testDebounce()
   }
 }
 
+static void testIndependentDebounce()
+{
+  Debounce d;
+  CHECK(d.update(true, 0, 0) == 0 && d.update(true, 0, kDebounceMs) == 0);
+  // The power line keeps bouncing while volume-up is pressed, then released.
+  for (uint64_t t = 40; t < 136; t += 8) {
+    const uint8_t noisyPower = t & 8 ? kKeyPower : 0;
+    const uint8_t volUp = t < 88 ? kKeyVolumeUp : 0;
+    CHECK(d.update(true, uint8_t(noisyPower | volUp), t) == (t >= 72 && t < 120 ? kKeyVolumeUp : 0));
+  }
+  CHECK(d.update(true, kKeyVolumeDown, 136) == 0);
+  CHECK(d.update(true, kKeyVolumeDown, 167) == 0);
+  CHECK(d.update(true, kKeyVolumeDown, 168) == kKeyVolumeDown);
+  CHECK(d.update(false, kKeysAll, 176) == kKeyVolumeDown);
+  CHECK(d.update(false, kKeysAll, 207) == kKeyVolumeDown);
+  CHECK(d.update(false, kKeysAll, 208) == 0);
+}
+
 // The adaptive poll loop (PollPlan + Debounce) over a press of `length` ms starting at `start`: whether it was reported, when
 // (ms after the press began), the samples in total, and the samples in the idle second before it.
 struct PressRun {
@@ -378,6 +396,39 @@ static void testPowerKey()
   }
 }
 
+static void testKeyBurstsAndResume()
+{
+  KeyRun r;
+  r.policyThere = false;
+  r.sample(0, 0);
+  r.sample(0, kDebounceMs);
+  uint64_t now = 40;
+  for (unsigned i = 0; i < 12; ++i) {
+    const uint8_t key = i % 3 == 0 ? kKeyPower : i % 3 == 1 ? kKeyVolumeUp : kKeyVolumeDown;
+    r.sample(key, now);
+    r.sample(key, now + kDebounceMs);
+    r.sample(0, now + 40);
+    r.sample(0, now + 40 + kDebounceMs);
+    now += 80;
+    CHECK(r.reports.size() == 2 * (i + 1) && r.reports.back().second == 0);
+    CHECK(r.reports.size() >= 2 && r.reports[r.reports.size() - 2].second == key);
+  }
+  r.sample(kKeysAll, now);
+  r.sample(kKeysAll, now + kDebounceMs);
+  CHECK(r.sent == kKeysAll);
+  r.d = Debounce();
+  r.k.reset();
+  now += 1000;
+  r.sample(kKeysAll, now);
+  CHECK(r.sent == 0 && r.reports.back().first == now);
+  r.sample(kKeysAll, now + 40);
+  r.sample(kKeyPower, now + 80);
+  r.sample(kKeyPower, now + 80 + kDebounceMs);
+  r.sample(kKeysAll, now + 120);
+  r.sample(kKeysAll, now + 120 + kDebounceMs);
+  CHECK(r.sent == (kKeyVolumeUp | kKeyVolumeDown) && r.asks.empty());
+}
+
 // A HID 1.11 short-item walk of the buttons descriptor: the input bits in order with their (page, usage).
 static void testDescriptor()
 {
@@ -494,8 +545,10 @@ int main()
   testSpmi();
   testDecode();
   testDebounce();
+  testIndependentDebounce();
   testAdaptivePolling();
   testPowerKey();
+  testKeyBurstsAndResume();
   testKeySim();
   testDescriptor();
   if (failures) {

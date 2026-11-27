@@ -6,7 +6,7 @@
 //   - the reads when everything runs: the PCI Express capability walk, the link decode, the PHY status;
 //   - the TLMM decode, the SMMU stream scan, the cmd-db lookup;
 //   - the PMIC survey over an SPMI arbiter model: the LDO page choice, and no store other than the observer read commands.
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. wifi_host.cpp -o /tmp/wifi_host && /tmp/wifi_host
+//   c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I.. wifi_host.cpp -o /tmp/wifi_host && /tmp/wifi_host
 #include "WifiSurvey.h"
 #include <cstdio>
 #include <cstring>

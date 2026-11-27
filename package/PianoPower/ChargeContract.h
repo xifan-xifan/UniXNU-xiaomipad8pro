@@ -257,6 +257,13 @@ static inline void piano_contract_fail(PianoChargeContract *c, int error, int qu
 static inline void piano_contract_timeout(PianoChargeContract *c, uint64_t now_ms) {
     (void)now_ms; ++c->timeouts; piano_contract_fail(c, PIANO_CONTRACT_TIMEOUT, 1);
 }
+/* After a confirmed physical detach, restart observation with PPM initialization.
+ * A bus sag alone is not a detach. Permanent capability failures still stay quarantined. */
+static inline int piano_contract_recover_detach(PianoChargeContract *c) {
+    if (!c->linked || !c->quarantined || c->last_error != PIANO_CONTRACT_TIMEOUT) return 0;
+    piano_contract_link(c, 1);
+    return 1;
+}
 static inline unsigned piano_contract_buffer_size(uint16_t version) {
     if (version >= 0x0100 && version <= 0x0120 && !(version & 15u)) return 48;
     if (version == 0x0200 || version == 0x0210) return 528;

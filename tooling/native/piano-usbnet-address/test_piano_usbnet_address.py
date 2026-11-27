@@ -48,8 +48,12 @@ exit 0''',
 }
 
 
-def run(bootargs, inet, service=None, replace_after=None, guard=4, wait=4, merged=None, denied=False):
-    t = Path(tempfile.mkdtemp(prefix='usbnet-'))
+def run(*args, **kwargs):
+    with tempfile.TemporaryDirectory(prefix='usbnet-') as directory:
+        return run_in(Path(directory), *args, **kwargs)
+
+
+def run_in(t, bootargs, inet, service=None, replace_after=None, guard=4, wait=4, merged=None, denied=False):
     stubs = t / 'bin'
     stubs.mkdir()
     for name, body in STUBS.items():
@@ -85,14 +89,25 @@ check(rc == 0 and console == '' and calls == '', 'the merged OID takes precedenc
 rc, console, calls, *_ = run('piano-usb-net=1', '169.254.80.2', denied=True)
 check(rc == 0 and console == '' and calls == '', 'permission errors keep the helper inactive')
 
+switch = 'piano-usb-net=1'
 for args, active in (
         ('piano-usb-net=1 piano-usb-net=0', False),
         ('piano-usb-net=0 piano-usb-net=1', True),
-        ('quiet\tpiano-usb-net=1', True),
+        ('quiet\tpiano-usb-net=1\t ', True),
         ('piano-usb-net-txflow=1 other=piano-usb-net=1', False),
-        ('piano-usb-net=*', False)):
+        ('piano-usb-net=*', False),
+        ('piano-usb-net=\t1', False),
+        ('piano-usb-net', True),
+        ('piano-usb-net=0xffffffff', True),
+        ('piano-usb-net=0x100000000', False),
+        ('piano-usb-net=-1', False),
+        ('piano-usb-net=1*', False),
+        ('piano-usb-net=1junk', False),
+        ('piano-usb-net=' + '9' * 2000, False),
+        ('x' * (4094 - len(switch)) + ' ' + switch, True),
+        (switch + ' ' + 'x' * (4095 - len(switch)), False)):
     rc, console, calls, *_ = run('', '', merged=args, wait=0)
-    check(rc == 0 and bool(console) == active and not calls, f'exact last boot argument, as data: {args!r}')
+    check(rc == 0 and bool(console) == active and not calls, f'boot argument of {len(args)} bytes: {args[:60]!r}')
 
 legacy = 'a=' + 'x' * 1013
 rc, console, calls, manual, inet, service = run(legacy, '169.254.80.2', service='Ethernet Adaptor', replace_after=1.5,

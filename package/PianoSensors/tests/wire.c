@@ -354,6 +354,50 @@ static void refusals(void)
 static uint64_t rng = 88172645463325252ull;
 static uint64_t next(void) {rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; return rng;}
 
+static void frame_boundaries(void)
+{
+    uint8_t buf[128];
+    SscQmi m;
+    SscResponse r;
+    uint32_t n = hex("02 01 00 20 00 07 00 02 04 00 00 00 00 00", buf, sizeof buf);
+    for (uint32_t i = 0; i < n; ++i) CHECK(ssc_qmi_parse(buf, i, &m) == -1);
+    CHECK(ssc_qmi_parse(buf, n, &m) == 0 && ssc_qmi_response(&m, &r) == 0 && ssc_response_ok(&r));
+    buf[n] = 0x11;
+    CHECK(ssc_qmi_parse(buf, n + 1, &m) == -1);   /* bytes outside the declared frame */
+    ++buf[5];
+    CHECK(ssc_qmi_parse(buf, n + 1, &m) == -1);   /* incomplete TLV header after a valid result */
+    buf[5] += 2;
+    buf[n + 1] = 1;
+    buf[n + 2] = 0;
+    CHECK(ssc_qmi_parse(buf, n + 3, &m) == -1);   /* incomplete TLV value after a valid result */
+    ++buf[5];
+    buf[n + 3] = 1;
+    CHECK(ssc_qmi_parse(buf, n + 4, &m) == 0 && ssc_qmi_response(&m, &r) == -1); /* short status */
+    buf[n] = 0x7f;
+    CHECK(ssc_qmi_parse(buf, n + 4, &m) == 0 && ssc_qmi_response(&m, &r) == 0 && ssc_response_ok(&r));
+
+    n = hex("04 00 00 21 00 07 00 02 04 00 01 00 08 01", buf, sizeof buf);
+    int has_client;
+    uint64_t client;
+    const uint8_t *payload;
+    uint32_t length;
+    CHECK(ssc_qmi_parse(buf, n, &m) == 0 && ssc_qmi_report(&m, &has_client, &client, &payload, &length) == -1);
+    buf[10] = 2;
+    CHECK(ssc_qmi_parse(buf, n, &m) == 0 && ssc_qmi_report(&m, &has_client, &client, &payload, &length) == 0 && length == 2);
+
+    const uint8_t short_suid[] = {0x0a, 0x09, 0x09, 1, 0, 0, 0, 0, 0, 0, 0};
+    const uint8_t split_suid[] = {0x0a, 0x09, 0x09, 1, 0, 0, 0, 0, 0, 0, 0,
+                                  0x0a, 0x09, 0x11, 0, 0, 0, 0, 0, 0, 0, 0};
+    SscEvents events;
+    CHECK(ssc_events_open(&events, short_suid, sizeof short_suid) == -1);
+    CHECK(ssc_events_open(&events, split_suid, sizeof split_suid) == 0 && events.has_suid &&
+          events.suid.low == 1 && events.suid.high == 0);
+    const uint8_t no_msg_id[] = {0x12, 0x00};
+    SscEvent ev;
+    CHECK(ssc_events_open(&events, no_msg_id, sizeof no_msg_id) == 0 && ssc_events_next(&events, &ev) == -1);
+    CHECK(ssc_events_open(&events, NULL, 1) == -1);
+}
+
 static void round_trips(void)
 {
     for (unsigned round = 0; round < 3000; ++round) {
@@ -466,6 +510,7 @@ int main(void)
     vectors();
     tolerance();
     refusals();
+    frame_boundaries();
     round_trips();
     fuzz();
     printf("PASS wire formats: the 16 vectors of ssc-facts.md A.4, tolerance, refusals, 3000 round trips, 200000 mutations: %u checks\n",

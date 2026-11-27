@@ -82,3 +82,5 @@ Use the light load for the fixed-mode desktop composition check. At both 60 and 
 For 120 presented, require both hardware scanout links within 1% of 120 Hz, the expected DPU mode in both snapshots, and at least two complete in-run DPU cadence windows corroborating the user-space result. Require the new-surface cadence in those windows within 2% of 120 Hz, their p95/p99 within 1.20 periods, and zero reported gaps of at least 100 ms. Apply the same cross-check to the M3 60 Hz mode. A legacy configuration can show 60 Hz app presents on a panel scanning at 120 Hz. Record both rates.
 
 Run a separate sustained 3D pass at a declared nonzero load, retaining all frame times, GPU completion counts, and the existing thermal guard and reset evidence. The appropriate load and 3D performance floor can be set after the first RAM qualification. Keep RAM and installed results distinct and repeat the desktop and 3D passes on the installed system for goal 12.
+
+The [installed Metal 3D sustain test](metal-sustain.md) provides the textured workload, ten-minute spec block, and frame-level grading.

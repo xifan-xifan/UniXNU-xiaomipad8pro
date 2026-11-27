@@ -67,7 +67,7 @@ size_t type4(uint32_t *words,size_t at,uint32_t reg,uint32_t value)
 
 IOReturn NativeAdrenoRing::poison()
 {
-    poisoned_=true;return kIOReturnIOError;
+    __atomic_store_n(&poisoned_,true,__ATOMIC_RELEASE);return kIOReturnIOError;
 }
 void NativeAdrenoRing::enter() const {if(lock_.lock)lock_.lock(lock_.cookie);}
 void NativeAdrenoRing::leave() const {if(lock_.unlock)lock_.unlock(lock_.cookie);}
@@ -98,7 +98,7 @@ IOReturn NativeAdrenoRing::writeWptr(uint32_t value)
         }
         if(tries+1>=NativeAdrenoRingWptrRetries) {
             ++wptr_.dropped;++wptr_.failures;
-            poisoned_=true;
+            poison();
             return kIOReturnTimeout;
         }
         if(io_.delay_us)io_.delay_us(io_.cookie,NativeAdrenoRingWptrDelayUs);
@@ -112,7 +112,7 @@ uint32_t NativeAdrenoRing::readShadow()
 {
     if(cache_.acquire && cache_.acquire(cache_.cookie,fence_,16)) {poison();return rptr_shadow_;}
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
-    rptr_shadow_=fence_[0];
+    rptr_shadow_=__atomic_load_n(&fence_[0],__ATOMIC_ACQUIRE);
     return rptr_shadow_;
 }
 IOReturn NativeAdrenoRing::ibBefore(uint32_t rptr,uint64_t *iova,uint32_t *dwords) const
@@ -155,7 +155,7 @@ IOReturn NativeAdrenoRing::kick()
 {
     enter();
     IOReturn status=kIOReturnNotReady;
-    if(attached_ && !poisoned_) {
+    if(attached_ && !poisoned()) {
         status=io_.barrier(io_.cookie)?poison():writeWptr(next_);
     }
     leave();
@@ -260,7 +260,7 @@ IOReturn NativeAdrenoRing::attach(const NativeAdrenoRingIo *io,const NativeAdren
     void *ring,size_t ring_bytes,uint64_t ring_iova,void *fence,size_t fence_bytes,uint64_t fence_iova,
     const NativeAdrenoRingRegs *regs)
 {
-    if(attached_ || poisoned_ || ring_ || fence_)return kIOReturnBusy;
+    if(attached_ || poisoned() || ring_ || fence_)return kIOReturnBusy;
     if(!io || !io->write32 || !io->read32 || !io->barrier || !cache || !ring || !fence ||
         ring_bytes<8192 || ring_bytes>(1u<<20) || (ring_bytes&(ring_bytes-1)) ||
         ((ring_iova|ring_bytes)&(ring_bytes-1)) || (ring_iova&4095) ||
@@ -281,7 +281,7 @@ IOReturn NativeAdrenoRing::detach()
 {
     enter();
     IOReturn status=kIOReturnSuccess;
-    if(poisoned_)status=kIOReturnBusy;
+    if(poisoned())status=kIOReturnBusy;
     else if(!attached_)status=kIOReturnNotReady;
     else if(outstanding())status=kIOReturnBusy;
     else {
@@ -329,7 +329,7 @@ IOReturn NativeAdrenoRing::submitWords(const uint32_t *words,size_t word_count,u
     enter();
     IOReturn status=kIOReturnSuccess;
     do {
-        if(!attached_ || poisoned_) {status=kIOReturnNotReady;break;}
+        if(!attached_ || poisoned()) {status=kIOReturnNotReady;break;}
         /* A replay takes back a fence this ring issued, after the one it follows: after < replay <= seqno_ (sequence numbers). */
         if(replay && ((int32_t)(replay-after)<=0 || (int32_t)(seqno_-replay)<0)) {status=kIOReturnBadArgument;break;}
         const uint32_t seq=replay?replay:seqno_+1,waitFor=replay?after:seqno_;
@@ -339,7 +339,7 @@ IOReturn NativeAdrenoRing::submitWords(const uint32_t *words,size_t word_count,u
         /* A stream that cannot fit an empty ring is refused for good; one that does not fit now waits for space. */
         if(word_count>size_words-NativeAdrenoRingGapWords-extra) {status=kIOReturnNoResources;break;}
         const uint32_t rptr=readShadow();
-        if(poisoned_) {status=kIOReturnIOError;break;}
+        if(poisoned()) {status=kIOReturnIOError;break;}
         if(rptr>=size_words) {status=poison();break;}   /* an impossible read pointer: the CP or the memory is lost */
         const uint32_t used=(next_-rptr)&mask;
         if(word_count+extra+NativeAdrenoRingGapWords>size_words-used) {status=kIOReturnBusy;break;}
@@ -385,13 +385,13 @@ NativeAdrenoRingFence NativeAdrenoRing::poll(uint32_t fence,const NativeAdrenoRi
     uint32_t *observed,bool retire)
 {
     const uint64_t start=clock && clock->now_us?clock->now_us(clock->cookie):0;
-    const uint32_t issued=lastSubmitted();
     for(;;) {
         if(cache_.acquire && cache_.acquire(cache_.cookie,fence_,16)) {poison();return NativeAdrenoRingFencePoisoned;}
         __atomic_thread_fence(__ATOMIC_ACQUIRE);
-        const uint32_t value=fence_[A830_MEMPTRS_FENCE/4];
+        const uint32_t value=__atomic_load_n(&fence_[A830_MEMPTRS_FENCE/4],__ATOMIC_ACQUIRE);
         if(observed)*observed=value;
-        if((int32_t)(value-issued)>0) {poison();return NativeAdrenoRingFencePoisoned;}   /* a fence never issued */
+        /* A submit and recovery can publish a newer fence while this waiter sleeps. */
+        if((int32_t)(value-lastSubmitted())>0) {poison();return NativeAdrenoRingFencePoisoned;}
         if((int32_t)(value-fence)>=0) {
             if(retire)noteCompleted(value);
             return NativeAdrenoRingFenceComplete;
@@ -405,7 +405,7 @@ NativeAdrenoRingFence NativeAdrenoRing::wait(uint32_t fence,const NativeAdrenoRi
     uint32_t *observed)
 {
     if(observed)*observed=0;
-    if(!attached_ || poisoned_)return NativeAdrenoRingFencePoisoned;
+    if(!attached_ || poisoned())return NativeAdrenoRingFencePoisoned;
     if(!fence || (int32_t)(fence-lastSubmitted())>0)return NativeAdrenoRingFenceArgument;
     if(!waiter_.wait)return poll(fence,clock,timeout_us,observed,true);
     uint32_t seen=0;
@@ -422,7 +422,7 @@ NativeAdrenoRingFence NativeAdrenoRing::observeFence(uint32_t fence,const Native
     uint32_t *observed)
 {
     if(observed)*observed=0;
-    if(!attached_ || poisoned_)return NativeAdrenoRingFencePoisoned;
+    if(!attached_ || poisoned())return NativeAdrenoRingFencePoisoned;
     if(!fence || (int32_t)(fence-lastSubmitted())>0)return NativeAdrenoRingFenceArgument;
     if(!waiter_.wait || !timeout_us)return poll(fence,clock,timeout_us,observed,false);
     uint32_t seen=0;
@@ -433,14 +433,14 @@ NativeAdrenoRingFence NativeAdrenoRing::observeFence(uint32_t fence,const Native
 }
 IOReturn NativeAdrenoRing::waitForSpace(size_t word_count,bool framed,const NativeAdrenoRingClock *clock,uint32_t timeout_us)
 {
-    if(!attached_ || poisoned_)return kIOReturnNotReady;
+    if(!attached_ || poisoned())return kIOReturnNotReady;
     const uint32_t size_words=(uint32_t)(ring_bytes_/4),mask=size_words-1;
     const uint32_t extra=extraWords(framed,framed);
     if(!word_count || word_count>size_words-NativeAdrenoRingGapWords-extra)return kIOReturnNoResources;
     const uint64_t start=clock && clock->now_us?clock->now_us(clock->cookie):0;
     for(;;) {
         const uint32_t used=(next_-readShadow())&mask;
-        if(poisoned_)return kIOReturnIOError;
+        if(poisoned())return kIOReturnIOError;
         if(word_count+extra+NativeAdrenoRingGapWords<=size_words-used)return kIOReturnSuccess;
         const uint64_t spent=clock && clock->now_us?clock->now_us(clock->cookie)-start:timeout_us;
         if(spent>=timeout_us)return kIOReturnTimeout;
@@ -465,13 +465,16 @@ IOReturn NativeAdrenoRing::recover(uint32_t *last,const uint32_t *restart)
         const uint32_t issued=seqno_;
         /* A restart fence past the last one issued is none: every waiter wakes, as without one. */
         const uint32_t to=restart && (int32_t)(issued-*restart)>=0?*restart:issued;
-        fence_[A830_MEMPTRS_RPTR/4]=0;fence_[A830_MEMPTRS_BV_RPTR/4]=0;
-        fence_[A830_MEMPTRS_FENCE/4]=to;fence_[NativeAdrenoRingFenceBvOffset/4]=to;
+        /* Fence waiters and the watchdog still read memptrs while the ring is halted. */
+        __atomic_store_n(&fence_[A830_MEMPTRS_RPTR/4],0u,__ATOMIC_RELAXED);
+        __atomic_store_n(&fence_[A830_MEMPTRS_BV_RPTR/4],0u,__ATOMIC_RELAXED);
+        __atomic_store_n(&fence_[NativeAdrenoRingFenceBvOffset/4],to,__ATOMIC_RELAXED);
+        __atomic_store_n(&fence_[A830_MEMPTRS_FENCE/4],to,__ATOMIC_RELEASE);
         __atomic_thread_fence(__ATOMIC_RELEASE);
         if(io_.barrier(io_.cookie))status=kIOReturnIOError;
         next_=rptr_shadow_=0;
         noteCompleted(to);
-        poisoned_=false;reset_pending_=true;
+        __atomic_store_n(&poisoned_,false,__ATOMIC_RELEASE);reset_pending_=true;
         if(last)*last=issued;
     }
     leave();

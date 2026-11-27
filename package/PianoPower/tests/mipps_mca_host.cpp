@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
+// Build: clang++ -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -I.. -x c++ mipps_mca_host.cpp -x c ../ChargeMipps.c ../PianoMca.c -o /tmp/mipps_mca_host && /tmp/mipps_mca_host
 // MiPPS over the MCA codec: PianoMca's auxiliary request channel (its allowlist, encoding, answers, timeout, interleaving with the
 // cycle) and the MiPPS engine (ChargeMipps.c) driven end to end through it against a firmware + adapter model. TEST keys only.
 #include "ChargeMipps.h"

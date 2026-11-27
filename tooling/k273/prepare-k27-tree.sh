@@ -10,14 +10,23 @@
 # the k273 series' last patch (kernel-k273-0065-s0001-native.macho). The clone's first build recompiles everything once (its objects'
 # recipes name the other tree's paths), a few minutes. patches/k27 patches past the configured tree's series (K27_TREE_TOP, 0066)
 # are applied to the clone too, after patches/k273, and then name the kernel (0067: kernel-k273-0067-s0001-native.macho).
+# PIANO_K27_GPU_TIER_WC=1 opts into k27 0077 and uses a separate clone by default.
 set -euo pipefail
 D=$(cd "$(dirname "$0")/../.." && pwd); cd "$D"
 . "$D/tooling/k27/k27-tree.sh"
 SRC=$PIANO_K27_TREE
-T=${K273_TREE:-$D/out/k273/k27-tree}
+WC=${PIANO_K27_GPU_TIER_WC:-0}
+TREE_NAME=k27-tree
+if [ "$WC" = 1 ]; then TREE_NAME=k27-tree-gpu-tier-wc; fi
+T=${K273_TREE:-$D/out/k273/$TREE_NAME}
 KC=${K273_INPUTS:-$D/out/inputs/k273}/kc/kc273-mac17j.bin
 TAG=${1:-0065}
 [ -f "$KC" ] || { echo "no $KC: tooling/k273/decompress-kernelcache.py" >&2; exit 1; }
+WC_HEADER=out/k27/xnu/osfmk/arm/pmap/pmap_piano_gpu_wc.h
+if [ "$WC" != 1 ] && { [ -f "$T/$WC_HEADER" ] || { [ ! -d "$T" ] && [ -f "$SRC/$WC_HEADER" ]; }; }; then
+  echo "k27 0077 is already present in the selected tree. Use a tree without 0077 or set PIANO_K27_GPU_TIER_WC=1." >&2
+  exit 1
+fi
 if [ ! -d "$T" ]; then
   mkdir -p "$(dirname "$T")"
   cp -c -R "$SRC" "$T"
@@ -55,6 +64,7 @@ KTAG=$TAG
 for p in "$D"/patches/k27/0*.patch; do
   [ -e "$p" ] || continue
   n=$(basename "$p" .patch); num=${n%%-*}
+  if [ "$num" = 0077 ] && [ "$WC" != 1 ]; then continue; fi
   [ "$((10#$num))" -gt "$((10#${K27_TREE_TOP:-0066}))" ] || continue
   if git -C "$T/out/k27/xnu" log --format=%s | grep -xF "k27 $n" > /dev/null; then echo "$num: applied already"
   elif git -C "$T/out/k27/xnu" apply --reverse --check "$p" 2> /dev/null; then echo "$num: in the source already (not committed)"

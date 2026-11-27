@@ -17,15 +17,16 @@ static const char pianoBootArgsOID[] __attribute__((used)) = "kern.piano_bootarg
 static inline void
 pianoBootArgs(char args[PIANO_BOOT_ARGS_MAX])
 {
+    memset(args, 0xff, PIANO_BOOT_ARGS_MAX);
     size_t size = PIANO_BOOT_ARGS_MAX;
     int status = sysctlbyname(pianoBootArgsOID, args, &size, NULL, 0);
     if (status != 0 && errno == ENOENT) {
+        memset(args, 0xff, PIANO_BOOT_ARGS_MAX);
         size = PIANO_BOOT_ARGS_MAX;
         status = sysctlbyname("kern.bootargs", args, &size, NULL, 0);
     }
-    if (status == 0 && size > 0 && size <= PIANO_BOOT_ARGS_MAX)
-        args[size - 1] = '\0';
-    else
+    if (status != 0 || size == 0 || size > PIANO_BOOT_ARGS_MAX ||
+        memchr(args, '\0', size) != args + size - 1)
         args[0] = '\0';
 }
 

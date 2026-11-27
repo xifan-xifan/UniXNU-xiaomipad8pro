@@ -9,8 +9,7 @@
 //   - a new capture run, a writer that stops (underrun, then primed again), a reader that stalls (lapped), the Mic's mute and level.
 //   micns_host --wav IN.wav OUT.wav [--bypass]: a recording (mono 16-bit, 48 kHz or 24 kHz, the latter upsampled x2 and the output
 //   decimated back) through the same tap/core path in simulated real time, for the offline measurement (piano-vpio-measure.py block).
-//   cc -std=c11 -Wall -Wextra -Werror -I .. -I ../../PianoAudio -I ../third_party/rnnoise/include micns_host.c ../MicNsCore.c \
-//      <rnnoise sources> -lm
+// clang -std=c11 -O1 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -Wno-null-dereference -I../third_party/rnnoise/include -c ../third_party/rnnoise/src/rnn.c -o /tmp/micns_host.rnn.o && clang -std=c11 -O1 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -Dmalloc=micns_test_malloc -Dcalloc=micns_test_calloc -I../third_party/rnnoise/include -c ../third_party/rnnoise/src/denoise.c -o /tmp/micns_host.denoise.o && clang -std=c11 -O1 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -Dmalloc=micns_test_malloc -c ../third_party/rnnoise/src/kiss_fft.c -o /tmp/micns_host.fft.o && clang -std=c11 -O1 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -DPIANO_MICNS_TEST_ALLOC -I.. -I../../PianoAudio -I../third_party/rnnoise/include micns_host.c ../MicNsCore.c ../third_party/rnnoise/src/{rnn_data,pitch,celt_lpc}.c /tmp/micns_host.{rnn,denoise,fft}.o -lm -o /tmp/micns_host && /tmp/micns_host
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -166,6 +165,62 @@ static void testRnnoise(void)
     CHECK(r.out2 == 0.0 && core.s.blocks > 250);
 }
 
+static void testBounds(void)
+{
+    static float out[MICNS_MAX_READ + 2];
+    static int16_t samples[MICNS_MAX_READ + MICNS_RESERVE + MICNS_BLOCK];
+    fresh(1);
+    out[0] = 1.0f;
+    CHECK(micns_read(&core, out, 0) == 0 && out[0] == 1.0f && !core.s.reads && !core.anchored);
+    CHECK(micns_read(&core, NULL, 1) == 0 && !core.s.reads);
+
+    // Wrap both the physical ring and the absolute counter before a maximum-size read.
+    __atomic_store_n(&tap->written, UINT64_MAX - 15, __ATOMIC_RELEASE);
+    CHECK(micns_read(&core, out, 1) == 0);
+    for (size_t i = 0; i < sizeof samples / sizeof samples[0]; ++i) samples[i] = 8192;
+    audio_tap_write(tap, samples, sizeof samples / sizeof samples[0], 32767, 0, 0);
+    out[MICNS_MAX_READ] = out[MICNS_MAX_READ + 1] = 1.0f;
+    CHECK(micns_read(&core, out, MICNS_MAX_READ + 1) == MICNS_MAX_READ);
+    for (uint32_t i = 0; i < MICNS_MAX_READ; ++i) CHECK(out[i] == 0.25f);
+    CHECK(out[MICNS_MAX_READ] == 0.0f && out[MICNS_MAX_READ + 1] == 1.0f);
+
+    micns_free(&core);
+    micns_free(&core);
+    out[0] = 1.0f;
+    CHECK(micns_fill(&core) == 0 && micns_read(&core, out, 1) == 0 && out[0] == 0.0f);
+    CHECK(micns_start(&core, tap) == 0 && micns_fill(&core) == 0 && !core.s.delivered);
+}
+
+#ifdef PIANO_MICNS_TEST_ALLOC
+static unsigned alloc_calls, fail_allocation;
+
+void *micns_test_malloc(size_t bytes)
+{
+    return ++alloc_calls == fail_allocation ? NULL : malloc(bytes);
+}
+
+void *micns_test_calloc(size_t count, size_t bytes)
+{
+    return ++alloc_calls == fail_allocation ? NULL : calloc(count, bytes);
+}
+
+static void testAllocationFailure(void)
+{
+    fresh(1);
+    core.bypass = 0;
+    for (unsigned i = 1; i <= 7; ++i) {
+        alloc_calls = 0;
+        fail_allocation = i;   // the main state, three recurrent layers and three FFT allocations
+        CHECK(micns_start(&core, tap) == -1 && core.st == NULL);
+        Writer w = {0, (double)sim_us, 0, 1, 0, constant, 0, 11, 0, 0};
+        Result r = run(&w, 512, 0.2, 0, 0, 0);
+        CHECK(r.out2 > 0.0 && core.s.blocks && core.s.missing == 0);
+    }
+    fail_allocation = 0;
+    CHECK(micns_start(&core, tap) == 0 && core.st);
+}
+#endif
+
 static void testEvents(void)
 {
     fresh(1);
@@ -211,39 +266,82 @@ static void testEvents(void)
 static int16_t *wav_in;
 static uint64_t wav_frames;
 static int16_t from_wav(uint64_t i) {return i < wav_frames ? wav_in[i] : 0;}
+static uint16_t le16(const uint8_t *b) {return (uint16_t)(b[0] | b[1] << 8);}
 static uint32_t le32(const uint8_t *b) {return b[0] | b[1] << 8 | b[2] << 16 | (uint32_t)b[3] << 24;}
+
+static const uint8_t *wavData(const uint8_t *b, size_t size, uint32_t *rate, uint32_t *bytes)
+{
+    if (size < 12 || memcmp(b, "RIFF", 4) || memcmp(b + 8, "WAVE", 4)) return NULL;
+    int valid_format = 0;
+    for (size_t at = 12; size - at >= 8;) {
+        const uint32_t len = le32(b + at + 4);
+        const uint8_t *body = b + at + 8;
+        if (len > size - at - 8) return NULL;
+        if (!memcmp(b + at, "fmt ", 4)) {
+            if (len < 16) return NULL;
+            *rate = le32(body + 4);
+            valid_format = le16(body) == 1 && le16(body + 2) == 1 && le16(body + 14) == 16 &&
+                           (*rate == 48000 || *rate == 24000);
+        }
+        if (!memcmp(b + at, "data", 4)) {
+            if (!valid_format || !len || (len & 1) || len > UINT32_MAX - 36) return NULL;
+            *bytes = len;
+            return body;
+        }
+        at += 8 + (size_t)len;
+        if (len & 1) {
+            if (at == size) return NULL;
+            ++at;
+        }
+    }
+    return NULL;
+}
+
+static void testWavBounds(void)
+{
+    uint8_t wave[46] = {'R', 'I', 'F', 'F', 38, 0, 0, 0, 'W', 'A', 'V', 'E',
+                        'f', 'm', 't', ' ', 16, 0, 0, 0, 1, 0, 1, 0, 0x80, 0xbb, 0, 0,
+                        0, 0, 0, 0, 2, 0, 16, 0, 'd', 'a', 't', 'a', 2};
+    uint32_t rate = 0, bytes = 0;
+    CHECK(wavData(wave, sizeof wave, &rate, &bytes) == wave + 44 && rate == 48000 && bytes == 2);
+    CHECK(!wavData(wave, sizeof wave - 1, &rate, &bytes));  // data extends beyond EOF
+    wave[16] = 1;
+    CHECK(!wavData(wave, sizeof wave, &rate, &bytes));      // fmt chunk is too short to read
+    wave[16] = 16;
+    wave[22] = 2;
+    CHECK(!wavData(wave, sizeof wave, &rate, &bytes));
+}
+
 static int wavMode(const char *in, const char *out_path, int bypass)
 {
     FILE *f = fopen(in, "rb");
     if (!f) {perror(in); return 1;}
-    fseek(f, 0, SEEK_END);
-    const long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
+    const long size = !fseek(f, 0, SEEK_END) ? ftell(f) : -1;
+    if (size < 12 || fseek(f, 0, SEEK_SET)) {fclose(f); return 1;}
     uint8_t *b = malloc((size_t)size);
-    if (!b || fread(b, 1, (size_t)size, f) != (size_t)size) {fprintf(stderr, "read %s\n", in); return 1;}
+    const int read_ok = b && fread(b, 1, (size_t)size, f) == (size_t)size;
     fclose(f);
-    uint32_t rate = 0, at = 12, data = 0, bytes = 0;
-    uint16_t ch = 0, bits = 0;
-    while (at + 8 <= (uint32_t)size) {
-        const uint32_t len = le32(b + at + 4);
-        if (!memcmp(b + at, "fmt ", 4)) {ch = (uint16_t)(b[at + 10] | b[at + 11] << 8); rate = le32(b + at + 12); bits = (uint16_t)(b[at + 22] | b[at + 23] << 8);}
-        if (!memcmp(b + at, "data", 4)) {data = at + 8; bytes = len; break;}
-        at += 8 + len + (len & 1);
-    }
-    if (ch != 1 || bits != 16 || !data || (rate != 48000 && rate != 24000)) {fprintf(stderr, "%s: mono 16-bit 48/24 kHz only\n", in); return 1;}
+    uint32_t rate = 0, bytes = 0;
+    const uint8_t *pcm = read_ok ? wavData(b, (size_t)size, &rate, &bytes) : NULL;
+    if (!pcm) {free(b); fprintf(stderr, "%s: expected a mono 16-bit PCM WAV at 48 or 24 kHz\n", in); return 1;}
     const uint64_t n_in = bytes / 2, up = rate == 24000 ? 2 : 1;
-    const int16_t *pcm = (const int16_t *)(const void *)(b + data);
     wav_frames = n_in * up;
     wav_in = malloc(wav_frames * sizeof *wav_in);
+    CHECK(wav_in);
     for (uint64_t i = 0; i < n_in; ++i) {   // x2: linear interpolation (the offline method's)
-        if (up == 1) {wav_in[i] = pcm[i]; continue;}
-        wav_in[2 * i] = pcm[i];
-        wav_in[2 * i + 1] = (int16_t)(((int32_t)pcm[i] + (i + 1 < n_in ? pcm[i + 1] : pcm[i])) / 2);
+        const int16_t sample = (int16_t)le16(pcm + i * 2);
+        wav_in[up * i] = sample;
+        if (up == 2) {
+            const int16_t next = i + 1 < n_in ? (int16_t)le16(pcm + (i + 1) * 2) : sample;
+            wav_in[2 * i + 1] = (int16_t)(((int32_t)sample + next) / 2);
+        }
     }
+    free(b);
     fresh(bypass);
     Writer w = {0, (double)sim_us, 0, 1, 0, from_wav, 0, 11, 0, 0};
     // the reader's output, aligned back to the input by the core's own delay (the first delivered frames follow the priming)
     float *outbuf = calloc(wav_frames + 48000, sizeof *outbuf);
+    CHECK(outbuf);
     uint64_t produced = 0;
     static float blk[512];
     double next_read = sim_us + 512e6 / 48000.0;
@@ -263,34 +361,44 @@ static int wavMode(const char *in, const char *out_path, int bypass)
     CHECK(core.s.anchors == 1 && core.s.runs == 0 && core.s.startup >= first_in);
     const uint64_t out_n = wav_frames / up;
     int16_t *o16 = malloc(out_n * sizeof *o16);
+    CHECK(o16);
     for (uint64_t i = 0; i < out_n; ++i) {
         const uint64_t k = delay + i * up;
         const float v = k < produced ? outbuf[k] * 32768.0f : 0;
         o16[i] = (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : lrintf(v));
     }
     FILE *g = fopen(out_path, "wb");
-    if (!g) {perror(out_path); return 1;}
-    uint8_t h[44];
-    memcpy(h, b, 44 < data ? 44 : data);
+    if (!g) {perror(out_path); free(o16); free(outbuf); free(wav_in); micns_free(&core); return 1;}
+    uint8_t h[44] = {0};
     const uint32_t ob = (uint32_t)(out_n * 2);
     memcpy(h, "RIFF", 4); h[4] = (uint8_t)(36 + ob); h[5] = (uint8_t)((36 + ob) >> 8); h[6] = (uint8_t)((36 + ob) >> 16); h[7] = (uint8_t)((36 + ob) >> 24);
     memcpy(h + 8, "WAVEfmt ", 8); h[16] = 16; h[17] = h[18] = h[19] = 0; h[20] = 1; h[21] = 0; h[22] = 1; h[23] = 0;
     for (int i = 0; i < 4; ++i) h[24 + i] = (uint8_t)(rate >> (8 * i)), h[28 + i] = (uint8_t)((rate * 2) >> (8 * i));
     h[32] = 2; h[33] = 0; h[34] = 16; h[35] = 0; memcpy(h + 36, "data", 4);
     for (int i = 0; i < 4; ++i) h[40 + i] = (uint8_t)(ob >> (8 * i));
-    fwrite(h, 1, 44, g); fwrite(o16, 2, out_n, g); fclose(g);
+    const int write_ok = fwrite(h, 1, 44, g) == 44 && fwrite(o16, 2, out_n, g) == out_n;
+    const int close_ok = fclose(g) == 0;
+    free(o16);
+    free(outbuf);
+    free(wav_in);
+    CHECK(write_ok && close_ok);
     const MicNsStats *s = &core.s;
     printf("wav: %s -> %s (%s): %llu frames at %u Hz, delay %llu frames at 48 kHz, blocks %llu drops %llu repeats %llu missing %llu "
            "in/out %.1f dB, vad %.3f, %.1f us a block\n", in, out_path, bypass ? "bypass" : "RNNoise", (unsigned long long)out_n, rate,
            (unsigned long long)delay, (unsigned long long)s->blocks, (unsigned long long)s->drops, (unsigned long long)s->repeats,
            (unsigned long long)s->missing, 10.0 * log10(s->in_squares / (s->out_squares + 1e-9)), s->vad_sum / (double)(s->blocks + !s->blocks),
            (double)s->proc_ticks / (double)(s->blocks + !s->blocks));
+    micns_free(&core);
     return 0;
 }
 
 int main(int argc, char **argv)
 {
     if (argc >= 4 && !strcmp(argv[1], "--wav")) return wavMode(argv[2], argv[3], argc >= 5 && !strcmp(argv[4], "--bypass"));
+    testWavBounds();
+#ifdef PIANO_MICNS_TEST_ALLOC
+    testAllocationFailure();
+#endif
     testPassthrough(0, 512, 60.0);
     testPassthrough(200, 512, 60.0);
     testPassthrough(-200, 512, 60.0);
@@ -298,6 +406,7 @@ int main(int argc, char **argv)
     testPassthrough(-150, 4096, 150.0);
     testRnnoise();
     testEvents();
+    testBounds();
     micns_free(&core);
     printf("PASS micns: %u checks\n", checks);
     return 0;

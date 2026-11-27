@@ -180,6 +180,11 @@ class Session {
   const SensorResult &result() const { return r_; }
   bool viaCci() const { return rear_ && opt.rearCci; }
   bool ownsTitan() const { return u_.titan; }   // TITAN_TOP was found collapsed and powered by this session
+  void assertReset()
+  {
+    const unsigned reset = rear_ ? kPinRearReset : kPinFrontReset;
+    if (u_.pin[reset]) pinLevel(reset, false, "reset: low (asserted)");
+  }
   // One register write over the sensor's bus (level 3: its tables and controls): the 16-bit register address, then `bytes` (1..3)
   // of the value, big-endian. Only while begin()'s bus is up.
   bool sensorWrite(uint16_t reg, unsigned bytes, uint32_t value)
@@ -829,7 +834,7 @@ class Session {
     ops.step(kStepDown, "power down (reverse order, only what this level changed)");
     const unsigned reset = rear_ ? kPinRearReset : kPinFrontReset, avdd = rear_ ? kPinRearAvdd : kPinFrontAvdd,
                    mclkPin = rear_ ? kPinRearMclk : kPinFrontMclk;
-    if (u_.pin[reset]) pinLevel(reset, false, "reset: low (asserted)");
+    assertReset();
     busDown();
     mclkOff();
     if (rear_) {

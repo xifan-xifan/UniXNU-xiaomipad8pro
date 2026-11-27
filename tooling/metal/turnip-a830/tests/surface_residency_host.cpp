@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <future>
 #include <set>
+#include <stdexcept>
 
 struct FakeGpu {
     std::mutex lock;
@@ -69,6 +70,13 @@ int main() {
         return address ? std::make_shared<Generation>(gpu, address, pixels) : nullptr;
     };
     SurfaceResidency<Generation> decoder(restore()), unusedPool(restore()), capture(nullptr);
+    assert(!capture.borrowResident() && !capture.evictIdle());
+    try {
+        capture.acquire(true, []() -> std::shared_ptr<Generation> {throw std::runtime_error("map failed");});
+        assert(false);
+    } catch (const std::runtime_error &) {
+        assert(!capture.borrowResident() && !capture.evictIdle());
+    }
     auto decodeLease = decoder.acquire(false, restore);
     assert(decodeLease && !decoder.evictIdle() && gpu.usable(1));
     assert(!capture.acquire(false, restore));
@@ -122,5 +130,12 @@ int main() {
     captureRetired.set_value();
     checkCapture.get();
     assert(capture.evictIdle() && gpu.rejected == 4);
+    assert(!capture.evictIdle() && !capture.borrowResident());
+    const auto borrow = decoder.acquire(false, restore)->address;
+    {
+        auto borrowed = decoder.borrowResident();
+        assert(borrowed && borrowed->address == borrow && !decoder.evictIdle());
+    }
+    assert(decoder.evictIdle() && !gpu.usable(borrow));
     std::puts("PASS concurrent decode/capture leases, idle VA release, busy quarantine, failed map, coalesced remap and escaped pin");
 }

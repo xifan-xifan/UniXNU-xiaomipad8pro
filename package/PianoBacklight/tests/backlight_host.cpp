@@ -4,9 +4,10 @@
 // Controller's register sequences on two register models (survey writes nothing; boot level; display off/on; steps and the floor;
 // the lid; failures, retries and giving up; a missing IC; only 0x04/0x05/0x08 ever written, BL_EN bit 7 never, bits 5:0 kept); the
 // whole stack (Controller over BitI2c over two bit-level ICs); PianoBacklightClient.h's KeyWatch.
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. backlight_host.cpp -o /tmp/backlight_host && /tmp/backlight_host
+//   c++ -std=c++20 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I.. backlight_host.cpp -o /tmp/backlight_host && /tmp/backlight_host
 #include "BitI2c.h"
 #include "Ktz8866.h"
+#include "Ktz8866Chip.h"
 #include "NativeBrightness.h"
 #include "PianoBacklightClient.h"
 #include <cstdio>
@@ -17,95 +18,13 @@
 #include <vector>
 
 using namespace pianobacklight;
+using backlighttest::Chip;
+using backlighttest::resetRegs;
 static int failures;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); ++failures; } } while (0)
 
-// The datasheet's reset values (Table 5), with the ID's reserved bits 0b001.
-static void resetRegs(uint8_t *r)
-{
-  std::memset(r, 0, kRegCount);
-  r[kRegId] = 0x21; r[kRegCfg1] = 0xfa; r[kRegCfg2] = 0x8d; r[kRegBrtLsb] = 0x07; r[kRegBrtMsb] = 0xff; r[kRegEn] = 0x3f;
-  r[kRegLcd1] = 0x18; r[kRegLcd2] = 0x11; r[kRegBoost] = 0x28; r[kRegOutp] = 0x1e; r[kRegOutn] = 0x1c; r[kRegOpt1] = 0x80;
-  r[kRegOpt2] = 0x77; r[kRegRamp] = 0x44; r[kRegIfs] = 0xf8;
-}
-
-// ------------------------------------------------------------------------------------------------------------- bit-level IC
-struct Chip {
-  uint8_t address = kAddress;
-  uint8_t reg[kRegCount] = {};
-  uint8_t pointer = 0;
-  bool sdaLow = false, sclLow = false, mSda = true, mScl = true, lastSda = true, lastScl = true;
-  enum { idle, addr, ackAddr, wr, ackWr, rd, rdAck, ignore } st = idle;
-  int bits = 0, stretch = 0, holding = 0;
-  uint8_t shift = 0, byte = 0;
-  bool reading = false, masterAck = false, firstByte = false;
-  std::vector<std::pair<uint8_t, uint8_t>> writes;   // (register, value)
-  unsigned starts = 0, stops = 0;
-  bool sda() const { return mSda && !sdaLow; }
-  bool scl() const { return mScl && !sclLow; }
-  void load() { byte = pointer < kRegCount ? reg[pointer] : 0; ++pointer; sdaLow = !(byte & 0x80); }
-  void rising()
-  {
-    if (st == addr || st == wr) { shift = uint8_t(shift << 1 | (sda() ? 1 : 0)); ++bits; }
-    else if (st == rdAck) masterAck = !sda();
-  }
-  void falling()
-  {
-    switch (st) {
-    case addr:
-      if (bits == 8) {
-        if ((shift >> 1) == address) { st = ackAddr; reading = shift & 1; sdaLow = true; }
-        else st = ignore;
-      }
-      break;
-    case ackAddr:
-      sdaLow = false;
-      if (stretch) { sclLow = true; holding = stretch; }
-      if (reading) { st = rd; bits = 0; load(); }
-      else { st = wr; bits = 0; shift = 0; firstByte = true; }
-      break;
-    case wr:
-      if (bits == 8) {
-        if (firstByte) pointer = shift;
-        else {
-          writes.push_back({pointer, shift});
-          if (pointer < kRegCount) reg[pointer] = shift;
-          ++pointer;
-        }
-        firstByte = false;
-        st = ackWr;
-        sdaLow = true;
-      }
-      break;
-    case ackWr: sdaLow = false; st = wr; bits = 0; shift = 0; break;
-    case rd:
-      if (++bits < 8) sdaLow = !((byte >> (7 - bits)) & 1);
-      else { sdaLow = false; st = rdAck; }
-      break;
-    case rdAck:
-      if (masterAck) { st = rd; bits = 0; load(); }
-      else { st = ignore; sdaLow = false; }
-      break;
-    default: break;
-    }
-  }
-  void update()
-  {
-    const bool s = sda(), c = scl();
-    if (c && lastScl && lastSda && !s) { st = addr; bits = 0; shift = 0; ++starts; }   // START or repeated START
-    else if (c && lastScl && !lastSda && s) { st = idle; ++stops; }                    // STOP
-    else if (c && !lastScl) rising();
-    else if (!c && lastScl) falling();
-    lastSda = sda();
-    lastScl = scl();
-  }
-};
 static Chip gChip[2];
 static unsigned gDelays;
-static void cSda(void *ctx, bool release) { Chip *c = static_cast<Chip *>(ctx); c->mSda = release; c->update(); }
-static void cScl(void *ctx, bool release) { Chip *c = static_cast<Chip *>(ctx); c->mScl = release; c->update(); }
-static bool cReadSda(void *ctx) { return static_cast<Chip *>(ctx)->sda(); }
-static bool cReadScl(void *ctx) { return static_cast<Chip *>(ctx)->scl(); }
 static void cDelay(void *ctx, unsigned)
 {
   ++gDelays;
@@ -118,7 +37,7 @@ static void testI2c()
   Chip &c = gChip[0];
   resetRegs(c.reg);
   BitI2c bus;
-  bus.configure({&c, cSda, cScl, cReadSda, cReadScl, cDelay}, 5, 2000);
+  bus.configure(c.lines(cDelay), 5, 2000);
   uint8_t v = 0;
   const uint8_t id = kRegId;
   CHECK(bus.writeRead(kAddress, &id, 1, &v, 1) == I2c::ok && v == 0x21);
@@ -130,13 +49,25 @@ static void testI2c()
   uint8_t two[2] = {};
   const uint8_t lsb = kRegBrtLsb;
   CHECK(bus.writeRead(kAddress, &lsb, 1, two, 2) == I2c::ok && two[0] == 0x07 && two[1] == 0x73);
-  // Clock stretching after the address; nobody at 0x12; a stuck clock.
+  // Clock stretching after the address; nobody at 0x12.
   c.stretch = 30;
   CHECK(bus.writeRead(kAddress, &id, 1, &v, 1) == I2c::ok && v == 0x21);
   c.stretch = 0;
   CHECK(bus.write(0x12, w, 2) == I2c::nackAddress);
   CHECK(c.writes.size() == 1);
   CHECK(c.stops >= 5);
+  // All bytes ACKed, but SCL never went high for STOP. Leave both lines released.
+  c.writes.clear();
+  c.holdAfterWrite = 10000;
+  CHECK(bus.write(kAddress, w, 2) == I2c::stretchTimeout && c.writes.size() == 1);
+  CHECK(c.mSda && c.mScl);
+  c = Chip();
+  resetRegs(c.reg);
+  c.releaseSdaAfterClocks = 20;
+  CHECK(bus.writeRead(kAddress, &id, 1, &v, 1) == I2c::busBusy && c.writes.empty());
+  c.releaseSdaAfterClocks = 3;
+  CHECK(bus.writeRead(kAddress, &id, 1, &v, 1) == I2c::ok && v == 0x21);
+  CHECK(c.mSda && c.mScl && c.sda() && c.scl());
 }
 
 // ------------------------------------------------------------------------------------------------------------- steps, levels, log limit
@@ -158,8 +89,15 @@ static void testSteps()
   CHECK(s.count() == 17 && s.at(0) == 128 && s.at(16) == 2047 && s.at(8) == 128 + (1919 * 8 + 8) / 16);
   CHECK(codeForPercent(45, 128) == 921 && codeForPercent(0, 128) == 128 && codeForPercent(100, 128) == 2047 && codeForPercent(250, 128) == 2047);
   CHECK(codeForPercent(3, 128) == 128);
+  CHECK(codeForPercent(0, UINT16_MAX) == kFullScale);
+  CHECK(queuedSteps(-19, -2) == -20 && queuedSteps(19, 2) == 20);
+  CHECK(queuedSteps(-20, INT32_MIN) == -20 && queuedSteps(20, INT32_MAX) == 20);
+  CHECK(queuedSteps(-20, INT64_MAX) == 20 && queuedSteps(20, INT64_MIN) == -20);
+  CHECK(queuedSteps(4, -2) == 2);
+  for (unsigned code = 0; code <= kFullScale; ++code)
+    CHECK(codeOf(uint8_t((code & 7u) | 0xf8u), uint8_t(code >> 3)) == code);
   CHECK(percentOf(2047) == 100 && percentOf(921) == 45 && percentOf(0) == 0);
-  CHECK(rampUs(0) == 512 && rampUs(1) == 1000 && rampUs(4) == 8000 && rampUs(15) == 16384000);
+  CHECK(rampUs(0) == 512 && rampUs(1) == 1000 && rampUs(4) == 8000 && rampUs(15) == 16384000 && rampUs(0x10) == 512);
   CHECK(idIsKtz8866(0x21) && idIsKtz8866(0x20) && !idIsKtz8866(0xff) && !idIsKtz8866(0x00) && !idIsKtz8866(0x61));
   CHECK(enableValue(0x3f, true) == 0x7f && enableValue(0x7f, false) == 0x3f && enableValue(0xff, true) == 0x7f && enableValue(0x15, false) == 0x15);
   CHECK(writable(0x04) && writable(0x05) && writable(0x08) && !writable(0x09) && !writable(0x0f) && !writable(0x15) && !writable(0x02));
@@ -422,13 +360,15 @@ static void testDisplayAndSteps()
   // A step while dark: remembered, not written.
   c.step(1, "test keys");
   CHECK(m.writes().size() == 2 && c.code() == 1024 && m.logged("(applied when the backlight is on again)"));
-  // Wake: the new code first, then BL_EN, on each IC.
+  // Wake: verify the new code on both ICs before enabling either.
   c.display(true, 1, 1);
   w = m.writes();
   CHECK(w.size() == 8);
   if (w.size() == 8) {
-    CHECK(w[2].reg == kRegBrtLsb && w[3].reg == kRegBrtMsb && w[4].reg == kRegEn && w[4].value == 0x7f && w[4].ic == 0);
-    CHECK(w[5].ic == 1 && w[5].reg == kRegBrtLsb && w[7].ic == 1 && w[7].reg == kRegEn);
+    CHECK(w[2].ic == 0 && w[2].reg == kRegBrtLsb && w[3].reg == kRegBrtMsb);
+    CHECK(w[4].ic == 1 && w[4].reg == kRegBrtLsb && w[5].reg == kRegBrtMsb);
+    CHECK(w[6].ic == 0 && w[6].reg == kRegEn && w[6].value == 0x7f);
+    CHECK(w[7].ic == 1 && w[7].reg == kRegEn && w[7].value == 0x7f);
   }
   CHECK(m.lit(0) && m.lit(1) && m.code(0) == 1024 && m.code(1) == 1024);
   // Steps: up to full scale and no further, down to the floor and no further.
@@ -614,10 +554,70 @@ static void testFailures()
   cr.survey();
   r.deaf[1] = true;
   cr.start();
-  CHECK(r.code(0) == codeForPercent(30, 128) && r.code(1) == 812 && cr.pending() && r.logged("READ BACK DIFFERS"));
+  CHECK(r.code(0) == 812 && r.code(1) == 812 && cr.pending() && r.logged("READ BACK DIFFERS"));
   r.deaf[1] = false;
   cr.retry();
   CHECK(r.code(1) == codeForPercent(30, 128) && !cr.pending() && cr.controlling());
+}
+
+static void testPairRecovery()
+{
+  for (unsigned failing = 0; failing < kIcs; ++failing) {
+    Model m;
+    m.setFound(0, 812, true);
+    m.setFound(1, 812, true);
+    Controller c(m);
+    CHECK(c.survey() && c.start());
+    c.display(true, 1, 1);
+    m.readReplies[{failing, kRegBrtMsb}] = {-1};  // the new code took, but we could not verify it
+    c.manualCode(1600, "test");
+    CHECK(c.pending() && m.lit(0) && m.lit(1) && m.code(0) == 812 && m.code(1) == 812);
+    c.manualCode(812, "superseding request");
+    CHECK(!c.pending() && m.code(0) == 812 && m.code(1) == 812);
+
+    c.display(false, 1, 0);
+    c.manualCode(1600, "while dark");
+    m.failWrites[failing] = 1;
+    c.display(true, 1, 1);
+    CHECK(c.pending() && !m.lit(0) && !m.lit(1));
+    c.retry();
+    CHECK(!c.pending() && m.lit(0) && m.lit(1) && m.code(0) == 1600 && m.code(1) == 1600);
+
+    m.readReplies[{failing, kRegEn}] = {kEnSinks | kEnBacklight, -1};  // off took before its readback failed
+    c.sleep(true);
+    CHECK(c.pending() && !c.bothDark() && !m.lit(0) && !m.lit(1));
+    c.retry();
+    CHECK(!c.pending() && c.bothDark());
+    c.sleep(false);
+    CHECK(c.bothLit());
+
+    c.display(false, 1, 0);
+    m.readReplies[{failing, kRegEn}] = {kEnSinks, -1};  // enable took, but its readback failed
+    c.display(true, 1, 1);
+    CHECK(c.pending() && !m.lit(0) && !m.lit(1));
+    c.display(false, 1, 0);
+    CHECK(!c.pending() && !m.lit(0) && !m.lit(1));
+
+    m.failWrites[failing] = -1;
+    c.display(true, 1, 1);
+    for (int i = 0; i < 8; ++i) c.retry();
+    CHECK(!c.controlling() && !m.lit(0) && !m.lit(1));
+    checkWhitelist(m, 128);
+  }
+
+  Model m;
+  m.setFound(0, 812, true);
+  m.setFound(1, 812, true);
+  Controller c(m);
+  CHECK(c.survey() && c.start());
+  c.display(true, 1, 1);
+  m.present[1] = false;
+  c.manualCode(1600, "silent secondary");
+  for (int i = 0; i < 8; ++i) c.retry();
+  CHECK(!c.controlling() && m.lit(0) && m.lit(1) && m.code(0) == 812 && m.code(1) == 812);
+  m.present[1] = true;
+  c.sleep(true);
+  CHECK(c.bothDark() && !m.lit(0) && !m.lit(1));
 }
 
 // ------------------------------------------------------------------------------------------------------------- the whole stack
@@ -629,7 +629,7 @@ struct Wire final : Ics {
   uint64_t now = 0;
   Wire()
   {
-    for (unsigned i = 0; i < 2; ++i) bus[i].configure({&gChip[i], cSda, cScl, cReadSda, cReadScl, cDelay}, 5, 2000);
+    for (unsigned i = 0; i < 2; ++i) bus[i].configure(gChip[i].lines(cDelay), 5, 2000);
   }
   bool read(unsigned ic, uint8_t reg, uint8_t *v) override
   {
@@ -674,6 +674,13 @@ static void testStack()
   CHECK(gChip[0].reg[kRegEn] == 0x7f && gChip[1].reg[kRegEn] == 0x7f);
   c.step(-1, "stack");
   CHECK(codeOf(gChip[1].reg[kRegBrtLsb], gChip[1].reg[kRegBrtMsb]) == 812);
+  gChip[1].nackWriteReg = kRegBrtMsb;
+  c.manualCode(1601, "stack data NACK");
+  CHECK(c.pending() && c.bothLit());
+  for (const Chip &chip : gChip) CHECK(codeOf(chip.reg[kRegBrtLsb], chip.reg[kRegBrtMsb]) == 812);
+  c.retry();
+  CHECK(!c.pending());
+  for (const Chip &chip : gChip) CHECK(codeOf(chip.reg[kRegBrtLsb], chip.reg[kRegBrtMsb]) == 1601);
   for (const Chip &chip : gChip)
     for (auto [reg, value] : chip.writes) {
       CHECK(writable(reg));
@@ -797,12 +804,12 @@ static void testAmbientReadbackFault()
   const uint32_t good = c.ic(1).codeReadbacks;
   m.deaf[1] = true;
   c.ambient(800, 3000, "fault test");
-  CHECK(c.ic(0).code == c.code() && c.ic(0).codeReadbacks > 0);
-  CHECK(c.ic(1).code == old && c.ic(1).codeReadbacks == good && c.ic(1).errors > 0);
+  CHECK(c.ic(0).code == old && c.ic(0).codeReadbacks > 0);
+  CHECK(c.ic(1).code == old && c.ic(1).codeReadbacks == good + 1 && c.ic(1).errors > 0);
   CHECK(!c.autoActive() && c.controlling());
   m.deaf[1] = false;
   c.retry();
-  CHECK(c.autoActive() && c.ic(1).code == c.code() && c.ic(1).codeReadbacks == good + 1);
+  CHECK(c.autoActive() && c.ic(1).code == c.code() && c.ic(1).codeReadbacks == good + 2);
   m.deaf[1] = true;
   c.ambient(500, 400, "persistent fault");
   c.retry();
@@ -810,6 +817,30 @@ static void testAmbientReadbackFault()
   CHECK(!c.controlling() && c.autoFault() && !c.autoActive());
   CHECK(!c.automatic(true, "cannot restore control"));
   checkWhitelist(m, 128);
+}
+
+static void testAmbientSnapshots()
+{
+  Model m;
+  Controller c(m);
+  Config cfg = config();
+  cfg.autoAllowed = true;
+  c.configure(cfg);
+  CHECK(c.survey() && c.start());
+  c.display(true, 1, 1);
+  CHECK(c.ambientSnapshot(1, 1, 500, 400) && c.autoActive());
+  c.display(false, 1, 0);
+  CHECK(c.bothDark() && !c.ambientState().valid());
+  CHECK(!c.ambientSnapshot(2, 1, 500, 400));
+  c.display(true, 1, 1);
+  CHECK(c.bothLit() && !c.autoActive());
+  CHECK(!c.ambientSnapshot(3, 1, 500, 400) && !c.autoActive());
+  c.sleep(true);
+  CHECK(!c.ambientSnapshot(4, 2, 500, 400) && !c.autoActive());
+  c.sleep(false);
+  CHECK(c.ambientSnapshot(4, 2, 500, 400) && c.autoActive());
+  CHECK(!c.ambientSnapshot(3, 1, 900, 9000) && c.code() == 1024);
+  CHECK(!c.ambientSnapshot(5, 2, 1001, UINT32_MAX) && c.code() == 1024);
 }
 
 struct NativePropertyRecord {
@@ -907,46 +938,17 @@ static void testNativeBrightness()
       CHECK(cold.classify(5 << 16, 50010) == NativeIntent::kFollow && cold.echoes() == 1);
       CHECK(std::strcmp(kNativeSync, "piano-backlight-sync") == 0);
     }
-    {   // round 2 (SLIDER-INIT.md): the restore and EDR ramps reach the stream like moves; with the daemon's lease they do not end
-        // automatic mode, the daemon's report does
-      auto run = [](NativeIntent &n, bool managed, const std::vector<double> &nits, uint64_t t0) {
-        bool ended = false;
-        for (size_t k = 0; k < nits.size(); ++k) {
-          const StreamChoice c = streamChoice(n.classify(int64_t(nits[k] * 65536), t0 + 17 * k), true, managed, false);
-          ended = ended || c.endsAuto;
-          if (c.apply && !c.endsAuto) return true;   // never while automatic owns the panel
-        }
-        return ended;
-      };
-      // installed 14:07: the restore 431.949 (first value), then sdr x EDR headroom 1.04185 / 1.0668
-      const std::vector<double> installed = {431.949, 450.025, 460.818};
-      // slider2: an EDR fade over the SDR level 347.65, 0.99545 per step from 417.18 (desk-login's last key level)
-      std::vector<double> fade = {417.18};
-      while (fade.back() > 347.7) fade.push_back(fade.back() * 0.99545);
-      NativeIntent a, b, c2, d;
-      a.reset(0);
-      CHECK(run(a, false, installed, 10000));    // no lease: the EDR step ends automatic mode (what the installed boot did)
-      b.reset(0);
-      CHECK(!run(b, true, installed, 10000));    // the lease: dropped, automatic mode kept
-      c2.reset(0);
-      CHECK(c2.classify(int64_t(417.18 * 65536), 100) == NativeIntent::kFollow);
-      CHECK(run(c2, false, fade, 20000));        // slider2: the fade ended automatic mode
-      d.reset(0);
-      CHECK(d.classify(int64_t(417.18 * 65536), 100) == NativeIntent::kFollow);
-      CHECK(!run(d, true, fade, 20000));
-      // 2026-11-22 (AUTO-BRIGHT.md): the daemon's report never ends automatic mode: while automatic it is the curve's trim
-      // (Controller::userLevel, testUserLevel), not a level from the stream; in manual mode it is the level
-      const StreamChoice r = streamChoice(NativeIntent::kFollow, true, true, true);
-      CHECK(!r.apply && !r.endsAuto);
-      const StreamChoice rm = streamChoice(NativeIntent::kUserMove, false, true, true);
-      CHECK(rm.apply && !rm.endsAuto);
-      CHECK(!streamChoice(NativeIntent::kUserMove, true, false, true).endsAuto);
-      const StreamChoice m = streamChoice(NativeIntent::kUserMove, false, true, false);
-      CHECK(m.apply && !m.endsAuto);
-      const StreamChoice f = streamChoice(NativeIntent::kFollow, true, false, false);
-      CHECK(!f.apply && !f.endsAuto);
-      d.moved(200 << 16);                        // the stream goes on from the reported level
-      CHECK(d.classify(201 << 16, 30000) == NativeIntent::kFollow);
+    {
+      NativeIntent native;
+      CHECK(native.classify(150 << 16, 0) == NativeIntent::kFollow);
+      const auto move = native.classify(172 << 16, 9000);
+      CHECK(move == NativeIntent::kUserMove);
+      CHECK(streamChoice(move, true, false) == StreamChoice::automaticTrim);
+      CHECK(streamChoice(move, true, true) == StreamChoice::follow);
+      CHECK(streamChoice(NativeIntent::kFollow, true, false) == StreamChoice::follow);
+      CHECK(streamChoice(move, false, true) == StreamChoice::manualLevel);
+      native.moved(200 << 16);
+      CHECK(native.classify(201 << 16, 30000) == NativeIntent::kFollow);
       Lease lease;
       CHECK(!lease.active(0));
       lease.set(120, 1000);
@@ -956,21 +958,6 @@ static void testNativeBrightness()
       lease.set(100000, 0);
       CHECK(lease.active(kManagedMaxS * 1000 - 1) && !lease.active(kManagedMaxS * 1000));
       CHECK(std::strcmp(kNativeManaged, "piano-backlight-managed") == 0 && std::strcmp(kNativeMoved, "piano-backlight-moved") == 0);
-      // round 3 (slider3 boot: CoreBrightness's default 150 x EDR 1.2 ended automatic mode at the login window before the lease):
-      // given back when the lease arrives; not after a display power-on, a reported move or an explicit setting cleared it
-      Handover h;
-      NativeIntent boot;
-      boot.reset(0);
-      CHECK(boot.classify(int64_t(150.0 * 65536), 100) == NativeIntent::kFollow);
-      const StreamChoice e = streamChoice(boot.classify(int64_t(171.45 * 65536), 9000), true, false, false);
-      CHECK(e.endsAuto);
-      h.streamEndedAuto(false);
-      CHECK(h.leaseArrived() && !h.leaseArrived());   // once
-      h.streamEndedAuto(true);                         // ended while a lease held (only a reported move can): never given back
-      CHECK(!h.leaseArrived());
-      h.streamEndedAuto(false);
-      h.cleared();                                     // a display power-on, a reported move or piano-backlight-auto
-      CHECK(!h.leaseArrived());
     }
     CHECK(std::strcmp(kNativeOverride, "force-brightness-control") == 0);
     auto bitsOf = [](double d) { uint64_t b; std::memcpy(&b, &d, 8); return b; };   // 2026-11-21: the swap record's double
@@ -1001,7 +988,7 @@ static void testNativeBrightness()
   m.deaf[1] = true;
   ctl.manualCode(1600, kNativeRequest);
   CHECK(!ctl.ambientState().requested());
-  CHECK(ctl.ic(0).code == 1600 && ctl.ic(1).code == previous);
+  CHECK(ctl.ic(0).code == previous && ctl.ic(1).code == previous);
   CHECK(!adapter.applied(ctl, applied) && applied == previous);
   m.deaf[1] = false;
   ctl.retry();
@@ -1184,6 +1171,21 @@ static void testUserLevel()
   CHECK(lc.userLevel(512, "piano-brightness-sync") && l.code(0) == 512 && lc.ambientState().trim() == -512 && lc.autoActive());
   CHECK(lc.ambient(1000, 10000, "test light") && l.code(0) == 1024);                         // half of full scale
   CHECK(lc.ambient(250, 50, "test light") && l.code(0) == 256);
+  CHECK(lc.ambient(1000, UINT32_MAX, "test light"));
+  CHECK(lc.userLevel(1001, "slider") && l.code(0) == 1001 && lc.autoActive());
+  lc.display(false, 1, 0);
+  lc.step(1, "keys during display sleep");
+  CHECK(!lc.ambientState().valid() && lc.ambientState().requested() && !l.lit(0));
+  lc.display(true, 1, 1);
+  CHECK(lc.ambient(500, 400, "fresh wake sample") && lc.autoActive());
+  CHECK(lc.ambientState().offset() == 1 && l.code(0) > 501 && l.code(0) == l.code(1));
+
+  Ambient narrow;
+  narrow.configure(true, 32, false, 20);
+  CHECK(narrow.target(0, 0) && narrow.adjust(kFullScale) && narrow.code() == kFullScale);
+  CHECK(narrow.target(INT32_MAX, UINT32_MAX) && narrow.adjust(32) && narrow.code() == 32);
+  CHECK(narrow.step(INT32_MIN) && narrow.code() == 32);
+  CHECK(narrow.step(INT32_MAX) && narrow.code() >= 32 && narrow.code() <= kFullScale && narrow.automatic());
   checkWhitelist(l, 128);
 }
 
@@ -1402,10 +1404,12 @@ int main()
   testLid();
   testSleep();
   testFailures();
+  testPairRecovery();
   testStack();
   testKeys();
   testAmbient();
   testAmbientReadbackFault();
+  testAmbientSnapshots();
   testNativeBrightness();
   testAndroidBrightness();
   testUserLevel();

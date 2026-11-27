@@ -1,6 +1,46 @@
 # USB host / OTG and the Type-C port: PianoUsbHost
 
-> **Status 2026-11-11: offline, built, host-tested, linked; nothing run on hardware.** Backlog item B7 (`../BACKLOG-hardware.md`).
+## Status as of 2026-11-27
+
+**USB host / OTG is RAM-only on an empty port.** Path A2 (`PianoXhciHost`) started in host mode on the `usb-a2d` RAM boot
+on 2026-11-18. A1 remains the control. The SC8541 VBUS sourcing and live role hand-off still need qualification, and USB storage
+and HID enumeration with real peripherals remain open. [Support status](../STATUS.md) · [Hardware backlog, B7](../BACKLOG-hardware.md#2-backlog-b1b15)
+
+**USB device-mode debug works on installed v13.1y12q.** The USB-C console, root shell and SSH work. TX flow control is on by
+default and was active on the November 27 disk check. The same day's `v131y12t-qual1` RAM check passed 66/66 exact transfers
+with zero driver drops. [Installed boot](../results-2026-11-27.md#installed-boot) · [RAM qualification](../results-2026-11-27.md#ram-qualification)
+
+## B7 offline role, VBUS and xHCI model
+
+**Fix-image gate HOLD.** SC8541 sourcing and discharge, live controller hand-off, and real-device enumeration still require an
+attended owner OTG session with a USB-C OTG adapter and USB peripherals. The header is included by the standalone sanitizer suite.
+[Owner qualification protocol](usb-otg-qual.md) · [Model](../../package/PianoUsbHost/UsbRoleVbusModel.h) · [Host test](../../package/PianoUsbHost/tests/role_vbus_host.cpp)
+
+The model borrows the pinned SM8750 USB stream ID `0x40`, the DWC3 halt and role fields, and the xHCI Run/Stop, Halted and PORTSC
+fields from the existing headers. It reads the owner snapshot's UCSI connector 1 status and a full 32-byte GLINK port 0
+notification. It requires matching orientation when UCSI 2.0 reports it, USB data capability, and the USB-only mux. DFP, UFP and
+powered-cable-plus-UFP determine data role independently of power direction. Only Source/Host qualifies for this loan. The
+fixture pairs PAN with the owner's generation and sequence, uses `0xff` for absent PAN orientation, and requires a fresh
+observation after wake. [SM8750 USB definitions](../../package/PianoDwc3/PianoUsbHw.h) · [DWC3 registers](../../package/PianoDwc3/Dwc3Regs.h) · [xHCI registers](../../package/PianoUsbHost/UsbHostHw.h) · [UCSI and GLINK codec](../../package/PianoUsbHost/Ucsi.h) · [Owner snapshot](../../package/include/PianoUsbcContract.h)
+
+Confirmed gadget release, a matching verified SID and bank, and an unpowered bus with charging and external sink VBUS absent
+permit the synthetic 5 V request. A fault drops the request and starts teardown in the same transition. The host keeps DMA
+ownership until Run/Stop reads clear, Halted reads set, and the bus reports discharged. DWC3 then confirms its device role
+and reclaims the same domain. A missing halt, discharge or reclaim proof leaves the model held. A fault or failed attempt
+requires a clean Type-C detach and a safe bus before re-arming.
+
+The context bank number, correlation tokens, and VBUS levels are fixture inputs. The levels carry no voltage thresholds or
+SC8541 programming values. The synthetic deadlines are 10 ms for attach debounce, 50 ms for device release, 20 ms for VBUS
+ramp, 30 ms per reset attempt with a cap of two attempts, 50 ms for enumeration, 20 ms for halt, 40 ms for discharge, 50 ms for
+reclaim while awake, and 500 ms for the entire host loan from the release request. The xHCI fixture uses default speed IDs 3
+and 4 for High-Speed and SuperSpeed. It models USB2 port reset, USB3 link-up or warm reset, and address and descriptor
+completion. These are synthetic port outcomes, including the SuperSpeed path.
+
+Run the sanitizer suite with `python3 scripts/ci/self-tests.py --only package/PianoUsbHost/tests/`.
+
+## Original design and bring-up (2026-11-11 to 2026-11-14)
+
+> **2026-11-11 build snapshot.** PianoUsbHost was built, host-tested and linked ahead of tablet qualification.
 > `package/PianoUsbHost`, inert without `piano-usbhost`: level 1/2 a read-only survey; **level 5 (H5)** host mode with our own
 > minimal xHCI probe (host switch, HCRST, rings, a No-Op command, port connection, optional port reset, way back), host-tested
 > against a register model (`XhciHost.h`, §6.2a); **level 6 (H6 preparation, path A1)** Apple's `AppleUSBXHCI` on our
@@ -23,16 +63,18 @@
 > `piano-usb-handoff=1`). Tablet list with expected lines: §8.3.
 > Test images and expected lines: §8. Template: `README.md`.
 
-## 1. Purpose and gate
+See the [USB host2 integration and Phase U qualification gates](usb-host2-qualification.md).
+
+### 1. Purpose and gate
 
 Ubuntu made the single USB-C port a dual-role port (v0.5.0, v0.6.0, v1.1.0): USB sticks, keyboards, mice and powered docks with
 pass-through charging, 5 Gbit/s in both plug orientations, role switching with a computer, USB recovery after a USB-C display
 unplug. Natively the port is PianoDwc3's device-mode debug channel (`usb-device-debug.md`). Host mode gates no login milestone; it
 is a daily-use feature (backlog tier 3), and B8 (DisplayPort Alt Mode) builds on its Type-C half.
 
-## 2. Hardware facts
+### 2. Hardware facts
 
-### 2.1 Controller, xHCI, role registers
+#### 2.1 Controller, xHCI, role registers
 
 | Item | Value | Source | State |
 |---|---|---|---|
@@ -48,7 +90,7 @@ is a daily-use feature (backlog tier 3), and B8 (DisplayPort Alt Mode) builds on
 | QSCRATCH VBUS/session override | `0xa6f8800`: HS_PHY_CTRL +0x10 b20 UTMI_OTG_VBUS_VALID + b28 SW_SESSVLD_SEL, SS_PHY_CTRL +0x30 b24 LANE0_PWR_PRESENT; set for device, cleared for host (dwc3-qcom's role notifier) | LNX dwc3-qcom.c | verified (source) |
 | UTMI clock as PIPE clock | GENERAL_CFG +0x08: set b8 (clock off), b0 + b3, clear b8, 100–1000 µs waits; Ubuntu v1.1.0 uses it in DP-only modes (else the next xHCI reset times out); PianoDwc3 uses it for high-speed device mode | LNX (K:68d28640e1d1); PianoDwc3 | verified (source) |
 
-### 2.2 QMP USB3/DP combo PHY (the SuperSpeed lanes and their Type-C mux)
+#### 2.2 QMP USB3/DP combo PHY (the SuperSpeed lanes and their Type-C mux)
 
 | Item | Value | Source | State |
 |---|---|---|---|
@@ -59,7 +101,7 @@ is a daily-use feature (backlog tier 3), and B8 (DisplayPort Alt Mode) builds on
 | PCS ready | PCS_STATUS1 (+0x1e14) b6 PHYSTATUS = not ready | LNX pcs-v8.h | verified (source) |
 | Natively | not used: PianoDwc3 runs high speed with the UTMI clock as PIPE clock; the PHY's state after the UEFI is **needs-boot** (SUN saw COM = 0x01 in its device mode) | PianoDwc3; SUN | — |
 
-### 2.3 Type-C state: four witnesses
+#### 2.3 Type-C state: four witnesses
 
 | Witness | What | Needs | State |
 |---|---|---|---|
@@ -77,7 +119,7 @@ owner (charging.md §2, "Rp bit→current inferred").
 DSP down a sink-only port never sees an OTG adapter's Rd: **host detection needs the DSP running** (PianoPower level 2 works
 natively since 2026-11-11 07:15, charging.md).
 
-### 2.4 DIO4485, VBUS, repeater, hazards
+#### 2.4 DIO4485, VBUS, repeater, hazards
 
 | Item | Value | Source | State |
 |---|---|---|---|
@@ -88,7 +130,7 @@ natively since 2026-11-11 07:15, charging.md).
 | **Hazard K:7dffd78b342d** | a QSCRATCH VBUS-override write from the UCSI role switch while the glue clocks were off (s2idle) reset the SoC; Ubuntu defers it while suspended and shares one role lock with suspend and the Type-C clock updates (K:9834284b801f) | kernel.md §2.11 | verified |
 | SPI 133 | one line for both roles; our ArmCpu has `armcpu_spi_attach` (one handler per INTID) but no detach and no mask | power-irq.md §2.1 | verified |
 
-## 3. Ubuntu as the specification
+### 3. Ubuntu as the specification
 
 Kernel `piano/dev` (`unixnu-research/ubuntu-ref/kernel`, 7f8d6bedde47; v1.1.0 = d2710cd13b33), read as described behaviour:
 - **Roles** (`ucsi.c` partner change → `usb_role_switch` of `usb@a600000`, K:b1eb75bcf65f): UFP partner → host, DFP → device,
@@ -104,7 +146,7 @@ Kernel `piano/dev` (`unixnu-research/ubuntu-ref/kernel`, 7f8d6bedde47; v1.1.0 = 
   state machine after a source detach).
 - **Open in Ubuntu**: hub and DisplayPort after resume (device.md #21); judge sleep power with the cable out (HS PHY not in L2).
 
-## 4. UniXNU templates to build on
+### 4. UniXNU templates to build on
 
 | Piece | Base | Licence | Delta for piano |
 |---|---|---|---|
@@ -114,9 +156,9 @@ Kernel `piano/dev` (`unixnu-research/ubuntu-ref/kernel`, 7f8d6bedde47; v1.1.0 = 
 | Controller bring-up, SMMU, coherency | PianoDwc3 (takeover order, SMMU stream 0x40, UTMI-as-PIPE) and QcomDwc3's coherence note: Apple's USB code does no cache maintenance, so stream 0x40 gets its own stage-1 context with an identity map of DRAM in write-back inner-shareable 1 GiB blocks (a bypass bank leaves the master non-coherent) | this repo; BSD | PianoDwc3's bypass bank is fine for its own WC rings (and level 5's), not for Apple's xHCI: **done** as `SmmuIdentity.h` (QcomDwc3's `smmuIdentity()` adapted, host-tested), level 6's default |
 | Host-mode facts measured on piano | Project-SunUEFI `PianoUsbHost.c` / host plan (stock `Usb30InitHost` values + GCTL.DSBLCLKGTNG + GUCTL.HSTINAUTORETRY, the No-Op command acceptance test, hi-lo writes, PMIC Rd detection twice 250 ms apart) | BSD-2-Clause-Patent | compiled there, not verified on the tablet |
 
-## 5. IOKit family / ABI: the macOS side
+### 5. IOKit family / ABI: the macOS side
 
-### 5.1 What our kernel collection has (the vma2 26A434 KC's `__PRELINK_INFO`: names and matching dictionaries only)
+#### 5.1 What our kernel collection has (the vma2 26A434 KC's `__PRELINK_INFO`: names and matching dictionaries only)
 
 | Kext | Classes / personalities | Matches | On piano |
 |---|---|---|---|
@@ -128,7 +170,7 @@ Kernel `piano/dev` (`unixnu-research/ubuntu-ref/kernel`, 7f8d6bedde47; v1.1.0 = 
 | `AppleUSBUserHCI`, `AppleUSBVHCI` | user-space / virtual host controllers | `AppleUSBUserHCIUserClient` | private user-client protocol: no |
 | `AppleVirtualPlatformPCIE` (AppleVirtualPlatform) | the VM's ECAM host bridge (`pcie,vmapple1`) | AppleARMIODevice | no: ECAM is memory-mapped config space; we cannot emulate BAR sizing in RAM |
 
-### 5.2 Measured: Apple's host stack links into the native collection
+#### 5.2 Measured: Apple's host stack links into the native collection
 
 `kc-build27-piano.py` (the native KC's builder) with our native set (ARMPlatformStandIn, NativeUfs, NativeRamBlock,
 NativeGopDisplay, PianoDwc3, PianoNullEthernet) plus `--keep` AppleUSBXHCIPCI, AppleUSBHub, AppleUSBHostCompositeDevice,
@@ -150,7 +192,7 @@ OSDynamicCast"). What the cable keys must hold is to be settled at H6 from behav
 earlier reading: QcomDwc3 publishes `AppleUSBCableType = USBHost` on the resource service when it enters the **device** role (a USB
 host is on the cable: lockdownd's launch event) and removes it when it leaves that role; in the host role it publishes nothing.
 
-### 5.2a The link with the full native set (`PIANO_USBHOST_STACK=1`, 2026-11-11, linked, not booted)
+#### 5.2a The link with the full native set (`PIANO_USBHOST_STACK=1`, 2026-11-11, linked, not booted)
 
 `PIANO_USBHOST_STACK=1 tooling/k27/build-native-image.sh` adds two descriptors to the native list and nothing else changes:
 - `tooling/k27/kext/PianoUsbHostStack.json`, a **codeless** bundle (`kc-build.py`: no objects, a plist entry only): its libraries are
@@ -182,7 +224,7 @@ the 0x8d6f0-byte `__DATA_CONST` gap PianoTouch used, the only gap left that hold
 is the one PianoA830's 0x402a0 bytes take first, and PianoTouch must link after PianoA830 (it imports PianoA830's lock word). A
 largest-first or best-fit placement in the KC builder (the k27 tree's, read-only here) would fit both.
 
-### 5.3 Options and effort
+#### 5.3 Options and effort
 
 | | Option | Private ABI | Effort | Main risks |
 |---|---|---|---|---|
@@ -203,12 +245,11 @@ Ubuntu parity (5 Gbit/s both orientations, docks with pass-through charging, rol
 **2026-11-14:** A2 is built (§5.4). It is the better first boot of the two, because A1's two open risks (an abstract class, and a
 64-bit write that reaches a 4-byte helper in this collection) are exactly what A2 removes; A1 stays in the tree as the control.
 
-### 5.4 Path A2: `PianoXhciHost`, our subclass of the collection's `AppleUSBXHCI` (built, host-tested, not booted)
+#### 5.4 Path A2: `PianoXhciHost`, our subclass of the collection's `AppleUSBXHCI` (built, host-tested, not booted)
 
-The owner approved the binary analysis on 2026-11-14; the offline result is `private/host-checks/20261114-xhci/REPORT.md` (local
-only). What it established about the 27.3 mac17j collection (`out/inputs/k273/kc/kc273-mac17j.bin`, sha256 `d1003b51…`): the class
-has **427 slots**, instance size **0xf88**, no pure virtual slot; the minimal subclass needs exactly three overrides, and the
-reviewed UniXNU-sheng fixture pins **this exact collection**, so no new extraction was needed.
+The 2026-11-14 analysis of the 27.3 mac17j collection (SHA-256 `d1003b51…`) established that the class has **427 slots**, an
+instance size of **0xf88** and no pure virtual slot. The minimal subclass needs three overrides. The reviewed UniXNU-sheng
+fixture pins the same collection. [Tracked ABI fixture](../../data/usb-xhci/abi-26C5035r-mac17j.json)
 
 **The data file.** `data/usb-xhci/abi-26C5035r-mac17j.json` (+ `data/usb-xhci/README.md`) is ours: slot numbers, PAC diversities,
 the symbol every slot must reach, the instance size, the fabricated declarations of the private slots, and the three slots we
@@ -260,9 +301,9 @@ only one automatic client can ever match the nub; `tooling/k27/check-usbhost-sta
 class by name and calls init/attach/start itself — one boot answers both "did IOKit matching find our personality" and "does
 `start()` accept this nub". The A1 path is unchanged (`piano-usbhost-a2=0` on an A1 collection).
 
-## 6. Design
+### 6. Design
 
-### 6.1 Roles: one owner of the controller
+#### 6.1 Roles: one owner of the controller
 
 - **Policy** (`UsbHostSurvey.h decideRole`, host-tested): UCSI first when the DSP's port manager answers (UFP or cable + UFP →
   host; DFP → device; audio → none); else the PMIC: a sink's Rd while we source → host (OTG adapter, bus-powered device); a source's
@@ -276,7 +317,7 @@ class by name and calls init/attach/start itself — one boot answers both "did 
   DEVCTRLHLT, release the event buffer; later reclaim) at H8; until then host tests run with `piano-usb=0`, or level 5's
   hand-off by time (§7: no PianoDwc3 code).
 
-### 6.2 Switch sequences (after QcomDwc3 and Linux)
+#### 6.2 Switch sequences (after QcomDwc3 and Linux)
 
 - **device → host**: PianoDwc3 stopped; VBUS override off (clocks checked); GCTL soft reset 100 ms if the IP needs it (survey:
   GSNPSID/GVERSION); PRTCAPDIR = 1; GUSB2PHYCFG SUSPHY/ENBLSLPM off, GUSB3PIPECTL SUSPHY off; repeater host flag (SPMI write: owner
@@ -284,7 +325,7 @@ class by name and calls init/attach/start itself — one boot answers both "did 
 - **host → device**: the xHCI terminated (HCHalted read), soft reset, PRTCAPDIR = 2, override on, repeater device, PianoDwc3's
   takeover again; its replay of the retained log shows the host session on the Mac.
 
-### 6.2a What level 5 does (`XhciHost.h`, host-tested by `tests/xhcihost_host.cpp`)
+#### 6.2a What level 5 does (`XhciHost.h`, host-tested by `tests/xhcihost_host.cpp`)
 
 Every store goes through a Hal; nothing is stored unless the USB30 GDSC and its four branch clocks (master, sleep, cfg_noc AXI,
 aggre AXI) read on, and **each QSCRATCH store is preceded by that read again** (the K:7dffd78b342d rule; the test drops a clock
@@ -318,13 +359,13 @@ Not done at level 5 (on purpose): the eUSB2 repeater's host clock force (an SPMI
 entry, not needed for a connection), the QMP PHY (H7), SUN's other stock host values, GCTL.DSBLCLKGTNG (left as found), any
 interrupt, any role lock shared with other kexts (level 5 is the only writer: PianoDwc3 off or time-separated, §7).
 
-### 6.3 Orientation and lanes
+#### 6.3 Orientation and lanes
 
 High speed needs no orientation (both D+/D- pairs meet in the receptacle; the DIO4485 is left in its USB state). SuperSpeed (H7):
 the PHY in USB3-only mode with TYPEC_CTRL = software select | (reverse ? 1 : 0); reverse from the PMIC's CC bit, gpio61 and later
 UCSI/PAN — the survey's three witnesses must agree on the tablet first. The DIO4485 is touched only for DP (B8).
 
-### 6.4 VBUS (H3)
+#### 6.4 VBUS (H3)
 
 Host for a bus-powered device needs the DSP up (PianoPower level 2) with its board configuration (`piano-power=2`, writes on: the
 default; PianoMca's `board()` sends 0x201c, 0x201a, 0x201b on every charger generation, §2.4). The DSP's firmware then sources VBUS by
@@ -345,19 +386,19 @@ What "we source VBUS" looks like, the witnesses to read on the tablet (all read 
 | PianoPower `[Ns] mca: bus … mV` | about 5000 mV (our own boost) with the bus current our load | the source's | 0x20002 |
 | the device | a stick's LED, a keyboard's LEDs at power-up | — | eyes |
 
-A gap to know: PianoPower's built-in policy sees a bus above 4 V and counts it as a source attached; with our own 5 V on the bus it
-would write its input limit and charge current for "a source" of unknown type (500 mA in, the 5 V row). Harmless for the boost as far
-as the source says (the firmware's reverse mode does not take input), but it is a policy decision for PianoPower's owner (charging.md):
-ignore the bus while 0x200d reads boosting, or while UCSI says we are the provider.
+PianoPower's built-in policy counts a bus above 4 V as an attached source. On host levels 3–6, `piano-power-policy=1` with
+`piano-power-own-bus=1` treats positively identified sourced VBUS as a detach. The guard preserves active charge stops and excludes
+sourced VBUS from AC reporting. It uses fresh UCSI provider status or, when that status is unavailable, the PMIC's Rd reading.
+An observed Rp takes precedence so a powered hub still supplies external power.
 
-### 6.5 Debugging while the port is a host
+#### 6.5 Debugging while the port is a host
 
 The cable to the Mac is gone in host mode, so: the pstore mailbox (always); a time-limited host session
 (`piano-usbhost-back=S`, after QcomDwc3's `usb-back`) that returns to device mode, where PianoDwc3's replay of the retained log
 shows what happened; from H6 on, a USB-Ethernet dongle on the dock or the OTG adapter (Apple's CDC-ECM/NCM/ASIX drivers are in
 the linked set) for `log stream` and ssh. NCM over device mode (`piano-usb-net=1`) stays the daily debug path.
 
-### 6.5a Level 6: Apple's xHCI on `PianoUsbHostNub` (path A1, prepared)
+#### 6.5a Level 6: Apple's xHCI on `PianoUsbHostNub` (path A1, prepared)
 
 - **SMMU** (`-smmu=2`, the default at level 6): stream 0x40 through its own stage-1 context bank, a level-1 table of 1 GiB identity
   blocks from 2 GiB (Normal write-back, inner shareable), so the DWC3's DMA is coherent without cache maintenance (QcomDwc3's
@@ -383,7 +424,7 @@ the linked set) for `log stream` and ssh. NCM over device mode (`piano-usb-net=1
   with the last one's idVendor:idProduct; a line per change and every 30 s. `-back=S`: the nub terminated (Apple's family stops its
   devices and the controller), RS 0 + HCRST, back to device mode.
 
-### 6.6 Levels 3 and 4: the port manager (H3/H4, built and host-tested)
+#### 6.6 Levels 3 and 4: the port manager (H3/H4, built and host-tested)
 
 **The path to the DSP.** UCSI is not a QRTR service: the DSP serves it as owner 0x800b on the GLINK channel PMIC_RTR_ADSP_APPS,
 which PianoPower owns (its charger owner 0x800a and the port owner 0x800c are there too), so no `PianoAdspContract.h` port reaches it.
@@ -461,7 +502,7 @@ take within 2 s is withdrawn (`state` withdraws a pending ask), so it can never 
 yet is H9's side for our host session: PianoUsbHost is not in the power tree, so a sleep entered during a host session does not stop
 our probe or Apple's xHCI first (the switch is default off; do not combine it with sleep tests).
 
-## 7. Boot args and component
+### 7. Boot args and component
 
 | Boot arg | Default | Effect |
 |---|---|---|
@@ -484,7 +525,18 @@ our probe or Apple's xHCI first (the switch is default off; do not combine it wi
 | `piano-usbhost-handoff=0/5/6` | 0 | levels 3/4: **the role switch**: 0 the decision published only ("would switch"); 5 host sessions with our probe; 6 with Apple's xHCI on the nub (`PIANO_USBHOST_STACK=1`). With `piano-usb>=2` it also needs PianoDwc3's `piano-usb-handoff=1`, else refused at start |
 | `piano-usbhost-debounce=MS` | 1000 | levels 3/4: how long the decision must read host before the switch (at most 10000); device is at once |
 | `piano-usbhost-uor=0/1/2` | 0 | level 4, a test switch: SET_UOR once per generation at the first connected status: 1 ask for DFP (we host), 2 for UFP |
+| `piano-usbhost-sinkhost=0/1` | 0 | levels 3/4 with `-handoff=6`, the real path (U1: the first real-device session; no `piano-usbhost-test-loan`): 0 host only for a UFP partner while we source VBUS (OTG adapter, bus-powered device); 1 also while the partner powers the bus (a hub or dock with PD pass-through after its data-role swap). `PortRole.h hostGate`; logged `usb-host2: ... [PianoUsbHost2V1]` (the gate, and the power direction on `loan BEGIN`). The loan stays bounded by `piano-usbhost-back`; the unplug, a role change, a stale snapshot or the deadline returns the core to device mode. With `piano-power-own-bus=1` PianoPower takes our own VBUS as no source (Q17) |
 | `piano-usb-handoff=0/1` (PianoDwc3) | 0 | PianoDwc3 answers PianoUsbHost's release/reclaim (UsbHandoff.h) and registers its service for it; 0: the controller is PianoDwc3's for the whole boot |
+
+`PIANO_KEXT_PROFILE=usbhost-a2` (`tooling/k27/build-native-image.sh`) selects `PIANO_USBHOST_A2=1` on the full native list
+(including PianoTouch, PianoCamera and PianoDp), so the KC
+carries PianoXhciHost, PianoUsbHostStackA2 and through it Apple's hub, composite, HID, mass-storage and USB-Ethernet class drivers,
+gated (`check-usbhost-stack.py`). The daily list stays without them. Two gaps of the earlier A2 collection are closed in
+`PianoUsbHostStackA2.json` (2026-11-21): `IOSCSIBlockCommandsDevice` (IOSCSIPeripheralDeviceType00: without it a stick ends at its
+IOSCSIPeripheralDeviceNub, no IOMedia), and a kernel HID path (Apple's IOUSBHostHIDDevice matches only boot keyboards, deferred
+until the IOKit daemon is up; stock macOS serves other HID interfaces with driver extensions, untested here): IOUSBHostHIDDevice on
+HID interfaces and IOHIDFamily's IOHIDEventDriver for USB keyboards, mice and consumer controls. The three fallback personalities
+require a `PianoUsbHostNub` ancestor, leaving the gadget's USB-transport HID devices outside their match.
 
 Levels 5 and 6 refuse (and run the level 1 survey) while PianoDwc3 owns the controller (`piano-usb>=2`). The one exception is level
 5's **hand-off by time**: `piano-usbhost-back=S` and `piano-usb-delay >= piano-usbhost-delay + S + 30`: the host session ends, the core
@@ -508,7 +560,7 @@ only — see the descriptor's comment: naming `IOUSBHostFamily` as well would ma
 tool `tooling/k27/xhci-abi.py`. It is **not** in `configs/k27-native-kexts.txt`: only `PIANO_USBHOST_A2=1` links it, together with
 `PianoUsbHostStackA2` instead of `PianoUsbHostStack` (§5.4).
 
-## 8. Hardware test plan and ladder
+### 8. Hardware test plan and ladder
 
 RAM boots, owner present, Ubuntu returns on reboot. Each step is opt-in by boot argument; H1 writes nothing.
 
@@ -550,10 +602,10 @@ PianoUsbHost: done: N MMIO loads, 0 MMIO stores; P pages mapped, 0 map failures
 Fail-safe: a load from a block whose gate read on cannot write anything; a stall is a watchdog reset back to ABL/Ubuntu;
 `piano-usbhost-xhci=0`, `-qmp=0`, `-spmi=0` remove each part.
 
-### 8.1 H5 test images (`piano-usbhost=5`)
+#### 8.1 H5 test images (`piano-usbhost=5`)
 
 RAM boots through the native loop (`tooling/native/native-loop.sh IMAGE`: the test runs until `piano-reset-after`, then the dump
-image pulls its log from the pstore mailbox; `grep PianoUsbHost logs/native-runs/<ts>-loop/xnu-console.txt`). Built and linked
+image pulls its log from the pstore mailbox; `grep PianoUsbHost "$CONSOLE_LOG"`). Built and linked
 2026-11-11 (default collection: 48 kexts kept, as before), not booted.
 
 | Image | Build | What it shows |
@@ -616,7 +668,7 @@ take), `GSTS.CURMOD does not read host` (the role did not change: try `-csr=1`);
 the doorbell: compare ERSTBA/ERDP read back), `the completion points at another TRB` (a 64-bit address mis-latched: the region
 should be below 4 GiB), a code other than 1 (a TRB the controller rejects).
 
-### 8.2 H6 test images (`piano-usbhost=6`, path A1)
+#### 8.2 H6 test images (`piano-usbhost=6`, path A1)
 
 | Image | Build | What it shows |
 |---|---|---|
@@ -654,11 +706,11 @@ controller on: also A2). DCBAAP/ERSTBA above 4 GiB with `HSE` or no events → t
 low half first): our own 32-bit IOMapper on stream 0x40 (no Apple ABI) or A2's 64-bit write override. A device on the port (with
 VBUS, as H5c) counted under `USB devices` with its idVendor:idProduct is the H6 pass's first half (ioreg: IOUSBHostDevice).
 
-### 8.3 H3/H4 test images and the batched tablet list (`piano-usbhost=3|4`)
+#### 8.3 H3/H4 test images and the batched tablet list (`piano-usbhost=3|4`)
 
-Built like image G2 (charging.md §5e), in the main checkout (`PIANO_K27_TREE` from `~/.config/piano/env`): RAM boots through
-`tooling/native/native-loop.sh IMAGE out/ram-dump/boot-piano-macos-ram-A-bundled.img`; the logs from the pstore mailbox
-(`logs/native-runs/<ts>-loop/xnu-console.txt`) and, while the Mac cable is in, the USB console (`python3 tooling/native/usb-console.py
+Built like image G2 (charging.md §5e), in the main checkout with `PIANO_K27_TREE` set: RAM boots through
+`tooling/native/native-loop.sh IMAGE out/ram-dump/boot-piano-macos-ram-A-bundled.img`; the logs come from the pstore mailbox
+(`CONSOLE_LOG` in the example) and, while the Mac cable is in, the USB console (`python3 tooling/native/usb-console.py
 --capture 1000 &`). Every image runs PianoPower at level 2 **with writes** (the board configuration is the H3 prerequisite; it also
 writes the input limit and charge current, as image I / P1 do). Common prefix:
 
@@ -667,7 +719,7 @@ PIANO_GPU=2 PIANO_VMM_PRESENT=0 PIANO_MENU_TIMEOUT=0 PIANO_RESET_AFTER=420 \
   PIANO_EXTRA_ARGS="exec-log=1 piano-usb=2 piano-power=2 <the image's arguments>" tooling/k27/build-native-image.sh
 mkdir -p out/ram-usbc/<image> && cp out/ram/boot-piano-macos-ram-A-bundled.img out/ram/build-A-bundled.json out/ram-usbc/<image>/
 grep -E 'PianoUsbHost: (level|port|ucsi|role|hand-off|stage 4|host|No-Op|port [0-9])|PianoPower: (ucsi|mca: (USB-C|board|write)|\[[0-9]+s\] (usb|diag port))|PianoDwc3: hand-off' \
-  logs/native-runs/<ts>-loop/xnu-console.txt
+  "$CONSOLE_LOG"
 ```
 
 | # | Image | Arguments | Attended? | Plugs | What it answers |
@@ -759,15 +811,13 @@ Risks of the batch (also §6.6): U1/A1/A2 send UCSI commands to the DSP's PPM fo
 handles them badly could stall its Type-C state machine (charging included) until the next DSP start, which natively is the next boot;
 U0 first isolates that. A2 writes the controller (as H5) and hands it between two kexts for the first time.
 
-### 8.4 The first A2 probe (`out/ram-a2`, 27.3, unattended, path A2)
+#### 8.4 The first A2 probe (`out/ram-a2`, 27.3, unattended, path A2)
 
-The image and its dump companion are built by `private/host-checks/20261114-a2/build-image.sh` (local; no device access) from the
-A2 collection of `PIANO_USBHOST_A2=1 tooling/k273/build-k273-image.sh`. Arguments: the installed `macos-27.3` line of
-`out/persistent/esp-k273-v2.json` plus its `boot_args_split` tail, without `piano-boot-args=macos`, `data-store-lba` and
-`data-persist=2`; `data-persist=0` (the owner's Data store is never opened: seed `/Volumes/ExtSSD/k273/v2/seed-200.img`, trust
-`…/layer/kernel.macho.trustcache`); PianoDwc3's `piano-usb*` arguments removed, because at level 6 the host probe owns the
-controller (`piano-usb=0`, so **there is no USB console and no root shell in this boot** — the log is the pstore mailbox, pulled by
-`out/ram-a2-dump`); then
+The 2026-11-14 image and dump companion used the A2 collection from `PIANO_USBHOST_A2=1 tooling/k273/build-k273-image.sh`.
+The installed `macos-27.3` boot line and `boot_args_split` tail supplied the starting arguments. The RAM image dropped
+`piano-boot-args=macos` and `data-store-lba` and switched to `data-persist=0`, using a seed and trust cache from the same layout.
+At level 6 the host probe owns the controller. With `piano-usb=0`, the pstore mailbox supplies the console log via the dump image.
+The probe used these arguments:
 
 ```
 piano-usb=0 piano-usbhost=6 piano-usbhost-a2=1 piano-usbhost-delay=30 piano-usbhost-attach=3 piano-usbhost-irq=1
@@ -780,11 +830,10 @@ Built 2026-11-14 from the A2 collection `660bced2…` (the ADT, trust cache and 
 `a0e0a6e92acd44f4362830aac42aa3894421b0127be95b00a953f15f3ed643fa`; both `verify-ram-images.py PASS: 0 failure(s)` and below the
 250,000,000-byte limit. Run it like the other RAM probes: `tooling/native/native-loop.sh
 out/ram-a2/boot-piano-macos-ram-A-bundled.img out/ram-a2-dump/boot-piano-macos-ram-A-bundled.img`, then
-`grep -E 'PianoXhciHost|PianoUsbHost' logs/native-runs/<ts>-loop/xnu-console.txt`. Nothing needs a hand on the tablet; with
+`grep -E 'PianoXhciHost|PianoUsbHost' "$CONSOLE_LOG"`. Nothing needs a hand on the tablet; with
 nothing in the port the probe still answers questions 1–9 below. **`piano-touch=2` is in the line but PianoTouch is not in this
 collection** (the stack's kexts keep their addresses and leave no `__DATA_CONST` gap for it, §5.2a): expect no `PianoTouch:` line
-and do not read that as a touch regression. End the run as soon as the lines below are read (`reset fastboot`): there is no reason
-to wait out the 900 s.
+and do not read that as a touch regression. The 900 s reset timer returns the probe to fastboot for the dump image.
 
 **What this boot must answer, and the line that answers it** (values to be measured; the log is the mailbox copy):
 
@@ -803,7 +852,7 @@ to wait out the 900 s.
 | 11 | Does the interrupt line work or does it have to be polled? | the `interrupt SPI 133: N entries …` counters growing in later lines; `0 entries` with events arriving means the poll fallback is doing the work (`piano-usbhost-irq=0` isolates it) |
 | 12 | Did anything of Apple's stack load that should not have? | `PianoUsbHost: stack: AppleUSBHostResources up (IOUSBHostFamily loaded through the gate)` is expected; no `IOUSBMassStorageDriver`/hub/HID matching lines before a device is attached |
 | 13 | The summary, for the result table | `PianoUsbHost: host summary: switch ok \| probe PASS \| nub up \| PianoXhciHost attached \| USB devices 0 (last 0000:0000) \| interrupt SPI 133 \| host kept` |
-| 14 | Did the boot stay healthy (the rest of the image is the installed profile)? | `piano-boot-guard: healthy after 180 s`, `NativeRamBlock: Data store state` 1/3 (volatile, **never** 2), the Wi-Fi and charging lines as in the installed boot, and the return to fastboot at 900 s |
+| 14 | Did the RAM boot reach userspace and return to fastboot? | `piano-boot-guard: piano-reset-after=900 owns the watchdog and the restart reason: the guard stays off` (if the profile enables the guard), `NativeRamBlock: Data store state` 1/3 (volatile, **never** 2), the Wi-Fi and charging lines, and the return to fastboot at 900 s |
 
 With a device in the port (attended, later): `USB devices 1` with its `idVendor:idProduct` and, for a stick, a mount — that is the
 H6 pass. This first boot deliberately needs nobody at the tablet: a bus-powered device would also need the DSP's VBUS (H3).
@@ -815,7 +864,7 @@ with the A2 line present means the metaclass did not register: read `OSKext` lin
 `write64` line means Apple's start refused before touching a 64-bit register (a provider property or a resource it wants, not the
 accessors).
 
-## 9. Fallback
+### 9. Fallback
 
 Without `piano-usbhost` nothing changes: PianoDwc3 owns the port in device mode (console, HID, NCM), PianoPower reads the Type-C
 state for charging (and its relay has no client: PianoMca sees every message as before); without `PIANO_USBHOST_STACK=1` the collection is the usual one, and with it nothing of Apple's stack loads
@@ -823,7 +872,7 @@ unless `piano-usbhost=6` opens the gate. At levels 5 and 6 a failed step stops t
 with `piano-usbhost-back=S` the core is returned to device mode, else it stays as left until the next boot (the firmware resets the
 controller for its own device mode). Later, the role manager (H8) returns the core to device mode itself.
 
-## 10. Open questions
+### 10. Open questions
 
 1. PRTCAPDIR, the IP revision (soft reset needed?), the root ports and their protocols after the UEFI → H1.
 2. Does the PMIC's CC bit agree with gpio61 (high = reverse) and the PHY's select in both orientations? → H1b.
@@ -853,9 +902,9 @@ controller for its own device mode). Later, the role manager (H8) returns the co
     only" or "none"?), and does its orientation agree with gpio61 in both plug orientations? → U0/A1 `port: notification` lines.
 16. Does PianoDwc3's takeover run cleanly a second time after a host session (event buffer, FIFOs, the UTMI selection kept), and
     does the Mac's CDC-ACM driver enumerate it again? → A2.
-17. PianoPower's built-in policy counts our own 5 V as a source attached while we source (§6.4): its owner's decision.
+17. Does the opt-in PianoPower guard exclude sourced VBUS while preserving charge holds (§6.4)? → Phase U4 and U5.
 
-## 11. Licence note
+### 11. Licence note
 
 PianoUsbHost, PianoUsbHostStandIn and PianoXhciHost are BSD-2-Clause-Patent (`LICENSE`, `UPSTREAM` in each package). Linux
 (GPL-2.0) is the specification only: behaviour and offsets cited by file and function, nothing pasted (dwc3 and xhci for level 5,
@@ -864,9 +913,8 @@ the `write-64-hi-lo-quirk` fact for A2). QcomDwc3 and Project-SunUEFI are BSD-2-
 read as the **design decision** behind A2 (which three slots, and why each one) and is cited in `package/PianoXhciHost/UPSTREAM`,
 with the code written anew here; their GPL PHY headers are not used.
 
-**Path A2 and Apple's binary** (owner's approval, 2026-11-14): the class's vtable layout was analysed offline
-(`private/host-checks/20261114-xhci/REPORT.md`, local only) and the result reused from UniXNU-sheng's reviewed fixture of the same
-collection. What is in this repository is **our analysis data**: slot numbers, PAC diversities, symbol names, the instance size and
+**Path A2 and Apple's binary** (owner's approval, 2026-11-14): the analysis reused the vtable layout from UniXNU-sheng's
+reviewed fixture of the same collection. The tracked analysis data records slot numbers, PAC diversities, symbol names, the instance size and
 synthetic declaration names (`data/usb-xhci/abi-26C5035r-mac17j.json`, provenance in `data/usb-xhci/README.md`). No Apple code,
 Apple bytes, Apple binary or payload is committed, and the generated declaration header and thunks are build outputs under
 `out/native-kexts/PianoXhciHost/`. From the collection itself only kext names, class names, OSBundleLibraries, Info.plist matching

@@ -15,19 +15,15 @@
 @property(nonatomic, strong) dispatch_semaphore_t ready;
 @end
 @implementation CompatFrameProbe
-- (void)publish:(CVPixelBufferRef)pb ticks:(uint64_t)ticks sequence:(uint64_t)sequence drops:(uint64_t)drops
+- (void)deliverSample:(CMSampleBufferRef)sample discontinuity:(CMIOExtensionStreamDiscontinuityFlags)flags hostTime:(uint64_t)ns
 {
-  [super publish:pb ticks:ticks sequence:sequence drops:drops];
+  [super deliverSample:sample discontinuity:flags hostTime:ns];
   ++frames;
-  if (frames != 1 && frames != 32) return;
-  CMFormatDescriptionRef fd = NULL;
-  CMSampleBufferRef sample = NULL;
-  CMSampleTimingInfo timing = {CMTimeMake(1, 30), CMClockMakeHostTimeFromSystemUnits(ticks), kCMTimeInvalid};
-  assert(!CMVideoFormatDescriptionCreateForImageBuffer(NULL, pb, &fd));
-  assert(!CMSampleBufferCreateReadyWithImageBuffer(NULL, pb, fd, &timing, &sample));
-  CFRelease(fd);
-  if (frames == 1) first = sample;
-  else { later = sample; dispatch_semaphore_signal(self.ready); }
+  if (frames == 1) first = (CMSampleBufferRef)CFRetain(sample);
+  else if (frames == 32) {
+    later = (CMSampleBufferRef)CFRetain(sample);
+    dispatch_semaphore_signal(self.ready);
+  }
 }
 - (void)dealloc { if (first) CFRelease(first); if (later) CFRelease(later); }
 @end

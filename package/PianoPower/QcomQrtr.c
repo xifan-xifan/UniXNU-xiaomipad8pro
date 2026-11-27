@@ -21,8 +21,8 @@ void qcom_qrtr_init(QcomQrtr *q, uint32_t local_node, QcomQrtrSend send, void *s
 static int emit(QcomQrtr *q, uint32_t type, uint32_t from_port, uint32_t node, uint32_t port, const uint8_t *data, uint32_t length)
 {
     uint8_t packet[MAX_PACKET];
+    if (length > QCOM_QRTR_MAX_DATA) return -1;
     const uint32_t padded = (length + 3) & ~3u;
-    if (QCOM_QRTR_HEADER + padded > sizeof packet) return -1;
     put32(packet, 1);
     put32(packet + 4, type);
     put32(packet + 8, q->local_node);
@@ -149,6 +149,12 @@ int qcom_qrtr_receive(QcomQrtr *q, const uint8_t *packet, uint32_t length)
     const uint32_t confirm = le32(packet + 16), size = le32(packet + 20), dst_port = le32(packet + 28);
     if (size > length - QCOM_QRTR_HEADER) {q->rx_bad++; return -1;}
     const uint8_t *data = packet + QCOM_QRTR_HEADER;
+    /* Control packets carry their command again in the payload. Server changes need all four words. */
+    if (type != QCOM_QRTR_DATA &&
+        (size < 4 || le32(data) != type || ((type == QCOM_QRTR_NEW_SERVER || type == QCOM_QRTR_DEL_SERVER) && size < CTRL_BYTES))) {
+        q->rx_bad++;
+        return -1;
+    }
     q->rx_packets++;
     if (type == QCOM_QRTR_DATA) {
         q->rx_data++;
@@ -162,8 +168,6 @@ int qcom_qrtr_receive(QcomQrtr *q, const uint8_t *packet, uint32_t length)
         }
         return 0;
     }
-    /* control packets carry their command again in the payload */
-    if (size < 4) {q->rx_bad++; return -1;}
     switch (type) {
     case QCOM_QRTR_HELLO:
         q->remote_node = src_node;
@@ -173,7 +177,7 @@ int qcom_qrtr_receive(QcomQrtr *q, const uint8_t *packet, uint32_t length)
         break;
     case QCOM_QRTR_NEW_SERVER:
     case QCOM_QRTR_DEL_SERVER:
-        if (size >= CTRL_BYTES) remote_server(q, data + 4, type == QCOM_QRTR_NEW_SERVER);
+        remote_server(q, data + 4, type == QCOM_QRTR_NEW_SERVER);
         break;
     case QCOM_QRTR_BYE:
         q->remote_count = 0;

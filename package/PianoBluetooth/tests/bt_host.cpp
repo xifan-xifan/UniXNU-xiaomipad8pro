@@ -8,7 +8,8 @@
 //   QcaCodec.h  the commands' bytes, the reply parsers, the file names, the NVM tag patcher and its bounds, the download plan, and
 //               the whole set-up sequence against a simulated controller, with faults (no answer at the new speed, a missing board
 //               NVM, no NVM at all, a hardware error during the download, a failing reset, a malformed version, a stop request)
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. bt_host.cpp -o /tmp/bt_host && /tmp/bt_host
+//   c++ -std=c++20 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I.. bt_host.cpp -o /tmp/bt_host && /tmp/bt_host
+#include "BtUartRing.h"
 #include "GeniUart.h"
 #include "HciH4.h"
 #include "QcaCodec.h"
@@ -275,6 +276,72 @@ static void testH4()
   CHECK(!parseCommandComplete(bad, 5, cc));   // its length byte says 4 parameters, only 3 are there
 }
 
+static void testH4LengthLimits()
+{
+  const std::vector<std::vector<uint8_t>> frames = {
+    {kH4Command, 0x03, 0x0c, 255},
+    {kH4Event, kEvVendor, 255},
+    {kH4Acl, 1, 0x20, 0, 4},
+    {kH4Acl, 1, 0x20, 1, 4},
+    {kH4Acl, 1, 0x20, 0xff, 0xff},
+  };
+  const size_t payloads[] = {255, 255, 1024, 1025, 65535};
+  const uint8_t next[] = {kH4Event, kEvVendor, 0};
+  for (size_t i = 0; i < frames.size(); ++i) {
+    auto frame = frames[i];
+    frame.resize(frame.size() + payloads[i], kIbsWakeInd);
+    H4Decoder decoder;
+    Seen seen;
+    decoder.feed(frame.data(), frame.size() - 1, sinkFor(seen));
+    CHECK(!decoder.idle() && seen.packets.empty() && seen.ibs.empty());
+    decoder.feed(frame.data() + frame.size() - 1, 1, sinkFor(seen));
+    const bool fits = frame.size() - 1 <= H4Decoder::kMax;
+    CHECK(decoder.idle() && decoder.stats().oversized == unsigned(!fits));
+    CHECK(seen.packets.size() == size_t(fits) && seen.ibs.empty());
+    if (fits && !seen.packets.empty())
+      CHECK(seen.packets.front().first == frame[0] &&
+            seen.packets.front().second == std::vector<uint8_t>(frame.begin() + 1, frame.end()));
+    decoder.feed(next, sizeof next, sinkFor(seen));
+    CHECK(decoder.idle() && seen.packets.size() == size_t(fits) + 1);
+
+    // Losing a transport mid-header or mid-payload discards the partial frame.
+    for (size_t cut : {size_t(1), frames[i].size() - 1, frame.size() - 1}) {
+      seen = {};
+      decoder.feed(frame.data(), cut, sinkFor(seen));
+      CHECK(!decoder.idle() && seen.packets.empty());
+      decoder.reset();
+      decoder.feed(next, sizeof next, sinkFor(seen));
+      CHECK(decoder.idle() && seen.packets.size() == 1);
+    }
+  }
+  const uint8_t badComplete[] = {kEvCommandComplete, 2, 1, 0};
+  const uint8_t badStatus[] = {kEvCommandStatus, 3, 0, 1, 3, 0};
+  CommandComplete complete;
+  CommandStatus status;
+  CHECK(!parseCommandComplete(badComplete, sizeof badComplete, complete));
+  CHECK(!parseCommandStatus(badStatus, sizeof badStatus, status));
+}
+
+static void testUartRing()
+{
+  std::vector<uint8_t> ring(BT_TTY_FIFO), in(BT_TTY_FIFO), out(BT_TTY_FIFO);
+  for (size_t i = 0; i < in.size(); ++i) in[i] = uint8_t(i ^ (i >> 8));
+  uint32_t head = BT_TTY_FIFO - 2, len = 0;
+  bt_tty_fifo_put(ring.data(), head, &len, nullptr, 0);
+  bt_tty_fifo_get(ring.data(), &head, &len, nullptr, 0);
+  CHECK(head == BT_TTY_FIFO - 2 && len == 0);
+  bt_tty_fifo_put(ring.data(), head, &len, in.data(), BT_TTY_FIFO);
+  CHECK(len == BT_TTY_FIFO && ring[BT_TTY_FIFO - 2] == in[0] && ring[0] == in[2]);
+  uint8_t prefix[3] = {};
+  bt_tty_fifo_get(ring.data(), &head, &len, prefix, sizeof prefix);
+  CHECK(head == 1 && len == BT_TTY_FIFO - sizeof prefix && !memcmp(prefix, in.data(), sizeof prefix));
+  bt_tty_fifo_put(ring.data(), head, &len, prefix, sizeof prefix);
+  CHECK(len == BT_TTY_FIFO);
+  bt_tty_fifo_get(ring.data(), &head, &len, out.data(), BT_TTY_FIFO);
+  CHECK(head == 1 && len == 0 && !memcmp(out.data(), in.data() + sizeof prefix, BT_TTY_FIFO - sizeof prefix) &&
+        !memcmp(out.data() + BT_TTY_FIFO - sizeof prefix, prefix, sizeof prefix));
+}
+
 // ------------------------------------------------------------------------------------------------------------ LE event mask patch
 static std::vector<uint8_t> leMaskStream()
 {
@@ -356,6 +423,23 @@ static void testLeMask()
     uint8_t c[] = {0x99, 0x01, 0x01, 0x20, 0x08, 0x1f, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
     p.patch(c, sizeof c, true, [](const H4LeMaskPatcher::Seen &) {});
     CHECK(c[0] == 0x99 && c[5] == 0x5f && c[6] == 0x18 && p.stats().resyncs == 1);
+  }
+  // After a transport reset a truncated ACL or mask must give way to the first new command.
+  const std::vector<uint8_t> mask = {kH4Command, 1, 0x20, 8, 1, 0, 0, 0, 0, 0, 0, 0x80};
+  const std::vector<uint8_t> acl = {kH4Acl, 1, 0x20, 0xff, 0xff};
+  for (const auto *frame : {&mask, &acl}) {
+    for (size_t cut = 1; cut < frame->size(); ++cut) {
+      H4LeMaskPatcher p;
+      auto partial = *frame;
+      auto next = mask;
+      p.patch(partial.data(), cut, true, [](const H4LeMaskPatcher::Seen &) {});
+      CHECK(p.stats().masks == 0);
+      p.reset();
+      p.patch(next.data(), next.size(), true, [](const H4LeMaskPatcher::Seen &seen) {
+        CHECK(seen.from == 0x8000000000000001ull && seen.to == 0x8000000000000841ull);
+      });
+      CHECK(p.stats().masks == 1 && p.stats().patched == 1 && next[4] == 0x41 && next[5] == 0x08 && next.back() == 0x80);
+    }
   }
 }
 
@@ -451,6 +535,9 @@ static void testLeReady()
     a.onHostAcl(mtuRsp, sizeof mtuRsp);
     a.onHostAcl(smpRsp, sizeof smpRsp);
     a.onHostAcl(contFrag, sizeof contFrag);
+    a.onHostAcl(mtuReq, sizeof mtuReq - 1);   // ACL payload shorter than the header says
+    uint8_t badL2cap[] = {1, 0, 5, 0, 0, 0, 4, 0, 0x02};
+    a.onHostAcl(badL2cap, sizeof badL2cap);   // L2CAP header declares no data
     CHECK(a.stats().hostStarted == 0);
     a.onHostAcl(mtuReq, sizeof mtuReq);
     std::vector<LeReadyAssist::Inject> got;
@@ -855,6 +942,11 @@ static void testRadioRssi()
     wrongLen[1] = uint8_t(wrongLen[1] + 1);   // a length byte that does not match: ignored entirely
     r.onEvent(wrongLen.data(), wrongLen.size());
     CHECK(r.stats().leReports == 5);
+    auto shortData = b;
+    shortData.pop_back();
+    shortData[1] = uint8_t(shortData.size() - 2);   // complete H4 frame, truncated final report
+    r.onEvent(shortData.data(), shortData.size());
+    CHECK(r.stats().malformed == 2 && r.stats().leReports == 5);
   }
   {
     RadioRssi r;
@@ -903,6 +995,8 @@ int main()
   testClockPlan();
   testUartPlan();
   testH4();
+  testH4LengthLimits();
+  testUartRing();
   testLeMask();
   testLeReady();
   testRadioRssi();

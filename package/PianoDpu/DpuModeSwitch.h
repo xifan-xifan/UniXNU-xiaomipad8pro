@@ -95,6 +95,11 @@ template <class Io>
 const char *sendRateGroup(Io &io, const RateGroup &group, const LinkWords &timing, bool &transmitted, bool restoring = false)
 {
   using namespace panel;
+  constexpr unsigned lo = kVActiveEnd + 4, kLeadLines = 8, kTailLines = 24;
+  transmitted = false;
+  if (!group.count || group.count > sizeof group.w / sizeof group.w[0]) return "invalid DSI rate group";
+  if (!timing.htotal || timing.htotal > UINT16_MAX || timing.vtotal < lo + kLeadLines + kTailLines)
+    return "no common DSI front porch for the command";
   LinkSaved saved[2];
   const bool ready[] = {readCommandLink(io, 0, saved[0]), readCommandLink(io, 1, saved[1])};
   if ((!ready[0] || !ready[1]) && (!restoring || (!ready[0] && !ready[1])))
@@ -107,7 +112,7 @@ const char *sendRateGroup(Io &io, const RateGroup &group, const LinkWords &timin
   bool prepared = true;
   bool triggered[2] = {};
   bool done[2] = {};
-  uint64_t blankDeadline = 0;
+  uint64_t blankStart = 0, blankUs = 0;
   for (unsigned l = 0; l < 2; ++l) {
     if (!ready[l]) continue;
     const auto &s = saved[l];
@@ -129,15 +134,15 @@ const char *sendRateGroup(Io &io, const RateGroup &group, const LinkWords &timin
   }
   const char *why = prepared ? "no common DSI front porch for the command" : "DSI command setup failed read-back";
   if (prepared) {
-    const unsigned vtotal = timing.vtotal, lo = kVActiveEnd + 4, hi = vtotal - 24;
+    const unsigned vtotal = timing.vtotal, hi = vtotal - kTailLines;
     for (unsigned attempt = 0; attempt < 3; ++attempt) {
-      if (!waitLines(io, lo + 8, hi, vtotal, 55000, lineNs(timing.htotal))) break;
+      if (!waitLines(io, lo + kLeadLines, hi, vtotal, 55000, lineNs(timing.htotal))) break;
       const uintptr_t irq = io.irqOff();
       const unsigned a = io.rd(intfReg(1, kIntfLineCount)), b = io.rd(intfReg(2, kIntfLineCount));
       const bool blank = a >= lo && a <= hi && b >= lo && b <= hi;
       if (blank) {
-        const uint64_t remaining = uint64_t(vtotal - (a > b ? a : b) - 1) * lineNs(timing.htotal) / 1000;
-        blankDeadline = io.nowUs() + remaining;
+        blankUs = uint64_t(vtotal - (a > b ? a : b) - 1) * lineNs(timing.htotal) / 1000;
+        blankStart = io.nowUs();
         for (unsigned l = 0; l < 2; ++l)
           if (ready[l]) triggered[l] = io.wr(dsiReg(l, kDsiTrigDma), 1);
       }
@@ -151,19 +156,19 @@ const char *sendRateGroup(Io &io, const RateGroup &group, const LinkWords &timin
       io.delayUs(25);
     }
   }
-  const uint64_t start = io.nowUs(), end = start + kDmaDoneTimeoutUs;
+  const uint64_t start = io.nowUs();
   do {
     for (unsigned l = 0; l < 2; ++l)
       done[l] = !triggered[l] ||
                 ((io.rd(dsiReg(l, kDsiIntrCtrl)) & kIntDmaDone) && !(io.rd(dsiReg(l, kDsiStatus0)) & kStatusDmaBusy));
     const uint64_t now = io.nowUs();
     if (done[0] && done[1]) {
-      if (!why && now >= blankDeadline) why = "DSI DMA completion was not observed inside the common front porch";
+      if (!why && now - blankStart >= blankUs) why = "DSI DMA completion was not observed inside the common front porch";
       break;
     }
-    if (now < blankDeadline && now - start < 250) io.delayUs(2);
+    if (now - blankStart < blankUs && now - start < 250) io.delayUs(2);
     else io.sleepMs(1);
-  } while (io.nowUs() < end);
+  } while (io.nowUs() - start < kDmaDoneTimeoutUs);
   for (unsigned l = 0; l < 2; ++l) {
     if (!ready[l]) continue;
     if (!done[l]) {
@@ -308,9 +313,8 @@ Result switchTiming(Io &io, unsigned hz, const Options &o)
       if (w.pixelClockHz == kPixelClockHz && !firstDifference(w, live)) before[l] = w;
     }
     after[l] = plan(g, *target);
-    if (!before[l].hz || (l && before[l].hz != before[0].hz) ||
-        after[l].pixelClockHz != kPixelClockHz || (p.link[l].config & kIntfConfigProgFetchEn &&
-        (!g.fetchLines || g.fetchLines > after[l].vfp || g.fetchOffset >= after[l].htotal))) {
+    if (!before[l].hz || (l && before[l].hz != before[0].hz) || after[l].pixelClockHz != kPixelClockHz ||
+        ((p.link[l].config & kIntfConfigProgFetchEn) && !g.fetchLines)) {
       r.why = "live timing or programmable fetch is outside the panel's mode family";
       return r;
     }

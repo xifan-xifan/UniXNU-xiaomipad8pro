@@ -22,7 +22,8 @@ static inline int pianoOutputDiscontinuity(int formatChanged, uint64_t lastNs, u
 {
   if (formatChanged) return 1;
   if (!lastNs || nowNs <= lastNs) return 0;
-  return nowNs - lastNs > PIANO_OUTPUT_MAX_SOURCE_AGE_NS + intervalNs;
+  const uint64_t gap = nowNs - lastNs;
+  return gap > intervalNs && gap - intervalNs > PIANO_OUTPUT_MAX_SOURCE_AGE_NS;
 }
 
 typedef struct {
@@ -75,29 +76,36 @@ static inline PianoOutputRect pianoOutputFit(uint32_t sw, uint32_t sh, uint32_t 
   return r;
 }
 
-// Source is immutable BGRA. Pixel-center nearest sampling avoids any temporary frame allocation.
-static inline void pianoOutputScaleBGRA(const uint8_t *src, uint32_t sw, uint32_t sh, size_t ss,
-                                        uint8_t *dst, uint32_t dw, uint32_t dh, size_t ds)
+static inline int pianoOutputRowsValid(size_t stride, uint64_t rowBytes, uint32_t height)
 {
+  return rowBytes && rowBytes <= stride && height && stride <= SIZE_MAX / height;
+}
+
+// Source is immutable BGRA. Pixel-center nearest sampling avoids any temporary frame allocation.
+static inline int pianoOutputScaleBGRA(const uint8_t *src, uint32_t sw, uint32_t sh, size_t ss,
+                                       uint8_t *dst, uint32_t dw, uint32_t dh, size_t ds)
+{
+  if (!src || !dst || !pianoOutputRowsValid(ss, (uint64_t)sw * 4, sh) ||
+      !pianoOutputRowsValid(ds, (uint64_t)dw * 4, dh)) return 0;
   const PianoOutputRect r = pianoOutputFit(sw, sh, dw, dh);
-  if (!r.width || !r.height) return;
   if (sw == dw && sh == dh) {
     for (uint32_t y = 0; y < dh; ++y) memcpy(dst + y * ds, src + y * ss, (size_t)dw * 4);
-    return;
+    return 1;
   }
   for (uint32_t y = 0; y < dh; ++y) {
     uint8_t *row = dst + y * ds;
-    for (uint32_t x = 0; x < dw; ++x) {
+    for (size_t x = 0; x < dw; ++x) {
       row[x * 4] = row[x * 4 + 1] = row[x * 4 + 2] = 0;
       row[x * 4 + 3] = 255;
     }
     if (y < r.y || y >= r.y + r.height) continue;
-    const uint32_t sy = (uint32_t)(((uint64_t)(y - r.y) * 2 + 1) * sh / ((uint64_t)r.height * 2));
+    const uint32_t sy = (uint32_t)(((uint64_t)(y - r.y) * sh + sh / 2) / r.height);
     for (uint32_t x = 0; x < r.width; ++x) {
-      const uint32_t sx = (uint32_t)(((uint64_t)x * 2 + 1) * sw / ((uint64_t)r.width * 2));
+      const uint32_t sx = (uint32_t)(((uint64_t)x * sw + sw / 2) / r.width);
       memcpy(row + (size_t)(r.x + x) * 4, src + sy * ss + (size_t)sx * 4, 4);
     }
   }
+  return 1;
 }
 
 // BT.709 video-range NV12. Complete both CPU planes before publishing the buffer;
@@ -106,8 +114,8 @@ static inline void pianoOutputScaleBGRA(const uint8_t *src, uint32_t sw, uint32_
 static inline int pianoOutputBGRAto420v(const uint8_t *src, uint32_t w, uint32_t h, size_t ss,
                                        uint8_t *ys, size_t yStride, uint8_t *uv, size_t uvStride)
 {
-  if (!src || !ys || !uv || !w || !h || (w & 1) || (h & 1) ||
-      ss < (size_t)w * 4 || yStride < w || uvStride < w) return 0;
+  if (!src || !ys || !uv || (w & 1) || (h & 1) || !pianoOutputRowsValid(ss, (uint64_t)w * 4, h) ||
+      !pianoOutputRowsValid(yStride, w, h) || !pianoOutputRowsValid(uvStride, w, h / 2)) return 0;
   for (uint32_t y = 0; y < h; y += 2) {
     for (uint32_t x = 0; x < w; x += 2) {
       int r = 0, g = 0, b = 0;

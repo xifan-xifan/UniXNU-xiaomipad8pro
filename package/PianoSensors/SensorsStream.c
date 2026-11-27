@@ -95,6 +95,12 @@ static void set_edge(SsEngine *e, int edge, uint64_t at)
     emit(e, SS_ACCEL, &t, at, 0);
 }
 
+static void reset_accel(SsEngine *e)
+{
+    sno_init(&e->orient);
+    e->last_accel_ticks = 0;
+}
+
 static void light_target(SsEngine *e, int32_t target, uint64_t at)
 {
     unsigned changed = 0;
@@ -145,6 +151,10 @@ static void apply(SsEngine *e, uint64_t at)
     e->ch[SS_LIGHT].why = held ? held : !c->light_consumer ? "no consumer" : c->display == 0 ? "display off"
                         : c->lid == 0 ? "lid closed" : 0;
     const int accel = !held && ss_accel_wanted(c);
+    if (!accel && e->accel.want) {
+        /* A quick gate cycle can leave the same SSC session on. Its edge and dwell still expire. */
+        reset_accel(e);
+    }
     pas_want(&e->accel, accel, at);
     e->ch[SS_ACCEL].why = held ? held : ss_accel_blocker(c);
     if (!accel) set_edge(e, PS_EDGE_NONE, at);
@@ -165,8 +175,7 @@ static void restart(SsEngine *e, int i, uint64_t at)
     ch->hub_rate_milli = 0;
     ch->sample_session = 0;
     if (i == SS_ACCEL) {
-        sno_init(&e->orient);
-        e->last_accel_ticks = 0;
+        reset_accel(e);
         set_edge(e, PS_EDGE_NONE, at);
     }
     apply(e, at);
@@ -184,7 +193,7 @@ void ss_init(SsEngine *e, const SsOps *ops, const SsConfig *config)
     if (e->cfg.accel_batch_ms > 1000) e->cfg.accel_batch_ms = 1000;
     pal_init(&e->light, &e->cfg.stream);
     pas_init(&e->accel, &e->cfg.stream);
-    sno_init(&e->orient);
+    reset_accel(e);
     e->cond.display = e->cond.lid = e->cond.attached = -1;
     e->out.target = -1;
     e->out.edge = PS_EDGE_NONE;
@@ -295,8 +304,15 @@ void ss_from_list(SsEngine *e, const ScClient *list)
 
 void ss_conditions(SsEngine *e, const SsConditions *c)
 {
+    const int cover_changed = (e->cond.attached == 1) != (c->attached == 1);
     e->cond = *c;
-    apply(e, now(e));
+    const uint64_t at = now(e);
+    if (cover_changed) {
+        /* Bench acquisition stays on through a cover change. Its orientation must still start over. */
+        reset_accel(e);
+        set_edge(e, PS_EDGE_NONE, at);
+    }
+    apply(e, at);
 }
 
 void ss_sleep(SsEngine *e, int asleep)
@@ -339,6 +355,10 @@ static void observe(SsEngine *e, int i, uint64_t at)
     SntText t;
     if (i == SS_LIGHT && (s->state == PAS_FAILED || s->dirty ||
         (s->state != PAS_ON && s->state != PAS_ENABLING))) light_invalid(e, s->state == PAS_FAILED);
+    if (i == SS_ACCEL && (s->dirty || (s->state != PAS_ON && s->state != PAS_ENABLING))) {
+        reset_accel(e);
+        set_edge(e, PS_EDGE_NONE, at);
+    }
     if (s->timeouts != ch->timeouts_seen) {
         ch->timeouts += s->timeouts - ch->timeouts_seen;
         ch->timeouts_seen = s->timeouts;
@@ -489,10 +509,7 @@ static void sample(SsEngine *e, int i, const SscSensorEvent *se, uint64_t at, ui
     if (se->count < 3) {ch->malformed++; return;}
     const int use = pas_event(s, at);
     if (use == PAS_EV_DROP) {ch->dropped++; return;}
-    if (use == PAS_EV_FIRST) {
-        sno_init(&e->orient);
-        e->last_accel_ticks = 0;
-    }
+    if (use == PAS_EV_FIRST) reset_accel(e);
     ch->samples++;
     if (se->status == 0) ch->unreliable++;
     if (ch->sample_session != s->sessions) {
@@ -504,9 +521,10 @@ static void sample(SsEngine *e, int i, const SscSensorEvent *se, uint64_t at, ui
         snt_km(&t, "z", sfx_milli(se->data[2]));
         snt_str(&t, " m/s^2");
         snt_kd(&t, "session", s->sessions);
+        if (e->cfg.accel_sample_time) snt_kx(&t, "qtimer", ticks);
         emit(e, i, &t, at, 0);
     }
-    uint64_t sample_ms = at;
+    int state;
     if (e->cfg.accel_sample_time) {
         const uint64_t ticks_per_ms = 19200;   /* SSC's 19.2 MHz QTimer */
         const uint64_t max_gap = 2 * 1000 * ticks_per_ms / e->cfg.accel_hz;
@@ -515,9 +533,10 @@ static void sample(SsEngine *e, int i, const SscSensorEvent *se, uint64_t at, ui
             e->orient.candidate = e->orient.state;
         e->last_accel_ticks = ticks;
         if (!ticks || ticks == last) return;
-        sample_ms = ticks / ticks_per_ms;
+        state = ps_accel_sample_at(&e->orient, &e->cfg.axes, se->data, ticks, SNO_HOLD_MS * ticks_per_ms);
+    } else {
+        state = ps_accel_sample(&e->orient, &e->cfg.axes, se->data, at);
     }
-    const int state = ps_accel_sample(&e->orient, &e->cfg.axes, se->data, sample_ms);
     if (state >= 0) set_edge(e, ps_edge_of(state), at);
 }
 
@@ -698,6 +717,7 @@ void ss_status(const SsEngine *e, int i, char *out, uint32_t size)
         snt_str(&t, " Hz asked");
     }
     if (ch->hub_rate_milli) snt_km(&t, " hub Hz", ch->hub_rate_milli);
+    if (i == SS_ACCEL && e->cfg.accel_sample_time) snt_kx(&t, "qtimer", e->last_accel_ticks);
     snt_kd(&t, "sessions", s->sessions);
     snt_kd(&t, "requests", ch->requests);
     snt_kd(&t, "answers", ch->responses);

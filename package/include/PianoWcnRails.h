@@ -181,7 +181,6 @@ static inline void piano_wcn_report(const PianoWcnRails *r, uint32_t event, uint
     if (r->ops->report) r->ops->report(r->ops->context, event, a, b);
 }
 static inline uint32_t piano_wcn_load(volatile uint32_t *w) { return __atomic_load_n(w, __ATOMIC_ACQUIRE); }
-static inline void piano_wcn_store(volatile uint32_t *w, uint32_t v) { __atomic_store_n(w, v, __ATOMIC_RELEASE); }
 
 // The owner bits and bit 31 (the rails are up). Any context.
 static inline uint32_t piano_wcn_rails_owners(const PianoWcnRails *r)
@@ -382,7 +381,7 @@ static inline int piano_wcn_rails_vote(PianoWcnRails *r, uint32_t *added)
     return PianoWcnOk;
 }
 
-// The client's rails: up, voted or verified, with the client an owner. 0, or an error (nothing of the state changed, no owner bit).
+// The client's rails: up, voted or verified, with the client an owner. An error adds no owner bit.
 static inline int piano_wcn_rails_get(PianoWcnRails *r, unsigned client)
 {
     if (!piano_wcn_valid(r) || !client || (client & ~(unsigned)PIANO_WCN_CLIENTS)) return PianoWcnArgument;
@@ -398,8 +397,8 @@ static inline int piano_wcn_rails_get(PianoWcnRails *r, unsigned client)
         unsigned bad = 0;
         r->step = PianoWcnStepVerify;
         if (piano_wcn_rails_verify(r, &bad)) {
-            s |= client;
-            piano_wcn_store(r->state, s);
+            // A peer that timed out in put can drop its bit even while we hold the lock.
+            s = __atomic_or_fetch(r->state, client, __ATOMIC_ACQ_REL);
             r->verifies++;
             piano_wcn_report(r, PianoWcnRailsVerified, s, 0);
             piano_wcn_pmu_lock(r, 0);
@@ -410,20 +409,20 @@ static inline int piano_wcn_rails_get(PianoWcnRails *r, unsigned client)
     uint32_t added = 0;
     rc = piano_wcn_rails_vote(r, &added);
     if (rc) {
-        // Back to what was found: the enables this attempt added are withdrawn unless an owner still runs on the rails (then they
-        // are recorded, for the last owner's release). The rails are no longer known to be up either way.
-        if (!(s & PIANO_WCN_CLIENTS)) {
-            if (added) piano_wcn_rails_withdraw(r, added);
-        } else {
-            s |= added << PIANO_WCN_ADDED_SHIFT;
+        // The rails are no longer known to be up. With no owners, undo this attempt's enables and keep any failed withdrawals
+        // recorded. With an owner present, keep all the added enables for the last owner's release.
+        s = __atomic_and_fetch(r->state, ~PIANO_WCN_UP, __ATOMIC_ACQ_REL);
+        if (added && !(s & PIANO_WCN_CLIENTS)) {
+            const uint32_t withdrawn = piano_wcn_rails_withdraw(r, added);
+            added &= ~withdrawn;
+            __atomic_fetch_and(r->state, ~(withdrawn << PIANO_WCN_ADDED_SHIFT), __ATOMIC_RELEASE);
         }
-        piano_wcn_store(r->state, s & ~PIANO_WCN_UP);
+        if (added) __atomic_fetch_or(r->state, added << PIANO_WCN_ADDED_SHIFT, __ATOMIC_RELEASE);
         piano_wcn_report(r, PianoWcnRailsFailed, (uint32_t)r->step, (uint32_t)rc);
         piano_wcn_pmu_lock(r, 0);
         return rc;
     }
-    s |= client | PIANO_WCN_UP | (added << PIANO_WCN_ADDED_SHIFT);
-    piano_wcn_store(r->state, s);
+    s = __atomic_or_fetch(r->state, client | PIANO_WCN_UP | (added << PIANO_WCN_ADDED_SHIFT), __ATOMIC_ACQ_REL);
     r->votes++;
     piano_wcn_report(r, PianoWcnRailsVoted, s, r->voted);
     piano_wcn_pmu_lock(r, 0);
@@ -442,26 +441,27 @@ static inline unsigned piano_wcn_rails_put(PianoWcnRails *r, unsigned flags)
         const uint32_t s = __atomic_and_fetch(r->state, ~(uint32_t)client, __ATOMIC_ACQ_REL);
         return s & PIANO_WCN_CLIENTS;
     }
-    uint32_t s = piano_wcn_load(r->state);
-    if (!(s & client)) {
+    const uint32_t before = piano_wcn_load(r->state);
+    if (!(before & client)) {
         r->put_unbalanced++;
-        piano_wcn_report(r, PianoWcnRailsPutUnbalanced, client, s);
+        piano_wcn_report(r, PianoWcnRailsPutUnbalanced, client, before);
     }
-    s &= ~(uint32_t)client;
+    const uint32_t s = piano_wcn_load(r->state) & ~(uint32_t)client;
+    uint32_t clear = client;
     if (!(s & PIANO_WCN_CLIENTS) && (flags & PIANO_WCN_RELEASE) && (s & PIANO_WCN_ADDED)) {
         r->step = PianoWcnStepRelease;
         const uint32_t mask = (s & PIANO_WCN_ADDED) >> PIANO_WCN_ADDED_SHIFT;
         r->withdrawn = piano_wcn_rails_withdraw(r, mask);
         // The rails are no longer known to be up: a later get votes again (and finds which ones still are). A withdrawal that did
         // not go through keeps its bit, for the next release.
-        s &= ~(r->withdrawn << PIANO_WCN_ADDED_SHIFT);
-        if (r->withdrawn) s &= ~PIANO_WCN_UP;
+        if (r->withdrawn)
+            clear |= PIANO_WCN_UP | (r->withdrawn << PIANO_WCN_ADDED_SHIFT);
         if (r->withdrawn != mask) r->step = -PianoWcnStepRelease;
     }
-    piano_wcn_store(r->state, s);
-    piano_wcn_report(r, PianoWcnRailsPut, s, r->withdrawn);
+    const uint32_t after = __atomic_and_fetch(r->state, ~clear, __ATOMIC_ACQ_REL);
+    piano_wcn_report(r, PianoWcnRailsPut, after, r->withdrawn);
     piano_wcn_pmu_lock(r, 0);
-    return s & PIANO_WCN_CLIENTS;
+    return after & PIANO_WCN_CLIENTS;
 }
 
 #ifdef __cplusplus

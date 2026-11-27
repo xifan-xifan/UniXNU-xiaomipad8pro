@@ -12,5 +12,19 @@ in UPSTREAM. Build: tooling/k27/build-native-piano-backlight.sh (host tests, the
 | `BitI2c.h` | portable: the software I2C master (PianoKeyboard's, copied) |
 | `PianoBacklightClient.h` | header only: the function names other drivers call, the brightness key watch (`piano-backlight-keys=1`) |
 | `tests/backlight_host.cpp` | host tests (bit-level KTZ8866 model, register sequences, sleep/wake, lid, failures, keys) |
+| `tests/backlight_curve_sync_host.cpp` | ASan/UBSan coverage of the Android ALS/SDR curve, native brightness input, and paired KTZ8866 power and fault sequences |
 
 Status (2026-11-11): built and host-tested, not run on the tablet.
+
+## Goal 5 offline qualification
+
+Run `python3 scripts/ci/self-tests.py --only package/PianoBacklight/tests/` from the repository root. The curve suite exercises
+the live portable policy and controller over two simulated bit-banged I²C buses. The forward curve is nondecreasing with
+quantization plateaus, and inverse luminance rises strictly across SDR codes 921–1952. The suite checks invalid raw samples,
+strict SDR decoding, and ambient snapshot bounds. The live swap queue clamps positive out-of-range nits, and the ambient callout
+clamps positive targets above 1000 permille.
+
+The modeled IOKit handoff permits touch park and M5 only after both BL_EN readbacks confirm dark. A chip that keeps NACKing can
+retain BL_EN after the bounded blank retries, which causes the handoff to fail closed. Wake checks cover the register sequence and
+rejection of targets from the previous ambient revision. The physical dark → bright → dark lux sweep and hands-on Control Center
+slider verification remain **HOLD**.

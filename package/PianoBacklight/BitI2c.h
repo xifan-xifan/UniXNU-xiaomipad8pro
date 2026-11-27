@@ -2,7 +2,7 @@
 // I2C master in software on two TLMM pins, open drain: a line is driven low or released to its pull-up, never driven high. Register
 // writes and register reads (write the register, repeated START, read N bytes), clock stretching honoured. A copy of
 // package/PianoKeyboard/BitI2c.h (same repository, BSD-2-Clause-Patent; PianoPower's Gauge.h I2cBus generalised, run on piano at
-// ~80 kHz) in this package's namespace and otherwise unchanged, so the two drivers share no header another change could move.
+// ~80 kHz) in this package's namespace, so the two drivers share no header another change could move.
 // No QUP serial engine is used: its clocks, firmware and DFS tables are not ours to set up.
 #ifndef PIANO_BACKLIGHT_BIT_I2C_H
 #define PIANO_BACKLIGHT_BIT_I2C_H
@@ -52,8 +52,7 @@ class BitI2c {
       if (!sclHigh()) return false;
       wait();
     }
-    stop();
-    return io_.readSda(io_.ctx) && io_.readScl(io_.ctx);
+    return stop() == I2c::ok;
   }
   // START, address+W, bytes, STOP.
   I2c write(uint8_t address, const uint8_t *bytes, unsigned n) { return run(address, bytes, n, nullptr, 0); }
@@ -63,16 +62,16 @@ class BitI2c {
  private:
   I2c run(uint8_t address, const uint8_t *w, unsigned wn, uint8_t *r, unsigned rn)
   {
+    failedByte = 0;
     if ((!io_.readSda(io_.ctx) || !io_.readScl(io_.ctx)) && !recover()) return I2c::busBusy;
     const I2c result = transfer(address, w, wn, r, rn);
-    stop();
+    const I2c end = stop();
     io_.delayUs(io_.ctx, 2 * half_ + 4);   // bus free time
-    return result;
+    return result == I2c::ok ? end : result;
   }
   I2c transfer(uint8_t address, const uint8_t *w, unsigned wn, uint8_t *r, unsigned rn)
   {
     I2c e = I2c::ok;
-    failedByte = 0;
     if (wn || !rn) {
       if (!start()) return I2c::busBusy;
       if (!writeByte(uint8_t(address << 1), &e)) return e != I2c::ok ? e : I2c::nackAddress;
@@ -113,14 +112,18 @@ class BitI2c {
     wait();
     return true;
   }
-  void stop()
+  I2c stop()
   {
+    io_.scl(io_.ctx, false);
+    wait();
     io_.sda(io_.ctx, false);
     wait();
-    sclHigh();
+    const bool clock = sclHigh();
     wait();
     io_.sda(io_.ctx, true);
     wait();
+    if (!clock) return I2c::stretchTimeout;
+    return io_.readSda(io_.ctx) ? I2c::ok : I2c::busBusy;
   }
   // One bit, SCL low on entry and exit; returns SDA as sampled while SCL was high.
   bool bit(bool release, I2c *e)

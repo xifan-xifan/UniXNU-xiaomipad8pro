@@ -395,6 +395,13 @@ inline void gestureUpdate(Gesture &g, const GestureContact *all, unsigned count,
   }
   case GestureMode::two: {
     const int i1 = findContact(v, nv, g.id1), i2 = findContact(v, nv, g.id2);
+    const unsigned followed = unsigned(i1 >= 0) + unsigned(i2 >= 0);
+    if (nv > followed) {
+      ++g.cancels;
+      gnote(o, GestureKind::cancelFingers, g.px, g.py, now - g.downMs);
+      g.mode = GestureMode::inert;
+      return;
+    }
     if (g.lifting || i1 < 0 || i2 < 0) {
       g.lifting = true;
       if (nv) return;
@@ -405,12 +412,6 @@ inline void gestureUpdate(Gesture &g, const GestureContact *all, unsigned count,
         gnote(o, GestureKind::twoTap, g.c0x, g.c0y, now - g.downMs);
       }
       g.mode = GestureMode::idle;
-      return;
-    }
-    if (nv > 2) {
-      ++g.cancels;
-      gnote(o, GestureKind::cancelFingers, g.px, g.py, now - g.downMs);
-      g.mode = GestureMode::inert;
       return;
     }
     const GestureContact &a = v[i1], &b = v[i2];

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
+// c++ -std=c++20 -Wall -Wextra -Werror -I ../vt vt_host.cpp -o /tmp/vt_host && /tmp/vt_host
 #include "PianoVideoVTWire.h"
 #include <cstdio>
 #include <cstring>

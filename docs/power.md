@@ -1,6 +1,33 @@
 # Power: the battery picture, CPU idle (k27 0061) and suspend-to-idle (k27 0062)
 
-Status 2026-11-11: **built, host-tested, linked into a KC with the current kext set; not run on the tablet.** Late that day the
+## Status as of 2026-11-27
+
+**System sleep is partial.** Installed v13.1y12q arms the cover and power-key policy. The November 26 v13.1y12m checks
+recorded Wi-Fi and USB recovery and return to the lock screen after wake. The November 27 `v131y12t-qual1` RAM qualification
+passed suspend-to-idle with timer wake and simulated power-key and lid policies. Physical power-key use and closing the cover
+on battery still need attended checks. Native panel sleep stays off in the daily profile. In M5R the panel stayed dark after
+wake and the fix-image gate remains HOLD. [Support status](STATUS.md) · [Hardware backlog](BACKLOG-hardware.md) · [November 27 RAM qualification](results-2026-11-27.md#ram-qualification)
+
+**Charging and battery.** The daily line carries 5 V charging up to 3 A from a capable source, default-on fixed 9 V PD buck
+(about 14 W on the stock charger), and an 80% hold that resumes charging at 75%. PPS 9 V is built and awaits a tablet run.
+Charge Pump / MiPPS is off by default and the fix for the first run's 100 mA limit awaits an attended check. Battery percentage
+and power state work on disk. RAM `m120c-120` reported 122 cycles, 9200 mAh design capacity and 8781 mAh full capacity. System
+Information showed “Service Recommended” and omitted Maximum Capacity. On November 27 the opt-in RAM BH-2 check published
+`AppleSmartBatteryPack`. **Owner decision (2026-11-27, `OWNER-0748`):** host-side disassembly analysis of Apple 27.3 `powerd`
+is APPROVED (analysis only; never commit Apple binaries) to fix `kIOReturnIOError` writing `BHPersistentStorage`.
+The [27.3 storage trace and host regressions](drivers/power-bh2-powerd-analysis.md) locate the normalized error and distinguish
+write success from durable synchronization. The underlying failed operation remains unknown; the fix-image gate is HOLD and
+both reporting opt-ins remain default 0. [Support status](STATUS.md) · [November 26 battery results](results-2026-11-26.md#efi-memory-battery-and-video) · [November 27 RAM qualification](results-2026-11-27.md#ram-qualification)
+
+**Thermal and idle policy.** Low Power, Automatic and High Power reached the policy through `pmset` on installed v13.1y12l.
+High Power is the daily setting. The November 27 installed 10-minute Metal 3D run completed 35,985 frames at 59.98 fps and
+967–1050 MHz with zero GPU faults. Board skin rose from 41.2 to 45.8 °C under the docked thermal table. FPS measured Metal
+completions (`presented=0`). The Energy Mode picker still needs a hands-on check. The November 26 install also confirmed the
+login-window CPU fix. The audio daemon is held until login. [Support status](STATUS.md) · [November 26 install results](results-2026-11-26.md#install) · [November 27 Metal results](results-2026-11-27.md#sustained-metal-3d-installed-v131y12q)
+
+## Original power design and bring-up (2026-11-11 to 2026-11-12)
+
+On 2026-11-11 the initial implementation was built, host-tested and linked into the bring-up KC before tablet runs. Late that day the
 GPU's part of the contract (§4: `piano-gpu-suspend=1`) and the LLCC island slice (§3.6: read at every GPU boot, `piano-llcc-island=1`
 programs it) joined it, built and host-tested in PianoA830, tests G1-G3 and L1 in §6. 2026-11-12: k27 0064 (built, host-tested,
 not run): the kernel reads the LLCC island again at each ss3 decision (`piano-llcc-island-live=1`, §3.6) and a driver can cancel the
@@ -8,21 +35,19 @@ suspend in progress (`piano-sleep-cancel=1`, §3.7); tests C0, C1, L2, L3 in §6
 the drivers' idle wakeups audited and the cheap ones fixed (§1.1, tests W1/W2), the first callers of the cancel, opt-in (NativeUfs,
 PianoA830: §3.7, test C2). Later still on 2026-11-12 (built, host-tested, not run): the idle load the night's captures showed (two
 Apple daemons spinning in every boot, §1.2; its A/B §6.5) and PianoThermal's governor made safe against it (`drivers/thermal.md` §8
-item 8). Everything here is off unless its boot argument is
-set, and the kernels with 0060 and later are themselves opt-in (§6: the default build kernel stops at 0059). The owner's priority is battery life; this page is the whole picture (what each piece saves,
-who owns it) and, in detail, the kernel/platform part: CPU idle states, a system sleep that is the closest equivalent of Linux's
-s2idle with its wake sources, and lid / power-key sleep.
+item 8). The original builder defaulted to kernel 0059. The test plan selected newer kernels and enabled each feature with its
+boot argument (§6). This design covers CPU idle, suspend-to-idle, wake sources, and lid and power-key sleep.
 
 Facts are marked **verified** (read from source, the running system, a binary or a register a running driver already uses),
 **spec** (Linux or Gunyah read as the specification only: Linux is GPL, nothing copied; Gunyah is BSD-3-Clause, read only),
 **Ubuntu** (measured on this tablet by the Ubuntu project: `ubuntu-history/kernel.md`, `ubuntu-history/device.md`),
 **inferred** or **needs-boot**.
 
-## 1. The battery picture
+### 1. The battery picture
 
-The native system runs from two packs (9800 mAh, about 38 Wh). The one native reading so far, early in a boot with the GPU
-coming up, was `battery: 4440 mV, -860 mA (discharging)`, about 3.8 W (`drivers/charging.md` §4): a working day is not
-possible at that rate. Where it goes, and who is cutting it:
+The original estimates used two packs (9800 mAh, about 38 Wh) and an early reading with the GPU coming up of
+`battery: 4440 mV, -860 mA (discharging)`, about 3.8 W (`drivers/charging.md` §4). The table records the bring-up assumptions
+and driver state at the time.
 
 | Piece | What it saves (estimate, **inferred** until measured) | Owner | State | Page |
 |---|---|---|---|---|
@@ -40,11 +65,11 @@ possible at that rate. Where it goes, and who is cutting it:
 Battery life follows from the average power: at 3 W about 13 h, at 1 W 38 h; suspended at 0.5 W (no CX collapse) about three days,
 at 30 mW (Ubuntu's CX-off) over a month. §6.4 is the measurement that replaces these estimates.
 
-### 1.1 Idle wakeups by driver (2026-11-12)
+#### 1.1 Idle wakeups by driver (2026-11-12)
 
 A CPU that wakes for nothing pays twice: the work, and on this platform each wake out of `ret` (P cores 172/130 µs entry/exit,
-§2.1) through Gunyah's virtual interrupt. **Measured** (`ram-pm-idle1`, `piano-cpuidle=1`, idle login window on the Mac's cable;
-`logs/usb-console/20261112-015436-port0.txt`, the last four 60 s summaries): `ret` entries per minute cpu0 ~133k (48-51 % idle),
+§2.1) through Gunyah's virtual interrupt. **Measured** (`ram-pm-idle1`, `piano-cpuidle=1`, idle login window on USB, last four
+60 s summaries): `ret` entries per minute cpu0 ~133k (48-51 % idle),
 cpu1 ~93k (54-59 %), cpu2 ~37k (72 %), cpu3 ~10k (96 %), cpu4/5 1-3k (99 %), **cpu6/7 ~178k each at 33-34 % idle**, the same
 before and after the display went off: about 12000 idle entries a second in all, nearly 3000 a second on each prime core. The
 drivers' own counters in that run: PianoDwc3 8.5-12.4k wakeups / 60 s (`passes busy` 6-10k: its 1 ms tier while the console
@@ -101,10 +126,9 @@ The display's state for all of them comes from one place: `package/include/Piano
 notification, its `piano-display-power-messages`, its property-change messages; the panel's instance preferred over D6's), used by
 PianoA830, PianoThermal and PianoInput; PianoPolicy has its own (`policy.md` §4).
 
-### 1.2 The idle load at the login window: PerfPowerServices and audiomxd (P11, 2026-11-12)
+#### 1.2 The idle load at the login window: PerfPowerServices and audiomxd (P11, 2026-11-12)
 
-Most of what §1.1 left unexplained is two Apple daemons, not the kexts. **Measured** in the night's captures
-(`logs/usb-console/20261112-*-port0.txt`):
+The November 12 console captures attributed most of the unexplained load in §1.1 to two Apple daemons.
 
 - The kernel's CPU monitor (`process PerfPowerService[N] thread T caught burning CPU! It used more than 50% CPU over 180 seconds`,
   and the same for `audiomxd`) fires in every boot that ran 180 s past the daemons' start: 32 captures with PerfPowerServices' line,
@@ -179,9 +203,9 @@ Fixes and defaults:
   (the vmapple kernels of the KDK have it; the open xnu tree only calls it, `clock.c`), so it may be missing natively: a second,
   weaker candidate for the spin, and `sc-trace` cannot show it (it skips failing `sysctl` calls).
 
-## 2. CPU idle (k27 0061, `piano-cpuidle=N`)
+### 2. CPU idle (k27 0061, `piano-cpuidle=N`)
 
-### 2.1 Facts
+#### 2.1 Facts
 
 | Fact | State | Source |
 |---|---|---|
@@ -198,7 +222,7 @@ Fixes and defaults:
 | Entering ss3 (4400 µs exit) stalls GPI DMA: Linux holds a 2000 µs CPU latency limit around each GPI SPI message (touch frames) | Ubuntu | K:322fd1bfbda9 |
 | The AOP keeps RPMh sleep counters at 0x0c3f0048: records `aosd`, `cxsd`, `ddr` {count, last entered, last exited, accumulated, 19.2 MHz ticks}; cxsd/ddr accumulating with the time asleep is CX collapse and DDR self-refresh | spec; Ubuntu | `qcom_stats`; K:1d5861e2ee37 |
 
-### 2.2 Design
+#### 2.2 Design
 
 - **Where:** `cpu_idle()`'s WFI (interrupts masked) calls `piano_cpuidle_enter()`; nothing else in the idle path changes
   (`osfmk/arm64/piano_pm.c`, hook in `cpu.c`).
@@ -224,7 +248,7 @@ Fixes and defaults:
   answers and the RPMh line), `machdep.piano_cpuidle_level` (read-write, 0 .. N: the A/B switch without a reboot); every
   `piano-cpuidle-period` s (60) one console line per CPU and the RPMh line.
 
-### 2.3 Boot arguments
+#### 2.3 Boot arguments
 
 | Argument | Default | Meaning |
 |---|---|---|
@@ -236,7 +260,7 @@ Fixes and defaults:
 | `piano-llcc-island-ok=1` | 0 | ss3 even with the island not reserved: an experiment that can reset the SoC. Not needed for a slice PianoA830 programmed when `piano-llcc-island-live=1` is set |
 | `piano-llcc-island-live=1` (0064) | 0 | ss3 (idle level 3, `piano-sleep-state=3`) decided on ATTR0/ATTR1 read at each ss3 decision and at each suspend's entry, not on the boot reading (§3.6); read only |
 
-### 2.4 Lines
+#### 2.4 Lines
 
 ```
 piano-pm: PSCI version 0x10001; FEATURES: CPU_SUSPEND 3 (extended StateID, OS-initiated mode supported), SYSTEM_SUSPEND 0, SET_SUSPEND_MODE 0, CPU_OFF 0, STAT_COUNT -1
@@ -258,9 +282,9 @@ piano-cpuidle: LLCC ISLAND1 (SCID 12) now reserved: reserved ways 0x7fffffff, bo
 until it is` the other way; `machdep.piano_cpuidle` ends with `LLCC island reserved (live: N reads, M reserved, last 0x7fffffff/0;
 boot not reserved)` at level 3).
 
-## 3. Suspend-to-idle (k27 0062, `piano-sleep=1`)
+### 3. Suspend-to-idle (k27 0062, `piano-sleep=1`)
 
-### 3.1 Why not macOS's own sleep path
+#### 3.1 Why not macOS's own sleep path
 
 | Fact | State | Source |
 |---|---|---|
@@ -273,7 +297,7 @@ So the platform hook is IOCPUSleepKernel itself (the least invasive place: every
 and the drivers' power tree, runs as on a Mac; nothing below it is used), and `sleep-disabled` is overridden **kernel-side**,
 only with `piano-sleep=1` (the ADT stays `sleep-disabled = 1` in every image: an image without the argument can never sleep).
 
-### 3.2 The sequence
+#### 3.2 The sequence
 
 ```
 IOPMrootDomain (idle / Apple menu / lid / power key / piano-sleep-test)
@@ -299,7 +323,7 @@ IOPMrootDomain (idle / Apple menu / lid / power key / piano-sleep-test)
 Nothing of a driver runs between the freeze and the release: all their polling threads stop with it (§4 tells them what that
 means for them).
 
-### 3.3 Wake sources
+#### 3.3 Wake sources
 
 Read by the kernel between polls, with no driver code, through registers the drivers already read (read only):
 
@@ -317,7 +341,7 @@ Poll cost: a wake every `piano-sleep-poll` ms (100) for a few SPMI reads (µs). 
 (2-4.4 ms); with those states `piano-sleep-poll=200..250` is the better trade (a power-key press must last a poll to be seen).
 The interrupt route (SPMI arbiter SPI 746 through the PDC, the TLMM wake lines; `power-irq.md`) removes the polling later.
 
-### 3.4 Time across a suspend
+#### 3.4 Time across a suspend
 
 `mach_absolute_time()` does not count the suspend (as on a Mac: idle timers, HID idle time and every driver's timeout see only
 awake time); the architected counter runs through it, so the time asleep is exact and the calendar is advanced by it in
@@ -325,7 +349,7 @@ awake time); the architected counter runs through it, so the time asleep is exac
 freeze handshake makes the rebase safe: from the moment the time is noted until the release, no XNU code runs anywhere and nothing
 is stamped (recount and the scheduler's snapshots all lie before it).
 
-### 3.5 Wake reliability (reboot rather than hang)
+#### 3.5 Wake reliability (reboot rather than hang)
 
 - The Gunyah watchdog (SMCCC vendor-hypervisor calls, as 0056) is armed at entry, pinged by the loop every 5 s, and pinged by a
   thread call for 240 s after the wake (past IOPMrootDomain's own 180 s wake watchdog, whose panic then becomes a reset), then
@@ -339,7 +363,7 @@ is stamped (recount and the scheduler's snapshots all lie before it).
   end of the wake window, as 0056 and the boot guard (`boot-guard.md`) are for the whole boot; the end of the window disables it
   only when nobody else holds it, and the loop pings it whoever holds it, `piano-sleep-wdt=0` included.
 
-### 3.6 What this does not reach yet: CX collapse and DDR self-refresh
+#### 3.6 What this does not reach yet: CX collapse and DDR self-refresh
 
 Linux's s2idle on this SoC reaches CX off and DDR self-refresh since Ubuntu v0.8.0. What it took (Ubuntu; kernel.md §2.1, §2.2):
 every block dropping its RPMh/clock votes (the APPS RSC, DRV2 at 0x16520000, replays its sleep set only when the CPU subsystem
@@ -365,7 +389,7 @@ goes down, and any active vote left in place persists through sleep), the **LLCC
   refused while an active TCS is busy) is only needed for votes a driver must keep while awake, and only if DRV2's solver bit is
   clear (probe line).
 
-### 3.7 A driver's cancel of the suspend in progress (k27 0064, `piano-sleep-cancel=1`)
+#### 3.7 A driver's cancel of the suspend in progress (k27 0064, `piano-sleep-cancel=1`)
 
 Until 0064 a driver could not stop a sleep (0062's only aborts are its own: a CPU that does not park); a driver that could not go down
 put itself back up and the suspend went on without its saving (§4, `PianoPowerContract.h`). 0064 adds a cancel, **off unless
@@ -420,7 +444,7 @@ refused: `piano-sleep: WHO asks to cancel the suspend (WHY): not honoured (piano
 (or `no system sleep in progress`, `too late (the CPUs are frozen)`; the first 16 of a boot, then every 64th). `machdep.piano_sleep`:
 `...; wakes: ... keyboard 0 cancelled 1; driver cancels on (1 cancelled, 0 refused); LLCC island ...; rpmh ...`.
 
-## 4. The driver contract (`package/include/PianoPowerContract.h`)
+### 4. The driver contract (`package/include/PianoPowerContract.h`)
 
 Every piano driver: two IOKit power states (off, on), `pianopower::join(this)` in `start()` (PMinit, the platform expert's
 `PMRegisterDevice`, `registerPowerDriver`, `changePowerStateTo(on)`, as NativeGopDisplay does), `setPowerState` synchronous
@@ -433,7 +457,7 @@ While suspended nothing of the driver runs and `mach_absolute_time()` stands sti
 them needs a 0061/0062 kernel, which `build-native-image.sh` pins with `K27_KERNEL`), and since 0064 the cancel of §3.7
 (`pianopower::cancelSystemSleep`, through IOPMrootDomain: no link dependency).
 
-What each driver adds (their owners' work; nothing here changes their packages):
+The following table records the original division of work among drivers.
 
 | Driver | off | on | Also |
 |---|---|---|---|
@@ -456,9 +480,9 @@ What each driver adds (their owners' work; nothing here changes their packages):
 | PianoSensors | level 4 (joined then): both sensor streams disabled (SNS message 10) before the acknowledgement, at most 800 ms; a stream not off by then has its QRTR port closed (the hub drops it), unless PianoPower asks for quiet | fresh streams if their consumers want them | below level 4 nothing; never the DSP (PianoPower's), docs/drivers/sensors.md §5c.4 |
 | NativeRamBlock, PianoNullEthernet, ARMPlatformStandIn | nothing | nothing | — |
 
-**Status of the drivers' parts** (2026-11-11; built, host-tested, linked into the KC with the 0063 kernel; **not run on the
-tablet**; each driver's page has its lines). A driver in the power tree whose off/on is not reached costs nothing: the default ADT
-never sleeps without `piano-sleep=1`, and the power tree's first `on` (at the join) is answered with nothing done.
+**Driver integration snapshot (2026-11-11).** These parts were built, host-tested and linked into the 0063 bring-up KC before
+tablet qualification. The ADT default requires `piano-sleep=1` to enable system sleep. A driver answers the first `on` at join
+without a hardware transition.
 
 | Driver | In the power tree | off / on as built | Default / opt-in | Page |
 |---|---|---|---|---|
@@ -477,11 +501,10 @@ never sleeps without `piano-sleep=1`, and the power tree's first `on` (at the jo
 | NativeRamBlock | with NativeUfs's, and only with the Data store open read-write (NativeUfs's power child) | off: the store synced under the disk's gate, new requests held (a failed sync vetoes NativeUfs's suspend); on: released | opt-in | `drivers/ufs.md` §12.3 |
 | PianoA830, PianoWifi, PianoAudio | not part of this change | see their pages | – | – |
 
-## 5. Policy defaults
+### 5. Policy defaults
 
-The policy on top of this (the cover closed on battery or on power, the keyboard's wake, the power key, macOS Low Power Mode → the
-power profile) is **PianoPolicy's: [`policy.md`](policy.md)** (`piano-policy=N`, backlog B2/B5); it replaces the lid and power-key
-routes below (`piano-keyboard-lid`, PianoInput's direct `kIOPMSleepNow`) once its tests pass.
+The table records the original bring-up defaults and target settings. On the installed daily line PianoPolicy owns the lid and
+power-key policy. The `piano-keyboard-lid` path below was used in the early test design. [PianoPolicy](policy.md)
 
 | What | Default | How |
 |---|---|---|
@@ -529,18 +552,16 @@ IOCPUSleepKernel exit (piano: timer)
 and `sysctl machdep.piano_sleep`: `on; state 1, poll 100 ms, wake mask 0x1, max 30 s; suspends 3 (aborted 0), last 30012 ms by
 timer, total 90040 ms; wakes: power-key 0 lid 0 usb 0 volume-down 0 timer 3 irq 0 keyboard 0; LLCC island ...; rpmh ...`.
 
-## 6. Test plan (order of risk)
+### 6. Test plan (order of risk)
 
 Every test is a RAM boot (nothing written to the tablet; `build-ram-images.py`'s store guard gives other seeds `data-persist=0`)
 with `piano-reset-after` as the backstop and every reset into ABL fastboot (0057), the USB console captured on the Mac
 (`tooling/native/usb-console.py --capture S`, or the mailbox through `tooling/native/native-loop.sh IMAGE out/ram-pm-dump/...`).
 A stuck tablet: power + volume-down for 15-20 s.
 
-**Kernel levels.** Current images are 27.3-only, built by `tooling/k273/build-k273-image.sh` with `K273_KERNEL`; the retired
-`tooling/k27/build-native-image.sh` / `kernel-k27-0059-native.macho` default is not used. The 0059-0064 levels below describe the
-original 2026-11-12 test configuration, not today's builder default: 0060 (RTC), 0061 (CPU idle), 0062 (sleep), 0063 (boot guard)
-and 0064 (this page's §3.6 live island, §3.7 cancel) are opt-in by kernel, then each again by its boot argument. The test images
-here need 0061/0062; C0, C1, L2, L3 need 0064.
+**Kernel levels.** The original 2026-11-12 test configuration selected 0060 for RTC, 0061 for idle, 0062 for sleep, 0063 for
+the boot guard and 0064 for the live island and driver cancel. The tests below require 0061/0062, with 0064 for C0, C1, L2 and
+L3. The 27.3 builder is `tooling/k273/build-k273-image.sh` with `K273_KERNEL`.
 
 **Build** (the original 0061/0062 test configuration; current KC through the k273 wrapper, root-layout caveat in k273-line.md §4):
 ```sh
@@ -630,7 +651,7 @@ from outside this repository`, every vtable check 0 problem slots, KC `bdeda56ba
 `f99aa6972c3a5ed6…`, `ram-p8-idleold` `b02f75cf39d87fc5…`, `ram-p8-cancel` `e44a6ea5decaead8…`, the dump `fda1823f24eb9377…`; the
 longest command line (`-cancel`) 961 bytes. Rebuild in the main checkout before a run.
 
-### 6.4 The measurement (A/B)
+#### 6.4 The measurement (A/B)
 
 PianoPower's line every 10 s (`piano-power=1 piano-power-period=10`, all images): `[Ns] battery: V mV, I mA (discharging), P %
 (R/F mAh), ...`; the current is the two packs' sum, negative while discharging. With the cable out (a host keeps the HS PHY out
@@ -650,7 +671,7 @@ interrupt work cut the wake-ups); display off another 0.5-1.5 W; suspended, a fr
 CPUs parked), still hundreds of mW while the rails keep their votes; with §3.6 done, tens of mW and `cxsd`/`ddr` accumulating with
 the time asleep.
 
-### 6.5 The idle-load A/B (P11, P9: 2026-11-12)
+#### 6.5 The idle-load A/B (P11, P9: 2026-11-12)
 
 §1.2's question, unattended at the idle login window on the Mac's cable, 900 s each: what PerfPowerServices and audiomxd cost, and
 whether the clock jump is PerfPowerServices' cause. `tooling/k27/build-p9-test-images.sh [base off rtc deny gov diag]` packaged
@@ -686,7 +707,7 @@ from that night's rtc run by `rtc-offset.py`), `ram-p9-deny` `dbc1dd5dc09e7449�
 `6efaaf5a673285fd…`, the dump image `ram-p9-dump` `c4d62771c314faaa…`. The kernel's hash depends on the k27 tree's path: rebuild in
 the main checkout before a run if the queue's other images are built there.
 
-## 7. Risks and limits
+### 7. Risks and limits
 
 - **A broken idle or suspend path hangs the tablet**: everything is opt-in; the watchdog covers the suspend path; test images
   reset on their own. The idle path has no watchdog of its own: a CPU that never returns from CPU_SUSPEND shows as a stall until
@@ -704,14 +725,14 @@ the main checkout before a run if the queue's other images are built there.
 - The GPU's suspend (§4): its host votes are the system's only CX/MX/DDR votes, lowered at PreSleep while drivers outside the power
   tree may still run and while UFS (its link in Hibern8 at most, its clocks on: `drivers/ufs.md` §12.2), USB and PCIe stay clocked:
   the rails' default floor is NOM_L1 for that reason, and `piano-gpu-suspend-rails=0` is safe only once those are gated. A GPU that
-  cannot go down stays up and the sleep goes on without its share (0064's cancel, §3.7, is there for a driver whose state must not
-  sleep; PianoA830 does not use it).
+  cannot go down normally stays up and the sleep goes on without its share. The 0064 opt-in cancel covers a failed GPU entry as
+  described in §3.7.
 - Not done: RPMh sleep/wake sets (kernel; SH0/MC0/CN0's keepalive minimum persists through the sleep without them), PDC wake
   routing, PSCI SYSTEM_SUSPEND (needs CPU_OFF/ON in ArmCpu), macOS dark wakes (every wake is full; a cancelled suspend wakes fully
   too). Built, not run (0064, opt-in): the kernel's re-read of the LLCC island at each ss3 decision (§3.6, tests L2/L3) and a
   driver-initiated cancel of a suspend (§3.7, C0/C1); its two callers (NativeUfs, PianoA830) are opt-in too (C2).
 
-## 8. Files
+### 8. Files
 
 `patches/k27/0061-*.patch` (`osfmk/arm64/piano_pm.c`, `piano_pm.h`, `piano_pm_policy.h`; hooks in `cpu.c`, `arm_init.c`;
 `machdep.piano_cpuidle*` in `bsd/dev/arm64/sysctl.c`), `patches/k27/0062-*.patch` (the suspend in `piano_pm.c`; `IOCPU.cpp`,

@@ -19,6 +19,7 @@ enum {
   PBS_GAP_MS = 2000,       // at least this long between two syncs
   PBS_REPEATS = 3,         // syncs of one level CoreBrightness did not take before backing off
   PBS_BACKOFF_MS = 60000,
+  PBS_MAX_MILLINITS = (int)((int64_t)INT32_MAX * 1000 / 65536),
 };
 enum pbs_action { PBS_IDLE = 0, PBS_WAIT = 1, PBS_SYNC = 2, PBS_MOVED = 3 };   // nothing / ask again in about a second / sync / report
 
@@ -30,6 +31,7 @@ struct pbs_state {
   uint32_t repeats;         // syncs of synced_level since CoreBrightness last matched the panel
   uint64_t backoff_until;
   int64_t expected;         // CoreBrightness's level as we expect it (millinits), -1: not known yet (the next answer is the baseline)
+  int awaiting_echo;       // a successful set that may still be taking effect
 };
 
 static inline void pbs_init(struct pbs_state *s)
@@ -51,23 +53,37 @@ static inline int pbs_matches(uint32_t a, uint32_t b)
 static inline enum pbs_action pbs_decide(struct pbs_state *s, uint64_t now, uint32_t panel, int owned, int active, int lit,
                                          int64_t corebrightness)
 {
-  if (corebrightness < 0 || corebrightness > 0xffffffffll) {   // not answering: the next answer is a new baseline
+  if (corebrightness < 0 || corebrightness > PBS_MAX_MILLINITS) {
     s->expected = -1;
     s->level = 0;
+    s->awaiting_echo = 0;
     return PBS_IDLE;
   }
   if (s->expected < 0) s->expected = corebrightness;   // its restore (or a restart's): what it had before we looked
-  if (!owned || !lit || !panel) {   // the user's level (the stream owns the panel) or dark: follow it, never touch it
+  if (!owned || !lit || !panel || panel > PBS_MAX_MILLINITS) {
     s->expected = corebrightness;
     s->level = 0;
+    s->awaiting_echo = 0;
     return PBS_IDLE;
+  }
+  if (s->awaiting_echo) {
+    if (now - s->last_sync >= PBS_GAP_MS) {
+      s->awaiting_echo = 0;
+    } else if (pbs_matches((uint32_t)corebrightness, s->synced_level)) {
+      s->expected = corebrightness;
+      s->awaiting_echo = 0;
+    }
   }
   if (!pbs_matches((uint32_t)corebrightness, (uint32_t)s->expected)) {   // automatic owns the panel, and the user moved the slider
     s->expected = corebrightness;
     s->level = 0;
+    s->awaiting_echo = 0;
     return PBS_MOVED;
   }
-  if (!active) return PBS_IDLE;   // requested, no target applied yet (its auto-active change wakes the daemon)
+  if (!active) {
+    s->level = 0;
+    return PBS_IDLE;
+  }
   if (panel != s->level) {
     s->level = panel;
     s->level_since = now;
@@ -78,14 +94,17 @@ static inline enum pbs_action pbs_decide(struct pbs_state *s, uint64_t now, uint
     s->repeats = 0;
     return PBS_IDLE;
   }
-  if (now < s->backoff_until) return PBS_IDLE;
   if (s->last_sync && now - s->last_sync < PBS_GAP_MS) return PBS_WAIT;
   if (panel != s->synced_level) {
     s->repeats = 0;
-  } else if (s->repeats >= PBS_REPEATS) {
-    s->repeats = 0;
-    s->backoff_until = now + PBS_BACKOFF_MS;
-    return PBS_IDLE;
+    s->backoff_until = 0;
+  } else {
+    if (now < s->backoff_until) return PBS_IDLE;
+    if (s->repeats >= PBS_REPEATS) {
+      s->repeats = 0;
+      s->backoff_until = now + PBS_BACKOFF_MS;
+      return PBS_IDLE;
+    }
   }
   ++s->repeats;
   s->synced_level = panel;
@@ -93,10 +112,12 @@ static inline enum pbs_action pbs_decide(struct pbs_state *s, uint64_t now, uint
   return PBS_SYNC;
 }
 
-// After a sync: CoreBrightness's level as read right after the set (its own rounding), else the level we gave.
-static inline void pbs_synced(struct pbs_state *s, int64_t corebrightness_after)
+// Keep the pre-sync baseline until readback succeeds. A successful set can take effect after the first readback.
+static inline void pbs_synced(struct pbs_state *s, int set, int64_t corebrightness_after)
 {
-  s->expected = corebrightness_after >= 0 ? corebrightness_after : (int64_t)s->synced_level;
+  if (corebrightness_after >= 0 && corebrightness_after <= PBS_MAX_MILLINITS) s->expected = corebrightness_after;
+  s->awaiting_echo = set && (corebrightness_after < 0 || corebrightness_after > PBS_MAX_MILLINITS
+                             || !pbs_matches((uint32_t)corebrightness_after, s->synced_level));
 }
 
 // millinits as PianoBacklight's signed 16.16 nits (piano-backlight-sync, piano-backlight-moved)

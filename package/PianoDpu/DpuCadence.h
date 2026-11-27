@@ -13,14 +13,16 @@ namespace pianodpu {
 
 struct Hist {
   static constexpr uint32_t kBucketUs = 250, kBuckets = 200;   // 0..50 ms, then the overflow bucket kBuckets
-  uint32_t b[kBuckets + 1] = {};
+  uint32_t b[kBuckets + 1] = {};  // bucket 0 includes zero; other buckets include their upper edge
   uint64_t n = 0, sumUs = 0, maxUs = 0;
   void add(uint64_t us)
   {
-    const uint64_t i = us / kBucketUs;
-    ++b[i < kBuckets ? i : kBuckets];
+    const uint64_t i = us ? (us - 1) / kBucketUs : 0;
+    uint32_t &count = b[i < kBuckets ? i : kBuckets];
+    if (count == UINT32_MAX) return;  // keep the aggregate count in sync with the buckets
+    ++count;
     ++n;
-    sumUs += us;
+    sumUs += us > UINT64_MAX - sumUs ? UINT64_MAX - sumUs : us;
     if (us > maxUs) maxUs = us;
   }
   void clear() { *this = Hist{}; }
@@ -29,7 +31,7 @@ struct Hist {
   uint64_t pct(uint32_t perMille) const
   {
     if (!n) return 0;
-    uint64_t rank = (n * perMille + 999) / 1000;
+    uint64_t rank = (n * (perMille < 1000 ? perMille : 1000) + 999) / 1000;
     if (!rank) rank = 1;
     uint64_t seen = 0;
     for (uint32_t i = 0; i <= kBuckets; ++i) {
@@ -38,13 +40,14 @@ struct Hist {
     }
     return maxUs;
   }
-  // How many samples are at most us (us a multiple of kBucketUs: exact; else the bucket holding us counts whole).
+  // Count through the bucket holding us. Positive edges up to 50 ms give exact counts. The overflow bucket
+  // is counted once the cutoff reaches the maximum sample.
   uint64_t atMost(uint64_t us) const
   {
+    if (us >= maxUs) return n;
     uint64_t c = 0;
-    const uint64_t last = us / kBucketUs;   // buckets [0, last) hold values < last * kBucketUs <= us
-    for (uint32_t i = 0; i < kBuckets && i < last; ++i) c += b[i];
-    if (last < kBuckets && us % kBucketUs) c += b[last];
+    const uint64_t last = us ? (us - 1) / kBucketUs : 0;
+    for (uint32_t i = 0; i < kBuckets && i <= last; ++i) c += b[i];
     return c;
   }
   // The six bands: <=9.5, 9.5-12.5, 12.5-18, 18-26, 26-35, >35 ms.
@@ -69,9 +72,12 @@ struct Band {
 constexpr Band cleanBand(uint64_t bytes, unsigned i, unsigned n, uint64_t line)
 {
   if (!n || i >= n || !line) return Band{0, 0};
-  const uint64_t lines = (bytes + line - 1) / line;
-  const uint64_t b = lines * i / n * line, e = lines * (i + 1) / n * line;
-  return Band{b < bytes ? b : bytes, e < bytes ? e : bytes};
+  const uint64_t lines = bytes / line + (bytes % line != 0);
+  const auto boundary = [&](unsigned band) {
+    if (band == n) return bytes;
+    return ((lines / n) * band + (lines % n) * band / n) * line;
+  };
+  return Band{boundary(i), boundary(i + 1)};
 }
 
 }  // namespace pianodpu

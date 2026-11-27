@@ -1,11 +1,32 @@
 # GPU userspace on the A830: the VM's Metal plugin, Turnip on Adreno830's ABI v2
 
-Status 2026-11-11: the macOS login screen ran on the A830 with this userspace at 07:45 (end of this file); nobody has logged in yet.
-The changes for the first desktop session and tonight's run are in [Desktop readiness, 2026-11-11](#desktop-readiness-2026-11-11). The
-kernel half (package/PianoA830: board inputs, firmware, bring-up) is in [gpu.md](gpu.md). Plan: the local plan `gpu-native-plan.md` (not published)
-§4 steps 2 and 3.
+## Daily status (2026-11-27)
 
-## 1. Purpose
+The installed daily build is **v13.1y12q**. WindowServer and apps use the Adreno 830 Metal plug-in. The November 26
+installed v13.1y12l check verified the plug-in through the App view and passed **30/30** graded ImageIO, Core Image on
+Metal, MetalKit texture and Quick Look paths, including the 4032-pixel JPEG and HEIC cases. That build verified 64 client
+windows of **4 GiB** in a 256 GiB GPU aperture, a 1 GiB per-object limit and **4 KiB paged GPU memory capped at 7168 MiB**,
+with no GPU open refusals or page faults. [November 26 Metal results](../results-2026-11-26.md#core-image-and-metal) · [PianoA830 kernel driver](gpu.md)
+
+- **Chrome on installed v13.1y12q, November 27.** With no GPU, WebGPU or sandbox flags, **6/6 WebGPU contexts** opened on
+  `qualcomm` / `adreno-8xx` (`fallback_adapter = false`). Compute results were correct, offscreen and canvas `bgra8unorm`
+  readbacks were exact, and context-provider, ring-buffer and transfer-buffer errors were zero. **WebGL 2 reached 37.89 fps**
+  at 3200 × 1738 through ANGLE Metal (`Adreno (TM) 830`, `GraphiteDawnMetal`). Kernel patch **0075** supplied **47-bit user VA**
+  (`machdep.virtual_address_size = 47`). All **17/17 Chrome processes** reported secure V8 sandbox mode (bucket 0,
+  `ReservationSizeGB = 1152`). The run recorded zero crashes, PianoA830 failures or sandbox denies.
+  [November 27 Chrome results](../results-2026-11-27.md#chrome)
+- **Safari on installed v13.1y12o, November 26.** WebGPU and WebGL 2 passed. On the earlier v13.1y12m check the WebGPU
+  page ran at about 52 fps with correct readback. [November 26 browser follow-up](../results-2026-11-26.md#v131y12o-installed)
+
+The installed ten-minute Metal sustain run is complete. Chrome on RAM boots remains open.
+[Installed Metal sustain results](../results-2026-11-27.md#sustained-metal-3d-installed-v131y12q) · [Support status](../STATUS.md) · [Hardware backlog](../BACKLOG-hardware.md) · [Metal sustain check](../tools/metal-sustain.md)
+
+## Historical GPU bring-up
+
+These notes record the original ABI and plug-in work, login-window and desktop runs, and the limits and open items of
+those builds. The [first desktop work](#desktop-readiness-2026-11-11) follows the November 11 login-window capture.
+
+### 1. Purpose
 
 WindowServer and every other Metal client get a real Metal device on piano's Adreno 830. The userspace is the one that drew the macOS 27
 desktop in the VM (`NativeAdrenoMetal.bundle`: plugin, frontend, Rust bridge, metal2vulkan, Turnip). Only Turnip's transport changes.
@@ -92,7 +113,7 @@ ABI: `NativeAdrenoABI.h` from `package/PianoA830/` when the kernel side has it, 
 lacks, `NativeAdrenoParamsOwnedCoherent` (Adreno740's v2 flag for IO-coherent BOs, value 2), added by
 `tooling/metal/turnip-a830/NativeAdrenoABICompat.h`. Adreno830 never sets it, so CPU views of BOs stay write-combined.
 
-## 2. Build, check, stage
+### 2. Build, check, stage
 
 ```sh
 tooling/metal/build-turnip-a830.sh           # -> out/turnip-a830/NativeAdrenoMetal.bundle (about 50 s cold on the M1 Pro, seconds after)
@@ -115,7 +136,7 @@ NativeSoftGpu and PianoA830 together are refused: Metal takes the first accelera
 Measured 2026-11-11: the staged seed is 124.6 MB packed (the input was 84.0 MB), so the macOS RAM image grows by about 40 MB to about 245 MB.
 Check that ABL's `max-download-size` takes it before the first run.
 
-## 3. The offline ABI handshake (`check-turnip-a830-host.py`)
+### 3. The offline ABI handshake (`check-turnip-a830-host.py`)
 
 The bundle's own arm64e Turnip runs on this Mac against Adreno830's host copy of its kernel stack. That is
 `tests/hostsim/host_gpu_service.cpp` with `HOSTSIM_GPU=a830`: the real GPU-context bring-up, VM, ring, submit and user-client code
@@ -151,7 +172,7 @@ Kits: Adreno830 `1a13210` is written against ArmSmmu4K `e923329` and AdrenoPM4 `
 into `out/turnip-a830/kits`. The standalone ArmSmmu4K checkout in `unixnu-research` is too new: its arena takes page callbacks, from
 `48dbd6c` on.
 
-## 4. What the kernel side (PianoA830) must provide
+### 4. What the kernel side (PianoA830) must provide
 
 Read from Turnip's darwin backend, the plugin and the frontend. The hostsim already models items 1-5.
 
@@ -197,7 +218,7 @@ Read from Turnip's darwin backend, the plugin and the frontend. The hostsim alre
    the CPU's lines of those pages, because GPU writes are not coherent.
 7. **Not needed now:** virtio-gpu methods, display holds and surface-sync tickets (§6), and GPU-copy present (`fb-gpu`, `0x7000`–`0x7005`).
 
-## 5. Test on the tablet (main session)
+### 5. Test on the tablet (main session)
 
 ```sh
 # PianoA830 linked (configs/k27-native-kexts.txt or PIANO_EXTRA_KEXTS), NativeSoftGpu not; the GPU's bring-up arguments are
@@ -231,7 +252,7 @@ The success lines, in order (`stderr-log=1` keeps the first 159 bytes of each wr
 | `MESA: error: device lost (tu_knl_darwin.cc:N): submit failed: 0x…` / `wait fence failed: 0x…` / `GPU faulted or hung` | device lost for that process: the kernel's `gpu recovery` and `gpu hang snapshot` lines say why (Turnip 0003; silent before) |
 | `NativeAdrenoMetal: <proc>: no Turnip beside the plugin` | the bundle is incomplete in the seed |
 
-## 6. Performance to expect
+### 6. Performance to expect
 
 - **GPU**: WindowServer composites on the A830. With the annibale bring-up profile the DCVS stays at or below 342 MHz (Adreno830
   README). A 3200x2136 login frame (wallpaper, blur, a few layers) is a few milliseconds of GPU time at that clock, and `TU_DEBUG=sysmem`
@@ -247,13 +268,13 @@ The success lines, in order (`stderr-log=1` keeps the first 159 bytes of each wr
   `METAL2VULKAN_SHADER_CACHE_OPTIONAL`) and says `NativeAdrenoMetal: <prog>: no writable cache directory: opening without the m2v disk
   cache`; its translations are then kept in memory only. Host check: `tooling/metal/turnip-a830/test-cache-fallback-host.sh`.
 
-## 7. CPU fallback (lavapipe): not built
+### 7. CPU fallback (lavapipe): not built
 
 The first version of this task asked for Mesa's CPU Vulkan driver behind the same plugin. It is not a near-free by-product of this
 build, and it was set aside when the owner made the GPU route the priority:
 - **LLVM.** llvmpipe needs it, and Homebrew's LLVM is arm64 only, while every image in an arm64e process must be arm64e. That means
-  a from-source LLVM 22.1.8 (the newest major Mesa `cecc0e9` guards for) built `-arch arm64e`, AArch64 target only: about 30-60 min
-  on this M1 Pro.
+  a from-source LLVM 22.1.8 (the newest major Mesa `cecc0e9` guards for) built `-arch arm64e`, AArch64 target only. The build
+  time was estimated at 30–60 min on the development host.
 - **Pointer authentication at the JIT boundary.** arm64e C code signs and authenticates function pointers, while llvmpipe's JIT code
   calls raw ones. Three places need patches in gallivm: symbols resolved for the JIT (`dlsym` answers signed pointers), constant
   function pointers (`lp_build_const_func_pointer`), and JIT functions handed to C callers (`gallivm_jit_function`), with JIT-to-JIT
@@ -272,7 +293,7 @@ To switch the plugin's ICD for a CPU fallback:
   NativeSoftGpu variant);
 - the device then reports the accelerator's port, so SkyLight takes its Metal compositor.
 
-## 8. Open items
+### 8. Open items
 
 1. `max-download-size` of piano's ABL against the 245 MB image (§2).
 2. The real Metal client count under macOS against the 32 slots (plan risk R4): the login screen had 7 Metal processes and 6 live
@@ -283,7 +304,7 @@ To switch the plugin's ICD for a CPU fallback:
    own connection type and the frontend should look for `AGXAccelerator`.
 4. `TU_DEBUG=sysmem` first. Drop it (`PIANO_A830_TU_DEBUG=`) once frames are right, and compare frame times.
 
-## 9. Licences
+### 9. Licences
 
 - Mesa: MIT.
 - Adreno830, ArmSmmu4K, AdrenoPM4 and AdrenoMetal: MIT.
@@ -292,7 +313,7 @@ To switch the plugin's ICD for a CPU fallback:
   published, honour the LGPL's terms for static linking.
 - Binaries are never committed. Provenance of every input: `tooling/metal/UPSTREAM`.
 
-## Measured 2026-11-11 07:45: the login screen on the A830
+### Measured 2026-11-11 07:45: the login screen on the A830
 
 PianoA830 (piano-gpu=2, piano-gpu-delay=20) brought the GPU up S1..S10 (an earlier full run: SMMU, FWMEM, GMU-HFI, CP, ZAP, fence
 self-test, METAL publish, DCVS, "GPU RUN 160M", 44-53 C). With Turnip on ABI v2 staged (this file's build) and the ADT's
@@ -303,12 +324,12 @@ yet; no input to log in (touch not done; the buttons only). Later the same day: 
 (gpu.md §8); NativeGopDisplay waits for the GPU's fence (gpu.md §8); a USB HID keyboard from the Mac and the keyboard cover give input.
 The run's log, read for the desktop: next section.
 
-## Desktop readiness, 2026-11-11
+### Desktop readiness, 2026-11-11
 
 Offline work (no boot) so that the first desktop session after a login on the A830 works and can be read from the console. The
 input of tonight's run is a login: a password typed from the Mac (`piano-usb-hid=1`) or the keyboard cover.
 
-### What the login run showed (07:44:43, 300 s)
+#### What the login run showed (07:44:43, 300 s)
 
 The run's console mailbox decodes with the fixed reader (`tooling/native/xnu-log.py decode logs/native-runs/20261111-074440-loop/dump.bin`,
 5653 lines, gpu.md §8). Bits are still wrong after the vote (threshold 3 of 11), so a word is sometimes garbled and the counts below
@@ -359,7 +380,7 @@ shader translation in every process with a cold m2v cache), then the camera. At 
 WindowServer's CPU: the 4096x2160 wallpaper video, decoded in software by VTDecoderXPCService, whose frames (formats 501/503 above) the
 frontend refuses, so none of them reaches the screen (2026-11-12: the flat grey login wallpaper). Nothing is cut tonight.
 
-### After the login: what changes
+#### After the login: what changes
 
 Metal clients. At the login screen 7 processes had a device. After it, expect the Dock (a large slot), Finder, SystemUIServer, Control
 Centre, Notification Centre and its widget renderer (chronod), WindowManager, Spotlight, WallpaperAgent (large), TextInput and
@@ -395,7 +416,7 @@ WindowServer loses its device and the session falls back to the login window. He
 setting that let the login through). A genuine hang then freezes the panel 10 s before the recovery; two recoveries a minute are
 allowed, the third gives the GPU up for the boot.
 
-### What changed
+#### What changed
 
 - Kernel (PianoA830, `ADRENO830_MACOS` only): the session's GPU events as `PianoA830: gpu …` lines whatever `piano-gpu-trace` says,
   the first time and then every 10th, 100th, …: `call failed: <proc>[pid] slot N <method> -> 0x… (<IOReturn>)` for every failed call
@@ -427,7 +448,7 @@ exceptions as before, `macos_lists` and `macos_events` PASS, `check-a830-abi-hos
 0 unresolved imports). Since then Turnip 0004/0005 (§1): CDHash `205e665f594c6b33c13369cdee1fc4863ce00f68`, the plugin unchanged
 (`9c42e844…`); the next `build-native-image.sh` restages the seed (a new identity again).
 
-### Tonight's run
+#### Tonight's run
 
 ```sh
 PIANO_GPU=2 PIANO_VMM_PRESENT=0 PIANO_RESET_AFTER=1200 \
@@ -479,7 +500,7 @@ Open risks:
 7. A new seed identity: the store of earlier boots is dropped, and every shader cache is cold on the first boot (first-use stalls per
    client).
 
-### A/B: sysmem against GMEM rendering
+#### A/B: sysmem against GMEM rendering
 
 The seed stages `tu-debug` = `sysmem` (`PIANO_A830_TU_DEBUG`'s default: no GMEM for the first bring-up). Turnip 0005 lets the boot
 line override it, so both images share one seed (one seed identity: a `data-persist=2` store survives the switch):
@@ -506,7 +527,7 @@ load/store-op bug; and the DCVS row's busy share should drop with GMEM on a desk
 every blend through DDR. Same order of checks as tonight's list; a GMEM failure is a reason to stay on sysmem,
 not to stop the session.
 
-### The VM's post-login hang, natively
+#### The VM's post-login hang, natively
 
 In the VM (virgl to the host's msm, 3200x2136, 2026-11-10/11), about one to two minutes after the login the GPU hung for real (the
 host's hangcheck fired with no ring progress, also at 10 s), WindowServer lost its device and the session went back to the login
@@ -522,7 +543,7 @@ WindowServer ...`, then the login window). What to keep from such a run: the thr
 every hang points at one pass), the culprit's process, the `clients` line before it, and whether it came with `piano-tu-debug=none`
 or with sysmem. Not a hang: a long pass that ends before 10 s (no recovery line); a page fault (its own line, the process's window).
 
-### The next desktop run (2026-11-12)
+#### The next desktop run (2026-11-12)
 
 What changed since attend4: the shared VM's 524288 table ranges, a 2048 MiB BO pool, macOS's window table (WindowServer 3.5 GiB),
 Turnip 0006, and the address-space lines (gpu.md §8, "The first desktop's address space"). One image, attend4's boot line plus
@@ -546,7 +567,7 @@ under the pointer's tip; `0 gave up after 1000 ms` in the fence line, and if a `
 frame the GPU had not finished: the previous one stayed). Fallbacks, added to `PIANO_EXTRA_ARGS`: `native-gop-display-cursor=2`
 (the pointer drawn in part or with a frame around it), `native-gop-display-defer=1` (the desktop slow, about 10 frames a second).
 
-## The login window's rendering, 2026-11-12
+### The login window's rendering, 2026-11-12
 
 Three photos of the login window, from runs `logs/usb-console/20261112-073745-port0.txt` (`ram-pol-gpuslot`), `20261112-074855-port0.txt`
 (`ram-pm-cancel0`) and `20261112-091642-port0.txt` (`au2`, built from main about 09:10). All three images had `data-persist=0`, so
@@ -572,7 +593,7 @@ changing inside its box every minute, so whatever the box is, it is drawn again 
 a race or a coherence problem, not a shader translation error. The VM drew the same
 glass login with this plugin and Mesa round, at 1280x800 (the VM-era screenshot `vma2-login.png`, 2026-11-10).
 
-### How the login window's renderers use the device (host trace)
+#### How the login window's renderers use the device (host trace)
 
 `tooling/metal/turnip-a830/render_trace_host.mm` (new) drives RenderBox and Core Animation on the build Mac through the staged
 plugin over Adreno830's hostsim (no shader runs there), and through the Mac's own GPU for comparison. It prints every pass, pipeline,
@@ -608,7 +629,7 @@ DYLD_INSERT_LIBRARIES=$O/hostsim/libhostiokit.dylib HOSTSIM_GPU=a830 HOSTSIM_PAG
   Upstream Turnip relies on `SINGLE_PRIM_MODE = FLUSH_PER_OVERLAP_AND_OVERWRITE` (the a6xx blob's setting) to keep the two in step.
   Nothing has checked that on the A830 (gen8).
 
-### Causes (evidence against inference)
+#### Causes (evidence against inference)
 
 1. **Curves.** Evidence: the glass shapes are an SDF written into a memoryless attachment and read back by the next draw of the same
    pass (trace above), in sysmem. Inference, not yet measured on the tablet: in some boots that read gets stale pixels of the SDF
@@ -640,7 +661,7 @@ DYLD_INSERT_LIBRARIES=$O/hostsim/libhostiokit.dylib HOSTSIM_GPU=a830 HOSTSIM_PAG
    VTDecoderXPCService keeps decoding about 9 frames a second. Earlier lines of this file said Core Animation converts these frames on
    the CPU; it does not, and they are corrected above.
 
-### Fixes in this tree
+#### Fixes in this tree
 
 - **Turnip `0007-turnip-darwin-sysmem-feedback-flush.patch`** (§1). Before each draw whose fragment shader reads an input attachment of
   the subpass, it flushes. Such a shader is one with non-bindless texture slots (ir3's `num_samp`), because input attachments are the
@@ -669,7 +690,7 @@ Bundle built 2026-11-12 (this tree, from scratch twice with the same result): `l
 the old one until the system layer (data-store.md §9: `stage.py --live DIR --gpu-bundle out/turnip-a830/NativeAdrenoMetal.bundle
 --installed-trust <the base's trust cache>`, then `build-esp.py --layer DIR` and the owner's `apply-update.sh`) installs it.
 
-### Test images (unattended, 12 minutes each)
+#### Test images (unattended, 12 minutes each)
 
 ```sh
 K27_KERNEL=<kernel-k27-0064-native.macho> PIANO_EXTRA_KEXTS=$(tooling/k27/build-native-piano-keyboard.sh | tail -1) \
@@ -727,13 +748,13 @@ slots) `dd4e7b22c65db32a…`. Images (`verify-ram-images.py` PASS each; command 
 `ram-gfx-coh` `871c5cc94eeebc39…` (fix's seed), `ram-gfx-bar` `f0aad23b9507b487…` (seed `ce90a139…`), the dump `8df7b15ae95a3123…`.
 Rebuild them in the main checkout before a run (the kernel's and the seeds' bytes depend on where they were built).
 
-## Allocation limits and the video wallpaper, 2026-11-12
+### Allocation limits and the video wallpaper, 2026-11-12
 
 The owner's report: a fixed per-surface cap of about 97 MB is not acceptable for macOS, whose clients assume Apple's 16384x16384 textures
 (1 GiB at 4 bytes a texel), and the login window's aerial video wallpaper is a bug to fix. Both are fixed in this tree: no fixed cap
 remains, each layer's limit is a real resource, and each refusal says which one on the console.
 
-### The failing surface, and the 97 MB
+#### The failing surface, and the 97 MB
 
 - **The frame.** WindowServer's texture over each frame of the login window's aerial: 4096x2160, Metal pixel format 503 (`YCBCR8_444_2P`:
   YCbCr 8-bit 4:4:4 over two planes). Core Animation asks format 503 for a CoreVideo `'444v'` surface (host trace, `render_trace_host`
@@ -757,7 +778,7 @@ remains, each layer's limit is a real resource, and each refusal says which one 
 - VTDecoderXPCService's own textures over 4K frames (formats 501 and 543 in the attended runs) met the same rule and are made now too;
   it is a small client (320 MiB window).
 
-### The limits, end to end
+#### The limits, end to end
 
 | Layer | Limit | Refused with |
 |---|---|---|
@@ -782,7 +803,7 @@ native-metal: surface '444v' 4096x2160 25.3M, p0 4096x2160 1B r4096/4096 @512 8.
 height). Large plain textures and buffers: `native-metal: texture 16384x16384x1 fmt 80 L1 s1 a1: made, 1032.0M by the runtime's layout
 (maxBufferLength 3584.0M)`.
 
-### Host checks (all pass, 22 of 22)
+#### Host checks (all pass, 22 of 22)
 
 `check-turnip-a830-host.py` builds the hostsim twice: as upstream (256 MiB) and as piano's kext (`-DADRENO830_MACOS`, with the 16 GiB
 aperture, `HOSTSIM_VA=16`). plugin_host's new sections, per run:
@@ -802,7 +823,7 @@ the old plugin refuses Core Animation's 503 texture at each frame (`surface text
 CPU`, 8 draws), this one makes it (24 draws, as on the Mac's own GPU). The bundle of these checks: `NativeAdrenoMetal` CDHash
 `3b48e955889824ef61d273680a777cde4da59eeb`, `libvulkan_freedreno.dylib` `33f6503bfd94aa7414663e10d19ed81ffdcb2e08`.
 
-### The wallpaper of the test images: still by default, the video on request
+#### The wallpaper of the test images: still by default, the video on request
 
 Before any login, macOS's login window (SecurityAgent's loginwindow plugin) reads the account's picture from
 `/var/db/Wallpapers/<GeneratedUID>/Wallpaper.png` (what `wallpaperexportd` writes after a login) and plays the default aerial video only
@@ -842,7 +863,7 @@ existing `UniXNU Still` login exports and account store are replaced by the stoc
 The new stock-picture conversion and replacement behaviour have not yet run on the tablet. **Revisit the default video wallpaper when
 hardware video decode (backlog B10, Iris) works.**
 
-### The verification image
+#### The verification image
 
 ```sh
 K27_KERNEL=<k27 tree>/out/k27/kernel-k27-0064-native.macho PIANO_GPU=2 PIANO_VMM_PRESENT=0 tooling/k27/build-native-image.sh
@@ -879,7 +900,7 @@ Built offline 2026-11-12 in an agent worktree (the 0064 kernel, 24 native kexts,
 rule passed): KC `a5706b5b5e5c76f0…`; `ram-gfx-video` `5cba0b63fdb287cb…` (seed `921b5d98…`), `ram-gfx-fix` `7f36b4eaaf6223bf…` (seed
 `d10bc6d3…`), the dump `f07f312ad8e9116a…`; `verify-ram-images.py` PASS for each. Rebuild them in the main checkout before a run.
 
-## Out of device memory on the first desktop sessions, 2026-11-12
+### Out of device memory on the first desktop sessions, 2026-11-12
 
 The owner's first real desktop sessions (image desk-dev, built 17:20 from main; console `logs/usb-console/20261112-172703-port0`):
 WindowServer aborted twice within five minutes (17:32:22, pid 98; 17:34:05, pid 1463) and the session fell back to the login window.
@@ -889,7 +910,7 @@ over a window's surface cannot be made). WindowServer's log just before: `native
 texture: OutOfMemory(Device)` (also 436x24, 448x64, 102x102), `texture over buffer refused: texture over buffer: OutOfMemory(Device)`,
 `surface texture 1720x998 fmt 80 plane 0 (at 0, row 6912): refused (5)`, SkyLight's `MTLTexture creation failed - Size=[1720 x 998]`.
 
-### Which limit: XNU's wired pages, behind a fragmented pool
+#### Which limit: XNU's wired pages, behind a fragmented pool
 
 - **A small texture asks for a block.** The runtime (metal2vulkan) places textures and buffers in pooled blocks of `VkDeviceMemory`
   and makes a new block when none has room (a request larger than half a block takes a dedicated one): a 128x128 texture refused
@@ -922,7 +943,7 @@ it the volatile Data disk held 1378 MiB (NativeRamBlock, `held in chunks`). Who 
 about 1200, imports about 150), iconservicesagent 263 (its peak 766), Siri AI 261, VTDecoderXPCService 144 (peak 300), Dock 74,
 WallpaperAgent 66, Terminal 56, ControlCenter 26, eleven more 1 MiB each.
 
-### The fixes in this tree
+#### The fixes in this tree
 
 - **The pool's room is used (PianoA830).** A BO no single free extent holds is cut from several, the largest first and the last one
   best fit, at most 64 (`NativeAdrenoPoolMaxPieces`; one span and one GPU range each, no kernel mapping), for a write-combined pool and
@@ -955,7 +976,7 @@ new: `deferred_bo-no-memory` (BoAlloc answered NoMemory twice: made after the wa
 the whole series, 124 ms at least; once more within the second: refused at once) and `deferred_bo-idle-trim` (a freed BO cached, then
 given back to the kernel with no further call, `TU_DARWIN_BO_CACHE_AGE_MS=200`); the image build below.
 
-### Still open (what to read on the next run)
+#### Still open (what to read on the next run)
 
 - Wired memory is the budget: every GPU byte is wired (the pool for the boot, a BO while it lives, an import while it is mapped).
   Apple's GPUs page resources in and out; here a pageable BO design (pages wired while a job uses them) would be the real fix.

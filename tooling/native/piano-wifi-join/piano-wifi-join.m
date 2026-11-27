@@ -84,7 +84,7 @@ static int safe_open(const char *path)
     fprintf(stderr, "piano-wifi-join: the profile's directory must be root's with mode 700; not read\n");
     return -1;
   }
-  const int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  const int fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
   if (fd < 0) return errno == ENOENT ? -2 : -1;
   struct stat fs;
   if (fstat(fd, &fs) != 0 || !S_ISREG(fs.st_mode) || fs.st_uid != 0 || (fs.st_mode & 077) || fs.st_size > 4096) {
@@ -424,12 +424,19 @@ static uint32_t receipt(void *unused)
     timeline("SET20 poll result=read-error errno=%d", errno);
     return 0;
   }
-  unsigned generation = 0;
-  if (!strstr(line, "source apple-set20")) {
+  static const char prefix[] = "set (generation ";
+  const char *digits = line + sizeof prefix - 1;
+  if (!n || n > sizeof line || memchr(line, 0, n) != line + n - 1 ||
+      strncmp(line, prefix, sizeof prefix - 1) || *digits < '0' || *digits > '9') {
     timeline("SET20 poll result=no-apple-generation");
     return 0;
   }
-  if (sscanf(line, "set (generation %u)", &generation) != 1) generation = 0;
+  char *end;
+  errno = 0;
+  unsigned long value = strtoul(digits, &end, 10);
+  const char *source = strstr(end, " source apple-set20");
+  unsigned generation = !errno && value <= UINT32_MAX && !strncmp(end, "): ", 3) && source &&
+                        !strcmp(source, " source apple-set20") ? (unsigned)value : 0;
   timeline("SET20 poll generation=%u", generation);
   return generation;
 }

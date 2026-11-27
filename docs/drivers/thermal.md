@@ -1,5 +1,35 @@
 # Thermal and CPU frequency: TSENS, protection, SCMI performance: PianoThermal
 
+## Daily status (2026-11-27)
+
+- **Installed v13.1y12q.** High Power is the daily default. The Android-aligned CPU and GPU frequency curves and thermal
+  limits were verified on installed v13.1y12l on November 26, with the GPU table up to 1100 MHz.
+  [Hardware backlog](../BACKLOG-hardware.md) · [November 26 install results](../results-2026-11-26.md#install)
+- **Board temperatures.** PianoThermal supplies PianoPower with readings from **11 PMIC ADC thermistors**, including battery,
+  charger and connector temperatures. All 11 channels were verified on the tablet by November 13.
+  [Hardware backlog, B6](../BACKLOG-hardware.md#2-backlog-b1b15)
+- **Energy Modes.** Low Power, Automatic and High Power set via `pmset` reached the power and thermal policy on installed
+  v13.1y12l on November 26. Hands-on verification of the System Settings Energy Mode picker remains pending.
+  [Support status](../STATUS.md) · [Hardware backlog, B5](../BACKLOG-hardware.md#2-backlog-b1b15)
+
+## Sensor faults
+
+- A CPU cluster needs a fresh, plausible TSENS reading from every zone in its cooling map. A missing zone selects the
+  cluster's slowest level. The normal recovery timer starts when the complete set reads below the release threshold.
+  Cached TSENS readings remain available for diagnostics. Critical confirmation uses fresh polls, and wake starts it again.
+  At `piano-thermal=2`, incomplete TSENS coverage holds the configured passive GPU ceiling even when the remaining zones
+  read cool. A fault alone never triggers critical shutdown.
+- ADC sample age includes time spent suspended. The charging API and CPU skin policy retain their three-period freshness
+  window, and the GPU APIs retain two periods. Only fresh, plausible, enabled channels count. Virtual skin requires all
+  inputs except when a fresh pin reading confirms the DSP owns the charger channel.
+- With CPU skin protection enabled, a fault uses the lowest existing skin steps, 748.8 and 1017.6 MHz, across Energy Modes.
+  CPU bursts and launch/input boosts require a valid skin reading. The GPU skin guard caps at 734 MHz or its previous
+  lower limit during a skin or XO fault, including a docked/mobile table change. A fresh reading is required to relax it.
+
+## Historical bring-up notes
+
+The design, boot arguments, test plans and measurements below describe the builds under test at the time.
+
 Status: code, 2026-11-11. `package/PianoThermal` is built, host-tested (`thermal_host: all passed`; the sensor map checked against
 the DT: 47 sensors) and linked into the native KC (kernel 0059: `com.unixnu.driver.PianoThermal: linked, ... 374 pointers`, none
 from outside this repository), inert without `piano-thermal` / `piano-cpufreq`; **`piano-thermal=1 piano-cpufreq=3` ran on the
@@ -11,7 +41,7 @@ PMIC board thermistors (battery, charger, connectors, skin, ...) and `piano_ther
 2026-11-11 (host-tested, linked, not run): the TSENS upper/lower threshold interrupts behind `piano-thermal-irq=1` (§13; default
 off; native SPI delivery under Gunyah unproven, the batched test §13.8 settles it).
 
-## 1. Purpose and gate
+### 1. Purpose and gate
 
 The native system had no temperature readout and no CPU frequency control. The GPU login screen already reached 57 C (PianoA830's own
 reading; its DCVS holds 160 MHz from 70 C), the tablet is used daily in a charging stand, and the battery drains fast. PianoThermal
@@ -19,7 +49,7 @@ gives (a) the SoC's temperatures on the console and in the IORegistry, (b) a con
 performance level over SCMI, a fixed "battery" level for an A/B test against the battery current, and a load-based governor with
 Ubuntu's power-profile caps. Gates daily use and any session long enough to heat the SoC (plan R4); battery life (open question 1).
 
-## 2. Hardware facts
+### 2. Hardware facts
 
 Sources: DT = `out/inputs/piano-boot.dtb` (Ubuntu's running DT); UH = `docs/ubuntu-history/device.md` §2.6, §2.7, §3.4; TSV2 = Linux
 `drivers/thermal/qcom/tsens-v2.c`, CPUCP = Linux `drivers/mailbox/qcom-cpucp-mbox.c` (Ubuntu's tree; GPL, as the specification
@@ -42,7 +72,7 @@ only); SCMI = Arm DEN0056; A830 = Adreno830 `Sm8750Tsens` (13T, SM8750); K90 = t
 | Profiles | Ubuntu (schedutil): Power Saver cpu0-5 ≤ 1785.6, cpu6-7 ≤ 1958.4 MHz, GPU ≤ 342; Balanced 3532.8 / 4089.6 MHz (boost off), GPU ≤ 1100; Performance 3532.8 / 4320 (boost) | UH | verified (Ubuntu, on the device) |
 | Votes | none: TSENS is always-on; SCMI perf is the CPUCP's; PianoThermal takes no GCC/RPMh lock | | verified (code) |
 
-## 3. Ubuntu as the specification
+### 3. Ubuntu as the specification
 
 `tsens-v2.c` + `tsens.c` (`get_temp_tsens_valid`: VALID retry, `tsens_hw_to_mC`: sign-extend 12 bits, x100 for v2), the zones'
 step_wise governor (one cooling step per polling interval at/over the trip, back under trip - hysteresis); `qcom-spmi-adc5-gen3.c`
@@ -50,7 +80,7 @@ step_wise governor (one cooling step per polling interval at/over the trip, back
 `scmi-cpufreq.c`, `arm_scmi/perf.c` and `shmem.c` for the perf domains (DESCRIBE_LEVELS paging, level indexing, polled transfers,
 levels above sustained = boost); `qcom-cpucp-mbox.c` for the doorbell; TuneD profiles for the caps (§2).
 
-## 4. UniXNU template to build on
+### 4. UniXNU template to build on
 
 No UniXNU kext reads TSENS or drives SCMI for piano. Taken (facts, no code): A830's status decode (PianoA830 uses it for the GPU
 sensors), K90's SCMI addresses and polled transport on the same SoC, UniXNU-sheng `CpuFreqProbe.cpp`'s mode ladder and governor
@@ -58,7 +88,7 @@ shape (SM8550 EPSS: not piano's registers). PianoThermal is new code (BSD-2-Clau
 (map, decode, poll), `Policy.h` (state machine), `Cluster.h` (a cluster against its trips), `Scmi.h` (transport, perf codec),
 `Governor.h` (fixed/governor/thermal limit).
 
-## 5. IOKit family / ABI
+### 5. IOKit family / ABI
 
 `PianoThermal : IOService` on `IOPlatformExpertDevice` (personality in `tooling/k27/kext/PianoThermal.json`), one kernel thread.
 Properties: `TemperaturesDeciC` (dict: cpu0/cpu1/gpu/nsp hottest), `SensorsDeciC` (data: int16 [4][16], -32768 = no reading),
@@ -115,7 +145,7 @@ once); the fixed level (mode 2) has no power caps and ignores it. One line per c
 `stopped: <why>`), `piano-thermal-adc`; for charging safety `int piano_thermal_board_temps(struct piano_board_temps *)`
 (`package/include/PianoBoardTemps.h`) and `callPlatformFunction("piano-thermal-board-temps", struct piano_board_temps *)` (§12.7).
 
-## 6. Boot args
+### 6. Boot args
 
 | Argument | Default | Effect |
 |---|---|---|
@@ -146,7 +176,7 @@ once); the fixed level (mode 2) has no power caps and ignores it. One line per c
 | `piano-thermal-irq-hold-ms` | 1000 | the fast tier after an upper interrupt (100..10000) |
 | `piano-thermal-irq-test=N` / `-test-s` | 0 / 120 | the synthetic test (§13.8): per controller the hottest sensor's upper threshold N tenths of a degree above its reading (1..200), for that many seconds (10..600), then its window back |
 
-## 7. Kernel archive / component
+### 7. Kernel archive / component
 
 Native kext `com.unixnu.driver.PianoThermal`, listed in `configs/k27-native-kexts.txt` after PianoA830 (named as a library: its GPU
 hooks). Build: `tooling/k27/build-native-piano-thermal.sh` (host tests, the DT map check when `out/inputs/piano-boot.dtb` and dtc
@@ -156,7 +186,7 @@ kext's second object; it exports `piano_thermal_board_temps`. The uplow interrup
 `tests/uplow_host.cpp` and the interrupt table check (`tooling/k27/check-tsens-irq.py`) to that script and `PianoThermalIrq.cpp` as
 the third object (it imports `armcpu_spi_attach` / `armcpu_spi_count` from the kernel).
 
-## 8. Hardware test plan
+### 8. Hardware test plan
 
 All RAM boots with the cable, owner present. Every level is off by default, so a bad image is fixed by its arguments.
 
@@ -236,13 +266,13 @@ channel never free | -101 no answer)` (the CPUCP does not serve the channel nati
 firmware's own limits; after 20 the domain is left alone); a hang right after `running:` (a core that never takes the bound
 thread of the clock measurement: boot with `piano-thermal-clock=0`).
 
-## 9. Fallback
+### 9. Fallback
 
 Without the arguments nothing is mapped. The hardware's own protection stays: TSENS critical thresholds (logged at level 1) and the
 CPUCP's limits management; PianoA830's own GPU rule (160 MHz from 70 C) is independent of this kext. Without `piano-cpufreq` the
 clusters stay at the level the boot stages left (open question 1).
 
-## 10. Open questions
+### 10. Open questions
 
 1. Which levels did the boot stages leave? (`piano-cpufreq=1`; NCC1 at 4.32 GHz would be a battery drain modes 2/3 remove.)
 2. Does the CPUCP serve SCMI natively under Gunyah at EL1 as on K90? (`piano-cpufreq=1`.)
@@ -274,7 +304,7 @@ clusters stay at the level the boot stages left (open question 1).
    residency and the touch feel.) 2026-11-12: the 94-99 % readings of P9 were not this (§8 item 8: a real spinner); an idle core reads
    up to 10 % from the quantisation (host-tested), harmless with the 80 % target.
 
-## 11. Licence note
+### 11. Licence note
 
 New code, BSD-2-Clause-Patent (`package/PianoThermal/LICENSE`). Linux (GPL) and the K90 port (APSL) were read for facts only; no code
 was copied. The SCMI layouts are from Arm's public specification. B6 (§12): Linux's ADC5 gen3, VADC-common, SDAM, pinctrl-spmi-gpio
@@ -283,7 +313,7 @@ parameters (§12.3), and Linux's resistance table is neither copied nor stored (
 run time to compare). §13: Linux's `tsens.c` / `tsens-v2.c` (the interrupt fields, the enable/disable sequences, the violation bits,
 the trip clamp, the suspend rule) were read as the specification only; no code was copied.
 
-## 12. B6: the board thermistors (PMIC ADC5 gen3)
+### 12. B6: the board thermistors (PMIC ADC5 gen3)
 
 Status: code, 2026-11-11. `Ntc.h`, `AdcChannels.h`, `PmicAdc.h`, `BoardTemps.h` (portable), `PianoThermalAdc.cpp` (the kernel
 side, the kext's second object) and `package/include/PianoBoardTemps.h` (the API); host-tested (`adc_host: all passed`), the map
@@ -291,14 +321,14 @@ checked against the DT (`check-adc-map: 11 channels, 4 thermistor pins, the arbi
 native KC (kernel 0059: `com.unixnu.driver.PianoThermal: linked, ... 435 pointers`, 17 native kexts, none from outside this repository); inert
 without `piano-thermal-adc`; **not run on hardware**.
 
-### 12.1 Purpose and gate
+#### 12.1 Purpose and gate
 
 The battery's, the charger's and the two connector thermistors for charging safety (B4, PianoPower), the two skin thermistors (msm,
 quiet) for the thermal policy, later the menu bar's battery temperature. Ubuntu exposed all eleven as monitoring-only thermal zones
 (v0.7.0). A conversion is a write (to the ADC's SDAM, the PMIC's shared memory with its PBS sequencer), so it is opt-in:
 `piano-thermal-adc=1`, default off; without it nothing of the SPMI arbiter is even mapped.
 
-### 12.2 Hardware facts
+#### 12.2 Hardware facts
 
 Sources: DT = `out/inputs/piano-boot.dtb`; KD = the Ubuntu kernel's `sm8750-xiaomi-piano.dts` (piano/dev, pinned in `UPSTREAM`);
 G3 = Linux `qcom-spmi-adc5-gen3.c` + `qcom-adc5-gen3-common.h`; VC = `qcom-vadc-common.c`; ARB = `spmi-pmic-arb.c`; all GPL, read as
@@ -331,7 +361,7 @@ The channel map (`AdcChannels.h`, in the board line's order; `check-adc-map.py` 
 | backlight | pm8550_backlight_therm | 0x14a | PM8550 (1) | 0x4a AMUX1_GPIO_100K_PU | Gen3 | 1360 / 200 µs | backlight | board |
 | flash | pm8550_flash_therm | 0x145 | PM8550 (1) | 0x45 AMUX2_THM_100K_PU | Gen3 | 1360 / 200 µs | flash | board |
 
-### 12.3 Scaling: from a code to degrees, derived (`Ntc.h`)
+#### 12.3 Scaling: from a code to degrees, derived (`Ntc.h`)
 
 1. Resistance: R = 100 kΩ · code / (full scale − code), full scale 2^14 (Gen3) or 0xffff (Gen4), rounded to the ohm.
 2. Temperature: Steinhart–Hart, 1/T = a + b·ln R + c·(ln R)^3, through three points fixed by the part's published parameters,
@@ -351,7 +381,7 @@ temperatures are read as °C × 1024. Read as milli-degrees, as Linux returns th
 these channels 2.4 % high** (25.6 °C at 25 °C, 51.2 °C at 50 °C). To compare with an Ubuntu reading, divide it by 1.024. The part's
 tolerance (±1 % R25, ±1 % B) is worth about ±0.3 °C near room temperature; one Gen3 code is 0.005 °C, one Gen4 code 0.0013 °C.
 
-### 12.4 The conversion (`PmicAdc.h`), the state machine the host test drives
+#### 12.4 The conversion (`PmicAdc.h`), the state machine the host test drives
 
 Start (reads only): the arbiter must be v7; the APID of PPID 0x090 (an entry owned by EE 0 wins); its owner must be EE 0, else OFF
 with nothing written. Only then is that one APID's read/write channel page mapped and writing enabled. Then (reads) SDAM 0's
@@ -381,7 +411,7 @@ written; everything else (the survey, the pins, every other PMIC peripheral) is 
 5 writes (the model: 20.8 and 55 a round). The host model audits every write and fails on one outside the allowlist, on another
 APID, on core/cnfg, or on a trigger written while one is pending.
 
-### 12.5 Errors
+#### 12.5 Errors
 
 | Error | Scope | After it |
 |---|---|---|
@@ -391,7 +421,7 @@ APID, on core/cnfg, or on a trigger written while one is pending.
 A PBS that drops a conversion costs that channel (600 ms, once); a PBS that wedges costs the channel, then the next channel's
 handshake stops everything (at most ~620 ms). Nothing is retried: a disabled channel is unknown, and the charging rules treat it so.
 
-### 12.6 The kernel side (`PianoThermalAdc.cpp`)
+#### 12.6 The kernel side (`PianoThermalAdc.cpp`)
 
 A thread of its own (`piano-thermal-adc`), so a slow conversion never delays the TSENS polling (10 ms near a trip). It starts after
 `piano-thermal-delay`, surveys, converts at once, then every `piano-thermal-adc-s` (default `piano-thermal-log-s`, 30 s; 5..3600).
@@ -401,7 +431,7 @@ The hook in `PianoThermal.cpp` is four small hunks: the include, `piano-thermal-
 `adc::hookStart`, and the `"piano-thermal-board-temps"` platform function. Cost: 11 conversions every 30 s, mostly asleep in 1 ms
 polls (the first round's statistics line gives the real duration).
 
-### 12.7 Charging safety: the API for PianoPower
+#### 12.7 Charging safety: the API for PianoPower
 
 `package/include/PianoBoardTemps.h` (C and C++):
 
@@ -431,7 +461,7 @@ below not stock-verified):
   is what to lower: conn or conn2 at or above 60 °C → ICL 100 mA (as at detach) until both are under 50 °C, logged;
 - charger at or above 85 °C → ICL 500 mA until it is under 75 °C.
 
-### 12.8 Hardware test (one RAM boot; unattended is fine, nothing is driven)
+#### 12.8 Hardware test (one RAM boot; unattended is fine, nothing is driven)
 
 ```sh
 PIANO_GPU=2 PIANO_VMM_PRESENT=0 PIANO_RESET_AFTER=300 \
@@ -468,7 +498,7 @@ conversion` on every channel (the PBS does not post EOC_STS without its interrup
 interrupt); Gen4 channels far from their Gen3 neighbours while those are sane (the Gen4 full scale is not 0xffff); one channel
 `open` / `shorted` (its thermistor or pin: see its pin's `ENABLED`); all readings about 2.4 % below Ubuntu's (expected, §12.3).
 
-### 12.9 Risks and open questions
+#### 12.9 Risks and open questions
 
 1. Gen4's full scale (0xffff) and 0x8000-is-valid come only from Ubuntu's own Gen4 patch. The full scale is settled (2026-11-12:
    the batt code gives the gauges' temperature); 0x8000 as valid has not been seen yet.
@@ -488,7 +518,7 @@ interrupt); Gen4 channels far from their Gen3 neighbours while those are sane (t
 7. The PMICs' temp-alarm stages and the ADC's own threshold monitoring (ADC_TM, SDAM 1) stay unused; the latter would let the PBS
    watch a threshold without polling (a later step, after one good run).
 
-### 12.10 The charger thermistor and the DSP's pin (2026-11-12, queue5 P12)
+#### 12.10 The charger thermistor and the DSP's pin (2026-11-12, queue5 P12)
 
 **Seen** (USB console, read only): with `piano-power=1` (the DSP's charger firmware never started; adc1) the charger channel read
 0x2f3e-0x2ded, 22.6-21.8 kΩ, **59.5-60.8 °C** at an idle board for the whole run, while batt read 32.6-34.6 °C against the gauges'
@@ -525,7 +555,7 @@ PianoThermal: [67s] adc: charger: pmih0108 gpio12 (the firmware's) high-Z (...):
 A pin that reads high-Z while the channel still reads ~60 °C before the DSP is up disproves the inference (then PianoPower's mark
 is what keeps the rule off it; report the pin line and the raw codes).
 
-## 13. The uplow interrupt: `piano-thermal-irq=1`
+### 13. The uplow interrupt: `piano-thermal-irq=1`
 
 Status: code, 2026-11-11. `TsensIrq.h` (portable: the facts, the threshold encoders, the handler's decision, the state machine),
 `PianoThermalIrq.cpp` (the kernel side, the kext's third object) and a hook of a few lines in `PianoThermal.cpp`; host-tested
@@ -535,7 +565,7 @@ native KC (kernel 0059: `com.unixnu.driver.PianoThermal: linked, ... 490 pointer
 from outside this repository`); default off; **not run on the tablet**: native SPI delivery under Gunyah is unproven, and the
 batched test (§13.8) is built to settle it at the first boot.
 
-### 13.1 Purpose
+#### 13.1 Purpose
 
 Battery. The thread polls every TSENS sensor every 1 s at rest, every 250 ms once the hottest reaches 70 C, and every 10 ms near a
 trip or while a cluster runs above 2.5 GHz (§5); the last alone is 100 wake-ups/s for as long as the boot stages leave the prime
@@ -543,7 +573,7 @@ cores fast (`piano-cpufreq=1` reports, sets nothing). Those tiers exist because 
 (~200 C/s). The upper-threshold interrupt says at once when any sensor crosses 85 C, so while every sensor is under it the warm tier
 and the fast-clock rule are not needed and the base poll can be 5 s; the lower-threshold interrupt says when the hot phase is over.
 
-### 13.2 Facts
+#### 13.2 Facts
 
 Sources: DT = `out/inputs/piano-boot.dtb`; TSV2 = Linux `drivers/thermal/qcom/tsens.c` + `tsens-v2.c` (Ubuntu's tree, GPL, the
 specification only); PI = `docs/power-irq.md` §2.1.
@@ -557,7 +587,7 @@ specification only); PI = `docs/power-irq.md` §2.1.
 | Semantics | a threshold is violated while TM_Sn_STATUS bit 17 (LOWER) / 18 (UPPER) is set (Linux reads those, not 0x08); enable = mask bit 0; disable = mask bit 1, then the clear bit 1 and 0; set_trips writes the window, then unmasks; before system suspend every lower interrupt masked, the upper ones armed (08e750858038) | TSV2 | spec |
 | Delivery | ArmCpu's `armcpu_spi_attach` (INTID = SPI + 32: 803-806), level, routed to the boot CPU, priority 0xa0, one handler per INTID, no detach and no mask (a storm is stopped with GICD_ICENABLER) | PI | the attach verified (kernel symbols); delivery **needs-boot** |
 
-### 13.3 Design
+#### 13.3 Design
 
 - **The window.** Every sensor that has a reading at the first poll gets lower 70 C / upper 85 C (one TM_Sn_UPPER_LOWER_THRESHOLD
   write each, bits [31:24] as found). An armed sensor is *low* (upper unmasked, lower masked) or *high* (the reverse): an upper
@@ -588,7 +618,7 @@ specification only); PI = `docs/power-irq.md` §2.1.
 - **Never written**: the critical thresholds (0x60 + 4n), the critical interrupt registers (0x14-0x1c), SROT, the PDC. The hardware's
   own protection stays as the boot stages left it.
 
-### 13.4 The tiers
+#### 13.4 The tiers
 
 | Uplow state | Poll tier | Base |
 |---|---|---|
@@ -600,12 +630,12 @@ specification only); PI = `docs/power-irq.md` §2.1.
 The thread's wait at rest is the uplow path's (`PianoThermal::pollWait` hands over to it): an interrupt ends it at once, and so does
 the system-sleep park request (it also kicks that wait). The 30 s report and the policy run as before, on the iterations there are.
 
-### 13.5 Boot arguments
+#### 13.5 Boot arguments
 
 `piano-thermal-irq=1` (needs PianoThermal running: `piano-thermal` ≥ 1, or `piano-cpufreq` / `piano-thermal-adc`, which imply it),
 `-up` / `-down` (85 / 70 C), `-poll-ms` (5000), `-hold-ms` (1000), `-test` / `-test-s` (0 / 120): §6.
 
-### 13.6 System sleep and the suspend hooks
+#### 13.6 System sleep and the suspend hooks
 
 With `piano-thermal-irq=1` the power-tree sleep (§5) masks as with `piano-thermal-sleep-mask=1` (the contract's rule: masked when
 interrupts are used). While the path is live, `piano_thermal_suspend_prepare()` is the path's own: every lower interrupt masked and
@@ -618,7 +648,7 @@ parks while suspended, the threshold interrupts masked (piano-thermal-irq=1: the
 `suspend prepare: lower threshold interrupts masked on 4 controllers, the upper ones kept armed (the uplow interrupt is serviced):
 tsens0 0x7fff->0x7fff ...` and `suspend finish: the uplow interrupt masks are back (lower armed for the sensors above 85.0 C)`.
 
-### 13.7 Build and host tests
+#### 13.7 Build and host tests
 
 `tooling/k27/build-native-piano-thermal.sh` runs `package/common/tests/run.sh` (PianoIrq.h), then `tests/uplow_host.cpp` against a
 model of the four controllers (thresholds compared with each sensor's temperature, the status bits, mask, clear, TM_INT_EN, a status
@@ -648,7 +678,7 @@ With the DT, `tooling/k27/check-tsens-irq.py` compares the SPI table (`uplow_hos
 trigger, inherited parent) and prints which PDC pin feeds each line. The kext's objects link with 0 unresolved imports
 (`armcpu_spi_attach`, `armcpu_spi_count`, the spin lock and wait primitives from the kernel).
 
-### 13.8 The batched tablet test (synthetic, nothing heated)
+#### 13.8 The batched tablet test (synthetic, nothing heated)
 
 Heating the SoC to 85 C is not needed and not wanted. The proof at the start already makes each line fire twice by moving a
 threshold across the reading; the synthetic test then waits for the *temperature itself* to cross a threshold set just above it:
@@ -731,7 +761,7 @@ Failure meanings:
 - A data abort at the first proof write: the TM range is read-only to this EL1 (Linux writes these registers under the same
   hypervisor, so not expected); drop `piano-thermal-irq`.
 
-### 13.9 Risks and open questions
+#### 13.9 Risks and open questions
 
 1. Delivery under Gunyah (SPI 771-774 are PDC outputs; the HLOS DT names them; Linux takes them): unproven natively. The proof
    decides at each boot; without delivery the cost is one 250 ms wait at the start (the proof stops at the first failure), then
@@ -750,7 +780,7 @@ Failure meanings:
 7. Not done: per-crossing windows (Linux's set_trips moves the window to the next trip; here the window is fixed and only the masks
    change), the critical interrupt, and an interrupt-driven near-trip tier (the 10 ms polls above 95 C stay).
 
-## 14. The stock-level CPU policy: `machdep.piano_cpufreq_perf` (2026-11-22)
+### 14. The stock-level CPU policy: `machdep.piano_cpufreq_perf` (2026-11-22)
 
 The owner's priority of 2026-11-21 (performance first: CPU clocks and DVFS behaviour at the stock Android levels, under the same
 thermal limits) and of 2026-11-22 (macOS Low Power Mode is the one performance switch). `Perf.h` (portable, host-tested in
@@ -764,11 +794,11 @@ thermal limits) and of 2026-11-22 (macOS Low Power Mode is the one performance s
 | 2 (beyond stock) | as 1 | as 1 | off (the sustained 3532.8 / 4089.6 ceilings) | to 3532 / 4320 MHz (`-burst-max0/1`), over sustained only while open | as 1 |
 
 - **Virtual skin**: the stock thermal daemon's sensor from the board thermistors of §12 (batt 500, quiet 131, charger -9, wifi 89,
-  msm 232 per mille of 1000, + 1.6 C); a missing input scales the present ones up to the full weight; valid only with the battery
-  and one skin thermistor. Readings are the ADC's last round (`piano-thermal-adc-s`, 30 s).
+  msm 232 per mille of 1000, + 1.6 C). When the DSP drives the charger pin, the other four inputs are scaled up to the full
+  weight. Readings are the ADC's last round (`piano-thermal-adc-s`, 30 s).
 - **Skin step table** (the stock normal scene): cpu0-5 2745.6 MHz from 15 C, 2400 at 37 C, 1996.8 at 39, 1555.2 at 41-44,
   1363.2 at 45, 960 at 46, 748.8 at 48; cpu6-7 3072 from 15 C, 2649.6 at 34, 1958.4 at 37-39, 1689.6 at 39.5, 1401.6 at 40,
-  1017.6 at 44; each step leaves only under its own clear point. No reading = the first step, never "no cap".
+  1017.6 at 44; each step leaves only under its own clear point. A sensor fault uses the lowest step.
 - **Burst**: macOS gives the kernel no launch/animation hint, so a burst opens at a load onset (the governor wanted more than its
   ceiling on this decision and not on the one before), lasts at most `piano-cpufreq-burst-ms` (1500), the next one needs a new onset
   and `piano-cpufreq-burst-gap-ms` (500); none from the skin boost limit (`piano-cpufreq-skin-boost-limit`, 48 C) and none on Power
@@ -793,7 +823,7 @@ thermal limits) and of 2026-11-22 (macOS Low Power Mode is the one performance s
   (2649-3513 MHz, zones 90-95 C most of the time, a few readings above 95 C) with the High Power cap 4320 in place and no refusal:
   the thermal limit, not the mode, set the ceiling (step_wise: down at 95 C, up only under 90 C).
 
-## 15. The full table: `machdep.piano_cpufreq_fullopp` (2026-11-22)
+### 15. The full table: `machdep.piano_cpufreq_fullopp` (2026-11-22)
 
 The owner's decision of 2026-11-22 22:43: the CPU on Android's whole frequency table and Android's thermal policy, as the GPU's
 full-table line. `Perf.h` (host-tested in `thermal_host` testFullopp), at run time `machdep.piano_cpufreq_fullopp` (root, 0/1;

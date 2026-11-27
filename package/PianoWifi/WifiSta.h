@@ -334,25 +334,26 @@ inline bool post(Sta &s, Build build)
 }
 
 // The band, the channel and its regulatory facts of a frequency.
-inline void channelFacts(const Sta &s, StaChoice &c)
+inline bool channelFacts(const Sta &s, StaChoice &c)
 {
-  c.band5 = c.freq >= 4900;
-  c.channel = c.band5 ? (c.freq - 5000) / 5 : (c.freq == 2484 ? 14u : (c.freq - 2407) / 5);
+  c.channel = dot11ChannelOfFreq(c.freq);
+  if (!c.channel) return false;
+  c.band5 = c.channel >= 32;
   c.passive = false;
   c.radar = false;
   c.powerDbm = 20;
-  if (s.env.reg && s.env.reg->seen) {
+  if (s.env.reg && s.env.reg->seen && s.env.reg->ruleCount) {
     RegChannel rc;
-    if (regChannel(*s.env.reg, c.freq, rc) && rc.allowed) {
-      c.passive = rc.passive;
-      c.radar = rc.radar;
-      c.powerDbm = rc.powerDbm > 0 ? rc.powerDbm : 20;
-      return;
-    }
+    if (!regChannel(*s.env.reg, c.freq, rc)) return false;
+    c.passive = rc.passive;
+    c.radar = rc.radar;
+    c.powerDbm = rc.powerDbm > 0 ? rc.powerDbm : 20;
+    return true;
   }
   // no regulatory word on it: the 5 GHz radar range is treated as a radar channel, as the fallback channel list does
   c.radar = c.band5 && c.freq >= 5260 && c.freq <= 5700;
   c.passive = c.radar;
+  return true;
 }
 
 // The class a candidate is tried in (StaClass): a 5 GHz one weaker than minRssi5 goes after the 2.4 GHz ones.
@@ -372,9 +373,10 @@ inline uint32_t chooseAll(const Sta &s, StaChoice *out, uint32_t capacity, uint3
 {
   total = radar = hidden = 0;
   if (!s.env.scan || !out || !capacity) return 0;
+  if (capacity > kStaCandidatesMax) capacity = kStaCandidatesMax;
   const ScanList &list = *s.env.scan;
   uint32_t kept = 0;
-  int32_t keys[kStaCandidatesMax + 1] = {};
+  int64_t keys[kStaCandidatesMax] = {};
   for (uint32_t i = 0; i < list.count; ++i) {
     const ScanEntry &e = list.entries[i];
     if (e.hidden) {
@@ -385,22 +387,22 @@ inline uint32_t chooseAll(const Sta &s, StaChoice *out, uint32_t capacity, uint3
     bool same = true;
     for (uint32_t k = 0; k < s.ssidLength && same; ++k) same = e.ssidRaw[k] == s.ssid[k];
     if (!same || !e.freq) continue;
-    ++total;
     StaChoice c;
     c.found = true;
     c.index = i;
     c.freq = e.freq;
     c.rssi = e.rssi;
     c.net = e;
-    channelFacts(s, c);
+    if (!channelFacts(s, c)) continue;
+    ++total;
     if (c.radar && !(s.options.flags & kStaFlagRadarOk)) {
       ++radar;
       continue;
     }
     c.cls = classOf(s, c);
     // a smaller key is tried first
-    int32_t key = ((s.options.flags & kStaFlagPrefer5) ? int32_t(c.cls) * 1000 : 0) - c.rssi;
-    if (s.bssidGiven && sameMac(e.bssid, s.bssidPref)) key = -100000;
+    int64_t key = ((s.options.flags & kStaFlagPrefer5) ? int64_t(c.cls) * 1000 : 0) - c.rssi;
+    if (s.bssidGiven && sameMac(e.bssid, s.bssidPref)) key = INT64_MIN;
     uint32_t at = kept;
     while (at > 0 && keys[at - 1] > key) --at;
     if (at >= capacity) continue;

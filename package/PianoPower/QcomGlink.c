@@ -12,7 +12,7 @@ static void barrier(void)
     __asm__ volatile("dmb osh" ::: "memory");
 #endif
 }
-static uint32_t align8(uint32_t v) {return (v + 7u) & ~7u;}
+static uint64_t align8(uint64_t v) {return (v + 7u) & ~UINT64_C(7);}
 static uint32_t le32(const uint8_t *p) {return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;}
 static void put32(uint8_t *p, uint32_t v) {p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);}
 static size_t name_length(const char *s) {size_t n = 0; while (n < QCOM_GLINK_NAME - 1 && s[n]) ++n; return n;}
@@ -67,10 +67,9 @@ static void tx_write(QcomGlink *g, const uint8_t *header, uint32_t header_length
     uint32_t head = *f->head;
     for (uint32_t i = 0; i < header_length; ++i) {f->data[head] = header[i]; if (++head == f->length) head = 0;}
     for (uint32_t i = 0; i < data_length; ++i) {f->data[head] = data[i]; if (++head == f->length) head = 0;}
-    head = align8(head);
-    if (head >= f->length) head -= f->length;
+    const uint64_t padded_head = align8(head);
     barrier();
-    *f->head = head;
+    *f->head = (uint32_t)(padded_head >= f->length ? padded_head - f->length : padded_head);
     g->tx_messages++;
     g->kick_pending = 1;
 }
@@ -88,14 +87,20 @@ static void notify_read(QcomGlink *g)
     }
 }
 
-static int tx(QcomGlink *g, const uint8_t *header, uint32_t header_length, const uint8_t *data, uint32_t data_length)
+static int tx_room(QcomGlink *g, uint64_t bytes)
 {
-    if (align8(header_length + data_length) > qcom_glink_tx_avail(&g->tx)) {
+    if (bytes > qcom_glink_tx_avail(&g->tx)) {
         g->tx_blocked++;
         g->retry_pending = 1;
         notify_read(g);
-        return QcomGlinkAgain;
+        return 0;
     }
+    return 1;
+}
+
+static int tx(QcomGlink *g, const uint8_t *header, uint32_t header_length, const uint8_t *data, uint32_t data_length)
+{
+    if (!tx_room(g, align8((uint64_t)header_length + data_length))) return QcomGlinkAgain;
     tx_write(g, header, header_length, data, data_length);
     return QcomGlinkOk;
 }
@@ -276,17 +281,27 @@ static void progress(QcomGlink *g)
     }
 }
 
+/* A frame includes its padding, and the producer must leave room to distinguish full from empty. */
+static int rx_frame(const QcomGlink *g, uint64_t bytes, uint32_t avail, uint32_t *padded)
+{
+    bytes = align8(bytes);
+    if (bytes + FULL_RESERVE > g->rx.length) return QcomGlinkCorrupt;
+    *padded = (uint32_t)bytes;
+    return avail >= *padded;
+}
+
 static int handle_data(QcomGlink *g, uint16_t cmd, uint32_t rcid, uint32_t liid, uint32_t avail)
 {
     uint8_t h[16];
     if (avail < 16) return 0;
     rx_peek(&g->rx, 0, h, 16);
     const uint32_t chunk = le32(h + 8), left = le32(h + 12);
-    if (chunk > g->rx.length || align8(16 + chunk) < chunk) return QcomGlinkCorrupt;
-    if (avail < 16 + chunk) return 0;  /* not all there yet */
+    uint32_t padded;
+    const int complete = rx_frame(g, 16ull + chunk, avail, &padded);
+    if (complete <= 0) return complete;
     QcomGlinkChannel *c = by_rcid(g, rcid);
     const unsigned index = liid - 1;
-    if (!c || !liid || index >= c->intent_count || !c->local[index].advertised) {
+    if (!c || !liid || index >= c->intent_count || !c->local[index].advertised || c->local[index].busy) {
         g->dropped++;
     } else {
         uint32_t fill = cmd == QCOM_GLINK_TX_DATA ? 0 : c->local[index].fill;
@@ -310,7 +325,7 @@ static int handle_data(QcomGlink *g, uint16_t cmd, uint32_t rcid, uint32_t liid,
         }
         c->local[index].fill = fill;
     }
-    rx_advance(&g->rx, align8(16 + chunk));
+    rx_advance(&g->rx, padded);
     return 1;
 }
 
@@ -404,8 +419,10 @@ static int receive_one(QcomGlink *g)
         break;
     case QCOM_GLINK_OPEN: {
         const uint32_t n = param2 & 0xffff;
-        if (n > g->rx.length || n == 0) return QcomGlinkCorrupt;
-        if (avail < 8 + n) return 0;
+        if (!n) return QcomGlinkCorrupt;
+        uint32_t padded;
+        const int complete = rx_frame(g, 8u + n, avail, &padded);
+        if (complete <= 0) return complete;
         char name[QCOM_GLINK_NAME] = {0};
         rx_peek(&g->rx, 8, (uint8_t *)name, n < QCOM_GLINK_NAME ? n : QCOM_GLINK_NAME - 1);
         name[QCOM_GLINK_NAME - 1] = 0;
@@ -443,7 +460,7 @@ static int receive_one(QcomGlink *g)
             c->rcid = param1;
             c->remote_open = 1;
         }
-        rx_advance(&g->rx, align8(8 + n));
+        rx_advance(&g->rx, padded);
         g->rx_messages++;
         return 1;
     }
@@ -451,8 +468,11 @@ static int receive_one(QcomGlink *g)
         if ((c = by_lcid(g, param1)) && c->open_sent == 1) c->open_acked = 1;
         break;
     case QCOM_GLINK_CLOSE:
+        c = by_rcid(g, param1);
+        /* Both commands must fit before acknowledging a close that also closes our side. */
+        if (c && c->open_sent == 1 && !tx_room(g, 16)) return 0;
         if (command(g, QCOM_GLINK_CLOSE_ACK, param1, 0)) return 0;
-        if ((c = by_rcid(g, param1))) {
+        if (c) {
             const int was = c->up;
             if (c->open_sent == 1 && command(g, QCOM_GLINK_CLOSE, c->lcid, 0)) return 0;
             reset_channel(g, c);
@@ -465,9 +485,9 @@ static int receive_one(QcomGlink *g)
     case QCOM_GLINK_CLOSE_ACK:
         break;
     case QCOM_GLINK_INTENT: {
-        if (param2 > (g->rx.length - 8) / 8) return QcomGlinkCorrupt;
-        const uint32_t bytes = 8 + 8 * param2;
-        if (avail < bytes) return 0;
+        uint32_t padded;
+        const int complete = rx_frame(g, 8ull + 8ull * param2, avail, &padded);
+        if (complete <= 0) return complete;
         c = by_rcid(g, param1);
         for (uint32_t i = 0; i < param2; ++i) {
             uint8_t pair[8];
@@ -488,7 +508,7 @@ static int receive_one(QcomGlink *g)
             c->remote[slot].busy = 0;
         }
         if (c) c->intent_asked = 0;
-        rx_advance(&g->rx, align8(bytes));
+        rx_advance(&g->rx, padded);
         g->rx_messages++;
         return 1;
     }
@@ -571,7 +591,7 @@ int qcom_glink_send(QcomGlink *g, QcomGlinkChannel *c, const void *data, uint32_
 {
     if (!g || !c || (!data && length)) return QcomGlinkArgument;
     if (g->broken || !c->up) return QcomGlinkNotOpen;
-    if (align8(16 + length) > g->tx.length / 2) return QcomGlinkTooBig;
+    if (align8(16ull + length) > g->tx.length / 2) return QcomGlinkTooBig;
     unsigned best = QCOM_GLINK_MAX_REMOTE_INTENTS;
     for (unsigned k = 0; k < QCOM_GLINK_MAX_REMOTE_INTENTS; ++k)
         if (c->remote[k].valid && !c->remote[k].busy && c->remote[k].size >= length &&

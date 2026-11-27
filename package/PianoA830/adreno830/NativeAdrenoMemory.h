@@ -8,10 +8,16 @@ class IOBufferMemoryDescriptor;
 class IOMemoryDescriptor;
 class IOMultiMemoryDescriptor;
 namespace a830tier { enum class Parse; }
+enum NativeAdrenoTierRequest : unsigned {
+    NativeAdrenoTierLegacySmall, NativeAdrenoTierLegacyLarge, NativeAdrenoTierContiguous, NativeAdrenoTierPrivate,
+    NativeAdrenoTierHostImport, NativeAdrenoTierScanoutImport, NativeAdrenoTierCpuMap,
+    NativeAdrenoTierImportDenied, NativeAdrenoTierCpuMapDenied, NativeAdrenoTierRequestCount
+};
 struct NativeAdrenoTierStats {
     const char *state;
     unsigned mode, runs, tested, passed, pass_mask;
     uint64_t free_bytes, used_bytes, refusals, allocations;
+    uint64_t requests[NativeAdrenoTierRequestCount];
 };
 /* UniXNU-piano (2026-11-23, GPU-PAGED P1b, private P1-GATE.md section 7): a user BO (the pageable named entry) of at least
  * NativeAdrenoWireSplitBytes is made of up to NativeAdrenoWireMaxParts named entries wired at the same time by
@@ -189,6 +195,7 @@ public:
     static void qualifyTier(unsigned bits,bool write_combined,bool cached_coherent,
         bool (*probe)(uint64_t,unsigned,void *),void *ctx,void (*line)(const char *,void *));
     static NativeAdrenoTierStats tierStats();
+    static void noteTierRequest(NativeAdrenoTierRequest request);
     static bool tierEligible(size_t bytes);
     IOReturn allocateTier(size_t bytes,unsigned bits);
     bool tier() const {return tier_;}

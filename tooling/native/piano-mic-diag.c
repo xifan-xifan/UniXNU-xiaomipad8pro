@@ -16,6 +16,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "../../package/PianoAudio/AudioTiming.h"
+#include "audio-cli.h"
+#include "audio-wav.h"
 
 enum {
     RATE = PIANO_AUDIO_RATE,
@@ -35,7 +37,9 @@ static volatile sig_atomic_t interrupted;
 static void stop_signal(int sig) { (void)sig; interrupted=1; }
 static uint64_t load64(const uint64_t *p) { return __atomic_load_n(p,__ATOMIC_ACQUIRE); }
 static mach_timebase_info_data_t tb;
-static uint64_t ns(uint64_t ticks) { return (uint64_t)((__uint128_t)ticks*tb.numer/tb.denom); }
+static __uint128_t ns(uint64_t ticks) { return (__uint128_t)ticks*tb.numer/tb.denom; }
+static uint64_t frame_clock(uint64_t ticks) { return (uint64_t)(ns(ticks)*RATE/1000000000); }
+static uint64_t distance(uint64_t a,uint64_t b) { return a>b ? a-b : b-a; }
 
 /* The engine publishes a completed wrap. Keep the block end two input safety
  * offsets behind its clock and reserve another two before overwrite. Kernel
@@ -44,7 +48,7 @@ static enum ReadState readable(uint64_t clock, uint64_t anchor, uint64_t next)
 {
     if (anchor > clock) return ANCHOR_AHEAD;
     if (clock - anchor > RING + LAG) return ANCHOR_STALE;
-    if (clock < next + BLOCK + LAG) return READ_WAIT;
+    if (clock < next || clock - next < BLOCK + LAG) return READ_WAIT;
     if (clock - next > MAX_AGE) return READER_LAG;
     return READ_READY;
 }
@@ -69,6 +73,7 @@ static int selftest(void)
         readable(MAX_AGE + 1, 0, 0) != READER_LAG ||
         readable(MAX_AGE, 0, 0) != READ_READY ||
         readable(1000, 2000, 0) != ANCHOR_AHEAD ||
+        readable(UINT64_MAX, UINT64_MAX, UINT64_MAX - 1) != READ_WAIT ||
         readable(BLOCK + LAG - 1, 0, 0) != READ_WAIT) return 1;
     puts("SELFTEST_PASS chronological 5s PCM across wraps and a 100ms reader stall, stale/overrun/future/early bounds");
     return 0;
@@ -117,16 +122,6 @@ static int control(io_connect_t c,io_service_t s,int level,int mute)
            level,mute,a,b,l,m,!a&&!b&&ok&&l==level&&m==mute?"PASS":"FAIL");
     return a||b||!ok||l!=level||m!=mute;
 }
-static void le16(unsigned char *p,uint16_t v) {p[0]=(unsigned char)v;p[1]=(unsigned char)(v>>8);}
-static void le32(unsigned char *p,uint32_t v) {for (unsigned i=0;i<4;++i)p[i]=(unsigned char)(v>>(i*8));}
-static int wav_header(FILE *f,uint32_t bytes)
-{
-    unsigned char h[44]={0};
-    memcpy(h,"RIFF",4); le32(h+4,bytes+36); memcpy(h+8,"WAVEfmt ",8); le32(h+16,16);
-    le16(h+20,1);le16(h+22,1);le32(h+24,RATE);le32(h+28,RATE*2);le16(h+32,2);le16(h+34,16);
-    memcpy(h+36,"data",4);le32(h+40,bytes);
-    return fseek(f,0,SEEK_SET) || fwrite(h,1,sizeof h,f)!=sizeof h;
-}
 static int capture(io_connect_t c,io_service_t service,const char *prefix,unsigned seconds)
 {
     char wav[1024],ready[1024],stop[1024],done[1024];
@@ -145,7 +140,7 @@ static int capture(io_connect_t c,io_service_t service,const char *prefix,unsign
         puts("HARNESS_FAIL check=unused_prefix");return 1;
     }
     FILE *f=fopen(wav,"wbx"); if (!f) {perror("exclusive wav");return 1;}
-    const char *failure = wav_header(f,0) ? "wav_header" : NULL;
+    const char *failure = audio_wav_write_header(f,RATE,0) ? "wav_header" : NULL;
     int started=0;
     mach_vm_address_t sa=0,ra=0; mach_vm_size_t sl=0,rl=0;
     uint64_t next=0,seed=0,previous_clock=0,blocks=0,anchors=0,last_anchor=0;
@@ -166,7 +161,7 @@ static int capture(io_connect_t c,io_service_t service,const char *prefix,unsign
         observed_seed=seed=load64(&s->seed);
         host=origin=load64(&s->host);
         sample=load64(&s->sample);
-        if (!seed || !origin || sample) failure="initial_anchor";
+        if (!seed || !origin || origin>mach_absolute_time() || sample) failure="initial_anchor";
     }
     int announced=0,stopped=0;
     while (!failure && !interrupted && ns(mach_absolute_time()-start)<(uint64_t)seconds*1000000000) {
@@ -176,7 +171,7 @@ static int capture(io_connect_t c,io_service_t service,const char *prefix,unsign
         now=mach_absolute_time();
         observed_seed=load64(&s->seed);
         check_clock=expected=0;
-        clock=ns(now-origin)*RATE/1000000000;
+        clock=frame_clock(now-origin);
         gap=previous_clock ? clock-previous_clock : 0;
         if (gap>max_gap) max_gap=gap;
         if (observed_seed!=seed) {failure="seed_change";break;}
@@ -184,8 +179,8 @@ static int capture(io_connect_t c,io_service_t service,const char *prefix,unsign
         if (sample%RING) {failure="anchor_alignment";break;}
         /* Host is stored before sample. Only retry a split snapshot while
          * the unread block is still inside the ring's safe window. */
-        expected=ns(host-origin)*RATE/1000000000;
-        if (expected+2<sample || expected>sample+2) {
+        expected=frame_clock(host-origin);
+        if (distance(expected,sample)>2) {
             ++torn_pairs;
             if (clock>next+MAX_AGE) {failure="torn_pair";break;}
             usleep(1000);
@@ -201,11 +196,12 @@ static int capture(io_connect_t c,io_service_t service,const char *prefix,unsign
             usleep(2000);
             __atomic_thread_fence(__ATOMIC_SEQ_CST);
             piano_audio_copy_from_ring(again,ring,RING,(uint32_t)(next%RING),BLOCK,1);
-            check_clock=ns(mach_absolute_time()-origin)*RATE/1000000000;
+            check_clock=frame_clock(mach_absolute_time()-origin);
             observed_seed=load64(&s->seed);
             if (observed_seed!=seed) {failure="reread_seed_change";break;}
             if (check_clock>next+MAX_AGE) {failure="reread_lag";break;}
             if (memcmp(block,again,sizeof block)) {failure="reread_mismatch";break;}
+            if (next>AUDIO_WAV_MAX_MONO_FRAMES-BLOCK) {failure="wav_size";break;}
             if (fwrite(block,1,sizeof block,f)!=sizeof block) {failure="wav_write";break;}
             next+=BLOCK;++blocks;
             if (!announced && next>=2u*RATE) {
@@ -224,7 +220,7 @@ static int capture(io_connect_t c,io_service_t service,const char *prefix,unsign
     if (!failure && sr) failure="stop_io";
     kern_return_t ru=ra?IOConnectUnmapMemory64(c,0x10000001,mach_task_self(),ra):KERN_SUCCESS;
     kern_return_t su=sa?IOConnectUnmapMemory64(c,0,mach_task_self(),sa):KERN_SUCCESS;
-    int header_rc=wav_header(f,(uint32_t)(next*2));
+    int header_rc=audio_wav_write_header(f,RATE,next);
     int close_rc=fclose(f);
     if (!failure && (ru || su)) failure=ru ? "unmap_ring" : "unmap_status";
     if (!failure && header_rc) failure="wav_finalize";
@@ -261,18 +257,17 @@ int main(int argc,char **argv)
     int ctl=argc==4&&!strcmp(argv[1],"--control"),rec=argc==4&&!strcmp(argv[1],"--capture");
     if ((!ctl&&!rec)||geteuid()!=0) {fputs("usage (root): --control LEVEL MUTE | --capture UNIQUE_PREFIX MAX_SECONDS; --selftest needs no device\n",stderr);return 2;}
     umask(0077);
-    char *end=NULL;unsigned seconds=0;int level=0,mute=0;
+    long seconds=0,level=0,mute=0;
     if (ctl) {
-        long v=strtol(argv[2],&end,10);if (*end||v<0||v>100)return 2;level=(int)v;
-        v=strtol(argv[3],&end,10);if (*end||v<0||v>1)return 2;mute=(int)v;
-    } else {long v=strtol(argv[3],&end,10);if (*end||v<5||v>180)return 2;seconds=(unsigned)v;}
+        if (!audio_parse_long(argv[2],0,100,&level) || !audio_parse_long(argv[3],0,1,&mute)) return 2;
+    } else if (!argv[2][0] || !audio_parse_long(argv[3],5,180,&seconds)) return 2;
+    if (rec && (mach_timebase_info(&tb)!=KERN_SUCCESS || !tb.numer || !tb.denom)) return 1;
     io_service_t s=find_mic();io_connect_t c=0;
     if (!s) {puts("HARNESS_FAIL unique Mic/mic-delivery1 contract missing");return 2;}
     kern_return_t kr=IOServiceOpen(s,mach_task_self(),0,&c);
     if (kr) {printf("HARNESS_FAIL IOServiceOpen 0x%x\n",kr);IOObjectRelease(s);return 2;}
     signal(SIGINT,stop_signal);signal(SIGTERM,stop_signal);signal(SIGHUP,stop_signal);
-    mach_timebase_info(&tb);
-    int rc=ctl?control(c,s,level,mute):capture(c,s,argv[2],seconds);
+    int rc=ctl?control(c,s,(int)level,(int)mute):capture(c,s,argv[2],(unsigned)seconds);
     kr=IOServiceClose(c);if (kr)rc=1;IOObjectRelease(s);
     printf("CONNECTION_CLOSED rc=0x%x result=%d\n",kr,rc);
     return rc;

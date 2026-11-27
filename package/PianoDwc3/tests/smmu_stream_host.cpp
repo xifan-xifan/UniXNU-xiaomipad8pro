@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Host test of SmmuStream.h on an SMMU register model shaped like piano's apps SMMU after NativeUfs (IDR1 0x60000053:
 // 83 banks, 128 pages; SID 0x60 on bank 82, as logs/native-runs/20261111-004859-loop recorded).
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. smmu_stream_host.cpp -o /tmp/smmu_stream_host && /tmp/smmu_stream_host
+//   c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=undefined -I.. smmu_stream_host.cpp -o /tmp/smmu_stream_host && /tmp/smmu_stream_host
 #include "SmmuStream.h"
 #include <cstdio>
 #include <map>
@@ -85,7 +85,18 @@ int main()
     s.r[0x74] = 1;
     SmmuPlan p = planSmmuStream(0x40, 0x100000, s.reader());
     unsigned polls = 0;
-    CHECK(applySmmuStream(p, 0x40, s.reader(), s.writer(), [&] { return ++polls > 5; }) != nullptr);
+    CHECK(applySmmuStream(p, 0x40, s.reader(), s.writer(), [&] { return ++polls > 5; }) != nullptr && polls == 6);
+  }
+  {  // If the new context does not read back, the stream match must stay disabled.
+    Smmu s;
+    const SmmuPlan p = planSmmuStream(0x40, 0x100000, s.reader());
+    const auto write = s.writer();
+    const auto ignoreS2cr = [&](uint32_t off, uint32_t value) {
+      if (off != 0xc00 + 4 * p.slot) write(off, value);
+    };
+    CHECK(applySmmuStream(p, 0x40, s.reader(), ignoreS2cr, never) != nullptr);
+    CHECK(s.r[0x800 + 4 * p.slot] == 0 && s.r[0x68] == 0 && s.r[0x70] == 0);
+    CHECK(applySmmuStream(p, 0x40, s.reader(), write, never) == nullptr);
   }
   std::printf("%s: %d failure(s)\n", failures ? "FAILED" : "ok", failures);
   return failures ? 1 : 0;

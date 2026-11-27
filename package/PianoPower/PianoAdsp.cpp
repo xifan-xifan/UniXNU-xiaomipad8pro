@@ -980,7 +980,7 @@ void clientReceive(void *context, QcomGlinkChannel *, const uint8_t *data, uint3
     if (__atomic_load_n(&gTracePort, __ATOMIC_ACQUIRE)) {
         const AdspTraceHeader h = atrHeader(data, length, !strcmp(c->name, "IPCRTR"), true);
         const int port = tracePort(c, h, true);
-        if (port >= 0) tracePacket(port, kTraceRx, "rx", 0, h, length, 0, 0);
+        if (port >= 0) tracePacket(unsigned(port), kTraceRx, "rx", 0, h, length, 0, 0);
     }
     if (c->client.receive) {
         const uint64_t t = nowMs();
@@ -1020,10 +1020,10 @@ void pumpSends() {
                 const int port = tracePort(&c, h, false);
                 if (port >= 0 && rc == QcomGlinkOk && gTraceCounts[port][kTracePublish] < kTraceCap) {
                     const uint64_t end = read + atrDistance(tail, head, gGlink.tx.length) + ((16 + m->length + 7) & ~7u);
-                    tracePacket(port, kTracePublish, "publish", m->trace_id, h, m->length, head, end);
+                    tracePacket(unsigned(port), kTracePublish, "publish", m->trace_id, h, m->length, head, end);
                     for (auto &f : gTraceFlight) if (!f.id) {f = {m->trace_id, (uint32_t)port, end, h}; break;}
                 } else if (port >= 0 && rc != QcomGlinkOk) {
-                    tracePacket(port, kTraceBlocked, "blocked", m->trace_id, h, m->length, head, 0, rc);
+                    tracePacket(unsigned(port), kTraceBlocked, "blocked", m->trace_id, h, m->length, head, 0, rc);
                     if (gTraceCounts[port][kTraceBlocked] < kTraceCap) {
                         unsigned valid = 0, busy = 0, fit = 0;
                         for (const auto &r : c.glink->remote) {valid += r.valid; busy += r.valid && r.busy;
@@ -1342,7 +1342,7 @@ extern "C" int piano_adsp_send_keep(PianoAdspChannel *c, const void *data, uint3
         const int port = tracePort(c, h, false);
         if (port >= 0 && gTraceCounts[port][kTraceEnqueue] < kTraceCap) {
             m.trace_id = ++gTraceSerial;
-            tracePacket(port, kTraceEnqueue, "enqueue", m.trace_id, h, length, 0, 0);
+            tracePacket(unsigned(port), kTraceEnqueue, "enqueue", m.trace_id, h, length, 0, 0);
         }
     }
     c->count++;
@@ -1385,7 +1385,7 @@ extern "C" void piano_adsp_health(PianoAdspHealth *out) {
     out->fatal = (slave & kFatal) ? 1 : 0;
     out->fatal_reports = gRestarts;
     out->link_generation = __atomic_load_n(&gLinkGeneration, __ATOMIC_ACQUIRE);
-    out->dsp_up = adsp_health_dsp_up(gStage, slave, gGlinkStarted && gGlink.version_agreed && !gGlink.broken, piano_qrtr_link_up());
+    out->dsp_up = adsp_health_dsp_up(gStage, slave, gGlinkStarted && gGlink.version_agreed && !gGlink.broken, piano_qrtr_link_up()) != 0;
     out->charger_pd = piano_qrtr_charger_pd(&out->charger_generation);
     out->quiet = piano_adsp_quiet();
     if (IOLock *lock = clientLock()) {

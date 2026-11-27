@@ -9,9 +9,10 @@ those of the two windows plus the SHNGROOT manifest, so:
     run separately because it needs sudo, or give --manifest-json with that run's output);
   - the manifest at block 0 is recomputed here from the two windows' names, offsets, sizes and sha256s and must be identical;
   - the layout (offsets, sizes, total) must be the pinned one, root.json must name the same windows and UUIDs.
+  - the SHA-256 of the full image, including its padding, must match root.json.
 
   verify-root.py [ROOT_DIR] [--pins PINS.json] [--quick] [--manifest-json SYSTEMOS-MANIFEST.json]
-     ROOT_DIR default out/inputs/k273/root. --quick skips hashing the 20.9 GB image's two window regions (structure only).
+     ROOT_DIR default out/inputs/k273/root. --quick checks structure and skips hashing the 20.9 GB image.
 Exit 0 with PASS, 1 with the first FAIL.
 """
 import argparse
@@ -34,18 +35,14 @@ def ok(message):
     print(f'ok    {message}', flush=True)
 
 
-def region_sha256(path, offset, size):
-    h = hashlib.sha256()
-    with open(path, 'rb') as f:
-        f.seek(offset)
-        left = size
-        while left:
-            chunk = f.read(min(16 << 20, left))
-            if not chunk:
-                break
-            h.update(chunk)
-            left -= len(chunk)
-    return h.hexdigest()
+def hash_bytes(stream, size, *hashes):
+    while size > 0:
+        chunk = stream.read(min(16 << 20, size))
+        if not chunk:
+            fail('root.img ended while hashing')
+        for digest in hashes:
+            digest.update(chunk)
+        size -= len(chunk)
 
 
 def manifest_bytes(windows):
@@ -80,6 +77,8 @@ def main(argv=None):
         fail(f'systemos.img.json size {sysos.get("size")}, the pin {sw["size"]} (make-systemos.sh SIZE_MIB must stay 6144)')
     windows = [{'name': 'OS', 'offset': osw['offset'], 'size': osw['size'], 'sha256': osw['sha256']},
                {'name': 'SystemOS', 'offset': sw['offset'], 'size': sw['size'], 'sha256': sysos['sha256']}]
+    if osw['offset'] < 4096 or osw['size'] <= 0 or sw['size'] <= 0 or osw['offset'] + osw['size'] > sw['offset']:
+        fail('the pinned root windows overlap or lie outside the image layout')
     expect, total = manifest_bytes(windows)
     if total != pins['image']['size']:
         fail(f'internal: the pinned layout gives {total} bytes, the pin {pins["image"]["size"]}')
@@ -96,6 +95,8 @@ def main(argv=None):
     image = r / 'root.img'
     if image.stat().st_size != pins['image']['size']:
         fail(f'root.img is {image.stat().st_size} bytes, the pin {pins["image"]["size"]}')
+    if record.get('image_bytes') != total:
+        fail(f'root.json image_bytes differs from the pinned size {total}')
     if (r / 'manifest/manifest.bin').read_bytes() != expect:
         fail('manifest/manifest.bin differs from the manifest recomputed from the windows')
     with open(image, 'rb') as f:
@@ -113,14 +114,22 @@ def main(argv=None):
         print('note  SystemOS file-level manifest not checked here: sudo python3 tooling/repro/volume-manifest.py --image '
               f'{r / "systemos.img"} --compare {a.pins}')
     if a.quick:
-        print('PASS (quick: structure only; the window regions were not hashed)')
+        print('PASS (quick: structure only)')
         return 0
-    for w in windows:
-        digest = region_sha256(image, w['offset'], w['size'])
-        if digest != w['sha256']:
-            fail(f'root.img window {w["name"]} at {w["offset"]:#x}: sha256 {digest}, expected {w["sha256"]}')
-        ok(f'root.img window {w["name"]}: sha256 {digest[:16]}...')
-    whole = record.get('image_sha256')
+    full_hash = hashlib.sha256()
+    with image.open('rb') as f:
+        for w in windows:
+            hash_bytes(f, w['offset'] - f.tell(), full_hash)
+            window_hash = hashlib.sha256()
+            hash_bytes(f, w['size'], full_hash, window_hash)
+            digest = window_hash.hexdigest()
+            if digest != w['sha256']:
+                fail(f'root.img window {w["name"]} at {w["offset"]:#x}: sha256 {digest}, expected {w["sha256"]}')
+            ok(f'root.img window {w["name"]}: sha256 {digest[:16]}...')
+        hash_bytes(f, total - f.tell(), full_hash)
+    whole = full_hash.hexdigest()
+    if whole != record.get('image_sha256'):
+        fail('root.json image_sha256 differs from the SHA-256 of root.img')
     print(f'PASS: root image {whole} (this build\'s own; the reference build was {pins["image"]["reference_build"]["sha256"][:16]}...)')
     return 0
 

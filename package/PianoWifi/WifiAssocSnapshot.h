@@ -9,8 +9,9 @@
 extern "C" {
 #endif
 
-#define PIANO_WIFI_ASSOC_SNAPSHOT_VERSION 2u
+#define PIANO_WIFI_ASSOC_SNAPSHOT_VERSION 3u
 #define PIANO_WIFI_ASSOC_SSID_MAX 32u
+#define PIANO_WIFI_ASSOC_RSN_MAX 64u
 
 struct piano_wifi_assoc_snapshot {
   uint32_t version;
@@ -33,11 +34,16 @@ struct piano_wifi_assoc_snapshot {
   uint32_t associate_result;
   uint32_t user_stop;  // public link hidden during user stop/replacement; local leave is voluntary
   uint32_t join_generation;  // accepted SET20 serial, zero for kernel-only diagnostic joins
+  uint16_t capability; // the selected BSS's advertised capability field
+  uint8_t rsn_length;
+  uint8_t rsn[PIANO_WIFI_ASSOC_RSN_MAX]; // whole RSN IE of the selected BSS
 };
 
 // Returns 0 and fills a current-version snapshot. The function is safe before the
 // station starts and reports power off/idle in that case.
-int piano_wifi_assoc_snapshot(struct piano_wifi_assoc_snapshot *out);
+// Version the symbol as well as the record so a mixed kext pair cannot write
+// the larger snapshot into an older front end's buffer.
+int piano_wifi_assoc_snapshot_v3(struct piano_wifi_assoc_snapshot *out);
 
 // 1 while the radio can scan and join (a pass reached level 7, the chip is up and the user power is ON), else 0: the front end
 // posts it to airportd as DRIVER_AVAILABLE (BSD event 55).

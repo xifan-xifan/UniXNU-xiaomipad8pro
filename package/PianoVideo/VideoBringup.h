@@ -27,6 +27,7 @@
 #include "VideoSmmu.h"
 #include "VideoArena.h"
 #include "VideoSession.h"
+#include "VideoEncode.h"
 
 namespace pianovideo {
 
@@ -105,6 +106,9 @@ class Bringup {
   uint32_t avcWidth = 0, avcHeight = 0; // selected before DMA preparation; zero preserves the legacy qualification
   bool hevc = false;
   uint32_t bitdepth = 8;
+  // E1 (piano-video-enc=1): an encoder session's buffers replace the decoder layout while encoder is set; cleared after it.
+  bool encoder = false;
+  enc::Geometry encGeometry;
   unsigned doorbells = 0, txEvents = 0, rxEvents = 0, dbgChecks = 0, dbgErrors = 0, msgDrops = 0, watchdogSamples = 0;
   uint32_t watchdogSeen = 0;
   int teardownRc = kOk;
@@ -188,17 +192,7 @@ class Bringup {
   {
     // Native sessions retain binary TX/RX history and parsed error evidence.
     // The ladder's duplicate packet dump must not serialize first-picture work.
-    if (opt.level == 6 && bytes >= kHfiHeaderBytes && !(bytes & 3) && buf[0] == bytes &&
-        buf[7] && buf[7] <= (bytes-kHfiHeaderBytes)/kHfiPacketBytes) {
-      uint32_t at=kHfiHeaderBytes;
-      unsigned n=0;
-      for (;n<buf[7] && at<=bytes && bytes-at>=kHfiPacketBytes;++n) {
-        const uint32_t size=buf[at/4];
-        if (size<kHfiPacketBytes || (size&3) || size>bytes-at) break;
-        at+=size;
-      }
-      if (n==buf[7] && at==bytes) return; // malformed diagnostics still get the original dump
-    }
+    if (opt.level == 6 && hfi::validFraming(buf, bytes)) return;
     if (bytes < kHfiHeaderBytes) {
       hw.note("V3 %s %u short header bytes %u word0 %08x", direction, seq, bytes, bytes >= 4 ? buf[0] : 0);
       return;
@@ -528,6 +522,7 @@ class Bringup {
   }
   bool prepareLayout()
   {
+    if (encoder) return enc::buildLayout(layout, encGeometry);
     return hevc ? layout.initHevc(avcWidth, avcHeight, bitdepth) :
            avcWidth ? layout.init(avcWidth, avcHeight) : layout.init();
   }

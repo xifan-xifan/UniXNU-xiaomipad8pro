@@ -4,17 +4,18 @@
 //   piano-torch=1  a read-only survey, logged as "PianoTorch: ..." lines: the SPMI arbiter, the flash module's APID and its owner
 //                  EE, identity, enables, per-channel current/strobe/timer, clamp, thermal thresholds, status bytes, raw bytes.
 //                  The only store is the SPMI observer channel's read command (package/PianoPower/SpmiObserver.h).
-//   piano-torch=2  the survey, then torch control: writes only to that peripheral, only the ten registers of TorchCore.h's
+//   piano-torch=2  the survey, then torch control: writes only to that peripheral, only the registers of TorchCore.h's
 //                  allowlist, each read back; a time limit (piano-torch-timeout), the module's own fault and over-temperature
 //                  bits, the SoC (PianoThermal) and battery (PianoPower) temperatures; off on system sleep and shutdown. Control:
 //                  an administrator's IORegistry property (tooling/native/piano-torch) or another driver's callPlatformFunction
 //                  (PianoTorchClient.h); piano-torch-test=S lights it once for S seconds at boot (the attended first test).
-// Without piano-torch the driver declines in probe() and maps nothing.
-// Other arguments: piano-torch-ma (default 50, the lamp current of an on without its own), piano-torch-max-ma (default 100,
-// hard cap 400; the factory range is opt-in), piano-torch-timeout=S (default 300, 10..1800), piano-torch-soc-max=C (default 85),
-// piano-torch-batt-max=C (default 45), piano-torch-delay=S (default 0), piano-torch-probe-spare=1 to add the old channel-B
-// mapping window, piano-torch-flash=1 for one bounded timed FLASH pulse after the torch window, and piano-torch-ladder=1 for
-// the guarded 100/200/300/400 mA ten-second ladder.
+// With piano-torch omitted or set to 0, the driver declines in probe() and maps nothing.
+// Other arguments: piano-torch-ma (default 400 mA total, 2 x 200 mA, the lamp current of an on without its own),
+// piano-torch-max-ma (default 400 mA total, hard cap 400 mA total, 2 x 200 mA),
+// piano-torch-timeout=S (default 300, 10..1800), piano-torch-soc-max=C (default 85), piano-torch-batt-max=C (default 45),
+// piano-torch-delay=S (default 0), and piano-torch-probe=1 to replace the boot test with T4. The probe can add a spare-pair
+// window (piano-torch-probe-spare=1) or a timed FLASH pulse (piano-torch-flash=1). The separate piano-torch-ladder=1 mode
+// runs 100/200/300/400 mA total steps within the configured cap.
 #include <IOKit/IOService.h>
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/IOLib.h>
@@ -55,18 +56,19 @@ uint32_t clampArg(uint32_t v, uint32_t lo, uint32_t hi) { return v < lo ? lo : v
 
 void readArgs()
 {
-  gArgs.level = bootArg("piano-torch", 0);
-  gArgs.maxMa = clampArg(bootArg("piano-torch-max-ma", kUbuntuTorchMaxMa), kTorchMinMa, kHardMaxMa);
-  gArgs.ma = clampArg(bootArg("piano-torch-ma", 50), kTorchMinMa, gArgs.maxMa);
+  gArgs.level = bootArg("piano-torch", kDefaultLevel);
+  gArgs.maxMa = clampMa(bootArg("piano-torch-max-ma", kDefaultMaxMa), kHardMaxMa);
+  gArgs.ma = clampMa(bootArg("piano-torch-ma", kDefaultOnMa), gArgs.maxMa);
   gArgs.timeout = clampArg(bootArg("piano-torch-timeout", 300), 10, 1800);
-  gArgs.test = clampArg(bootArg("piano-torch-test", 0), 0, 60);
+  gArgs.test = clampArg(bootArg("piano-torch-test", 0), 0, kProbeMaxSeconds);
   gArgs.delay = clampArg(bootArg("piano-torch-delay", 0), 0, 600);
   gArgs.socMax = clampArg(bootArg("piano-torch-soc-max", 85), 40, 105);
   gArgs.battMax = clampArg(bootArg("piano-torch-batt-max", 45), 30, 60);
-  gArgs.probe = clampArg(bootArg("piano-torch-probe", 0), 0, 1);
-  gArgs.probeSpare = clampArg(bootArg("piano-torch-probe-spare", 0), 0, 1);
-  gArgs.flash = clampArg(bootArg("piano-torch-flash", 0), 0, 1);
-  gArgs.ladder = clampArg(bootArg("piano-torch-ladder", 0), 0, 1);
+  const char *args = PE_boot_args();
+  gArgs.probe = bootSwitchEnabled(args, "piano-torch-probe");
+  gArgs.probeSpare = bootSwitchEnabled(args, "piano-torch-probe-spare");
+  gArgs.flash = bootSwitchEnabled(args, "piano-torch-flash");
+  gArgs.ladder = bootSwitchEnabled(args, "piano-torch-ladder");
 }
 
 void note(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -151,6 +153,8 @@ IOLock *gLock;
 Request gReq;
 Torch gTorch;          // under gLock
 bool gReady;           // level 2 control is up (under gLock)
+bool gBootDiagnostic;  // the boot diagnostic owns the lamp until its final read-back (under gLock)
+bool gPowerJoined;
 char gState[128] = "starting";
 
 // The temperatures other drivers publish, looked up every 10 s until found (they never unload).
@@ -229,9 +233,14 @@ void reportSurvey(const Survey &s)
   if (!s.flash) return;
   for (unsigned row = 0; row < 256; row += 16) {
     char line[64];   // "raw xx:" and 16 bytes of " xx"
-    int at = snprintf(line, sizeof line, "raw %02x:", row);
-    for (unsigned i = row; i < row + 16; ++i)
-      at += s.valid[i] ? snprintf(line + at, sizeof line - at, " %02x", s.reg[i]) : snprintf(line + at, sizeof line - at, " --");
+    const int prefix = snprintf(line, sizeof line, "raw %02x:", row);
+    if (prefix < 0) continue;
+    size_t at = size_t(prefix);
+    for (unsigned i = row; i < row + 16; ++i) {
+      const int wrote = s.valid[i] ? snprintf(line + at, sizeof line - at, " %02x", s.reg[i])
+                                  : snprintf(line + at, sizeof line - at, " --");
+      if (wrote > 0) at += size_t(wrote);
+    }
     note("%s", line);
   }
   if (!s.fourChannel) return;
@@ -258,39 +267,48 @@ void reportSurvey(const Survey &s)
 // them only the registers that changed (a diff against the previous dump), so the log stays readable. The probe runs once on
 // this driver's own thread; gProbeLast is its private state.
 Survey gProbeLast;
+Survey probeSnapshot(bool active)
+{
+  // Use a private observer port so this read-only snapshot can coexist with a synchronous power-off.
+  SpmiPort port;
+  port.io = &gIo;
+  port.apid = gApid.apid;
+  Bus bus = portBus(port);
+  if (active) bus.read = [](void *ctx, uint8_t reg, uint8_t *value, unsigned bytes) {
+    const SpmiPort &p = *static_cast<SpmiPort *>(ctx);
+    return pianopower::spmiReadOnce(*p.io, p.apid, reg, value, bytes) == pianopower::ReadResult::ok;
+  };
+  return survey(bus, active);
+}
 void probeSnapFull(const char *when)
 {
-  gProbeLast = survey(portBus(gPort));
-  note("probe dump %s (full):", when);
+  gProbeLast = probeSnapshot(false);
+  note("probe dump %s (full, %u failed reads):", when, gProbeLast.failures);
   reportSurvey(gProbeLast);
 }
-void probeSnapDiff(const char *label)
+void probeSnapDiff(const char *label, const Survey &now)
 {
-  const Survey now = survey(portBus(gPort));
-  unsigned changed = 0;
-  for (unsigned i = 0; i < 256; ++i)
-    if (now.valid[i] && gProbeLast.valid[i] && now.reg[i] != gProbeLast.reg[i]) ++changed;
-  if (!changed)
-    note("probe diff %s: no register changed", label);
-  else {
-    char line[230];
-    int at = snprintf(line, sizeof line, "probe diff %s: %u changed:", label, changed);
-    unsigned printed = 0;
-    for (unsigned i = 0; i < 256; ++i) {
-      if (!now.valid[i] || !gProbeLast.valid[i] || now.reg[i] == gProbeLast.reg[i]) continue;
-      if (at >= int(sizeof line) - 14) {
-        at += snprintf(line + at, sizeof line - at, " +%u more", changed - printed);
-        break;
+  unsigned changed = 0, unreadable = 0;
+  for (unsigned row = 0; row < 256; row += 16) {
+    char line[16 * 10 + 1] = {};
+    size_t at = 0;
+    for (unsigned i = row; i < row + 16; ++i) {
+      if (!now.valid[i] || !gProbeLast.valid[i]) {
+        ++unreadable;
+        continue;
       }
-      at += snprintf(line + at, sizeof line - at, " %02x:%02x->%02x", uint8_t(i), gProbeLast.reg[i], now.reg[i]);
-      ++printed;
+      if (now.reg[i] == gProbeLast.reg[i]) continue;
+      ++changed;
+      const int wrote = snprintf(line + at, sizeof line - at, " %02x:%02x->%02x", i, gProbeLast.reg[i], now.reg[i]);
+      if (wrote > 0) at += size_t(wrote);
     }
-    note("%s", line);
+    if (at) note("probe diff %s:%s", label, line);
   }
+  note("probe diff %s: %u changed, %u bytes unavailable for comparison", label, changed, unreadable);
   gProbeLast = now;
 }
 
-void formatStatus1Channels(uint8_t status1, uint8_t mask, char *out, unsigned size)
+void formatChannels(uint8_t status1, uint8_t status3, uint8_t mask, char *out, unsigned size)
 {
   unsigned at = 0;
   for (unsigned ch = 0; ch < kChannels4ch; ++ch) {
@@ -298,7 +316,9 @@ void formatStatus1Channels(uint8_t status1, uint8_t mask, char *out, unsigned si
     const bool shorted = status1 & (1u << (2 * ch));
     const bool open = status1 & (1u << (2 * ch + 1));
     if (at) at += unsigned(snprintf(out + at, at < size ? size - at : 0, " "));
-    at += unsigned(snprintf(out + at, at < size ? size - at : 0, "ch%u[short=%u open=%u]", ch, shorted, open));
+    const bool expired = status3 & (1u << (2 * ch));
+    at += unsigned(snprintf(out + at, at < size ? size - at : 0, "ch%u[short=%u open=%u timer_expired=%u]",
+                            ch + 1, shorted, open, expired));
     if (at >= size) {
       out[size - 1] = 0;
       return;
@@ -323,49 +343,50 @@ void summary(const Survey &s, const char *refusal, char *out, unsigned size)
 void logOutcome(const char *what, const Torch::Outcome &o, unsigned askedMa)
 {
   const StepResult &r = o.steps;
-  if (o.reason != Reason::none && o.reason != Reason::user && !r.writes) {
+  if (o.reason != Reason::none && o.reason != Reason::user && r.ok && !r.writes && !o.cleanedUp) {
     note("refused (%s): %s; nothing written%s", what, reasonName(o.reason), o.lit ? ", the torch stays as it was" : "");
     return;
   }
   if (o.lit) {
     note("on: %u mA (2 x %u mA, itarget %u, clamp %u) for %s; %u writes, %u read back; status %02x %02x %02x rt %02x, enables %02x %02x",
-         gTorch.ma(), gTorch.ma() / 2, gTorch.itarget(), clampForMa(gTorch.maxMa()), what, r.writes, r.readbacks, o.live.status1,
+         o.ma, o.ma / 2, itargetForMa(o.ma), clampForMa(gArgs.maxMa), what, r.writes, r.readbacks, o.live.status1,
          o.live.status2, o.live.status3, o.live.rt, o.live.moduleEn, o.live.chanEn);
-    if (askedMa && askedMa != gTorch.ma()) note("on: %u mA asked, %u mA set (the limit is %u mA, 5 mA steps a channel)", askedMa, gTorch.ma(), gTorch.maxMa());
+    if (askedMa && askedMa != o.ma) note("on: %u mA asked, %u mA set (the limit is %u mA, 5 mA steps a channel)", askedMa, o.ma, gArgs.maxMa);
     return;
   }
   note("off (%s): %s; %u writes, %u read back%s", what, reasonName(o.reason), r.writes, r.readbacks, r.ok ? "" : "; A STEP FAILED");
   if (!r.ok && r.why)
     note("failed step: register %#04x wanted %02x read %02x: %s (refused %u)", r.failedReg, r.failedWant, r.failedGot, r.why, r.refused);
+  if (o.cleanedUp) {
+    const StepResult &off = o.cleanup;
+    note("explicit off after failed activation: %u writes, %u read back%s", off.writes, off.readbacks,
+         off.ok ? "" : "; OFF UNCONFIRMED");
+    if (!off.ok)
+      note("failed off step: register %#04x wanted %02x read %02x: %s", off.failedReg, off.failedWant, off.failedGot, off.why);
+  }
 }
 
 void publishState(IOService *self)
 {
-  char state[128];
-  bool lit;
-  unsigned ma;
   IOLockLock(gLock);
-  strlcpy(state, gState, sizeof state);
-  lit = gTorch.lit();
-  ma = gTorch.ma();
+  self->setProperty(kPropertyState, gState);
+  self->setProperty(kPropertyLit, gTorch.lit());
+  self->setProperty(kPropertyMa, gTorch.ma(), 32);
   IOLockUnlock(gLock);
-  self->setProperty(kPropertyState, state);
-  self->setProperty(kPropertyLit, lit);
-  self->setProperty(kPropertyMa, ma, 32);
 }
 
-void queue(unsigned ma, unsigned seconds, const char *source)
+void queueLocked(unsigned ma, unsigned seconds, const char *source)
 {
-  IOLockLock(gLock);
   gReq.pending = true;
   gReq.ma = ma;
   gReq.seconds = seconds;
   gReq.source = source ? source : "?";
   IOLockWakeup(gLock, &gReq, false);
-  IOLockUnlock(gLock);
 }
 
 }  // namespace
+
+enum class ProbeResult { complete, alternate, stopped };
 
 // ------------------------------------------------------------------------------------------------------------ the service
 class PianoTorch : public IOService {
@@ -374,9 +395,8 @@ class PianoTorch : public IOService {
   void serve();
   void ladder();
   void probe();
-  void probeWindow(uint8_t mask, const char *label);
-  Reason probePollPhase(uint8_t mask, const char *phase, unsigned durationMs, bool enforceGuard);
-  void probeFlashPulse();
+  ProbeResult probeWindow(uint8_t mask, const char *label, bool flash = false);
+  void probeIdleSamples(uint8_t mask, const char *label, const char *phase);
   void offNow(Reason why, const char *what);
   static void thread(void *self, wait_result_t);
 
@@ -412,13 +432,17 @@ bool PianoTorch::start(IOService *provider)
   if (gArgs.level == 1) note("level 1: loads only, nothing written (the SPMI observer's read command is the only store)");
   setProperty("piano-torch", gArgs.level, 32);
   gLock = IOLockAlloc();
+  if (!gLock) {
+    stage(-1, "no lock; nothing done");
+    return true;
+  }
+  if (gArgs.level >= 2) gPowerJoined = pianopower::join(this) == kIOReturnSuccess;
   thread_t t = nullptr;
-  if (!gLock || kernel_thread_start(&PianoTorch::thread, this, &t) != KERN_SUCCESS) {
-    stage(-1, "no lock or no thread; nothing done");
+  if (kernel_thread_start(&PianoTorch::thread, this, &t) != KERN_SUCCESS) {
+    stage(-1, "no thread; nothing done");
     return true;
   }
   thread_deallocate(t);
-  if (gArgs.level >= 2) pianopower::join(this);   // setPowerState(kOff) turns the torch off before a system sleep
   registerService();                               // tooling/native/piano-torch and other drivers find it by class
   return true;
 }
@@ -462,6 +486,7 @@ void PianoTorch::run()
   gSurvey = survey(portBus(gPort));
   reportSurvey(gSurvey);
   const char *refusal = writeRefusal(gSurvey, gApid.apid, gApid.owner);
+  if (!refusal && gArgs.level >= 2 && !gPowerJoined) refusal = "could not register for synchronous power-off";
   char line[200];
   summary(gSurvey, refusal, line, sizeof line);
   setProperty(kPropertySurvey, line);
@@ -500,185 +525,261 @@ void PianoTorch::run()
   g.defaultS = gArgs.timeout;
   g.socMaxDeci = int32_t(gArgs.socMax) * 10;
   g.batteryMaxCenti = int32_t(gArgs.battMax) * 100;
+  const bool t4 = !gArgs.ladder && gArgs.probe && gArgs.test;
   IOLockLock(gLock);
-  gTorch.configure(portBus(gPort), g, gArgs.maxMa);
-  gTorch.controller().seed(gSurvey);
+  gTorch.configure(portBus(gPort), g, gArgs.maxMa, t4 && gArgs.probeSpare);
   gReady = true;
-  const bool foundLit = gSurvey.lit();
-  Torch::Outcome o;
-  if (foundLit) o = gTorch.turnOff(nowMs(), Reason::bootFoundOn);
+  gBootDiagnostic = gArgs.ladder || t4;
+  const Torch::Outcome o = gTorch.checkBootState(nowMs(), gSurvey);
   gTorch.describe(nowMs(), gState, sizeof gState);
   IOLockUnlock(gLock);
   note("level 2: torch control on channels 1+2 at %u mA (at most %u), auto-off after %u s, off at SoC >= %u C or battery >= %u C; "
        "writes only to PPID %#x, %u allowlisted registers",
        gArgs.ma, gArgs.maxMa, gArgs.timeout, gArgs.socMax, gArgs.battMax, kPpid, unsigned(sizeof kWritable / sizeof kWritable[0]));
-  if (foundLit) logOutcome("it was lit when the driver started", o, 0);
+  if (o.reason == Reason::bootFoundOn) logOutcome("it was lit when the driver started", o, 0);
   publishState(this);
   if (gArgs.ladder) {
     ladder();
-  } else if (gArgs.probe && gArgs.test) {
-    probe();   // replaces the single boot test: two windows (the factory's pair and the spare pair), dumps and polls
+  } else if (t4) {
+    probe();   // replaces the single boot test with the T4 windows, dumps and polls
   } else if (gArgs.test) {
     note("test: on at %u mA for %u s (piano-torch-test)", gArgs.ma, gArgs.test);
-    queue(gArgs.ma, gArgs.test, "the boot test");
+    IOLockLock(gLock);
+    if (!gReq.pending && gTorch.diagnosticAbort() == Reason::none)
+      queueLocked(gArgs.ma, gArgs.test, "the boot test");
+    IOLockUnlock(gLock);
   }
+  IOLockLock(gLock);
+  gBootDiagnostic = false;
+  IOLockUnlock(gLock);
   serve();
 }
 
-// The T4 probe (piano-torch-probe=1 with piano-torch-test=S): one 15-second lit window by default — channels 1+2 (the factory's
-// own torch pair) at piano-torch-ma — with STATUS1's per-channel short/open bits and INT_RT_STS (0x10) polled every 500 ms
-// before, during and after it, and a full 256-byte register dump before and after. The old spare-pair mapping window remains
-// available with piano-torch-probe-spare=1. A bounded timed FLASH pulse can follow the torch window with piano-torch-flash=1.
+// T4 uses the ordinary controlled torch path on each selected pair. Keep the samples and read-back labels tied to that pair.
+static void probeSample(uint8_t mask, const char *label, const char *phase, uint64_t elapsed,
+                        const Controller::Live &l, const Temperatures &t)
+{
+  char status[128] = "STATUS1=-- STATUS2=-- STATUS3=--", channels[128] = "";
+  char rt[96] = "--", module[4] = "--", en[4] = "--";
+  if (l.statusOk) {
+    snprintf(status, sizeof status, "STATUS1=%02x STATUS2=%02x STATUS3=%02x VPH_LOW=%u BCL=%u BOB_ILIM=%u/%u OTST=%u/%u BOB_THERM=%u",
+             l.status1, l.status2, l.status3, !!(l.status2 & kSts2VphLow), !!(l.status2 & kSts2BclIbat),
+             !!(l.status2 & kSts2BobIlimS1), !!(l.status2 & kSts2BobIlimS2), !!(l.status2 & kSts2Otst1),
+             !!(l.status2 & kSts2Otst2), !!(l.status2 & kSts2BobThermOverload));
+    formatChannels(l.status1, l.status3, mask, channels, sizeof channels);
+  }
+  if (l.rtOk)
+    snprintf(rt, sizeof rt, "%02x fault=%u ramp_up=%u ramp_down=%u", l.rt, !!(l.rt & kRtFault), !!(l.rt & kRtRampUpDone),
+             !!(l.rt & kRtRampDownDone));
+  if (l.moduleOk) snprintf(module, sizeof module, "%02x", l.moduleEn);
+  if (l.channelsOk) snprintf(en, sizeof en, "%02x", l.chanEn);
+  char flash[24], soc[24], battery[24];
+  temperatureText(t, flash, soc, battery, sizeof flash);
+  note("probe %s %s t+%llu ms: %s %s INT_RT_STS(0x10)=%s MODULE_EN=%s CHAN_EN=%s temp flash=%s SoC=%s battery=%s",
+       label, phase, (unsigned long long)elapsed, status, channels, rt, module, en, flash, soc, battery);
+}
+
+static Survey probeSettings()
+{
+  Survey s;
+  s.valid[kRegTimer0] = portRead(&gPort, kRegTimer0, &s.reg[kRegTimer0], 8);
+  s.valid[kRegModuleEn] = portRead(&gPort, kRegModuleEn, &s.reg[kRegModuleEn], 8);
+  s.valid[kRegTorchClamp] = portRead(&gPort, kRegTorchClamp, &s.reg[kRegTorchClamp], 1);
+  return s;
+}
+
+static void reportProbeSettings(uint8_t mask, const char *label, const Survey &s)
+{
+  const bool channels = s.valid[kRegTimer0], strobe = s.valid[kRegModuleEn], clamp = s.valid[kRegTorchClamp];
+  char ires[4] = "--", cl[4] = "--";
+  if (strobe) snprintf(ires, sizeof ires, "%02x", s.reg[kRegIres]);
+  if (clamp) snprintf(cl, sizeof cl, "%02x", s.reg[kRegTorchClamp]);
+  note("probe %s activation settings: IRESOLUTION=%s TORCH_CLAMP=%s", label, ires, cl);
+  for (unsigned ch = 0; ch < kChannels4ch; ++ch) {
+    if (!(mask & (1u << ch))) continue;
+    char timer[4] = "--", itarget[4] = "--", word[4] = "--";
+    if (channels) {
+      snprintf(timer, sizeof timer, "%02x", s.reg[kRegTimer0 + ch]);
+      snprintf(itarget, sizeof itarget, "%02x", s.reg[kRegItarget0 + ch]);
+    }
+    if (strobe) snprintf(word, sizeof word, "%02x", s.reg[kRegStrobe0 + ch]);
+    note("probe %s ch%u activation settings: TIMER=%s ITARGET=%s STROBE=%s (%s)", label, ch + 1, timer, itarget, word,
+         strobe ? strobeName(s.reg[kRegStrobe0 + ch]) : "unreadable");
+  }
+}
+
 void PianoTorch::probe()
 {
-  note("probe: piano-torch-probe=1: %u mA (Ubuntu 2 x 50 mA cap) for %u s, status1/INT_RT_STS polls every 500 ms before/during/after",
-       gArgs.ma, gArgs.test);
-  probeSnapFull("1: before torch window");
-  probeWindow(kPianoChannelMask, "A: channels 1+2 (the factory's torch pair)");
-  probeSnapDiff("2: after torch window A");
-  if (gArgs.probeSpare) {
-    probeWindow(kOtherChannelMask, "B: channels 3+4 (the spare pair)");
-    probeSnapDiff("3: after spare window B");
+  note("probe: T4 starts at %u mA (cap %u mA), %u s per torch window, spare=%u flash=%u",
+       maForItarget(itargetForMa(gArgs.ma)), gArgs.maxMa, gArgs.test, gArgs.probeSpare, gArgs.flash);
+  probeSnapFull("before all windows");
+  const ProbeResult a = probeWindow(kPianoChannelMask, "A ch1+2");
+  ProbeResult b = ProbeResult::complete;
+  if (a != ProbeResult::stopped && gArgs.probeSpare) b = probeWindow(kOtherChannelMask, "B ch3+4");
+  else if (gArgs.probeSpare) note("probe B ch3+4: skipped after window A stopped");
+  if (gArgs.flash) {
+    if (gArgs.maxMa < kProbeFlashMa)
+      note("probe FLASH ch1+2: skipped, %u mA exceeds the configured cap of %u mA", kProbeFlashMa, gArgs.maxMa);
+    else if (a == ProbeResult::complete && b == ProbeResult::complete)
+      probeWindow(kPianoChannelMask, "FLASH ch1+2", true);
+    else
+      note("probe FLASH ch1+2: skipped after a prior window stopped");
   }
-  if (gArgs.flash) probeFlashPulse();
-  probeSnapFull(gArgs.probeSpare ? "4: after all windows" : "3: after torch window");
+  probeSnapFull("after all windows");
+  note("probe: T4 finished");
 }
 
-void PianoTorch::probeWindow(uint8_t mask, const char *label)
+void PianoTorch::probeIdleSamples(uint8_t mask, const char *label, const char *phase)
 {
-  const unsigned ma = clampMa(gArgs.ma, gArgs.maxMa);
-  const uint8_t itarget = itargetForMa(ma);
-  note("probe window %s: on at %u mA (itarget %u, clamp %u) for %u s", label, ma, itarget, clampForMa(gArgs.maxMa), gArgs.test);
   const uint64_t start = nowMs();
-  Reason bad = Reason::none;
-  StepResult steps;
-  const Temperatures t0 = readTemperatures(start);
-  probePollPhase(mask, "before", 1000, false);
-  IOLockLock(gLock);
-  if (mask == kPianoChannelMask) {   // the real control path, exactly as a user's on
-    const Torch::Outcome o = gTorch.request(start, ma, gArgs.test, t0);
-    steps = o.steps;
-    bad = o.reason;
-    if (o.lit) gTorch.setTestMode(true);
-    gTorch.describe(start, gState, sizeof gState);
-  } else {                           // the spare pair: the controller directly, this boot's diagnostic
-    steps = gTorch.controller().on(itarget, clampForMa(gArgs.maxMa), mask);
-    if (!steps.ok) bad = Reason::writeFailed;
-    snprintf(gState, sizeof gState, "probe window B %s", steps.ok ? "on" : "off (a write failed)");
-  }
-  IOLockUnlock(gLock);
-  note("probe window %s: %s; %u writes, %u read back%s", label, bad == Reason::none ? "on" : reasonName(bad), steps.writes,
-       steps.readbacks, steps.ok ? "" : "; A STEP FAILED");
-  if (!steps.ok) {
-    if (!steps.why) note("probe window %s: no step detail (refused %u)", label, steps.refused);
-    else note("failed step: register %#04x wanted %02x read %02x: %s", steps.failedReg, steps.failedWant, steps.failedGot, steps.why);
-  }
-  if (bad != Reason::none) {   // request() ran its own off; a raw window's remains
-    if (mask != kPianoChannelMask) {
-      IOLockLock(gLock);
-      const StepResult undo = gTorch.controller().off(mask);
-      IOLockUnlock(gLock);
-      note("probe window %s: off after the refusal; %u writes, %u read back", label, undo.writes, undo.readbacks);
-    }
-    probePollPhase(mask, "after", 1000, false);
-    publishState(this);
-    return;
-  }
-
-  // While lit: the module's own words for why a lit register state makes no light (open channel, vreg not ready), which only
-  // appear once the channels are on — sampled twice a second, logged every sample.
-  bad = probePollPhase(mask, "during", gArgs.test * 1000, true);
-  probeSnapDiff(label);   // any register the module itself changed while lit shows here
-  IOLockLock(gLock);
-  if (mask == kPianoChannelMask) {
-    const Torch::Outcome o = gTorch.turnOff(nowMs(), Reason::test);
-    gTorch.describe(nowMs(), gState, sizeof gState);
-    IOLockUnlock(gLock);
-    note("probe window %s: off (%s); %u writes, %u read back", label, reasonName(o.reason), o.steps.writes, o.steps.readbacks);
-  } else {
-    const StepResult r = gTorch.controller().off(mask);
-    snprintf(gState, sizeof gState, "off (the probe)");
-    IOLockUnlock(gLock);
-    note("probe window %s: off (the probe); %u writes, %u read back", label, r.writes, r.readbacks);
-  }
-  const Reason after = probePollPhase(mask, "after", 1000, false);
-  if (bad == Reason::none) bad = after;
-  if (bad != Reason::none) note("probe window %s: ENDED EARLY by the guard: %s", label, reasonName(bad));
-  publishState(this);
-}
-
-Reason PianoTorch::probePollPhase(uint8_t mask, const char *phase, unsigned durationMs, bool enforceGuard)
-{
-  unsigned unreadable = 0;
-  Reason bad = Reason::none;
-  const uint64_t phaseStart = nowMs();
-  for (unsigned elapsed = 0; elapsed <= durationMs; elapsed += 500) {
-    if (elapsed) IOSleep(500);
+  for (unsigned i = 0; i < 3; ++i) {
+    if (i) IOSleep(kProbePollMs);
     const uint64_t now = nowMs();
     const Temperatures t = readTemperatures(now);
     IOLockLock(gLock);
-    const Controller::Live l = gTorch.controller().live();
-    const Reason verdict = enforceGuard ? judge(l, unreadable, t, gTorch.config(), mask) : Reason::none;
+    const bool operational = gTorch.operational();
+    const Controller::Live live = operational ? gTorch.controller().live() : Controller::Live();
     IOLockUnlock(gLock);
-    char faults[80];
-    char channels[128];
-    formatFaults(decodeFaults(l.status1, l.status2, l.status3, mask), faults, sizeof faults);
-    formatStatus1Channels(l.status1, mask, channels, sizeof channels);
-    if (!l.ok) {
-      ++unreadable;
-      note("probe %s: t+%llu ms: STATUS1/INT_RT_STS 0x10 UNREADABLE (%u consecutive): %s", phase,
-           (unsigned long long)(now - phaseStart), unreadable, channels);
-    } else {
-      unreadable = 0;
-      note("probe %s: t+%llu ms: STATUS1=%02x %s INT_RT_STS(0x10)=%02x status2=%02x status3=%02x enables=%02x/%02x faults=%s",
-           phase, (unsigned long long)(now - phaseStart), l.status1, channels, l.rt, l.status2, l.status3, l.moduleEn, l.chanEn, faults);
-    }
-    if (verdict != Reason::none) {
-      bad = verdict;
+    if (!operational) return;
+    probeSample(mask, label, phase, now - start, live, t);
+  }
+}
+
+ProbeResult PianoTorch::probeWindow(uint8_t mask, const char *label, bool flash)
+{
+  const unsigned duration = flash ? kProbeFlashMs : gArgs.test * 1000;
+  const unsigned interval = flash ? kPulsePollMs : kProbePollMs;
+  const unsigned ma = flash ? kProbeFlashMa : maForItarget(itargetForMa(gArgs.ma));
+  note("probe %s: next window %u mA total for %u ms", label, ma, duration);
+  probeIdleSamples(mask, label, "before");
+
+  const Temperatures temps = readTemperatures(nowMs());
+  IOLockLock(gLock);
+  const uint64_t start = nowMs();
+  const Torch::Outcome activation = gTorch.requestProbe(start, ma, duration, temps, mask, flash);
+  const uint64_t firstSample = nowMs();
+  // Copy settings during activation, before the short FLASH timer can expire.
+  Survey settings;
+  if (activation.steps.ok && activation.steps.writes) settings = probeSettings();
+  gTorch.describe(firstSample, gState, sizeof gState);
+  IOLockUnlock(gLock);
+  const auto reportActivation = [&] {
+    const StepResult &steps = activation.steps;
+    note("probe %s: activation %s; %u writes, %u read back%s", label,
+         activation.lit ? "on" : reasonName(activation.reason), steps.writes, steps.readbacks, steps.ok ? "" : "; A STEP FAILED");
+    if (steps.why) note("probe %s: activation failed reg %02x wanted %02x read %02x: %s", label,
+                        steps.failedReg, steps.failedWant, steps.failedGot, steps.why);
+    if (activation.sampled)
+      probeSample(mask, label, steps.writes ? "activation" : "preflight", firstSample - start, activation.live, temps);
+    if (steps.ok && steps.writes) reportProbeSettings(mask, label, settings);
+  };
+  Survey active;
+  if (!flash) {
+    if (activation.lit) active = probeSnapshot(true);
+    reportActivation();
+    publishState(this);
+  }
+
+  // Keep console writes out of the timed pulse. Four ticks fit between activation and explicit off, including the timer sample.
+  struct Reading { uint64_t elapsed; Controller::Live live; Temperatures temperatures; };
+  Reading pulse[kProbeFlashMs / kPulsePollMs];
+  unsigned pulseReadings = 0;
+  StepResult off = activation.cleanup;
+  Reason ended = activation.reason;
+  bool lit = activation.lit;
+  while (lit) {
+    const uint64_t now = nowMs();
+    const uint64_t next = start + (now - start) / interval * interval + interval;
+    const uint64_t wake = next < start + duration ? next : start + duration;
+    if (wake > now) IOSleep(unsigned(wake - now));
+    const uint64_t sample = nowMs();
+    const Temperatures t = readTemperatures(sample);
+    IOLockLock(gLock);
+    const Reason aborted = gTorch.diagnosticAbort();
+    const Torch::Outcome outcome = gTorch.poll(nowMs(), t);
+    gTorch.describe(nowMs(), gState, sizeof gState);
+    IOLockUnlock(gLock);
+    if (aborted != Reason::none) {
+      // The callback already ran the synchronous OFF. Do not resume this window on wake.
+      ended = aborted;
       break;
     }
+    if (outcome.sampled) {
+      if (!flash) probeSample(mask, label, "during", sample - start, outcome.live, t);
+      else if (pulseReadings < sizeof pulse / sizeof pulse[0]) pulse[pulseReadings++] = {sample - start, outcome.live, t};
+    }
+    off = outcome.steps;
+    ended = outcome.reason;
+    lit = outcome.lit;
   }
-  return bad;
+  if (flash) {
+    reportActivation();
+    for (unsigned i = 0; i < pulseReadings; ++i)
+      probeSample(mask, label, "during", pulse[i].elapsed, pulse[i].live, pulse[i].temperatures);
+  }
+
+  IOLockLock(gLock);
+  const Reason aborted = gTorch.diagnosticAbort();
+  const bool offUnconfirmed = gTorch.needsOff();
+  IOLockUnlock(gLock);
+  if (aborted != Reason::none) ended = aborted;
+  if ((activation.lit || activation.cleanedUp) && aborted == Reason::none) {
+    note("probe %s: explicit off (%s); %u writes, %u read back%s", label, reasonName(ended), off.writes, off.readbacks,
+         off.ok ? "" : "; OFF UNCONFIRMED");
+    if (off.why) note("probe %s: off failed reg %02x wanted %02x read %02x: %s", label,
+                      off.failedReg, off.failedWant, off.failedGot, off.why);
+  }
+  if (active.identity) probeSnapDiff(label, active);
+  if (!offUnconfirmed) probeIdleSamples(mask, label, "after");
+  char diff[40];
+  snprintf(diff, sizeof diff, "after %s", label);
+  if (!offUnconfirmed) probeSnapDiff(diff, probeSnapshot(false));
+  publishState(this);
+  const bool alternate = mask == kPianoChannelMask && !flash && ended == Reason::channelOpen && gArgs.probeSpare;
+  if (alternate && !offUnconfirmed) note("probe %s: open on factory pair, proceeding to the alternate-pair check", label);
+  if (offUnconfirmed) {
+    note("probe %s: stopped with OFF UNCONFIRMED", label);
+    return ProbeResult::stopped;
+  }
+  if (ended != Reason::test && !alternate) note("probe %s: stopped: %s", label, reasonName(ended));
+  if (alternate) return ProbeResult::alternate;
+  return ended == Reason::test ? ProbeResult::complete : ProbeResult::stopped;
 }
 
-void PianoTorch::probeFlashPulse()
+static void logLadderSample(unsigned step, unsigned ma, const char *phase, unsigned elapsed,
+                            const Controller::Live &live, const Temperatures &t)
 {
-  // 50 mA total (2 x 25 mA, 12.5 mA FLASH steps) for 80 ms. The safety timer
-  // is the visibility-friendly part of Ubuntu's photo path; off() still runs
-  // afterward to cover a timer or V4L2-owner edge case.
-  constexpr uint8_t kFlashItarget = 1;
-  constexpr uint8_t kFlashTimerTicks = 8;
-  note("probe FLASH pulse: timed 80 ms at 50 mA total (2 x 25 mA, 12.5 mA steps); V4L2 close trap covered by explicit off");
-  IOLockLock(gLock);
-  const StepResult pulse = gTorch.controller().flashPulse(kFlashItarget, kFlashTimerTicks, kPianoChannelMask);
-  IOLockUnlock(gLock);
-  note("probe FLASH pulse: on; %u writes, %u read back%s", pulse.writes, pulse.readbacks, pulse.ok ? "" : "; A STEP FAILED");
-  IOSleep(120);
-  IOLockLock(gLock);
-  const StepResult off = gTorch.controller().off(kPianoChannelMask);
-  IOLockUnlock(gLock);
-  note("probe FLASH pulse: explicit off after timer; %u writes, %u read back%s", off.writes, off.readbacks,
-       off.ok ? "" : "; A STEP FAILED");
+  char faults[80], channels[128];
+  char flashTemp[24], socTemp[24], batteryTemp[24];
+  formatFaults(decodeFaults(live.status1, live.status2, live.status3, kPianoChannelMask), faults, sizeof faults);
+  formatChannels(live.status1, live.status3, kPianoChannelMask, channels, sizeof channels);
+  temperatureText(t, flashTemp, socTemp, batteryTemp, sizeof flashTemp);
+  note("ladder poll: step=%u ma=%u phase=%s t+%u ms STATUS1=%02x %s INT_RT_STS(0x10)=%02x status2=%02x status3=%02x enables=%02x/%02x faults=%s temp flash=%s SoC=%s battery=%s%s",
+       step, ma, phase, elapsed, live.status1, channels, live.rt, live.status2, live.status3, live.moduleEn, live.chanEn, faults,
+       flashTemp, socTemp, batteryTemp, live.ok ? "" : " status unreadable");
 }
 
-// Torch5: one guarded boot answers the useful-current question without four reboots. Each level is lit for ten seconds and
-// followed by ten seconds dark. The PMIC status/RT byte and all three temperatures are sampled every 500 ms. A fault, an
-// unreadable status, or an existing SoC/battery guard ends the ladder and leaves the module explicitly off.
+// Each step runs for ten seconds lit and ten seconds dark. Either phase stops on the first fault or unreadable status.
 void PianoTorch::ladder()
 {
-  static const unsigned levels[] = {100, 200, 300, 400};
-  note("ladder: 100/200/300/400 mA total (2 channels), 10 s lit + 10 s dark, status/fault and temperatures every 500 ms; cap %u mA",
-       gArgs.maxMa);
-  for (unsigned step = 0; step < sizeof(levels) / sizeof(levels[0]); ++step) {
-    const unsigned ma = levels[step];
-    const uint64_t start = nowMs();
-    const Temperatures t0 = readTemperatures(start);
+  note("ladder: 10 s lit + 10 s dark per step, status/fault and temperatures every 500 ms; cap %u mA", gArgs.maxMa);
+  unsigned step = 0;
+  for (const unsigned ma : kLadderLevelsMa) {
+    if (ma > gArgs.maxMa) {
+      note("ladder: %u mA and higher steps skipped under the %u mA cap", ma, gArgs.maxMa);
+      return;
+    }
+    ++step;
+    const Temperatures t0 = readTemperatures(nowMs());
     IOLockLock(gLock);
-    Torch::Outcome on = gTorch.request(start, ma, 10, t0);
-    gTorch.setTestMode(false);
+    const uint64_t start = nowMs();
+    Torch::Outcome on;
+    if (gTorch.diagnosticAbort() == Reason::none) on = gTorch.request(start, ma, kLadderWindowSeconds, t0);
+    else on.reason = gTorch.diagnosticAbort();
+    if (on.lit) gTorch.setTestMode(true);
     gTorch.describe(start, gState, sizeof gState);
     IOLockUnlock(gLock);
-    note("ladder step %u: request %u mA (2 x %u mA)", step + 1, ma, ma / 2);
+    note("ladder step %u: request %u mA (2 x %u mA)", step, ma, ma / 2);
     logOutcome("ladder lit", on, ma);
     publishState(this);
     if (!on.lit) {
@@ -686,71 +787,57 @@ void PianoTorch::ladder()
       return;
     }
 
-    for (unsigned elapsed = 0; elapsed < 10000; elapsed += 500) {
-      if (elapsed) IOSleep(500);
-      const uint64_t now = nowMs();
-      const Temperatures t = readTemperatures(now);
+    uint64_t darkStart = 0;
+    for (unsigned elapsed = 0;; elapsed += kProbePollMs) {
+      const uint64_t now = nowMs(), due = start + elapsed;
+      if (now < due) IOSleep(unsigned(due - now));
+      const Temperatures t = readTemperatures(nowMs());
       IOLockLock(gLock);
-      const Torch::Outcome poll = gTorch.poll(now, t);
-      const Controller::Live live = poll.live;
-      gTorch.describe(now, gState, sizeof gState);
-      IOLockUnlock(gLock);
-      char faults[80], channels[128];
-      char flashTemp[24], socTemp[24], batteryTemp[24];
-      formatFaults(decodeFaults(live.status1, live.status2, live.status3, kPianoChannelMask), faults, sizeof faults);
-      formatStatus1Channels(live.status1, kPianoChannelMask, channels, sizeof channels);
-      temperatureText(t, flashTemp, socTemp, batteryTemp, sizeof flashTemp);
-      note("ladder poll: step=%u ma=%u phase=lit t+%u ms STATUS1=%02x %s INT_RT_STS(0x10)=%02x status2=%02x status3=%02x enables=%02x/%02x faults=%s temp flash=%s SoC=%s battery=%s",
-           step + 1, ma, elapsed, live.status1, channels, live.rt, live.status2, live.status3, live.moduleEn, live.chanEn, faults,
-           flashTemp, socTemp, batteryTemp);
-      if (!poll.lit) {
-        note("ladder stopped at %u mA lit window: %s", ma, reasonName(poll.reason));
+      if (gTorch.diagnosticAbort() != Reason::none) {
+        IOLockUnlock(gLock);
         return;
       }
+      const uint64_t sample = nowMs();
+      const Torch::Outcome poll = gTorch.poll(sample, t, /*ladder=*/true);
+      darkStart = nowMs();
+      gTorch.describe(darkStart, gState, sizeof gState);
+      IOLockUnlock(gLock);
+      if (poll.sampled) logLadderSample(step, ma, "lit", unsigned(sample - start), poll.live, t);
+      if (poll.lit) continue;
+      logOutcome("ladder lit window", poll, 0);
+      publishState(this);
+      if (poll.reason != Reason::test || !poll.steps.ok) return;
+      break;
     }
 
-    IOLockLock(gLock);
-    const Torch::Outcome off = gTorch.turnOff(nowMs(), Reason::test);
-    gTorch.describe(nowMs(), gState, sizeof gState);
-    IOLockUnlock(gLock);
-    note("ladder step %u: dark; %u writes, %u read back%s", step + 1, off.steps.writes, off.steps.readbacks,
-         off.steps.ok ? "" : "; A STEP FAILED");
-    publishState(this);
-    if (!off.steps.ok) {
-      note("ladder stopped after %u mA: off write failed", ma);
-      return;
-    }
-
-    unsigned darkUnreadable = 0;
-    for (unsigned elapsed = 0; elapsed < 10000; elapsed += 500) {
-      if (elapsed) IOSleep(500);
-      const uint64_t now = nowMs();
-      const Temperatures t = readTemperatures(now);
+    for (unsigned elapsed = 0; elapsed <= kLadderWindowMs; elapsed += kProbePollMs) {
+      const uint64_t now = nowMs(), due = darkStart + elapsed;
+      if (now < due) IOSleep(unsigned(due - now));
+      const Temperatures t = readTemperatures(nowMs());
       IOLockLock(gLock);
+      if (gTorch.diagnosticAbort() != Reason::none) {
+        IOLockUnlock(gLock);
+        return;
+      }
+      const uint64_t sample = nowMs();
       const Controller::Live live = gTorch.controller().live();
+      const Reason fault = ladderDarkFault(live, t, gTorch.config());
+      Torch::Outcome off;
+      if (fault != Reason::none) {
+        off = gTorch.turnOff(sample, fault);
+        gTorch.describe(sample, gState, sizeof gState);
+      }
       IOLockUnlock(gLock);
-      if (!live.ok) ++darkUnreadable;
-      else darkUnreadable = 0;
-      char faults[80], channels[128];
-      char flashTemp[24], socTemp[24], batteryTemp[24];
-      formatFaults(decodeFaults(live.status1, live.status2, live.status3, kPianoChannelMask), faults, sizeof faults);
-      formatStatus1Channels(live.status1, kPianoChannelMask, channels, sizeof channels);
-      temperatureText(t, flashTemp, socTemp, batteryTemp, sizeof flashTemp);
-      note("ladder poll: step=%u ma=%u phase=dark t+%u ms STATUS1=%02x %s INT_RT_STS(0x10)=%02x status2=%02x status3=%02x enables=%02x/%02x faults=%s temp flash=%s SoC=%s battery=%s",
-           step + 1, ma, elapsed, live.status1, channels, live.rt, live.status2, live.status3, live.moduleEn, live.chanEn, faults,
-           flashTemp, socTemp, batteryTemp);
-      const Faults f = decodeFaults(live.status1, live.status2, live.status3, kPianoChannelMask);
-      const bool hot = (t.socValid && t.socDeci >= gTorch.config().socMaxDeci) ||
-                       (t.batteryValid && t.batteryCenti >= gTorch.config().batteryMaxCenti);
-      if (f.any() || darkUnreadable >= 2 || hot) {
-        note("ladder stopped during dark after %u mA: %s%s%s", ma, f.any() ? "fault" : "", darkUnreadable >= 2 ? " unreadable" : "",
-             hot ? " temperature guard" : "");
+      logLadderSample(step, ma, "dark", unsigned(sample - darkStart), live, t);
+      if (fault != Reason::none) {
+        logOutcome("ladder dark window", off, 0);
+        publishState(this);
         return;
       }
     }
-    note("ladder step %u complete: %u mA lit 10 s, dark 10 s", step + 1, ma);
+    note("ladder step %u complete: %u mA lit 10 s, dark 10 s", step, ma);
   }
-  note("ladder complete: all four levels passed without a fault or guard");
+  note("ladder complete: all levels passed without a fault or guard");
 }
 
 // The control loop: requests as they come; while lit, a poll every second (the time limit, the guard).
@@ -762,30 +849,36 @@ void PianoTorch::serve()
     IOLockLock(gLock);
     if (!gReq.pending) {
       uint64_t deadline = 0;
-      clock_interval_to_deadline(gTorch.lit() ? 1000 : 60000, kMillisecondScale, &deadline);
+      const bool active = gTorch.operational() && (gTorch.lit() || gTorch.needsOff());
+      const uint64_t now = nowMs();
+      const uint64_t due = gTorch.deadlineMs();
+      const unsigned wait = gTorch.lit() && due < now + 1000 ? (due > now ? unsigned(due - now) : 1) : 1000;
+      clock_interval_to_deadline(active ? wait : 60000, kMillisecondScale, &deadline);
       IOLockSleepDeadline(gLock, &gReq, deadline, THREAD_UNINT);
     }
+    const bool work = gTorch.operational() && (gReq.pending || gTorch.lit() || gTorch.needsOff());
+    IOLockUnlock(gLock);
+    if (!work) continue;
+
+    const Temperatures t = readTemperatures(nowMs());
+    IOLockLock(gLock);
+    const uint64_t now = nowMs();
     const Request r = gReq;
     gReq.pending = false;
-    const bool lit = gTorch.lit();
-    IOLockUnlock(gLock);
-    if (!r.pending && !lit) continue;
-
-    const uint64_t now = nowMs();
-    const Temperatures t = readTemperatures(now);
-    IOLockLock(gLock);
     Torch::Outcome o;
     bool acted = false, polled = false;
-    if (r.pending) {
+    if (r.pending && gTorch.operational()) {
       const bool test = r.source && !strcmp(r.source, "the boot test");
       o = gTorch.request(now, r.ma, r.seconds, t);
       if (o.lit) gTorch.setTestMode(test);   // the boot test's end is logged as such; any later request is the user's
       acted = true;
-    } else if (lit) {
+    } else if (gTorch.operational() && (gTorch.lit() || gTorch.needsOff())) {
       o = gTorch.poll(now, t);
       polled = true;
     }
     gTorch.describe(now, gState, sizeof gState);
+    char state[sizeof gState];
+    strlcpy(state, gState, sizeof state);
     IOLockUnlock(gLock);
 
     if (acted) {
@@ -804,7 +897,7 @@ void PianoTorch::serve()
         logOutcome("guard", o, 0);
       } else if (now - lastLogMs >= 30000 || o.live.status1 != lastStatus[0] || o.live.status2 != lastStatus[1] ||
                  o.live.status3 != lastStatus[2]) {
-        note("lit: %s; status %02x %02x %02x rt %02x enables %02x %02x; SoC %d.%d C battery %d.%02d C", gState, o.live.status1,
+        note("lit: %s; status %02x %02x %02x rt %02x enables %02x %02x; SoC %d.%d C battery %d.%02d C", state, o.live.status1,
              o.live.status2, o.live.status3, o.live.rt, o.live.moduleEn, o.live.chanEn, t.socValid ? t.socDeci / 10 : 0,
              t.socValid ? t.socDeci % 10 : 0, t.batteryValid ? t.batteryCenti / 100 : 0, t.batteryValid ? t.batteryCenti % 100 : 0);
         lastLogMs = now;
@@ -817,19 +910,19 @@ void PianoTorch::serve()
   }
 }
 
-// Synchronous off from a power transition (sleep, shutdown): a few SPMI transactions, well under a millisecond.
+// Verify OFF synchronously before acknowledging the power transition.
 void PianoTorch::offNow(Reason why, const char *what)
 {
   if (!gLock) return;
   IOLockLock(gLock);
-  const bool act = gReady && gTorch.lit();
-  Torch::Outcome o;
-  if (act) {
-    o = gTorch.turnOff(nowMs(), why);
-    gTorch.describe(nowMs(), gState, sizeof gState);
-  }
+  gReq.pending = false;
+  const bool act = gReady && (gTorch.lit() || gTorch.needsOff());
+  const Torch::Outcome o = gTorch.quiesce(nowMs(), why);
+  if (act) gTorch.describe(nowMs(), gState, sizeof gState);
   IOLockUnlock(gLock);
   if (act) {
+    if (why == Reason::sleep && !o.steps.ok)
+      pianopower::cancelSystemSleep(kServiceClass, "torch OFF unconfirmed");
     logOutcome(what, o, 0);
     publishState(this);
   }
@@ -838,6 +931,12 @@ void PianoTorch::offNow(Reason why, const char *what)
 IOReturn PianoTorch::setPowerState(unsigned long state, IOService *)
 {
   if (state == pianopower::kOff) offNow(Reason::sleep, "system sleep");
+  else if (state == pianopower::kOn && gLock) {
+    IOLockLock(gLock);
+    gTorch.resume();
+    IOLockWakeup(gLock, &gReq, false);
+    IOLockUnlock(gLock);
+  }
   return pianopower::kAckNow;
 }
 
@@ -858,16 +957,17 @@ IOReturn PianoTorch::setProperties(OSObject *properties)
   if (gArgs.level < 2 || !gLock) return kIOReturnUnsupported;
   if (IOUserClient::clientHasPrivilege(current_task(), kIOClientPrivilegeAdministrator) != kIOReturnSuccess) return kIOReturnNotPrivileged;
   unsigned ma;
-  if (OSNumber *n = OSDynamicCast(OSNumber, set)) ma = n->unsigned32BitValue();
+  if (OSNumber *n = OSDynamicCast(OSNumber, set)) ma = boundedRequest(n->unsigned64BitValue(), kHardMaxMa);
   else if (OSBoolean *b = OSDynamicCast(OSBoolean, set)) ma = b->isTrue() ? gArgs.ma : 0;
   else return kIOReturnBadArgument;
-  OSNumber *seconds = OSDynamicCast(OSNumber, d->getObject(kPropertySeconds));
+  OSObject *duration = d->getObject(kPropertySeconds);
+  OSNumber *seconds = OSDynamicCast(OSNumber, duration);
+  if (duration && !seconds) return kIOReturnBadArgument;
   IOLockLock(gLock);
-  const bool ready = gReady;
+  const bool ready = gReady && gTorch.operational() && !gBootDiagnostic;
+  if (ready) queueLocked(ma, seconds ? boundedRequest(seconds->unsigned64BitValue(), gTorch.config().maxS) : 0, "setProperties");
   IOLockUnlock(gLock);
-  if (!ready) return kIOReturnNotReady;
-  queue(ma, seconds ? seconds->unsigned32BitValue() : 0, "setProperties");
-  return kIOReturnSuccess;
+  return ready ? kIOReturnSuccess : kIOReturnNotReady;
 }
 
 IOReturn PianoTorch::callPlatformFunction(const OSSymbol *name, bool wait, void *p1, void *p2, void *p3, void *p4)
@@ -886,10 +986,16 @@ IOReturn PianoTorch::callPlatformFunction(const OSSymbol *name, bool wait, void 
     return kIOReturnSuccess;
   }
   IOLockLock(gLock);
-  const bool ready = gReady, lit = gTorch.lit() || (gReq.pending && gReq.ma);
+  const bool ready = gReady && gTorch.operational() && !gBootDiagnostic;
+  if (ready) {
+    if (set)
+      queueLocked(boundedRequest(uintptr_t(p1), kHardMaxMa), boundedRequest(uintptr_t(p2), gTorch.config().maxS),
+                  p3 ? static_cast<const char *>(p3) : "a driver");
+    else {
+      const bool lit = gReq.pending ? gReq.ma != 0 : gTorch.lit();
+      queueLocked(lit ? 0 : gArgs.ma, 0, p1 ? static_cast<const char *>(p1) : "a driver");
+    }
+  }
   IOLockUnlock(gLock);
-  if (!ready) return kIOReturnNotReady;
-  if (set) queue(unsigned(uintptr_t(p1)), unsigned(uintptr_t(p2)), p3 ? static_cast<const char *>(p3) : "a driver");
-  else queue(lit ? 0 : gArgs.ma, 0, p1 ? static_cast<const char *>(p1) : "a driver");
-  return kIOReturnSuccess;
+  return ready ? kIOReturnSuccess : kIOReturnNotReady;
 }

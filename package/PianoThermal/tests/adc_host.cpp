@@ -13,7 +13,7 @@
 //   adc_host --map          print the channel map for tooling/k27/check-adc-map.py
 //   adc_host --ntc          print the curve's derivation
 //   adc_host --curve R ...  print the curve's milli-degrees C at each resistance R (ohms), for tooling/k27/check-ntc-curve.py
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. -I../../include adc_host.cpp -o /tmp/adc_host && /tmp/adc_host
+// Build: c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I.. -I../../include adc_host.cpp -o /tmp/adc_host && /tmp/adc_host
 #include "AdcChannels.h"
 #include "BoardTemps.h"
 #include "Ntc.h"
@@ -663,7 +663,7 @@ static void testBoardTemps()
 }
 
 // gpu/fullopp1: the skin API (piano-thermal-skin-temps) carries the virtual sensor's five inputs in its order plus XO, with the two-period
-// freshness of the GPU API, and the hook adds perf::virtualSkin over the five (the CPU policy's own number).
+// freshness of the GPU API and the virtual skin reading.
 static void testSkinTemps()
 {
   Model m;
@@ -679,17 +679,66 @@ static void testSkinTemps()
   b.round();
   const Snapshot s = snapshotOf(b, 5000);
   CHECK(fillSkinTemps(s, m.now, &t) && t.state == PIANO_BOARD_TEMPS_RUNNING && t.period_ms == 5000 && t.rounds == 1);
-  CHECK(t.valid == (1u << PIANO_SKIN_COUNT) - 1u && !t.virtual_valid);
+  CHECK(t.valid == (1u << PIANO_SKIN_COUNT) - 1u && t.virtual_valid);
   for (unsigned r = 0; r < PIANO_SKIN_COUNT; ++r) CHECK(std::abs(t.milli_c[r] - want[r]) <= 20 && t.sample_us[r]);
-  // what hookSkinTemps adds: the stock sum over the five (the 11-20 capture's zones gave 31.0 C; these give about 30.9 C)
-  const perf::Skin v = perf::virtualSkin(t.milli_c, t.valid & 31u);
-  CHECK(v.valid && v.used == 31u && std::abs(v.milliC - 30910) <= 60);
+  CHECK(t.virtual_used == 31u && std::abs(t.virtual_milli_c - 30910) <= 60);
   // two periods old still counts, a millisecond more does not
   const uint64_t last = s.atUs[channelIndex("batt")];
   CHECK(fillSkinTemps(s, last + 10000ull * 1000, &t) && (t.valid & (1u << PIANO_SKIN_BATTERY)));
   CHECK(fillSkinTemps(s, last + 10001ull * 1000, &t) && !(t.valid & (1u << PIANO_SKIN_BATTERY)));
   // without the battery the virtual sensor is not the stock one: invalid
-  CHECK(!perf::virtualSkin(t.milli_c, t.valid & 30u).valid);
+  CHECK(!t.virtual_valid);
+}
+
+static void testSnapshotFaults()
+{
+  Model model;
+  Board board;
+  CHECK(attach(board, model) == Err::none);
+  board.round();
+  const Snapshot good = snapshotOf(board, 5000);
+  const unsigned batt = unsigned(channelIndex("batt"));
+  const unsigned quiet = unsigned(channelIndex("quiet"));
+  const uint64_t now = model.now;
+  piano_board_temps roles{};
+  roles.version = PIANO_BOARD_TEMPS_VERSION;
+  piano_skin_temps skin{};
+  skin.version = PIANO_SKIN_TEMPS_VERSION;
+  piano_gpu_temps gpu{};
+  gpu.version = PIANO_GPU_TEMPS_VERSION;
+
+  for (const int32_t invalid : {kMinMilliC - 1, kMaxMilliC + 1}) {
+    Snapshot broken = good;
+    broken.milliC[batt] = broken.milliC[quiet] = invalid;
+    CHECK(fillBoardTemps(broken, now, &roles) == 3);
+    CHECK(fillSkinTemps(broken, now, &skin) && !(skin.valid & (1u << PIANO_SKIN_QUIET)));
+    CHECK(fillGpuTemps(broken, now, &gpu) && gpu.valid == 1);
+  }
+  Snapshot broken = good;
+  broken.atUs[batt] = broken.atUs[quiet] = now + 1;
+  CHECK(fillBoardTemps(broken, now, &roles) == 3);
+  CHECK(fillSkinTemps(broken, now, &skin) && !(skin.valid & (1u << PIANO_SKIN_QUIET)));
+  broken = good;
+  broken.disabledMask |= 1u << batt;
+  CHECK(fillBoardTemps(broken, now, &roles) == 3 && !(roles.valid & (1u << PIANO_BOARD_TEMP_BATTERY)));
+  broken = good;
+  broken.atUs[batt] = broken.atUs[quiet] = 0;
+  CHECK(fillBoardTemps(broken, now, &roles) == 3);
+  CHECK(fillGpuTemps(broken, now, &gpu) && gpu.valid == 1);
+  broken = good;
+  broken.periodMs = 0;
+  CHECK(fillBoardTemps(broken, now, &roles) == 0);
+  for (unsigned r = 0; r < perf::kSkinInputs; ++r) {
+    CHECK(!perf::virtualSkin(skin.milli_c, 31u & ~(1u << r)).valid);
+  }
+  broken = good;
+  const uint32_t chargerBit = 1u << channelIndex("charger");
+  broken.validMask &= ~chargerBit;
+  CHECK(fillSkinTemps(broken, now, &skin) && !skin.virtual_valid);
+  broken.pinHeldMask |= chargerBit;
+  CHECK(fillSkinTemps(broken, now, &skin) && skin.virtual_valid && !(skin.virtual_used & (1u << PIANO_SKIN_CHARGER)));
+  CHECK(fillSkinTemps(broken, now + 10001000, &skin) && !skin.virtual_valid);
+  CHECK(fillSkinTemps(broken, now + 10001000, &skin, kFreshPeriods) && skin.virtual_valid);
 }
 
 // The charger thermistor on the firmware's pin (PMIH0108 GPIO 12): counted only while the pin reads high-Z (queue5 P12: 22.6 kOhm,
@@ -788,6 +837,7 @@ int main(int argc, char **argv)
   testCodes();
   testBoardTemps();
   testSkinTemps();
+  testSnapshotFaults();
   testPinGate();
   if (failures) {
     std::printf("adc_host: %d FAILED\n", failures);

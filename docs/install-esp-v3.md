@@ -1,13 +1,36 @@
-# Installing ESP v3: the owner's checklist (retired 27.0.1 plan)
+# Installing macOS from the ESP
 
-**Retired 2026-11-14; do not run this checklist.** ESP v3 (`esp-daily3-macos.img`, sha256
-`fa5c0485a1d29634284ef77cdbd3bd4e608a56caa9a77cde8ebdf55e2aa29ca5`) was a proposed 27.0.1 daily system, never installed.
-The tablet now runs macOS 27.3 only from `esp-k273-v2` with the v3 delta; its root is on `linux_rootfs`, and the owner's 200 GiB
-Data store is on `linux_data` (LBA 71859642, seed `9bd6f902`). The old `8f3331104e03c970` store was cleared. Use
-[persistent-boot.md](persistent-boot.md) §13 and §13.8 for the current installation. Everything below is the historical v3
-checklist, including commands and expected output that are **not valid for the current tablet**.
+## Installed daily build (2026-11-27)
 
-## 1. Your decisions (before the session)
+The reference tablet runs **v13.1y12q** from the 27.3-only ESP, default entry `macos-27.3`. The root is on `linux_rootfs`
+and the 200 GiB Data store is on `linux_data`. Both November 27 disk boots reached the login window at **+32 s** with the Data
+store resumed and verified. Use the second-unit install guide for host preparation, RAM qualification and installation. That
+guide still awaits validation on other units.
+[November 27 results](results-2026-11-27.md) · [27.3 line](k273-line.md#current-line-2026-11-27) ·
+[Support status](STATUS.md#known-gaps) · [Second-unit install guide](../skills/install-piano-macos/SKILL.md)
+
+## Daily update and rollback
+
+Qualify the update from RAM first. Take verified backups of the affected regions, write only the changed parts and verify them
+by reading them back. Keep the previous ESP and the matching rollback files available until the disk boot verifies the profile
+and resumes the Data store. [November 26 install results](results-2026-11-26.md#install) · [Support status](STATUS.md)
+
+| Update | Rollback order |
+| --- | --- |
+| ESP only, with the Data-side layer and trust cache unchanged | Restore the previous ESP from its verified backup. The v13.1y12l → v13.1y12m kernel and boot-argument update used this pattern. |
+| ESP plus a new Data-side layer whose CDHashes the previous ESP lacks | Restore the previous layer while the current ESP still trusts both versions, then restore the previous ESP. When restoring Data from backup, restore the matching ESP and Data store together before booting. That returns Data to the backup point. |
+
+[November 26 ESP-only update](results-2026-11-26.md#later-the-same-day-v131y12m-installed) ·
+[Layer procedure](userland.md#74-the-procedure) · [Whole-disk layout](persistent-boot.md#138-the-whole-disk-layout-the-root-on-linux_rootfs-the-owners-data-grown-over-linux_data-2026-11-14)
+
+## Historical ESP v3 checklist (2026-11-12, retired 2026-11-14)
+
+**Archive only.** ESP v3 (`esp-daily3-macos.img`, SHA-256
+`fa5c0485a1d29634284ef77cdbd3bd4e608a56caa9a77cde8ebdf55e2aa29ca5`) was a proposed 27.0.1 daily system that was never installed.
+The 27.3-only migration retired the 27.0.1 volume and store. The commands and expected output below describe the retired v3 plan.
+[Migration history](k273-line.md#historical-migration-2026-11-12-to-2026-11-14)
+
+### 1. Your decisions (before the session)
 
 | Decision | Default in v3 | Choose |
 |---|---|---|
@@ -19,9 +42,9 @@ checklist, including commands and expected output that are **not valid for the c
 | **The quieting** (`launchctl disable` of four looping system jobs: PerfPowerServices alone takes 1.7 cores at the idle login window) | not done | optional, in the same Terminal session as the layer |
 | **Verbose boot text** (`-v`) | off (`--fast-boot 1`) | on only with a rebuild (`--fast-boot 0`) |
 
-## 2. Before the session (historical Mac checklist; the 27.0.1 image must not be installed)
+### 2. Before the session (historical Mac checklist; the 27.0.1 image must not be installed)
 
-1. The NAS is mounted (`PIANO_BACKUP_DIR` in `~/.config/piano/env`); the tablet is charged (`fastboot getvar battery-voltage`).
+1. The verified backup destination (`PIANO_BACKUP_DIR`) is available and the tablet is charged (`fastboot getvar battery-voltage`).
 2. The unattended RAM test passed: `v3-probe` (persistent-boot.md §11.6: the guard healthy at 180 s, Data store state 6, the login
    window, back in ABL fastboot at about 750 s). Before the layer also `v3-net` (the USB network's first run).
 3. The image and its record next to the install state, and a dry run (sends nothing):
@@ -34,7 +57,7 @@ checklist, including commands and expected output that are **not valid for the c
    ```
    Without the store backup, leave `store-backup` out here and below.
 
-## 3. The session (retired; do not run these commands)
+### 3. The session (retired; do not run these commands)
 
 From this checkout, in a shell with `PIANO_PERSIST_OUT` exported as in §2 (every `maint-session.py` command below needs it: the
 install state is the persist checkout's):
@@ -55,9 +78,9 @@ store no longer exists; this gate cannot pass and is not today's check. The curr
 
 The historical first-boot expectation was `Data store state 2 ... seed 8f333110, store seed 8f333110`; today's installed store
 reports seed/store seed `9bd6f902`. The boot-guard expectation remains `piano-boot-guard: healthy after 180 s, restart reason normal`. **Stop and roll back** on `state 3`, `state 7`,
-`kept` or `started over`. The login window still shows the old plugin's boxes behind the clock until the layer is in.
+`kept` or `started over`. The v3 checklist expected the old plugin's boxes behind the clock until the layer was in place.
 
-## 4. The system layer (once, you at the keyboard)
+### 4. The system layer (once, you at the keyboard)
 
 persistent-boot.md §11.8: boot `out/ram-v3-layer` from ABL fastboot (your own Data, with the USB network), log in, then in Terminal
 fetch `userland-update.tar` and `apply-update.sh` from the Mac, check the archive's sha256 (`69010daffa42b036…`), and run
@@ -65,7 +88,7 @@ fetch `userland-update.tar` and `apply-update.sh` from the Mac, check the archiv
 --secret` on the Mac, which reads it without echo and never logs it); nothing types it for you. Then
 `sudo sh /private/var/piano/userland/install.sh --check` and Apple menu › Restart: v3 boots with the new plugin.
 
-## 5. If something goes wrong (least invasive first)
+### 5. If something goes wrong (least invasive first)
 
 1. **A hang or panic in the boot**: the boot guard lands in ABL fastboot within 180 s; `fastboot reboot` tries again.
    **Always**: power + volume-down for 15-20 s gives ABL fastboot; from there every RAM image boots as before.

@@ -103,6 +103,10 @@ static void testStormGuard()
   CHECK(!edge.stray(0) && !edge.stray(50));
   CHECK(!edge.stray(101));   // a new window starts after 100
   CHECK(!edge.stray(150) && edge.stray(160));
+  StormGuard max = stormGuard(100, UINT32_MAX);
+  max.count = UINT32_MAX - 1;
+  CHECK(!max.stray(0) && max.count == UINT32_MAX);
+  CHECK(max.stray(0));
 }
 
 static void testMissGuard()
@@ -130,6 +134,9 @@ static void testWakeStats()
   CHECK(w.due(125000, &out) && out.seconds == 64 && out.wakeups == 0);
   WakeStats off = wakeStats(0);
   CHECK(!off.due(0, &out) && !off.due(1000000, &out));
+  WakeStats longWindow = wakeStats(1);
+  CHECK(!longWindow.due(0, &out));
+  CHECK(longWindow.due(UINT64_MAX, &out) && out.seconds == UINT32_MAX);
 }
 
 int main()

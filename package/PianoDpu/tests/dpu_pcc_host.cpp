@@ -61,6 +61,12 @@ static void testDecode()
   CHECK(decodeS3132(raw).m.m[0][1] == 0);
   raw[1] = 1ull << 63;                            // -0 in sign-magnitude
   CHECK(decodeS3132(raw).ok && decodeS3132(raw).m.m[0][1] == 0);
+  const uint64_t invalidWords[] = {kS3132Limit + 1, 0ull - kS3132Limit - 1,
+                                   0x7ff8000000000000ull, 0xfff8000000000000ull};
+  for (uint64_t invalid : invalidWords) {
+    raw[1] = invalid;
+    CHECK(!decodeS3132(raw).ok);
+  }
 }
 
 static void testMath()
@@ -113,6 +119,21 @@ static void testWords()
   CHECK(w.w[0][1] == 0x3c000 && w.clampedNegative == 0 && pccMilli(w.w[0][1]) == -500);
   n.m[0][1] = -8 * kOne;
   CHECK(pccWords(n, true).w[0][1] == 0x20000 && pccWords(n, true).saturated == 1);
+  w = pccWords(diagonal(INT32_MAX, INT32_MIN, -1), true);
+  CHECK(w.w[0][0] == 0x1ffff && w.w[1][1] == 0x20000 && w.w[2][2] == 0x3ffff && w.saturated == 2);
+
+  const Matrix minRow{{{INT32_MIN, INT32_MIN, INT32_MIN}, {}, {}}};
+  const Matrix extremes{{{INT32_MIN, INT32_MAX, INT32_MAX},
+                         {INT32_MIN, INT32_MAX, 1},
+                         {INT32_MAX, INT32_MAX, INT32_MIN}}};
+  const Matrix product = multiply(minRow, extremes);
+  CHECK(product.m[0][0] == 8 * kOne && product.m[0][1] == -8 * kOne && product.m[0][2] == 0);
+  const Matrix rounded = multiply(diagonal(1, -1, 1), diagonal(kOne / 2, kOne / 2, kOne / 2 - 1));
+  CHECK(same(rounded, diagonal(1, -1, 0)));
+  Matrix extremeCrossTerm = identity();
+  extremeCrossTerm.m[0][1] = INT32_MIN;
+  CHECK(!isDiagonal(extremeCrossTerm, INT32_MIN));
+  CHECK(same(multiply(identity(), identity(), INT32_MIN), Matrix{}));
 }
 
 static void testApply()
@@ -199,6 +220,7 @@ static void testNightShift()
   const uint64_t blank[9] = {};
   NightShift state;
   CHECK(state.neutral());
+  CHECK(state.setMatrix(unity) == NightShift::Input::accepted && state.neutral());
   CHECK(state.setMatrix(warm) == NightShift::Input::accepted && !state.neutral());
   CHECK(state.corrected().m[1][0] == -kOne / 4 && state.corrected().m[0][1] == kOne / 8);
   warm[3] = signMagnitude(-0.25);
@@ -270,6 +292,27 @@ static void testNightShift()
   CHECK(nightShiftPrograms(base, state).dspp[0].words.w[0][0] == 0x18000);
   state.setCorrection(UINT32_MAX);
   CHECK(state.corrected().m[0][0] == 4 * kOne && state.corrected().m[1][0] == -4 * kOne);
+  state.setCorrection(0);
+  CHECK(same(state.corrected(), Matrix{}) && !state.neutral());
+  CHECK(state.setMatrix(blank) == NightShift::Input::blank && !state.neutral());
+  CHECK(state.setMatrix(unity) == NightShift::Input::accepted && state.neutral());
+  CHECK(same(state.corrected(), identity()));
+
+  model::Dpu enabled;
+  const LivePath enabledPath = readPath(enabled);
+  CHECK(apply(enabled, enabledPath, identity(), true).ok);
+  PanelPcc enabledBase;
+  CHECK(capturePanelPcc(enabled, enabledPath, enabledBase));
+  PanelPcc enabledLast = enabledBase;
+  CHECK(state.setMatrix(warm) == NightShift::Input::accepted);
+  CHECK(updateNightShift(enabled, enabledPath, nightShiftPrograms(enabledBase, state), enabledLast, false).result.ok);
+  CHECK(state.setMatrix(unity) == NightShift::Input::accepted);
+  CHECK(updateNightShift(enabled, enabledPath, nightShiftPrograms(enabledBase, state), enabledLast, false).result.ok);
+  for (unsigned d = 0; d < 2; ++d) {
+    CHECK(enabled.pccActive[d][0] == 1);
+    for (unsigned k = 0; k < 9; ++k)
+      CHECK(enabled.pccActive[d][4 + k] == (k % 4 == 0 ? 0x8000u : 0u));
+  }
 
   LivePath incomplete = path;
   incomplete.dspps = 1;
@@ -321,6 +364,7 @@ static void testNightShiftRegisterWords()
   CHECK(capturePanelPcc(io, path, base));
   PanelPcc last = base;
   NightShift state;
+  CHECK(state.setMatrix(unity) == NightShift::Input::accepted);   // neutral boot reference for the serialization fixtures
   const struct {
     const uint64_t (&raw)[9];
     const uint32_t (&regs)[9];
@@ -343,6 +387,140 @@ static void testNightShiftRegisterWords()
     CHECK(grey(fixture.regs, 2) > 0);
   }
   CHECK(state.neutral() && same(last, base));
+}
+
+static void testNightShiftBootReference(const char *outputDirectory)
+{
+  // y12s-qual1 console:5780, ns-{base,off,half,warm2}-dpu.txt.
+  // Boot has seven intact raw words; its last two, and the other matrices,
+  // are reconstructed at S3.15 precision from physical +0x10..+0x30 words.
+  const uint64_t boot[9] = {
+    0xe93ec600, 0x135d7980, 0x0363c088,
+    0xffffffffff1493b5, 0xd904d800, 0x0071a262,
+    0xfffffffffe28adb0, 0xfffffffff94e0000, 0xb74e0000,
+  };
+  const uint64_t off[9] = {
+    0xe9300000, 0x136c0000, 0x03660000,
+    0xffffffffff140000, 0xd8ea0000, 0x00720000,
+    0xfffffffffe280000, 0xfffffffff94c0000, 0xb72c0000,
+  };
+  const uint64_t half[9] = {
+    0xc5fa0000, 0x322c0000, 0x07dc0000,
+    0xfffffffffd9a0000, 0x9b780000, 0x00ee0000,
+    0xfffffffffbe00000, 0xfffffffff1860000, 0x54a60000,
+  };
+  const uint64_t warm[9] = {
+    0xa69c0000, 0x4fa80000, 0x09bc0000,
+    0xfffffffffc2a0000, 0x61be0000, 0x00ce0000,
+    0xfffffffffb600000, 0xfffffffff1840000, 0x22540000,
+  };
+  const uint64_t unity[9] = {1ull << 32, 0, 0, 0, 1ull << 32, 0, 0, 0, 1ull << 32};
+  const uint64_t blank[9] = {};
+  // Reproduce the old failure through the real decode/serializer/programmer,
+  // before exercising the fix. Checking read-back equality alone missed it.
+  model::Dpu oldIo;
+  const LivePath oldPath = readPath(oldIo);
+  CHECK(apply(oldIo, oldPath, decodeS3132(boot, false).m, true).ok);
+  auto gray = [](const model::Dpu &io, unsigned d, unsigned output) {
+    if (!(io.pccActive[d][0] & 1u)) return 1.0;
+    const auto *regs = io.pccActive[d] + 4;
+    return (pccSignedQ15(regs[output]) + pccSignedQ15(regs[output + 3]) + pccSignedQ15(regs[output + 6])) / 32768.0;
+  };
+  CHECK(std::abs(gray(oldIo, 0, 0) - 1) < .001);
+  CHECK(std::abs(gray(oldIo, 0, 1) - .846) < .002 && std::abs(gray(oldIo, 0, 2) - .683) < .002);
+
+  model::Dpu io;
+  const LivePath path = readPath(io);
+  PanelPcc base;
+  CHECK(capturePanelPcc(io, path, base));
+  PanelPcc last = base;
+  NightShift state;
+  CHECK(state.setMatrix(blank) == NightShift::Input::blank);   // not a reference
+  uint64_t bad[9] = {s3132(1), 0, 0, 0, s3132(1), 0, 0, 0, 0};
+  CHECK(state.setMatrix(bad) == NightShift::Input::invalid && state.neutral());   // singular
+  bad[8] = s3132(.001);
+  CHECK(state.setMatrix(bad) == NightShift::Input::invalid && state.neutral());
+  bad[8] = s3132(.1);
+  CHECK(state.setMatrix(bad) == NightShift::Input::invalid && state.neutral());   // inverse exceeds 4
+  CHECK(state.setMatrix(boot) == NightShift::Input::accepted && state.neutral());
+  CHECK(same(nightShiftPrograms(base, state), base));
+  CHECK(!updateNightShift(io, path, nightShiftPrograms(base, state), last, false).attempted && io.stores.empty());
+
+  const struct {
+    const char *name;
+    const uint64_t (&raw)[9];
+    bool neutral;
+    double expectedGray[3];   // independent double-precision M * inverse(boot), tolerance covers capture quantization
+  } cases[] = {
+    {"off", off, true, {1.000, .999, .999}},
+    {"half", half, false, {1.033, .713, .397}},
+    {"warm", warm, false, {1.059, .441, .110}},
+    {"off-again", off, true, {1.000, .999, .999}},
+  };
+  for (const auto &fixture : cases) {
+    CHECK(state.setMatrix(fixture.raw) == NightShift::Input::accepted);
+    state.setCorrection(kOne);   // every observed slot 314 correction is unity
+    CHECK(updateNightShift(io, path, nightShiftPrograms(base, state), last, false).result.ok);
+    FILE *snapshot = nullptr;
+    if (outputDirectory) {
+      char filename[1024];
+      std::snprintf(filename, sizeof filename, "%s/ns-%s-dpu.txt", outputDirectory, fixture.name);
+      snapshot = std::fopen(filename, "w");
+      CHECK(snapshot);
+    }
+    for (unsigned d = 0; d < 2; ++d) {
+      const double r = gray(io, d, 0), g = gray(io, d, 1), b = gray(io, d, 2);
+      for (unsigned o = 0; o < 3; ++o) {
+        CHECK(std::abs(gray(io, d, o) - fixture.expectedGray[o]) < .002);
+        if (fixture.neutral) CHECK(std::abs(gray(io, d, o) - 1) <= .02);
+      }
+      if (!fixture.neutral) CHECK(r >= g && g >= b && r >= .9);
+      if (snapshot) {
+        std::fprintf(snapshot, "dspp%u: pcc en %08x c", d, io.pccActive[d][0]);
+        for (unsigned k = 0; k < 9; ++k) std::fprintf(snapshot, "%s %08x", k && k % 3 == 0 ? " |" : "", io.pccActive[d][4 + k]);
+        std::fprintf(snapshot, " (+00000000 00000000 00000000); gc en 00000000\n");
+      }
+      std::printf("ns-base %s dspp%u gray R %.3f G %.3f B %.3f\n", fixture.name, d, r, g, b);
+    }
+    if (snapshot) std::fclose(snapshot);
+    const PanelPcc beforeReplay = last;
+    CHECK(state.setMatrix(blank) == NightShift::Input::blank);
+    for (unsigned d = 0; d < 2; ++d) io.pccActive[d][0] = io.pccShadow[d][0] = 0;
+    CHECK(updateNightShift(io, path, nightShiftPrograms(base, state), last, true).result.ok && same(last, beforeReplay));
+  }
+  // Wake/mode replay and the OFF callback must not replace the boot reference.
+  CHECK(state.setMatrix(boot) == NightShift::Input::accepted && state.neutral());
+  CHECK(updateNightShift(io, path, nightShiftPrograms(base, state), last, false).result.ok && same(last, base));
+  CHECK(state.setMatrix(unity) == NightShift::Input::accepted && state.neutral());
+  CHECK(state.setMatrix(half) == NightShift::Input::accepted && std::abs(milli(state.corrected().m[0][0]) - 850) <= 1);
+
+  // A noncommuting reference/relative pair distinguishes right cancellation
+  // from inverse(reference) * M or elementwise coefficient division.
+  NightShift shear;
+  const uint64_t shearBase[9] = {s3132(1), s3132(.125), 0, 0, s3132(1), s3132(.25), 0, 0, s3132(1)};
+  const uint64_t composed[9] = {s3132(1), s3132(.25), s3132(.03125), s3132(-.25), s3132(.71875), s3132(.1875), 0, 0, s3132(.5)};
+  CHECK(shear.setMatrix(shearBase) == NightShift::Input::accepted);
+  CHECK(shear.setMatrix(composed) == NightShift::Input::accepted);
+  CHECK(shear.corrected().m[0][1] == kOne / 8 && shear.corrected().m[1][0] == -kOne / 4);
+  CHECK(shear.corrected().m[1][1] == 3 * kOne / 4 && shear.corrected().m[0][2] == 0 && shear.corrected().m[1][2] == 0);
+  // Independent scalar correction also works when it arrives before the reference.
+  NightShift pending;
+  pending.setCorrection(kOne / 2);
+  CHECK(pending.setMatrix(boot) == NightShift::Input::accepted && same(pending.corrected(), diagonal(kOne / 2, kOne / 2, kOne / 2)));
+
+  // Exercise negative determinants and the largest decode inputs through
+  // the same integer inverse (also run under the UB sanitizer).
+  NightShift permuted;
+  const uint64_t swap[9] = {0, s3132(1), 0, s3132(1), 0, 0, 0, 0, s3132(1)};
+  const uint64_t scaledSwap[9] = {0, s3132(.5), 0, s3132(.75), 0, 0, 0, 0, s3132(1)};
+  CHECK(permuted.setMatrix(swap) == NightShift::Input::accepted);
+  CHECK(permuted.setMatrix(scaledSwap) == NightShift::Input::accepted);
+  CHECK(same(permuted.corrected(), diagonal(kOne / 2, 3 * kOne / 4, kOne)));
+  NightShift maximum;
+  const uint64_t four[9] = {s3132(4), 0, 0, 0, s3132(4), 0, 0, 0, s3132(4)};
+  CHECK(maximum.setMatrix(four) == NightShift::Input::accepted);
+  CHECK(maximum.setMatrix(half) == NightShift::Input::accepted);
+  CHECK(std::abs(maximum.corrected().m[0][0] - decodeS3132(half, false).m.m[0][0] / 4) <= 1);
 }
 
 static void testState()
@@ -408,7 +586,7 @@ static void testGamma()
   CHECK(f.ok && isIdentity(f.m));
 }
 
-int main()
+int main(int argc, char **argv)
 {
   testDecode();
   testMath();
@@ -416,6 +594,7 @@ int main()
   testApply();
   testNightShift();
   testNightShiftRegisterWords();
+  testNightShiftBootReference(argc == 2 ? argv[1] : nullptr);
   testState();
   testGamma();
   if (failures) {

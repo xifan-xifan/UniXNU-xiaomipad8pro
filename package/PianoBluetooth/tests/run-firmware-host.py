@@ -9,8 +9,6 @@ import tempfile
 
 root = Path(__file__).resolve().parents[3]
 p = root / 'package/PianoBluetooth'
-out = root / 'out/native-kexts/PianoBluetooth/host-tests'
-out.mkdir(parents=True, exist_ok=True)
 with tempfile.TemporaryDirectory(prefix='bt-fw-host-') as tmp:
     inc = Path(tmp)
     (inc / 'IOKit').mkdir()
@@ -23,9 +21,9 @@ extern void bt_fw_free(void *);
 #define IOFreeType(p,t) bt_fw_free(p)
 #define IOLog(...) ((void)0)
 ''')
-    binary = out / 'firmware_host'
+    binary = inc / 'firmware_host'
     subprocess.run([os.environ.get('CC', 'cc'), '-std=c11', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
-                    '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
+                    '-fsanitize=address,undefined', '-fno-sanitize-recover=all', '-fno-omit-frame-pointer',
                     '-I', str(inc), '-I', str(p), '-I', str(root / 'package/PianoPower'),
                     str(p / 'tests/firmware_host.c'), str(p / 'BtFirmware.c'),
                     str(root / 'package/PianoPower/FatVolume.c'), '-o', str(binary)], check=True)

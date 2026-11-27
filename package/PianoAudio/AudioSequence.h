@@ -43,7 +43,7 @@ struct ArSeq {
     unsigned count;
     uint32_t port;           /* our GPR port for APM commands (their answers come back to it) */
     uint32_t prm_port;       /* and for PRM requests (a step with prm set) */
-    uint32_t token_base;     /* step i's token: base + i; its undo's: base + 0x100 + i */
+    uint32_t token_base;     /* step i's token: base + i; its undo's: base + AR_SEQ_TOKEN_SPAN / 2 + i */
     void *context;           /* the owner's (the builders and local actions read it) */
     uint32_t handle;         /* the MEM_MAP handle, from the ArMapped answer (0: none) */
     int state, error, failed_step;
@@ -59,6 +59,7 @@ struct ArSeq {
 };
 
 void ar_seq_init(ArSeq *s, const ArStep *steps, unsigned count, uint32_t port, uint32_t prm_port, uint32_t token_base, void *context);
+#define AR_SEQ_TOKEN_SPAN 0x200u
 /* Runs local steps inline and returns the next packet to send (the sequence then waits for its answer), or 0: waiting, up, down or
  * failed. Call again after every receive/timeout/abort/stop. */
 uint32_t ar_seq_next(ArSeq *s, uint8_t *out, uint32_t capacity);

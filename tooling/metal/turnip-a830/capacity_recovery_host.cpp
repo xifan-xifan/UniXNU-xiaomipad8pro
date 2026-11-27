@@ -19,13 +19,15 @@ using VkResult = int;
 using kern_return_t = int;
 using VkMemoryPropertyFlags = unsigned;
 constexpr int VK_SUCCESS=0, VK_ERROR_OUT_OF_DEVICE_MEMORY=-2, VK_ERROR_DEVICE_LOST=-4,
-              VK_ERROR_INVALID_EXTERNAL_HANDLE=-1000072003,VK_ERROR_OUT_OF_HOST_MEMORY=-1,VK_ERROR_UNKNOWN=-13;
+              VK_ERROR_INVALID_EXTERNAL_HANDLE=-1000072003,VK_ERROR_OUT_OF_HOST_MEMORY=-1;
 constexpr int KERN_SUCCESS=0, kIOReturnNoMemory=4, kIOReturnNoResources=5;
-enum tu_bo_alloc_flags {TU_BO_ALLOC_NO_FLAGS=0, TU_BO_ALLOC_GPU_READ_ONLY=1,
-                       TU_BO_ALLOC_REPLAYABLE=2, TU_BO_ALLOC_INTERNAL_RESOURCE=4,
-                       TU_BO_ALLOC_IMPLICIT_SYNC=8};
+enum tu_bo_alloc_flags {TU_BO_ALLOC_NO_FLAGS=0, TU_BO_ALLOC_ALLOW_DUMP=1<<0,
+                       TU_BO_ALLOC_GPU_READ_ONLY=1<<1, TU_BO_ALLOC_REPLAYABLE=1<<2,
+                       TU_BO_ALLOC_INTERNAL_RESOURCE=1<<3, TU_BO_ALLOC_IMPLICIT_SYNC=1<<6,
+                       TU_BO_ALLOC_GPU_PRIVATE=1<<7};
 enum {NativeAdrenoMethodBoAlloc=1, NativeAdrenoMethodBoImport=2, NativeAdrenoMethodBoMap=3,
-      NativeAdrenoMethodBoFree=4, NativeAdrenoParamsHostImport=1};
+      NativeAdrenoMethodBoFree=4, NativeAdrenoParamsHostImport=1,
+      NativeAdrenoParamsGpuPrivate=4, NativeAdrenoBoAllocGpuPrivate=4};
 struct NativeAdrenoAbiBoAlloc {uint64_t bytes; unsigned align_log2,contiguous;};
 struct NativeAdrenoAbiBoImport {uint64_t address,bytes;};
 struct NativeAdrenoAbiBoAllocReply {uint64_t handle;};
@@ -49,6 +51,7 @@ struct tu_bo {
    uint64_t unique_id=0,darwin_handle=0,darwin_alloc_size=0;
    uint32_t darwin_token=0;
    bool darwin_read_only=false;
+   bool darwin_cs=false;
    void *map=nullptr;
    bool never_unmap=false;
 };
@@ -59,6 +62,7 @@ struct darwin_retire_state {
    VkResult failure=VK_SUCCESS;
    struct {uint64_t used=0;} va;
    struct {uint64_t retries=0,retry_wins=0;} cache_stats;
+   struct {uint64_t allocs=0,reserve_hits=0,cache_mapped=0,cache_unmapped=0,fresh=0;} cs_stats;
 };
 static struct {struct {unsigned flags=NativeAdrenoParamsHostImport;} params;} dw;
 template<class T> static T p_atomic_read(T *p){return *p;}
@@ -78,6 +82,11 @@ static uint64_t darwin_cache_small_budget(){return 0;}
 static uint64_t darwin_cache_budget(){return 0;}
 static bool darwin_past_bo_limit(tu_device *,uint64_t,const char *){return false;}
 static bool darwin_cache_get(darwin_retire_state *,uint64_t,bool,bool,darwin_cached_bo *){return false;}
+// The recovery peer keeps the optional command-stream reserve disabled.
+[[maybe_unused]] static bool darwin_cs_enabled(){return false;}
+[[maybe_unused]] static bool darwin_cs_get(darwin_retire_state *,uint64_t,darwin_cached_bo *){return false;}
+[[maybe_unused]] static bool darwin_bo_note_due(uint32_t){return false;}
+[[maybe_unused]] static void darwin_bo_note(const char *,...){}
 static const char *tu_debug_bos_add(tu_device *,uint64_t,const char *n){return n;}
 static void tu_dump_bo_init(tu_device *,tu_bo *){}
 static void darwin_note_large_bo(tu_device *,uint64_t){}
@@ -151,7 +160,11 @@ static VkResult tu_bo_init_new_explicit_iova(tu_device *d,vk_object_base *base,t
    return darwin_bo_init(d,base,b,size,address,props,flags,lazy,name);
 }
 // Generated from 0012 applied to the real Mesa source; never a second implementation.
+#pragma clang diagnostic push
+// Turnip's Darwin implementation does not use the memory properties argument.
+#pragma clang diagnostic ignored "-Wunused-parameter"
 #include "capacity_backend.inc"
+#pragma clang diagnostic pop
 
 static Physical physical;
 static darwin_retire_state retire;
@@ -204,6 +217,11 @@ int main(){
    assert(tu_add_to_heap(&device,bo)==VK_ERROR_OUT_OF_DEVICE_MEMORY);
    assert(physical.heap.used==4096 && native.empty() && vaUsed==0 && waitUs==124000);preserved();
    std::puts("PASS actual heap gate: failed reservation rolled back before reclaim; terminal BO released exactly once");
+   reset();physical.heap={0,0};idleBytes=0;bo=nullptr;
+   assert(make(false,&bo)==VK_SUCCESS && bo->darwin_alloc_size==0);
+   assert(tu_add_to_heap(&device,bo)==VK_ERROR_OUT_OF_DEVICE_MEMORY);
+   assert(physical.heap.used==0 && native.empty() && vaUsed==0 && waitUs==124000);preserved();
+   std::puts("PASS zero heap/cache budget with no idle backing leaves no reservation");
    reset();failures[NativeAdrenoMethodBoMap]=1;cleanupFails=true;
    assert(make(true,&bo)==VK_ERROR_DEVICE_LOST && retire.failure==VK_ERROR_DEVICE_LOST);
    assert(notifyCount==0 && waitUs==0 && native.size()==1 && vaUsed==4096);

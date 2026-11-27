@@ -1,18 +1,23 @@
 # The Data store: format, the store guard, flatten, plugin staging
 
-Status 2026-11-14: the installed 27.3 collection carries the store guard, and the installed store is protected. The owner's store
-was carried into a 200 GiB window over `linux_data` (`data-store-part=linux_data`, LBA 71859642, 52430401 blocks, seed `9bd6f902`;
-[persistent-boot.md](persistent-boot.md) §13.8). The 2026-11-11/12 notes below record the original guard and system-layer work:
-the old `esp-daily-macos` / `esp-gpu-macos` collection and seed `aced5bf9…` belonged to the retired 27.0.1 line. Section 7 is the
-original test procedure, not a recipe to run unchanged against today's layout.
+## Installed baseline (2026-11-27)
+
+Both disk boots of **v13.1y12q** resumed and verified the owner's 200 GiB Data store on `linux_data`. M4 concurrent mode
+was active during the second boot and is enabled by default after Data mounts. M5 stays opt-in on `main` with
+`data-store-write-back=0` and `data-store-queue=0`.
+[November 27 results](results-2026-11-27.md) · [Support status](STATUS.md#known-gaps) · [27.3 line](k273-line.md#current-line-2026-11-27)
 
 The installed system's Data volume is `package/NativeRamBlock`: a RAM **seed** (the payload's `scratch-data.img`) plus a persistent
 **store** of the pages the system changed, in a 200 GiB window over `linux_data` served by `package/NativeUfs`
-(`data-store-part=linux_data`, LBA 71859642; `native_ufs_store_open/read/write/sync`). Before the 2026-11-14 layout this window
-was at the end of `linux_rootfs`. Until this change, a store made for one seed was silently re-initialised by any boot
-with another seed (`Data store state 3`, fresh). A rebuilt Turnip plugin, a staged file or a RAM test image with another seed
-dropped every Data change. The store at the old place had generation 10 at the install: it had been started over about ten
-times that day.
+(`data-store-part=linux_data`, LBA 71859642; `native_ufs_store_open/read/write/sync`).
+[Whole-disk layout](persistent-boot.md#138-the-whole-disk-layout-the-root-on-linux_rootfs-the-owners-data-grown-over-linux_data-2026-11-14)
+
+### Historical store guard bring-up (2026-11-11 to 2026-11-14)
+
+Before the 2026-11-14 layout, the store window was at the end of `linux_rootfs`. Before the guard, booting with a different seed
+silently re-initialised the store (`Data store state 3`, fresh). A rebuilt Turnip plugin, a staged file or a RAM test image with
+another seed dropped every Data change. The store at the old place had generation 10 at the install. The `esp-daily-macos` /
+`esp-gpu-macos` collection and seed `aced5bf9…` belonged to the retired 27.0.1 line. Section 7 records the original experiment.
 
 ## 1. The pieces
 
@@ -58,10 +63,9 @@ volatile fallback and flatten use the same paths and on-disk bytes in either mod
 
 ### Concurrent mode at boot (`piano-data-concurrent`, 2026-11-26)
 
-The daily line keeps `data-store-concurrent=2`: the stages are armed and Data mounts in the single-gate mode. Then the
-`piano-data-concurrent` daemon (`tooling/native/piano-data-concurrent`) switches the store to concurrent admission once. This is the
-order the tablet qualified: the dab-r2/dab-w1 A/B (QD8 read 4.9x, mixed reader p99 2528 to 269 us) and the direct power cut
-(m5dur-m4cc-cut4/verify4: every acknowledged record intact). `data-store-concurrent=1` (concurrent before the mount) was not run on the tablet.
+Installed v13.1y12q uses `data-store-concurrent=2`. This arms the stages and lets Data mount in single-gate mode. The
+`piano-data-concurrent` daemon switches the resumed store to concurrent admission once per boot.
+[November 27 results](results-2026-11-27.md) · [Userland manifest](../configs/userland.toml)
 
 The daemon switches only when all of these hold:
 - `PIANO_DATA_CONCURRENT_AT_BOOT=1` is in its plist;
@@ -76,6 +80,43 @@ console line, and the same text in `/private/var/run/piano-data-concurrent.statu
 Rollback:
 - on a running boot: `sudo sysctl -w machdep.piano_data_concurrent=0`;
 - for good: remove the key or the plist.
+
+### Installed A/B and scratch-window durability (2026-11-26)
+
+The Data-volume A/B on installed **v13.1y12o** measured concurrent mode against serial mode.
+[November 26 storage results](results-2026-11-26.md#data-storage)
+
+| Workload | Concurrent vs serial |
+| --- | --- |
+| 4 KiB random read, QD8 | 4.9× IOPS |
+| 4 KiB random read, QD32 | 5.6× IOPS |
+| 1 MiB sequential read, QD8 | 4.8× throughput |
+| Reader p99 latency with a 1 MiB writer | 2528 → 269 µs |
+| 1 MiB sequential write, QD8 | 1.5× throughput |
+| 4 KiB random write, QD8 | 0.9× IOPS |
+
+The concurrent-mode canary survived a clean reboot. The separate scratch-window power-cut tests used a direct reset.
+Concurrent, write-back and queue modes each **passed 32/32**, retaining every record acknowledged after `F_FULLFSYNC`
+and resuming without recovery errors. The unacknowledged tail could be lost.
+[November 26 storage results](results-2026-11-26.md#data-storage) ·
+[M4/M5 driver notes](drivers/data-store-m4-m5.md) · [Durability procedure](tools/durability.md)
+
+### Scratch-window throughput and latency A/B (2026-11-27)
+
+The Disk M5 speed A/B closed on three RAM boots with zero store or UFS kernel errors and the owner's Data store
+untouched. M4 concurrent returned `VERDICT GAIN` against serial. Against M4 concurrent:
+
+- **M5 write-back (`data-store-write-back=1`, `data-store-queue=0`) passed.** Write throughput rose 1.71×–4.12×,
+  reaching 3,089.8 MB/s at 1 MiB QD8 and about 11.1k–12.0k IOPS for 4 KiB random writes. Sync p50 fell 42%–58%,
+  and mixed-reader p99 fell 7% to 243.7 µs. Write-back is a scratch-qualified daily candidate with a prior 32/32
+  power-cut pass. Daily promotion requires an owner decision and a fresh owner-store backup.
+- **M5 queue (`data-store-write-back=0`, `data-store-queue=1`) failed.** With worker dispatch at 256–289 µs,
+  4 KiB random-read IOPS fell to 0.51×–0.57× and 128 KiB write throughput to 0.57×. Mixed-reader p99 and
+  `fsync` p50 rose to 1.62× and 1.39×. All 401 queue-full refusals came between P1 and P2, with zero during
+  timed read/write phases. Queue mode is unsuitable for daily use.
+
+[November 27 scratch-window results](results-2026-11-27.md#disk-m5-scratch-window-ab) ·
+[Full driver comparison](drivers/data-store-m4-m5.md#scratch-window-throughput-and-latency-ab-2026-11-27)
 
 ## 2. Store format (`PersistOverlay.h`)
 
@@ -363,7 +404,8 @@ new seed.
 | Tool | Data store behaviour |
 |---|---|
 | `tooling/bootimg/build-ram-images.py` | `data-persist` of a RAM macOS image (`data_store_args`, note on stderr). Without `PIANO_DATA_PERSIST`: **2 only when the image's seed is the installed one**; another seed gets **0**; an unknown installed seed gets 2 with a collection that has the guard, else 0. `PIANO_DATA_PERSIST=0\|1\|2` overrides, but 2 is refused when the seed is not known to be the installed one and the collection has no guard. `PIANO_DATA_STORE_REPLACE=1\|<8 hex>` and `PIANO_DATA_STORE_FLATTEN=1` (need 2 and the guard). `data-*` in `PIANO_EXTRA_ARGS` is refused, and so is 2 for a seed whose size is not the installed store's (section 8). The build record has `data_store` |
-| installed seed | `PIANO_INSTALLED_SEED` (environment or `~/.config/piano/env`): the identity (8 to 64 hex digits) or an ESP build record (`.json`); else `out/persistent/installed.json`, which `maint-session.py` writes with every ESP it installs (and removes on its rollback). For the installed 200 GiB store: `PIANO_INSTALLED_SEED=9bd6f902…` (or the installed `esp-k273-v3` record) |
+| M5 scratch store (RAM only) | `PIANO_SCRATCH_PLAN=<plan.json>` in `build-ram-images.py` (M5 durability qualification): a disposable bound store in the unused tail of `linux_rootfs`, which the size gate otherwise refuses. `common.check_scratch_plan` requires the plan's status `CONFIRMED` (checked against a fresh maintenance map), the window `scratch_window` computes (the same rule as `run_durability.py`: after the root image and a 1024-block guard, below the log reserve, clear of every protected extent), the plan's pinned seed (not the installed one), `PIANO_EXACT_ARGS` binding exactly that window (`native-ufs-root-part` and `data-store-part` `linux_rootfs`, `data-store-lba`, `log-reserve`, `log=0`, `data-persist=2`, `data-store-concurrent=1` or `=2`, `piano-durability=1`, `piano-reset-after` with `piano-reset-to=bootloader`), `PIANO_BOOT_ARGS_SPLIT=1`, no replace/flatten/`sheng-data-reset`, the installed store inside a protected extent, and a collection with the binding and the M5 switches. The effective line is checked again after the split. The build record's `data_store.scratch` has the window, plan hash and seed. The ESP builders keep `check_store_size` unchanged |
+| installed seed | `PIANO_INSTALLED_SEED`: the identity (8 to 64 hex digits) or an ESP build record (`.json`); else `out/persistent/installed.json`, written by `maint-session.py`. Use the current installed record for the 200 GiB store (seed `9bd6f902…`). |
 | `tooling/k273/build-k273-image.sh` | current 27.3 builder with `K273_KERNEL`: `out/ram` as above; the dump image `out/ram-dump` keeps `data-persist=0`; root-layout caveat in `k273-line.md` §4 |
 | `tooling/persist/base-seed.py` | section 9: `pin` the installed ESP's seed and trust cache as the store's base (`out/base/<identity16>/`, read only, never replaced); `show`, `path`, `diff` |
 | `tooling/persist/build-esp.py` | the daily profile takes the pinned base's seed and trust cache (`--seed base --trust base`); `--layer DIR` the system layer's trust cache (section 9). The macos entries keep `data-persist=2`. `--replace-data [1\|HEX8]` adds `data-store-replace` for an intended one-time switch; `--flatten-data` adds `data-store-flatten=1` (a no-op once the store is self-contained). A seed that is not the installed one gets a loud note (with the guard: kept, Data volatile, unless the store is self-contained). With a collection without the guard it is refused unless `--replace-data`. The installed trust cache's CDHashes are checked against the new one (`--installed-trust`). `--arg data-*` is refused. The record has `data_store` |
@@ -375,6 +417,7 @@ Host tests (offline, about 10 s in all):
 ```sh
 package/NativeRamBlock/Test/run-tests.sh [SEED.img]   # sparse, persist, direct, seeddisk, guard, volatile, volatile-stress, power (+ the seed's identity)
 python3 tooling/persist/test-data-store.py            # header reader vs the driver's encoder, installed seed, every tooling decision
+python3 tooling/persist/test-scratch-plan.py          # the M5 scratch plan: window rule, every refusal, data_store_args with the plan
 python3 tooling/persist/test-persist.py               # the install session against a fake tablet (needs out/persistent's inputs)
 ```
 
@@ -384,7 +427,6 @@ On the Mac, from a checkout with these commits. The installed ESP image is the o
 checkout's `out/persistent/`:
 
 ```sh
-# Set PIANO_INSTALLED_SEED to the installed esp-k273-v3.json record (seed prefix 9bd6f902), not the retired aced5bf9 identity.
 PIANO_A830_METAL=0 K273_KERNEL=<prepared kernel-k273-...-native.macho> tooling/k273/build-k273-image.sh  # current builder; root-layout caveat in k273-line.md §4
 python3 tooling/persist/store-test-images.py --installed-esp <persist checkout>/out/persistent/esp-daily-macos.img
 ```
@@ -493,13 +535,13 @@ or a bug.
 
 ## 8. Risks and open items
 
-- Nothing here has run on the tablet. The volatile large disk is new code on the boot path of every boot without the store
-  (test images, `data-persist=0`). Its first version hung the tablet under load (section 3). The pool version is host-tested:
+- **Historical volatile-Data notes (2026-11-11/12).** The first version of the large RAM-backed disk hung the tablet under load
+  (section 3). The pool version was host-tested at the time:
   sustained writes, budget, low memory, unmap, threads and the hang's own model (`Test/volatile-stress.cpp`).
   - At the budget, APFS gets write errors, and a failed metadata write corrupts the container (2026-11-12, section 3).
   - APFS sends unmaps to this disk: 100817 pages in the 2026-11-12 desktop session.
-  - The boot reservation and the fallbacks (2026-11-12) have not run on the tablet yet. They are host-tested against the
-    session's model (`Test/volatile-pool.cpp`: the old pool refuses, the new one does not, with or without a reservation;
+  - The boot reservation and the fallbacks were host-tested against the session's model (`Test/volatile-pool.cpp`:
+    the old pool refuses, the new one does not, with or without a reservation;
     fragmented and exhausted ranges; the backoff; bursts; unmap and the reads after it). Things to watch on the first run:
     - the `reserved at start` line;
     - `0 no memory` in the status line;
@@ -514,13 +556,13 @@ or a bug.
 - A flatten error turns writes off for that boot (state 5, as any store write error). The store stays valid.
 - **A seed of another logical size** is the one case the guard cannot see. The window's place depends on its size
   (`first = end - reserve - W`), so such a seed reads its "header" from inside the installed store. That block is blank, so the
-  first `data-persist=2` boot initialises a store there, over the owner's pages. All seeds so far are 12 GiB.
+  first `data-persist=2` boot can initialise a store there, over the owner's pages. The original store was 12 GiB.
   `build-ram-images.py` and `build-esp.py` refuse `data-persist=2` for any other size (`common.INSTALLED_STORE_PAGES`) unless
   `PIANO_DATA_STORE_RELAYOUT=1` (a deliberate re-layout, with `maint-session.py --store fresh` and a backup first).
 
 ## 9. The store's base and the system layer (2026-11-12)
 
-Built and host-tested offline; nothing of it has run on the tablet.
+This section records the 2026-11-12 design and offline host tests before tablet qualification.
 
 ### 9.1 What the seed identity is made of
 

@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 work=$(mktemp -d "${TMPDIR:-/tmp}/piano-camera-default.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 xcrun --sdk macosx clang -arch arm64 -mmacosx-version-min=14.0 -O1 -g \
-  -Wall -Wextra -Werror -Wno-unused-parameter -fobjc-arc -fsanitize=address,undefined \
+  -Wall -Wextra -Werror -Wno-unused-parameter -fobjc-arc -fsanitize=address,undefined -fno-sanitize-recover=all \
   camera_default_host.m -o "$work/camera-default-host" -framework Foundation -framework AVFoundation
 "$work/camera-default-host"
 # Compile the production entry point too; this never runs its app preference writer.

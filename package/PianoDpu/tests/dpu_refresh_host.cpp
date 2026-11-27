@@ -7,7 +7,7 @@
 //     never latches, a direct TOTAL write, a store the guard refuses;
 //   - the policy: idle -> 60, bursts -> 120, a blinking cursor stays at 60, the dwell, disabled after a failure; and the policy
 //     driving the model through a session of swaps.
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. dpu_refresh_host.cpp -o /tmp/dpu_refresh_host && /tmp/dpu_refresh_host
+//   c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -I.. dpu_refresh_host.cpp -o /tmp/dpu_refresh_host && /tmp/dpu_refresh_host
 #include "DpuRefresh.h"
 #include "dpu_model.h"
 #include <cstdio>
@@ -59,6 +59,9 @@ static void testPath()
   CHECK(refuse(q) != nullptr);
   CHECK(expectedMilliHz(kVtotal60) == 60000 && expectedMilliHz(kVtotal120) == 120000);
   CHECK(rateOk(59980, 4620, 20) && rateOk(119980, 2310, 20) && !rateOk(119980, 4620, 20) && !rateOk(57000, 4620, 20));
+  CHECK(rateOk(58800, 4620, 20) && rateOk(61200, 4620, 20));
+  CHECK(!rateOk(58799, 4620, 20) && !rateOk(61201, 4620, 20));
+  CHECK(!rateOk(0, 0, 20) && !rateOk(UINT64_MAX, 4620, 20));
 }
 
 static void testSwitch()
@@ -140,6 +143,32 @@ static void testCounters()
   CHECK(countersOn(m, p) && m.storesTo(intfReg(1, kIntfCountEn)) == 1);   // already on: nothing more
 }
 
+static void testPollBounds()
+{
+  struct Clock {
+    uint64_t start = UINT64_MAX - 49, now = start;
+    uint32_t rd(uint64_t pa) const
+    {
+      if (pa == intfReg(1, kIntfLineCount)) return 0;
+      return now - start < 100 ? UINT32_MAX : 0;
+    }
+    uintptr_t irqOff() { return 0; }
+    void irqRestore(uintptr_t) {}
+    uint64_t nowUs() const { return now; }
+    void delayUs(uint32_t us) { now += us; }
+    void sleepMs(uint32_t ms) { now += uint64_t(ms) * 1000; }
+  } io;
+  Frames edge;
+  CHECK(!waitFrameEdge(io, 150, nullptr) && !waitFrameEdge(io, 0, &edge) && io.now == io.start);
+  CHECK(waitFrameEdge(io, 150, &edge) && edge.f[0] == 0 && edge.us - io.start == 100);
+  io.now = io.start;
+  CHECK(waitFlush(io, kCtlCount, UINT32_MAX, 2000) == -1 && io.now == io.start);
+  CHECK(waitFlush(io, 0, UINT32_MAX, 2000) == 1000 && io.now - io.start == 1000);
+  io.now = io.start;
+  CHECK(!waitLines(io, 1900, 2000, 2310, 1200) && io.now - io.start == 1200);
+  CHECK(!waitLines(io, 0, 2310, 2310, 1));
+}
+
 static void testAnomalies()
 {
   {   // SunUEFI's words on hardware with the downstream layout: the TOTAL lands mid-frame (an underrun), and the way back
@@ -169,13 +198,36 @@ static void testAnomalies()
     const Switch s = switchTo(m, path(m), kVtotal60, o);
     CHECK(!s.ok && s.reverted && m.midFrameTotal > 0);
   }
-  {   // a line counter that does not move: no window, nothing written, nothing to switch back
-    model::Dpu m;
-    m.sleepMs(4);
-    const LivePath p = path(m);
-    m.intf[1].counting = false;   // reads 0: never inside 200..2000
-    const Switch s = switchTo(m, p, kVtotal60, Options());
-    CHECK(!s.ok && !s.reverted && s.stores == 0 && m.stores.empty() && std::strstr(s.why, "window"));
+  for (unsigned stalled = 1; stalled <= 2; ++stalled) {
+    struct StalledCounter : model::Dpu {
+      unsigned link = 0;
+      uint32_t rd(uint64_t pa)
+      {
+        if (pa == intfReg(link, kIntfLineCount)) return 500; // frozen within the write window
+        if (pa == intfReg(link, kIntfFrameCount)) return 1000;
+        return model::Dpu::rd(pa);
+      }
+    } m;
+    m.link = stalled;
+    const Switch s = switchTo(m, readPath(m), kVtotal60, Options());
+    CHECK(!s.ok && !s.reverted && s.stores == 0 && m.stores.empty() && std::strstr(s.why, "counters"));
+  }
+  {   // A stale DSI readback on one link without an observed underrun still requires rollback.
+    struct StaleTotal : model::Dpu {
+      bool corrupted = false;
+      uint32_t rd(uint64_t pa)
+      {
+        const uint32_t value = model::Dpu::rd(pa);
+        if (!corrupted && pa == dsiReg(1, kDsiTotal) && (value >> 16) == kVtotal60 - 1) {
+          corrupted = true;
+          return value ^ 1u;
+        }
+        return value;
+      }
+    } m;
+    const Switch s = switchTo(m, readPath(m), kVtotal60, Options());
+    CHECK(m.corrupted && !s.ok && s.reverted && s.revertOk && std::strstr(s.why, "DSI TOTAL"));
+    CHECK(m.dsi[0].total == 0x0905023f && m.dsi[1].total == 0x0905023f);
   }
   {   // refusals: no stores at all
     model::Dpu m;
@@ -303,6 +355,7 @@ int main()
   testPath();
   testSwitch();
   testCounters();
+  testPollBounds();
   testAnomalies();
   testPolicy();
   testSession();

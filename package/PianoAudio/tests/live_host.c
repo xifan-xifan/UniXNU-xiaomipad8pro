@@ -51,22 +51,24 @@ struct World {
     unsigned nq;
     char cmd[1024][40];
     unsigned ncmd, outstanding;
-    const char *fail_match;           // the first command (after `fail_after` commands) whose line is this: refused or, with drop, lost
+    const char *fail_match;           // matching commands after fail_after, up to fail_limit: refused or, with drop, lost
     unsigned fail_after;
-    int fail_seen, drop;
+    unsigned failures_injected, fail_limit;
+    int drop;
     uint32_t fail_status;
     unsigned writes, write_dones, reads, read_dones;
     int write_error_at, drop_writes_from, drop_writes_until;   // WRITEs by count: refused with status 5; not answered in [from, until)
     double dsp_ppm;                   // the DSP's clock against the host's
     uint64_t play_until_us, cap_until_us;
     unsigned queue_gaps, max_monitor_reads;
-    int clock_on, va_votes, va_mclk, dev_started, str_started, mic_started, cap_started, mic_prepared, cap_prepared;
+    int clock_on, vi_clock, va_votes, va_mclk, dev_started, str_started, mic_started, cap_started, mic_prepared, cap_prepared;
     int vote_on[4];                   // per hardware core: one owner (a second request of a held vote is a violation)
     unsigned prm_while_playing;       // duplex-hold1: PRM requests/releases of the VA clocks while the speaker stream graph runs
     int map_spk, map_mic;
     // the speaker-protection pair (AudioSpkProt.h)
     int vi_open, vi_started, prot_dev_open, re25_sets, oob_cfgs;
     unsigned vbat_sets, live_gets;
+    struct Answer live_reply;
     // MIPLAY (AudioSpkProt.h): its graph's state, the driver's configuration and the monitor's pregain updates
     int str_open, mip_open, mip_started, mip_rotation;
     unsigned mip_cfgs, preg_sets;
@@ -85,7 +87,7 @@ struct World {
     unsigned nperiods;
     // ---- the amplifiers, the pins, the VA macro
     struct Amp amp[4];
-    unsigned power_ups, unmutes, transfers, gain_cap;
+    unsigned power_ups, unmutes, transfers, gain_cap, gain_writes;
     int pins_on, va_on, va_calls;
     // ---- the devices' engines
     int out_running, in_running, sound_on, strict;
@@ -127,6 +129,7 @@ static uint32_t g_t0;                // the live paths' start (ms)
 static double g_ppm;                 // the next run's device clock against the DSP's
 static const char *g_fail;           // the next run's failing live command (refused, or lost with g_drop)
 static int g_drop, g_queue_full;
+static unsigned g_fail_limit = 1;
 static int g_mic_clock;
 static uint64_t g_mic_missing;
 static unsigned g_wakes;
@@ -134,6 +137,7 @@ static int g_mark;
 // speaker protection: the synthetic private files the session's ops carry, and the gauge's voltage
 static uint8_t g_spk_file[8192], g_spk_re25[16];
 static uint32_t g_spk_bytes, g_re25_bytes = 16, g_re25_q12[4] = {27000, 27500, 28000, 28500};
+enum {BadLiveHeader = 1, ShortLiveHeader, EmptyLiveData};
 static int g_spk, g_spk_files, g_live_header_bad;
 // MIPLAY: the synthetic private file, the request
 static uint8_t g_mip_file[8192];
@@ -143,6 +147,17 @@ static int g_miplay, g_mip_files;
 static uint32_t g_battery_uv = 4012000;
 static uint32_t now_ms(void) {return (uint32_t)(w.now_us / 1000u);}
 static uint32_t g_play_ahead_ms;   // duplex-age1: the producer stamps its sound this many ms after the worker's clock
+
+/* Optional adapters for the standalone stress suites. */
+static void (*fixture_engine)(void);
+static void (*fixture_capture)(int16_t *, uint32_t);
+static void (*fixture_write)(void);
+static void (*fixture_played)(uint64_t, int32_t);
+static int (*fixture_send)(const uint8_t *, uint32_t);
+static void (*fixture_receive)(const uint8_t *, uint32_t);
+static void (*fixture_poll)(void);
+static void (*fixture_live_data)(unsigned, uint32_t *);
+static void (*fixture_session_setup)(AudioSessionConfig *);
 
 static void violate(const char *what)
 {
@@ -198,6 +213,7 @@ static int all_unmuted(void)
             return 0;
     return 1;
 }
+static int speaker_clock(void) {return w.clock_on || w.vi_clock;}
 static void amp_defaults(struct Amp *a)
 {
     memset(a->reg, 0, sizeof a->reg);
@@ -208,7 +224,7 @@ static void amp_defaults(struct Amp *a)
 static void amp_derive(struct Amp *a)
 {
     const int on = !(a->reg[FS19XX_REG_PWRCTRL] & FS19XX_PWRCTRL_PWDN) && a->reg[FS19XX_REG_SYSCTRL] == FS19XX_SYSCTRL_ON;
-    const int clocked = w.clock_on && w.dev_started;
+    const int clocked = speaker_clock() && w.dev_started;
     a->reg[FS19XX_REG_DIGSTAT] = on && clocked && a->reg[FS19XX_REG_DACCTRL] == FS19XX_DACCTRL_UNMUTE ? FS19XX_DIGSTAT_DACRUN : 0;
     a->reg[FS19XX_REG_STATUS] = (uint16_t)((clocked ? 0x0040 : 0) | (on && clocked ? 0x0002 : 0) | a->inject);
 }
@@ -240,15 +256,17 @@ static int transfer(void *ctx, uint8_t address, const uint8_t *out, uint32_t out
         const uint16_t v = (uint16_t)(out[1] << 8 | out[2]);
         const int unmuted = !(a->reg[FS19XX_REG_DACCTRL] & FS19XX_DACCTRL_MUTE_BIT);
         // 2026-11-21: 243 (Android's) only while the protection pair's speaker graph is open; 231 otherwise; never above 243
-        const unsigned cap_now = w.gain_cap == FS19XX_GAIN_CAP && w.prot_dev_open ? FS19XX_GAIN_CAP_PROTECTED : w.gain_cap;
+        const int protection_up = w.prot_dev_open && w.vi_started;
+        const unsigned cap_now = w.gain_cap == FS19XX_GAIN_CAP && protection_up ? FS19XX_GAIN_CAP_PROTECTED : w.gain_cap;
+        if (reg == FS19XX_REG_VOLCTRL) w.gain_writes++;
         if (reg == FS19XX_REG_VOLCTRL && (v >> 8) > FS19XX_GAIN_HARD_LIMIT) violate("an amplifier gain above 243");
-        if (reg == FS19XX_REG_VOLCTRL && (v >> 8) > FS19XX_GAIN_CAP && !w.prot_dev_open) violate("an amplifier gain above 231 without the protection pair");
+        if (reg == FS19XX_REG_VOLCTRL && (v >> 8) > FS19XX_GAIN_CAP && !protection_up) violate("an amplifier gain above 231 without the protection pair");
         if (reg == FS19XX_REG_VOLCTRL && unmuted && (v >> 8) > cap_now) violate("an unmuted amplifier's gain above the level's cap");
         if (reg == FS19XX_REG_DACCTRL && !(v & FS19XX_DACCTRL_MUTE_BIT) && (a->reg[FS19XX_REG_VOLCTRL] >> 8) > cap_now)
             violate("an amplifier unmuted at a gain above the level's cap");
         if (reg == FS19XX_REG_PWRCTRL && !(v & (FS19XX_PWRCTRL_PWDN | FS19XX_PWRCTRL_I2CR))) {
             w.power_ups++;
-            if (!w.clock_on || !w.dev_started || !w.str_started) violate("an amplifier powered up without the bit clock and both graphs");
+            if (!speaker_clock() || !w.dev_started || !w.str_started) violate("an amplifier powered up without the bit clock and both graphs");
             if (w.prot_dev_open && !w.vi_started) violate("an amplifier powered up on the protected graph without the V/I graph");
         }
         if (reg == FS19XX_REG_DACCTRL && !(v & FS19XX_DACCTRL_MUTE_BIT)) {
@@ -347,7 +365,7 @@ static void dsp_write(const GprPacket *p)
     const uint8_t *d = p->payload;
     w.writes++;
     if (p->src_port != session.ports->data || p->dst_port != AR_IID_PLAY_SHMEM) violate("a WRITE from the wrong port");
-    if (!w.str_started || !w.dev_started || !w.clock_on) violate("a WRITE without the running graphs");
+    if (!w.str_started || !w.dev_started || !speaker_clock()) violate("a WRITE without the running graphs");
     const uint64_t address = le32(d) | (uint64_t)le32(d + 4) << 32;
     const uint64_t offset = (address & 0xffffffffu) - DMA_PHYS;
     const unsigned slot = (unsigned)(offset / AUDIO_SPK_PERIOD_BYTES);
@@ -358,6 +376,7 @@ static void dsp_write(const GprPacket *p)
     if (w.slot_busy[slot]) violate("a WRITE of a slot the DSP still has");
     w.slot_busy[slot] = 1;
     memcpy(w.slot_copy[slot], g_dma + offset, AUDIO_SPK_PERIOD_BYTES);
+    if (fixture_write) fixture_write();
     const int k = (int)w.writes;
     if (k >= w.drop_writes_from && k < w.drop_writes_until) {w.slot_busy[slot] = 0; return;}   // never played, never answered
     GprPacket r = {.dst_domain = GPR_DOMAIN_APPS, .src_domain = GPR_DOMAIN_ADSP, .src_port = p->dst_port, .dst_port = p->src_port,
@@ -372,7 +391,7 @@ static void dsp_write(const GprPacket *p)
 }
 
 // The DSP plays a speaker slot when its WRITE_DONE is due.
-static void play_slot(unsigned slot)
+static void play_slot(unsigned slot, uint64_t due_us)
 {
     w.slot_busy[slot] = 0;
     const int16_t *pcm = (const int16_t *)(const void *)w.slot_copy[slot];
@@ -388,6 +407,7 @@ static void play_slot(unsigned slot)
         const int v = abs(pcm[i]);
         if (v > peak) peak = v;
     }
+    if (fixture_played) fixture_played(due_us, peak);
     if (peak > live.cfg.ceiling) violate("a sample above the level's ceiling");
     if (peak > w.peak) w.peak = peak;
     if (w.nperiods < MAX_PERIODS) {w.period_at[w.nperiods] = now_ms() - g_t0; w.period_peak[w.nperiods++] = peak;}
@@ -435,6 +455,7 @@ static void fill_capture(unsigned slot, uint32_t bytes, uint32_t offset)
     memset(base, 0x55, AUDIO_MIC_PERIOD_BYTES); /* stale padding must not become PCM */
     int16_t *pcm = (int16_t *)(void *)(base + offset);
     w.cap_bytes += bytes;
+    if (fixture_capture) {fixture_capture(pcm, bytes / 4); return;}
     for (uint32_t i = 0; i < bytes / 4; ++i, ++w.cap_k) {
         const int hi = w.cap_k % 96 < 48;
         pcm[2 * i] = g_route_fixture ? (hi ? INT16_MAX : INT16_MIN) : (int16_t)(hi ? 8000 : -8000);
@@ -447,6 +468,7 @@ static int dsp_send(void *ctx, const uint8_t *b, uint32_t n)
     (void)ctx;
     w.send_calls++;
     if (w.queue_full_every && w.send_calls % (unsigned)w.queue_full_every == 0) return -1;
+    if (fixture_send && fixture_send(b, n)) return -1;
     if (w.off) w.sends_after_off++;
     GprPacket p;
     CHECK(gpr_decode(b, n, &p) == GprOk && p.size == n && n <= GPR_MAX_PACKET);
@@ -459,13 +481,16 @@ static int dsp_send(void *ctx, const uint8_t *b, uint32_t n)
     const int prm = p.opcode == AR_OP_PRM_REQUEST || p.opcode == AR_OP_PRM_RELEASE;
     if (p.src_port != (prm ? session.ports->prm : session.ports->apm)) violate("a command from the wrong port");
     uint32_t status = 0;
-    if (w.fail_match && !w.fail_seen && w.ncmd > w.fail_after && !strcmp(line, w.fail_match)) {
-        w.fail_seen = 1;
+    if (w.fail_match && w.failures_injected < w.fail_limit && w.ncmd > w.fail_after && !strcmp(line, w.fail_match)) {
+        w.failures_injected++;
         if (w.drop) return 0;   // lost: no answer will come
         status = w.fail_status;
     }
     if (!status) {
-        if (!strcmp(line, "PRM REQ 0x202 6144000")) w.clock_on = 1;
+        if (!strcmp(line, "PRM REQ 0x202 6144000")) {
+            if (w.vi_clock) violate("a CPU bit-clock request while the V/I endpoint owns it");
+            w.clock_on = 1;
+        }
         if (!strcmp(line, "PRM REL 0x202")) {if (w.dev_started || w.str_started) violate("the bit clock released under running graphs"); w.clock_on = 0;}
         if (!strncmp(line, "PRM VOTE", 8)) {
             const unsigned v = (unsigned)atoi(line + 9) & 3u;
@@ -493,15 +518,27 @@ static int dsp_send(void *ctx, const uint8_t *b, uint32_t n)
         // the protection pair (round 2, Android's order): the speaker graph (SP_RX, SP_TX's control peer) opened before the V/I
         // graph; V/I started before the speaker graph and stopped after it
         if (!strcmp(line, "OPEN 0xb00000d5")) {if (!w.prot_dev_open) violate("the V/I graph opened before the speaker graph"); w.vi_open = 1;}
-        if (!strcmp(line, "START 0xb00000d5")) {if (!w.clock_on || !w.vi_open) violate("the V/I graph started without the bit clock"); w.vi_started = 1;}
+        if (!strcmp(line, "START 0xb00000d5")) {
+            /* spk=3 omits the CPU vote. Model the endpoint's clock lifetime
+             * at the acknowledged V/I START/STOP boundaries. */
+            if (live.spk && (live.spk->plan.variant & SPK_VAR_ENDPOINT_CLOCK)) {
+                if (w.clock_on || w.vi_clock) violate("two owners of the speaker bit clock");
+                w.vi_clock = 1;
+            }
+            if (!speaker_clock() || !w.vi_open) violate("the V/I graph started without the bit clock");
+            w.vi_started = 1;
+        }
         if (!strcmp(line, "OPEN 0xb0000002")) w.prot_dev_open = 1;
         if (!strcmp(line, "START 0xb0000002")) {
-            if (!w.clock_on || !w.vi_started) violate("the protected speaker graph started without the clock or the V/I graph");
+            if (!speaker_clock() || !w.vi_started) violate("the protected speaker graph started without the clock or the V/I graph");
             if (!w.re25_sets) violate("the protected speaker graph started without Re25");
             w.dev_started = 1;
         }
         if (!strcmp(line, "STOP 0xb0000002")) {if (any_powered()) violate("a speaker graph stopped with an amplifier powered up"); w.dev_started = 0;}
-        if (!strcmp(line, "STOP 0xb00000d5")) {if (w.dev_started) violate("the V/I graph stopped under the running speaker graph"); w.vi_started = 0;}
+        if (!strcmp(line, "STOP 0xb00000d5")) {
+            if (w.dev_started || any_powered()) violate("the V/I graph stopped under the running speaker graph or amps");
+            w.vi_started = w.vi_clock = 0;
+        }
         if (!strcmp(line, "CLOSE 0xb0000002")) {if (w.vi_open) violate("the speaker graph closed before the V/I graph"); w.prot_dev_open = 0;}
         if (!strcmp(line, "CLOSE 0xb00000d5")) {if (w.vi_started) violate("the V/I graph closed while running"); w.vi_open = 0;}
         if (!strcmp(line, "CFG 0x4046 0x10001fa7")) {
@@ -581,16 +618,20 @@ static int dsp_send(void *ctx, const uint8_t *b, uint32_t n)
         if (!o || !w.dev_started) violate("a live-data GET outside the running protected graph");
         else {
             if (le32(o) != SPK_IID_SP_RX || le32(o + 4) != SPK_PID_LIVE || le32(o + 8) != SPK_LIVE_BYTES) violate("a live-data GET of another header");
-            for (unsigned c = 0; c < 4; ++c) {
-                const uint32_t words[6] = {g_re25_q12[c] * 102u / 100u, 31u + c, 0, (800u + 10u * c) * 256u, 3u + c, 0};
+            for (unsigned c = 0; g_live_header_bad != EmptyLiveData && c < 4; ++c) {
+                uint32_t words[6] = {g_re25_q12[c] * 102u / 100u, 31u + c, 0, (800u + 10u * c) * 256u, 3u + c, 0};
+                if (fixture_live_data) fixture_live_data(c, words);
                 for (unsigned k = 0; k < 6; ++k) for (unsigned b = 0; b < 4; ++b) o[16 + 24 * c + 4 * k + b] = (uint8_t)(words[k] >> (8 * b));
             }
-            if (g_live_header_bad) o[4] ^= 1;
+            if (g_live_header_bad == BadLiveHeader) o[4] ^= 1;
+            if (g_live_header_bad == ShortLiveHeader) o[8] = SPK_LIVE_BYTES - 24;
         }
         w.live_gets++;
         r.opcode = AR_OP_RSP_GET_CFG;
         const uint32_t ok = 0;
-        queue(due, &r, &ok, 1)->plan = 1;
+        struct Answer *reply = queue(due, &r, &ok, 1);
+        reply->plan = 1;
+        if (w.live_gets == 1) w.live_reply = *reply;
         return 0;
     }
     r.opcode = p.opcode == AR_OP_PRM_REQUEST ? AR_OP_PRM_REQUEST_DONE : p.opcode == AR_OP_PRM_RELEASE ? AR_OP_PRM_RELEASE_DONE : GPR_OP_BASIC_RESULT;
@@ -719,14 +760,16 @@ static void deliver(int to_live)
             w.nq--;
             if (a.plan) w.outstanding = 0;
             if (a.n >= 24 && le32(a.b + 20) == AR_OP_WRITE_DONE) {w.write_dones++; if (w.str_started) w.stream_dones++;}
-            if (a.read_slot <= -2) play_slot((unsigned)(-2 - a.read_slot));
+            if (a.read_slot <= -2) play_slot((unsigned)(-2 - a.read_slot), a.due_us);
             if (a.read_slot >= 0) {fill_capture((unsigned)a.read_slot, le32(a.b + 40), 0); w.read_dones++;}
-            if (to_live) audio_live_receive(&live, a.b, a.n, now_ms());
+            if (to_live && fixture_receive) fixture_receive(a.b, a.n);
+            else if (to_live) audio_live_receive(&live, a.b, a.n, now_ms());
             else audio_session_receive(&session, a.b, a.n, now_ms());
             continue;
         }
         ++i;
     }
+    if (to_live && fixture_poll) fixture_poll();
 }
 
 static void (*g_setup)(AudioLiveConfig *);
@@ -748,7 +791,9 @@ static void run(const struct Scenario *sc)
     AudioSessionConfig c;
     audio_session_defaults(&c);
     c.level = 6; c.dsp = 1; c.ports = sc->ports; c.preset_any = 1; c.mic = 1; c.silence_ms = 300; c.keep = 1;
-    AudioSessionOps ops = {0};
+    if (fixture_session_setup) fixture_session_setup(&c);
+    AudioSessionOps ops;
+    memset(&ops, 0, sizeof ops);
     ops.log = log_line; ops.send = dsp_send; ops.lpass_read = lpass_read;
     ops.amps = (AudioAmpsIo){0, &bus, reset_line, 0};
     ops.preset = preset; ops.preset_bytes = preset_bytes;
@@ -784,7 +829,7 @@ static void run(const struct Scenario *sc)
     w.gain_cap = sc->level >= 9 ? FS19XX_GAIN_CAP : AUDIO_AMPS_TEST_GAIN;
     w.engine_ppm = g_ppm;
     w.queue_full_every = g_queue_full;
-    w.fail_match = g_fail; w.drop = g_drop; w.fail_status = 1; w.fail_after = w.ncmd;
+    w.fail_match = g_fail; w.drop = g_drop; w.fail_status = 1; w.fail_after = w.ncmd; w.fail_limit = g_fail_limit;
     AudioLiveConfig lc;
     audio_live_defaults(&lc, sc->level);
     if (sc->gain) lc.gain = sc->gain;
@@ -807,7 +852,8 @@ static void run(const struct Scenario *sc)
     const uint64_t end = w.now_us + (uint64_t)sc->end_ms * 1000u;
     while (!live.finished && w.now_us < end) {
         deliver(1);
-        engine();
+        if (fixture_engine) fixture_engine();
+        else engine();
         if (sc->hook) sc->hook(now_ms() - g_t0);
         if (getenv("LIVE_FILL") && w.now_us % 2000000u == 0)
             fprintf(stderr, "t %u ms: fill %u avg %d drops %u repeats %u played %llu\n", now_ms() - g_t0, audio_ring_fill(&sh.out),
@@ -847,7 +893,7 @@ static void run(const struct Scenario *sc)
     for (int i = 0; i < 4; ++i) CHECK(!w.amp[i].released);
     CHECK(!w.pins_on && !w.va_on);
     for (unsigned i = 0; i < sizeof g_dma; ++i) if (g_dma[i]) {CHECK(!"the buffer is not zeroed at the end"); break;}
-    if (!w.off) CHECK(!w.clock_on && !w.va_votes && !w.va_mclk && !w.map_spk && !w.map_mic && !w.dev_started && !w.str_started);
+    if (!w.off) CHECK(!speaker_clock() && !w.va_votes && !w.va_mclk && !w.map_spk && !w.map_mic && !w.dev_started && !w.str_started);
     if (!w.off) CHECK(!w.vi_open && !w.vi_started && !w.prot_dev_open && !w.mip_open && !w.mip_started && !w.str_open);
     g_setup = 0;
 }
@@ -1555,7 +1601,9 @@ static void testSleepPendingMap(void)
 }
 static void testLedgerOverflow(void)
 {
-    AudioLedger l={0}; uint64_t a[AUDIO_LEDGER_WORDS]={0},b[AUDIO_LEDGER_WORDS];
+    AudioLedger l;
+    memset(&l, 0, sizeof l);
+    uint64_t a[AUDIO_LEDGER_WORDS]={0},b[AUDIO_LEDGER_WORDS];
     for(unsigned n=0;n<AUDIO_LEDGER_CAP+7;++n) {a[0]=n; audio_ledger_put(&l,a);}
     CHECK(l.written==AUDIO_LEDGER_CAP+7 && !audio_ledger_get(&l,0,b));
     CHECK(audio_ledger_get(&l,7,b) && b[0]==7);
@@ -1671,6 +1719,30 @@ static void testMicShortRestart(void)
     CHECK(live.cap.returned_bytes == w.cap_bytes && live.cap.returned_bytes == live.mic_frames * 4);
     CHECK(!live.cap.errors && count_cmd("VA ON", 0) == 2 && count_cmd("VA OFF", 0) == 2);
     CHECK(logged("mic release: run 2 down 1 va 0"));
+}
+
+static int g_mic_restarted_during_drain;
+static void duplex_mic_restart(uint32_t t)
+{
+    if (t == 100 && !w.out_running) device(1, 1);
+    w.amplitude = 20000;
+    w.sound_on = 1;
+    if (t == 2000 && w.in_running) device(1, 0);
+    if (live.mic_ending && live.cap.in_flight && !w.in_running && !g_mic_restarted_during_drain) {
+        CHECK(live.mic_state == LiveRunning && live.unmuted);
+        g_mic_restarted_during_drain = 1;
+        device(1, 1);
+    }
+}
+
+static void testDuplexMicRestartDuringDrain(void)
+{
+    const struct Scenario sc = {10, 0, 0, 600, 5500, AudioPortsUbuntu, 1, duplex_mic_restart};
+    g_mic_restarted_during_drain = 0;
+    run(&sc);
+    CHECK(g_mic_restarted_during_drain && !w.violations && w.mic_bad == 0);
+    CHECK(sh.input_runs == 2 && sh.epoch == 1 && live.mic_starts == 1 && live.spk_starts == 1 && w.unmutes == 4);
+    CHECK(sh.input_hal.delivered > PIANO_AUDIO_RATE && !sh.input_hal.missing && !live.cap.errors);
 }
 
 static void mic_clock(uint32_t t)
@@ -1981,7 +2053,7 @@ static int g_preg_fail;
 static void preg_volume(uint32_t t)
 {
     steady(t);
-    if (t == 2400 && g_preg_fail) {w.fail_match = "CFG 0x411f"; w.fail_after = w.ncmd; w.fail_seen = 0;}   // the monitor's, not the plan's
+    if (t == 2400 && g_preg_fail) {w.fail_match = "CFG 0x411f"; w.fail_after = w.ncmd; w.failures_injected = 0;}   // the monitor's, not the plan's
     if (t == 2500) {audio_live_control(&sh, 50, -1); w.wake = 1;}
 }
 static void testMiplayPregain(void)
@@ -2296,6 +2368,218 @@ static void testSoundAge(void)
     CHECK(!w.violations && live.ahead_total == 0 && live.fades_silent_total == 0);
 }
 
+// spk-probe1: the protection pair up without sound for a while, amplifiers down (or up muted),
+// the monitor read, the path down at the end; refused without the configuration's switch or without protection; real sound takes over.
+static uint32_t g_probe_req, g_probe_at, g_probe_mute_at, g_probe_snd_from, g_probe_snd_to, g_probe_dev_at;
+static uint32_t g_probe_sleep_at;
+static int g_probe_rc, g_probe_text_ok, g_probe_down_after;
+static char g_probe_text[480];
+static void probe_setup(AudioLiveConfig *c) {c->spk_probe = 1;}
+static void probe_hook(uint32_t t)
+{
+    if (g_probe_mute_at && t == g_probe_mute_at) audio_live_control(&sh, -1, 1);
+    if (g_probe_dev_at && t == g_probe_dev_at && !w.out_running) device(1, 0);
+    if (g_probe_sleep_at && t == g_probe_sleep_at) audio_live_sleep(&live, 1);
+    w.amplitude = 20000;
+    w.sound_on = g_probe_snd_to && t >= g_probe_snd_from && t < g_probe_snd_to;
+    if (t == g_probe_at && g_probe_rc == -2) g_probe_rc = audio_live_spk_probe(&sh, g_probe_req);
+    if (t == g_probe_at + 5000) {
+        AudioLiveSpkStatus status;
+        audio_live_spk_status(&live, &status);
+        audio_live_spk_live_text(&status, now_ms(), g_probe_text, sizeof g_probe_text);
+        g_probe_text_ok = strstr(g_probe_text, "amp0 r0-permille 1020 f0 800 q 3 t-dC 0 ok") &&
+                          strstr(g_probe_text, "why running") && strstr(g_probe_text, "prot active");
+    }
+    if (t == 11500) g_probe_down_after = live.spk_state == LiveDown && !w.prot_dev_open && !w.vi_open && !any_powered();
+}
+static void probe_reset(void)
+{
+    g_probe_req = 6; g_probe_at = 1000; g_probe_mute_at = g_probe_snd_from = g_probe_snd_to = g_probe_dev_at = 0;
+    g_probe_sleep_at = 0;
+    g_probe_rc = -2; g_probe_text_ok = g_probe_down_after = 0; g_probe_text[0] = 0;
+}
+static void testSpkProbe(void)
+{
+    const struct Scenario sc = {9, 0, 0, 0, 12000, AudioPortsUbuntu, 1, probe_hook};
+    // the request's range
+    audio_live_shared_init(&sh, g_out_ring, g_in_ring, AUDIO_Q15_ONE);
+    CHECK(audio_live_spk_probe(&sh, 0) == EINVAL && audio_live_spk_probe(&sh, 31) == EINVAL && audio_live_spk_probe(&sh, 100) == EINVAL);
+    CHECK(audio_live_spk_probe(&sh, 131) == EINVAL && audio_live_spk_probe(&sh, UINT32_MAX) == EINVAL);
+    CHECK(audio_live_spk_probe(&sh, 1) == 0 && audio_live_spk_probe(&sh, 130) == EBUSY);
+    // A: no device, no sound, amplifiers down: the pair up, the monitor read, nothing powered, nothing played, down at the end
+    spk_reset(); spk_files(); g_spk = 1; probe_reset(); g_setup = probe_setup;
+    run(&sc);
+    CHECK(g_probe_rc == 0 && !w.violations && live.prot_starts == 1 && live.spk_starts == 1 && !live.prot_fallbacks && live.probe_runs == 1);
+    CHECK(power_ups_after_session() == 0 && w.unmutes == 0 && w.sound_periods == 0 && live.probe_up == 1);
+    unsigned at = expect(live_from(), kProtUp, N(kProtUp));
+    const unsigned rounds = monitor_rounds(&at);
+    CHECK(rounds >= 2 && rounds <= 4 && live.probe_reads == rounds && live.live_reads == rounds);
+    at = expect(at, kProtDown, N(kProtDown));
+    CHECK(at == w.ncmd && logged("spk-probe1: probe 1: the protection pair for 6 s without sound, amplifiers left powered down (speaker down)"));
+    CHECK(logged("spk-probe1: amplifiers left powered down") && logged("spk-probe1: probe 1 over: done: the pair came up and the monitor read"));
+    CHECK(logged("PianoSpeakerProtV1 live ch3 slot 3 r0 7.097 ohm (102.0% of Re25)"));
+    if (!g_probe_text_ok) fprintf(stderr, "spk_live text: %s\n", g_probe_text);
+    CHECK(g_probe_text_ok && g_probe_down_after && !live.probing && !live.probe_noamps);
+    {   // the text after the run: the outcome and four amplifiers, relative values only (no ohms)
+        char t[480];
+        AudioLiveSpkStatus status;
+        audio_live_spk_status(&live, &status);
+        audio_live_spk_live_text(&status, now_ms(), t, sizeof t);
+        CHECK(strstr(t, "probe enabled requests 1 runs 1 refused 0 until-ms 0 reads ") && strstr(t, "why done: the pair came up and the monitor read"));
+        CHECK(strstr(t, "; amp3 r0-permille 1020 f0 830 q 6 t-dC 0 ok") && !strstr(t, "ohm"));
+        char small[24];
+        CHECK(audio_live_spk_live_text(&status, now_ms(), small, sizeof small) == sizeof small - 1 && small[sizeof small - 1] == 0);
+    }
+    // B: the default configuration refuses the request and starts nothing.
+    spk_reset(); spk_files(); g_spk = 1; probe_reset();
+    run(&sc);
+    CHECK(g_probe_rc == 0 && !w.violations && live.spk_starts == 0 && live.probe_refused == 1 && !live.probe_runs);
+    CHECK(logged("spk-probe1: request 6 refused: not enabled (piano-audio-spk-probe=1)"));
+    // C: protection not asked for: refused
+    spk_reset(); spk_files(); g_spk = 0; probe_reset(); g_setup = probe_setup;
+    run(&sc);
+    CHECK(!w.violations && live.spk_starts == 0 && logged("refused: protection not asked for"));
+    // D: a muted device offers PCM throughout a probe with amps powered. The deadline overrides the 30 s playback idle timer.
+    struct Scenario slow_idle = sc;
+    slow_idle.idle_ms = 30000;
+    spk_reset(); spk_files(); g_spk = 1; probe_reset(); g_probe_req = 106; g_setup = probe_setup;
+    g_probe_mute_at = 100; g_probe_dev_at = 200; g_probe_snd_from = 300; g_probe_snd_to = 12000;
+    run(&slow_idle);
+    CHECK(!w.violations && live.prot_starts == 1 && live.spk_starts == 1 && power_ups_after_session() == 4 && w.unmutes == 0);
+    CHECK(w.sound_periods == 0 && live.probe_reads >= 2 && logged("amplifiers powered up and held MUTED") && g_probe_down_after);
+    // E: real sound during the amplifier-less probe: that start ends, the path comes back with the amplifiers and plays
+    spk_reset(); spk_files(); g_spk = 1; probe_reset(); g_probe_req = 8; g_probe_at = 500; g_probe_dev_at = 2000;
+    g_probe_snd_from = 2500; g_probe_snd_to = 5000; g_setup = probe_setup;
+    run(&sc);
+    CHECK(!w.violations && live.spk_starts == 2 && live.prot_starts == 2 && !live.prot_fallbacks && power_ups_after_session() == 4);
+    CHECK(w.unmutes == 4 && w.sound_periods > 50 && logged("spk-probe1: probe 1 over: ended: real sound took over"));
+    CHECK(logged("spk-probe1: sound during the amplifier-less probe"));
+    // F: an existing playback run keeps ownership of the path.
+    spk_reset(); spk_files(); g_spk = 1; probe_reset(); g_setup = probe_setup;
+    g_probe_dev_at = 500; g_probe_snd_from = 800; g_probe_snd_to = 6000; g_probe_at = 2500;
+    run(&sc);
+    CHECK(!w.violations && live.probe_refused == 1 && live.probe_runs == 0 && live.spk_starts == 1);
+    CHECK(w.sound_periods > 300 && logged("refused: the speaker path is busy"));
+    // G: a failed probe unwinds. A normal playback start owns any passthrough fallback.
+    const char *failures[] = {"OPEN 0xb0000002", "GET 0x4046 0x10001fab"};
+    for (unsigned i = 0; i < N(failures); ++i) {
+        spk_reset(); spk_files(); g_spk = 1; probe_reset(); g_setup = probe_setup;
+        g_fail = failures[i];
+        run(&sc);
+        CHECK(!w.violations && live.prot_fallbacks == 1 && live.spk_starts == 1 && !live.probing);
+        CHECK(find_cmd("OPEN 0x4005", live_from()) == w.ncmd && g_probe_down_after && logged("ended: protection unavailable"));
+    }
+    // H: sleep cancels an active probe and the path parks.
+    spk_reset(); spk_files(); g_spk = 1; probe_reset(); g_setup = probe_setup;
+    g_probe_sleep_at = 3000;
+    run(&sc);
+    CHECK(!w.violations && live.parked && !live.probing && g_probe_down_after);
+    CHECK(logged("cancelled: the system sleeps"));
+    spk_reset(); g_setup = 0;
+}
+
+static void probe_reentry(uint32_t t)
+{
+    probe_hook(t);
+    if (t == g_probe_at) CHECK(audio_live_spk_probe(&sh, 130) == EBUSY);
+    if (t == 5000) {
+        CHECK(live.probing && !any_powered());
+        CHECK(audio_live_spk_probe(&sh, 130) == EBUSY);
+    }
+}
+
+static void testProbeReentry(void)
+{
+    const struct Scenario sc = {9, 0, 0, 0, 12000, AudioPortsUbuntu, 1, probe_reentry};
+    spk_reset(); spk_files(); g_spk = 1; probe_reset(); g_setup = probe_setup;
+    run(&sc);
+    CHECK(!w.violations && live.probe_runs == 1 && g_probe_down_after && live.probe_reads >= 2);
+    CHECK(power_ups_after_session() == 0 && !w.unmutes && !w.sound_periods);
+    spk_reset();
+}
+
+static void probe_abort_pending_map(uint32_t t)
+{
+    probe_hook(t);
+    if (!live.aborting && live.splan.in_flight && live.splan.seq.pending_opcode == AR_OP_MEM_MAP)
+        audio_live_abort(&live, 0, now_ms());
+}
+
+static void testProbeAbortPendingMap(void)
+{
+    const struct Scenario sc = {9, 0, 0, 0, 12000, AudioPortsUbuntu, 1, probe_abort_pending_map};
+    spk_reset(); spk_files(); g_spk = 1; probe_reset(); g_setup = probe_setup;
+    g_probe_req = 106;
+    run(&sc);
+    CHECK(!w.violations && live.probe_runs == 1 && !live.probing && !live.timeouts);
+    CHECK(count_cmd("UNMAP 0x55", live_from()) == 1 && power_ups_after_session() == 0);
+    CHECK(!w.unmutes && !w.sound_periods && logged("cancelled: the audio worker stopped"));
+    CHECK(audio_live_spk_probe(&sh, 30) == ENXIO);
+    spk_reset();
+}
+
+static unsigned g_old_monitor_injected;
+static void probe_old_monitor_reply(uint32_t t)
+{
+    probe_hook(t);
+    if (!g_old_monitor_injected && w.live_gets == 2 && live.xplan.in_flight) {
+        CHECK(live.live_reads == 1 && w.live_reply.n > 0);
+        audio_live_receive(&live, w.live_reply.b, w.live_reply.n, now_ms());
+        CHECK(live.xplan.in_flight && live.live_reads == 1);
+        g_old_monitor_injected = 1;
+    }
+}
+
+static void testProbeOldMonitorReply(void)
+{
+    const struct Scenario sc = {9, 0, 0, 0, 12000, AudioPortsUbuntu, 1, probe_old_monitor_reply};
+    spk_reset(); spk_files(); mip_files(); g_spk = g_miplay = 1; probe_reset(); g_setup = probe_setup;
+    g_old_monitor_injected = 0;
+    run(&sc);
+    CHECK(g_old_monitor_injected && live.mip_starts == 1 && !live.mip_fallbacks && !live.prot_fallbacks);
+    CHECK(live.live_reads == w.live_gets && live.probe_reads >= 2 && g_probe_down_after);
+    CHECK(!w.violations && !power_ups_after_session() && !w.sound_periods);
+    spk_reset();
+}
+
+static void testProbeMalformedLiveData(void)
+{
+    const struct Scenario sc = {9, 0, 0, 0, 12000, AudioPortsUbuntu, 1, probe_hook};
+    for (int bad = ShortLiveHeader; bad <= EmptyLiveData; ++bad) {
+        spk_reset(); spk_files(); mip_files(); g_spk = g_miplay = 1; probe_reset(); g_setup = probe_setup;
+        g_live_header_bad = bad;
+        run(&sc);
+        CHECK(!w.violations && live.mip_fallbacks == 1 && live.prot_fallbacks == 1 && live.spk_starts == 2);
+        CHECK(live.live_reads == 0 && live.probe_reads == 0 && !live.probing && g_probe_down_after);
+        CHECK(!power_ups_after_session() && !w.sound_periods && !w.unmutes && count_cmd("OPEN 0x4005", live_from()) == 0);
+        CHECK(logged(bad == EmptyLiveData ? "an empty live-data reply" : "live data under another header"));
+    }
+    spk_reset();
+}
+
+static void testSpkLiveBounds(void)
+{
+    AudioLiveSpkStatus status = {.live_reads = 1, .live_at = UINT32_MAX - 10, .enabled = 1};
+    for (unsigned c = 0; c < 4; ++c) status.re25[c] = 10000;
+    status.live_data = (SpkLive){
+        .re = {7000, 15000, 10000, UINT32_MAX},
+        .temp = {4096, (uint32_t)-4096, 0, (uint32_t)INT32_MIN},
+        .f0 = {200 * 256, 2000 * 256, 2000 * 256 + 1, 0},
+        .q = {3, 4, 5, UINT32_MAX},
+    };
+    char line[640];
+    audio_live_spk_live_text(&status, 5, line, sizeof line);
+    CHECK(strstr(line, "age-ms 16"));
+    CHECK(strstr(line, "amp0 r0-permille 700 f0 200 q 3 t-dC 10 ok"));
+    CHECK(strstr(line, "amp1 r0-permille 1500 f0 2000 q 4 t-dC -10 ok"));
+    CHECK(strstr(line, "amp2 r0-permille 1000 f0 2000 q 5 t-dC 0 check"));
+    CHECK(strstr(line, "amp3 r0-permille 429496729 f0 0 q 4294967295 t-dC -5242880 check"));
+    status.live_data.f0[2] = 200 * 256;
+    status.live_data.re[2] = 15001;
+    audio_live_spk_live_text(&status, 5, line, sizeof line);
+    CHECK(strstr(line, "amp2 r0-permille 1500 f0 200 q 5 t-dC 0 check"));
+}
+
 int main(void)
 {
     preset_bytes = sfsm_build(preset, sizeof preset, 0);
@@ -2324,6 +2608,7 @@ int main(void)
     testMicRoutePendingAndFailedRelease();
     testInputControlsAndWrap();
     testMicShortRestart();
+    testDuplexMicRestartDuringDrain();
     testQueueFull();
     testLoadedMonitor();
     testSleepCycles();
@@ -2332,6 +2617,12 @@ int main(void)
     testLedgerOverflow();
     testEpochStarts();
     testProtection();
+    testSpkProbe();
+    testProbeReentry();
+    testProbeAbortPendingMap();
+    testProbeOldMonitorReply();
+    testProbeMalformedLiveData();
+    testSpkLiveBounds();
     testProtPlanFallback();
     testProtRunningFallback();
     testProtFiles();

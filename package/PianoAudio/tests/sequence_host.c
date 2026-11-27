@@ -363,7 +363,11 @@ static void testPump(void)
     CHECK(ar_parse(rsp, m, &a) == ArWriteDone && ar_pump_done(&p, &a) == -1);
     r.token = p.token_base + 2;
     m = gpr_encode(rsp, sizeof rsp, &r, w, 16);
-    CHECK(ar_parse(rsp, m, &a) == ArWriteDone && ar_pump_done(&p, &a) == 1 && p.in_flight == 2);
+    CHECK(ar_parse(rsp, m, &a) == ArWriteDone);
+    a.address += ((uint64_t)UINT32_MAX + 1) * p.period_bytes;
+    CHECK(ar_pump_done(&p, &a) == -1 && p.busy[2] && p.in_flight == 3);
+    a.address -= ((uint64_t)UINT32_MAX + 1) * p.period_bytes;
+    CHECK(ar_pump_done(&p, &a) == 1 && p.in_flight == 2);
     // round the ring: slots 5, 6, 7, then 0 again
     for (int i = 5; i < 8; ++i) {
         if (ar_pump_free_slot(&p) < 0) break;

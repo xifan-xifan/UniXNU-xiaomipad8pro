@@ -25,8 +25,7 @@
 //     (the edges before it were the old firmware's);
 //   - the controller quiet (Quiet: no edge for kQuietMs): a reference still being learned is formed from its frames so far
 //     (TouchMatrix.h matrixSettle);
-//   - a contact or a gesture without a frame for kStallMs (an active controller announces one every ~12.6 ms): taken as the lift,
-//     what is still going on released (piano-thp releases a stalled stream's contacts after 100 ms);
+//   - a contact or a gesture without a decoded frame for kStallMs: silence counts as the lift; unusable frames cancel it.
 //   - piano-touch-noedge=MS (25..200; default 0): the reads without an announced frame of before (busy MS after the last read,
 //     at rest the idle period + kNoEdgeRestMs, the display off every kMutedReadMs), only for an A/B; gpio162 not mapped (no
 //     latch): every kNoEdgeOldMs, as the level-1 loop.
@@ -132,6 +131,13 @@ inline const char *readOnName(ReadOn r)
 
 // A contact or a gesture that got no frame for kStallMs: released (frames lost).
 inline bool stalled(bool live, uint64_t nowMs, uint64_t lastReadMs) { return live && nowMs >= lastReadMs && nowMs - lastReadMs >= kStallMs; }
+
+enum class StallAction : uint8_t { none, lift, cancel };
+inline StallAction contactStall(bool live, uint64_t nowMs, uint64_t lastDecodedMs, bool lastReadDecoded)
+{
+  if (!stalled(live, nowMs, lastDecodedMs)) return StallAction::none;
+  return lastReadDecoded ? StallAction::lift : StallAction::cancel;
+}
 
 // The watchdog's download again: at once, unless the last one for it was less than kWatchdogRetryMs ago (then at that time).
 // Never given up.

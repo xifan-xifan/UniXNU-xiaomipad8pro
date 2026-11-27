@@ -72,10 +72,11 @@
 #include "PianoGpuCeiling.h"
 #include "PianoGpuIdle.h"
 #include "PianoGpuQualificationLog.h"
+#include "PianoGpuSysctl.h"
 #include "../../include/PianoGpuQualificationDisplay.h"
 
 extern "C" int adreno830_qual607_control(int);
-extern "C" uint64_t gPhysBase,gPhysSize;
+extern "C" uint64_t gPhysBase,gPhysSize,gDramBase;
 using QualLog=pianogpu::QualificationLog<>;
 static QualLog *gQualLog;
 static IOSimpleLock *gQualLogLock;
@@ -132,20 +133,24 @@ static int exitTraceSysctl(struct sysctl_oid *,void *,int,struct sysctl_req *req
   char line[224];
   int n=snprintf(line,sizeof line,"R3DXLOG-v1 record-bytes=%u boot=%llu next=%u lost=%u\n",
                  unsigned(sizeof row),boot,head+1,head-end-unsigned(appendTerminal));
-  int err=SYSCTL_OUT(req,line,n);
+  const size_t headerBytes=pianogpu::snapshotLength(n,sizeof line);
+  if(!headerBytes)return EIO;
+  int err=SYSCTL_OUT(req,line,headerBytes);
   const auto writeRecord=[&](uint32_t seq,const A830ExitTrace::Record &r) {
-    const int bytes=snprintf(line,sizeof line,"R3DXREC seq=%u at=%llu stage=%u status=%u a=%llx b=%llx c=%llx d=%llx commit=%u\n",
+    const int written=snprintf(line,sizeof line,"R3DXREC seq=%u at=%llu stage=%u status=%u a=%llx b=%llx c=%llx d=%llx commit=%u\n",
                              seq,r.at,r.stage,r.status,r.a,r.b,r.c,r.d,seq);
-    return SYSCTL_OUT(req,line,bytes);
+    const size_t bytes=pianogpu::snapshotLength(written,sizeof line);
+    return bytes?SYSCTL_OUT(req,line,bytes):EIO;
   };
   for(uint32_t seq=1;!err && seq<=end;++seq) {
     if(!a830ExitTrace.copy(seq,row))return EAGAIN;
     err=writeRecord(seq,row);
   }
   if(!err && appendTerminal)err=writeRecord(terminalSeq,terminal);
+  if(err)return err;
   n=snprintf(line,sizeof line,"R3DXEND next=%u",head+1);
-  if(!err)err=SYSCTL_OUT(req,line,n+1);
-  return err;
+  const size_t endBytes=pianogpu::snapshotLength(n,sizeof line,true);
+  return endBytes?SYSCTL_OUT(req,line,endBytes):EIO;
 }
 static int qualLogSysctl(struct sysctl_oid *,void *,int,struct sysctl_req *req) {
   if(req->newptr)return EPERM;
@@ -157,7 +162,9 @@ static int qualLogSysctl(struct sysctl_oid *,void *,int,struct sysctl_req *req) 
   IOSimpleLockUnlockEnableInterrupt(gQualLogLock,irq);
   char header[160];
   int n=snprintf(header,sizeof header,"C5LOG-v1 first=%llu next=%llu rejected=%llu\n",bounds.first,bounds.next,bounds.rejected);
-  int err=SYSCTL_OUT(req,header,n);
+  size_t bytes=pianogpu::snapshotLength(n,sizeof header);
+  if(!bytes)return EIO;
+  int err=SYSCTL_OUT(req,header,bytes);
   QualLog::Record record;
   for(uint64_t sequence=bounds.first;!err && sequence<bounds.next;++sequence) {
     irq=IOSimpleLockLockDisableInterrupt(gQualLogLock);
@@ -165,7 +172,9 @@ static int qualLogSysctl(struct sysctl_oid *,void *,int,struct sysctl_req *req) 
     IOSimpleLockUnlockEnableInterrupt(gQualLogLock,irq);
     if(!ok)return EAGAIN; // snapshot overwritten while reading; never return a successful partial capture
     n=snprintf(header,sizeof header,"C5REC seq=%llu bytes=%u\n",sequence,unsigned(record.length));
-    err=SYSCTL_OUT(req,header,n);
+    bytes=pianogpu::snapshotLength(n,sizeof header);
+    if(!bytes)return EIO;
+    err=SYSCTL_OUT(req,header,bytes);
     if(!err)err=SYSCTL_OUT(req,record.text,record.length);
     if(!err)err=SYSCTL_OUT(req,"\n",1);
   }
@@ -1203,12 +1212,14 @@ void registerGpuInputFloor()
 // ---- the boost floor (piano-gpu-boost, machdep.piano_gpu_boost) ----------------------------------------------------------------
 volatile uint32_t gBoostEnabled;   // piano-gpu-boost=1 at start; machdep.piano_gpu_boost 0/1 at run time
 uint32_t gBoostArg;                // piano-gpu-boost=1 on the command line (never changes)
-IOReturn gpuBoost(uint32_t mhzOrLevel, uint32_t holdMs, uint32_t capMhz = 0)
+IOReturn gpuBoost(uintptr_t arg, uintptr_t hold, uintptr_t cap)
 {
   // Unsupported only without the boot argument (senders stop asking for the boot); switched off at run time: Offline, so the senders
   // keep asking and the next switch-on works at once (gpu-boost342a: the A/B's first "off" ended the senders for the rest of the boot).
   if (!gBoostArg) return kIOReturnUnsupported;
   if (!__atomic_load_n(&gBoostEnabled, __ATOMIC_ACQUIRE)) return kIOReturnOffline;
+  if (!pianogpu::boostArgumentsFit(arg, hold, cap)) return kIOReturnBadArgument;
+  const uint32_t mhzOrLevel = uint32_t(arg), holdMs = uint32_t(hold), capMhz = uint32_t(cap);
   // gpu/fullopp1: param4 a cap for the hold (PianoThermal's launch: Android's 967 MHz); 0 none
   if (capMhz ? adreno830_dcvs_boost_capped(mhzOrLevel, holdMs, capMhz) : adreno830_dcvs_boost(mhzOrLevel, holdMs)) return kIOReturnNotReady;
   const uint32_t n = adreno830_dcvs_boost_requests();
@@ -1359,14 +1370,10 @@ int sysctlGpuRecovery(struct sysctl_oid *,void *,int,struct sysctl_req *req)
   if(req->newptr)return EPERM;
   A830RecoveryStats s{};
   if(!adreno830_recovery_stats(&s))return SYSCTL_OUT(req,"none\n",6);
-  char line[256];
-  const int n=snprintf(line,sizeof line,"replay %u recoveries %u replay_recoveries %u jobs_replayed %u jobs_failed %u failures %u "
-                       "reports %u coalesced %u watchdog %u last_us %u max_us %u last_cause %u lost_cause %u holds %u\n",
-                       adreno830_recovery_replay_mode(),s.recoveries,s.replayRecoveries,s.jobsReplayed,s.jobsFailed,s.failures,s.reports,
-                       s.coalesced,s.watchdogHangs,s.lastUs,s.maxUs,unsigned(s.lastCause),unsigned(s.lostCause),
-                       __atomic_load_n(&gFaultHolds,__ATOMIC_ACQUIRE));
-  if(n<=0)return EIO;
-  return SYSCTL_OUT(req,line,size_t(n)<sizeof line?size_t(n)+1:sizeof line);
+  char line[pianogpu::kRecoverySnapshotBytes];
+  const size_t bytes=pianogpu::recoverySnapshot(line,adreno830_recovery_replay_mode(),s,
+                                              __atomic_load_n(&gFaultHolds,__ATOMIC_ACQUIRE));
+  return bytes?SYSCTL_OUT(req,line,bytes):EIO;
 }
 void registerGpuRecovery()
 {
@@ -1491,15 +1498,13 @@ int sysctlGpuWire(struct sysctl_oid *,void *,int,struct sysctl_req *req)
 {
   if(req->newptr)return EPERM;
   char line[200];
-  typedef unsigned long long u64;
+  unsigned long long stats[6];
+  for(unsigned i=0;i<6;++i)stats[i]=__atomic_load_n(&native_adreno_wire_stats[i],__ATOMIC_RELAXED);
   const int n=snprintf(line,sizeof line,"wire workers=%u split=%llu parts=%llu whole=%llu failed=%llu threads=%llu worker-parts=%llu priority=%u\n",
-                       unsigned(__atomic_load_n(&native_adreno_wire_workers,__ATOMIC_ACQUIRE)),u64(native_adreno_wire_stats[0]),
-                       u64(native_adreno_wire_stats[1]),u64(native_adreno_wire_stats[2]),u64(native_adreno_wire_stats[3]),
-                       u64(native_adreno_wire_stats[4]),u64(native_adreno_wire_stats[5]),
+                       unsigned(__atomic_load_n(&native_adreno_wire_workers,__ATOMIC_ACQUIRE)),stats[0],stats[1],stats[2],stats[3],stats[4],stats[5],
                        unsigned(__atomic_load_n(&native_adreno_wire_priority,__ATOMIC_ACQUIRE)));
-  if(n<=0)return EIO;
-  const int error=SYSCTL_OUT(req,line,size_t(n)<sizeof line?size_t(n):sizeof line-1);
-  return error?error:SYSCTL_OUT(req,"",1);
+  const size_t bytes=pianogpu::snapshotLength(n,sizeof line,true);
+  return bytes?SYSCTL_OUT(req,line,bytes):EIO;
 }
 void registerGpuPt()
 {
@@ -1534,12 +1539,19 @@ int sysctlGpuTier(struct sysctl_oid *,void *,int,struct sysctl_req *req)
 {
   if(req->newptr)return EPERM;
   const auto tier=NativeAdrenoMemory::tierStats();
-  char line[256];
+  char line[640];
   const int n=snprintf(line,sizeof line,
-      "mode=%u state=%s runs=%u checked=%u pass=%u fail=%u pass-mask=%#x free-mib=%llu used-mib=%llu refusals=%llu allocs=%llu",
+      "mode=%u state=%s runs=%u checked=%u pass=%u fail=%u pass-mask=%#x free-mib=%llu used-mib=%llu refusals=%llu allocs=%llu "
+      "legacy-small=%llu legacy-large=%llu contiguous=%llu private-req=%llu host-import=%llu scanout-import=%llu "
+      "cpu-maps=%llu tier-import-denied=%llu tier-cpu-map-denied=%llu",
       tier.mode,tier.state,tier.runs,tier.tested,tier.passed,tier.tested-tier.passed,tier.pass_mask,
       (unsigned long long)(tier.free_bytes>>20),(unsigned long long)(tier.used_bytes>>20),
-      (unsigned long long)tier.refusals,(unsigned long long)tier.allocations);
+      (unsigned long long)tier.refusals,(unsigned long long)tier.allocations,
+      (unsigned long long)tier.requests[NativeAdrenoTierLegacySmall],(unsigned long long)tier.requests[NativeAdrenoTierLegacyLarge],
+      (unsigned long long)tier.requests[NativeAdrenoTierContiguous],(unsigned long long)tier.requests[NativeAdrenoTierPrivate],
+      (unsigned long long)tier.requests[NativeAdrenoTierHostImport],(unsigned long long)tier.requests[NativeAdrenoTierScanoutImport],
+      (unsigned long long)tier.requests[NativeAdrenoTierCpuMap],(unsigned long long)tier.requests[NativeAdrenoTierImportDenied],
+      (unsigned long long)tier.requests[NativeAdrenoTierCpuMapDenied]);
   if(n<0 || size_t(n)>=sizeof line)return EIO;
   return SYSCTL_OUT(req,line,size_t(n)+1);
 }
@@ -1558,8 +1570,9 @@ void configureGpuTier()
   if(!mode)return;
   IORegistryEntry *chosen=IORegistryEntry::fromPath("/chosen",gIODTPlane);
   OSData *property=chosen?OSDynamicCast(OSData,chosen->getProperty("piano-extra-ram")):nullptr;
+  const uint64_t windowBase=gPhysBase<gDramBase?gPhysBase:gDramBase;
   NativeAdrenoMemory::configureTier(mode,property?static_cast<const uint8_t *>(property->getBytesNoCopy()):nullptr,
-                                 property?property->getLength():0,gPhysBase,gPhysSize);
+                                 property?property->getLength():0,windowBase,gPhysSize);
   if(chosen)chosen->release();
   const auto tier=NativeAdrenoMemory::tierStats();
   piano_a830_note("gpu tier: mode=%u state=%s runs=%u",mode,tier.mode?tier.state:"no-lock",tier.runs);
@@ -1591,12 +1604,14 @@ IOLock *gCeilingLock;
 pianogpu::CeilingSlots gCeiling;
 uint32_t gCeilingChanges;
 
-IOReturn ceilingSet(unsigned client, uint32_t khz)
+IOReturn ceilingSet(uintptr_t client, uintptr_t khz)
 {
-  if (client >= pianogpu::kCeilingClients) return kIOReturnBadArgument;
   if (gCeilingLock) IOLockLock(gCeilingLock);
   bool changed = false;
-  gCeiling.set(client, khz, &changed);
+  if (!gCeiling.set(client, khz, &changed)) {
+    if (gCeilingLock) IOLockUnlock(gCeilingLock);
+    return kIOReturnBadArgument;
+  }
   const pianogpu::CeilingSlots now = gCeiling;
   if (changed) adreno830_dcvs_set_ceiling(now.effective);
   adreno830_note_ceiling_holder(now.holder());   // gpu/throttle1: the LV line's and machdep.piano_gpu_state's "lpm" / "thermal"
@@ -2190,12 +2205,12 @@ IOReturn PianoA830::callPlatformFunction(const OSSymbol *functionName, bool wait
   // non-zero slot is the ceiling (PianoGpuCeiling.h, adreno830_dcvs_set_ceiling; one set before S10 applies when the DCVS starts). A line
   // per change of the ceiling in force, the first 8 then every 10th, 100th, ...
   if (functionName && functionName->isEqualTo("piano-gpu-ceiling"))
-    return ceilingSet(unsigned(uintptr_t(param2)), uint32_t(uintptr_t(param1)));
+    return ceilingSet(uintptr_t(param2), uintptr_t(param1));
   // A boost floor (PianoGpuBoost.h; boost342 / GPU-DAILY.md): param1 0 = the input boost, 1..16 a GMU level, else MHz; param2 the
   // hold in ms (0 = the touch hold). From the input kexts and the CPU agent's boost policy; every ceiling still wins. Only with
   // piano-gpu-boost=1 (machdep.piano_gpu_boost switches it at run time); otherwise unsupported, so senders stop asking.
   if (functionName && functionName->isEqualTo("piano-gpu-boost"))
-    return gpuBoost(uint32_t(uintptr_t(param1)), uint32_t(uintptr_t(param2)), uint32_t(uintptr_t(param4)));
+    return gpuBoost(uintptr_t(param1), uintptr_t(param2), uintptr_t(param4));
   // The LLCC island (PianoPowerContract.h pianopower::llccIslandReady): param1 = bool *, the two words read again. Any thread.
   if (functionName && functionName->isEqualTo("piano-llcc-island-ready")) {
     if (!param1) return kIOReturnBadArgument;

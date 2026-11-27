@@ -449,8 +449,8 @@ static NSDictionary *stats_json(const FtStats *stats, double start, double end)
     id modeHz = _modeBefore[@"reported_hz"];
     const double modeRate = [modeHz isKindOfClass:NSNumber.class] ? [modeHz doubleValue] : 0;
     const bool matchingMode = fabs(modeRate - _options.fps) <= _options.fps * 0.01;
-    const bool valid = _stopped >= _end && !_overflow && !_visibilityLost && !_modeChanged &&
-        _modeBefore.count && presented.intervals && !gpuErrors && submitted == completed;
+    const bool valid = ft_capture_valid(&presented, _stopped >= _end && !_overflow,
+        !_visibilityLost && !_modeChanged && _modeBefore.count, submitted, completed, gpuErrors);
     NSDictionary *report = @{
         @"schema_version": @1, @"capture_valid": @(valid),
         @"display": display_identity(_display),

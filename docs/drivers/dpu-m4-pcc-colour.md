@@ -1,5 +1,12 @@
 # DPU M4 Night Shift colour on SM8750
 
+The original M4 investigation below covers PCC register encoding. The
+[location-9 boot-reference fix](#location-9-boot-reference) covers the remaining warm
+Night Shift OFF state and records the 2026-11-27 RAM qualification. **Owner decision
+(2026-11-27, `OWNER-0749`):** `y12t` install with Night Shift daily routing ON is
+APPROVED (combinable with DPU M2 promotion if safe, with backup, SHA-256, read-back
+verify, and a ready rollback).
+
 ## References and register layout
 
 The Ubuntu v1.4.0 kernel pin is `83f0f89bed14a`. Its PCC setup, CRTC colour
@@ -59,7 +66,7 @@ Matrix entries below use `output←input`. Linux line numbers refer to
   `NativeGopDisplay.cpp:3430–3488` copies the nine words in row order
   and routes location 9 and the scalar correction independently to
   PianoDpu. The source trace and runtime callback establish the handoff.
-  CoreBrightness's internal transfer domain remains **unknown**.
+  The location-9 trace below covers CoreBrightness's matrix semantics.
 - **ours-OK, input units.** On callback #2, `0x00000000e91ad900 / 2^32`
   is about 0.911 and `0xffffffffff1301aa` as a signed word divided by
   `2^32` is about −0.004. This is two's-complement S31.32. Linux DRM
@@ -72,7 +79,8 @@ Matrix entries below use `output←input`. Linux line numbers refer to
   payload synchronously, updates desired state under the worker lock
   and queues the work. `DpuNightShift.h` rejects invalid words, keeps
   the last colour across zero matrices, and restores the captured base
-  on identity. It applies `gain × (firmware base × Apple matrix)`, using
+  on identity. Before boot-reference cancellation it applied
+  `gain × (firmware base × Apple matrix)`, using
   one unsigned Q16.16 gain for all nine terms. A bypassed firmware base
   acts as the identity during active colour. The capture reports unity
   (`0x10000`) as the correction, so it cannot explain the hue shift.
@@ -147,3 +155,116 @@ Checks: **ours-OK** for callback units, gates, RGB unpack, scalar correction, fi
 Root cause: y12q serialized a row-major RGB matrix with the Linux CTM's transposed PCC mapping and encoded negatives as sign-magnitude in an 18-bit field. Applying the downstream register order and the inferred two's-complement sign to the old read-back reproduces red/green clipping and surviving blue.
 
 ONE change: Serialize the existing RGB matrix to input-grouped PCC words with signed 18-bit two's-complement coefficients. Use the same layout and sign for the firmware base and register view. Record the actual verified DSPP0/1 words once per changed program. Pin the regression to the captured callback and read-back, and check identity and the warm response through the host MMIO model.
+
+## Location-9 boot reference
+
+Native Night Shift routing is opt-in with `native-gop-display-night-shift=1`.
+The daily profile keeps routing off. The RAM qualification starts with Night
+Shift OFF so the first valid location-9 callback can establish the reference.
+
+### 2026-11-27 RAM qualification
+
+The unlocked `y12t-obs1` run passed. Both DSPPs returned the following gray
+responses with zero PCC apply failures.
+
+| State | R | G | B |
+| --- | ---: | ---: | ---: |
+| Base | 1.000 | 1.000 | 1.000 |
+| Half | 1.032 | 0.714 | 0.398 |
+| Warm2 | 1.059 | 0.441 | 0.110 |
+| Off again | 1.000 | 1.000 | 0.999 |
+
+The result qualifies this boot sequence with fixed adaptation. Persisted-ON
+startup and changes in ambient adaptation are outside the qualification.
+The measurements give the register response to unit gray. A general matrix
+applied to encoded scanout approximates its linear-light response, and the
+red gain above unity can clip bright inputs. Daily routing requires an owner
+decision.
+
+### Why the OFF state was warm
+
+The earlier `y12s-qual1` capture showed both firmware PCCs bypassed at boot
+and unity Q16.16 brightness correction. Its first location-9 callback already
+carried a warm matrix, approximately `[911 76 13 | -4 848 2 | -7 -26 716]`
+in thousandths. The last two raw words were incomplete in the interleaved
+log, so the replay reconstructs them at the precision of the matching S3.15
+register words. The second OFF request returned within 17 register LSBs of
+the boot transform. Both GC blocks were disabled in the snapshots.
+
+| Earlier snapshot | R | G | B | Grader result |
+| --- | ---: | ---: | ---: | --- |
+| Base | 1.000 | 0.846 | 0.683 | OFF fails |
+| Off | 1.000 | 0.845 | 0.682 | OFF fails |
+| Half | 1.000 | 0.602 | 0.258 | Warm passes |
+| Full warm | 1.000 | 0.370 | 0.059 | Warm passes |
+
+CoreBrightness sends a composed white-point transform. Switching Night Shift
+off clears blue-light reduction while the independent ambient and native-white
+contributions can persist. Routing the absolute transform applies the boot
+adaptation to GOP scanout. Unity brightness correction preserves its color
+cast. A gamma-2.2 approximation still gives the earlier boot matrix gray
+gains of about 1.000 / 0.927 / 0.841.
+
+#### macOS 27.3 trace
+
+The addresses are unslid for macOS 27.3 (26C5035r).
+
+| Symbol and address | Observed operation |
+| --- | --- |
+| CoreBrightness `_CFXSetWhitePointType`, `0x1be7e64e4` | Type 1 installs the D65 RGB↔LMS basis and D65 reference white. |
+| CoreBrightness `__CFXGetMatrix`, `0x1be7e98dc` | Normalizes XYZ by Y, applies the Bradford basis, conjugates LMS gains back into RGB, and normalizes by the largest RGB row sum. These operations define a linear-light matrix. |
+| CoreBrightness `_CFXSetNativeWhitePoint`, `0x1be7eb61c` | Uses the supplied native xy for the native-white correction and its ramp. |
+| CoreBrightness `_CFXEnableAmbientAdaptation`, `0x1be7e74ec` and `_CFXEnableBlueLightReduction`, `0x1be7e8894` | Control ambient adaptation and blue-light reduction independently. |
+| CoreBrightness `__CFXUpdateBLRTarget`, `0x1be7e8a44` and `_CFXUpdateColorFade`, `0x1be7e9e48` | The blue-light reduction target starts at identity. The fade combines it with the ambient ramp and optional corrections, including native white. |
+| QuartzCore `IOMFBDisplay::update_color_matrix`, `0x18e1e54cc` | Ramps the matrix and sends nine row-major S31.32 words to location 9. Sends brightness correction independently as Q16.16. The D50 XYZ path uses ICC location 6. |
+| `_IOMobileFramebufferSetMatrix`, `0x1b5ed52c4` | Dispatches the 72-byte payload through user-client selector `0x37` to slot 309. Correction uses selector `0x32` and slot 314. |
+| Kernel `IOMobileFramebufferAP::set_matrix`, `0xfffffe000abfddf8` | Packs the location and matrix into DCP request `A437`. `setBrightnessCorrection` sends the scalar as `A438`. |
+
+Location 9 carries the result of the composition with no enable bit or
+contributor metadata. The trace establishes the transform's linear-light
+semantics and the transport. The live policy behind the captured warm
+baseline and the DCP firmware's transfer-block order remain unknown.
+QuartzCore has separate gamma and ICC paths. NativeGopDisplay publishes
+synthetic sRGB primaries, D65 xy and gamma 2.2.
+
+PianoDpu retains the input-grouped, signed PCC words and single CTL latch
+from the M4 encoding fix. The Qualcomm catalog places PCC v6 and GC v2
+in separate blocks at DSPP + `0x1700` and `0x17c0`. Native routing programs
+PCC only. [M4 register layout and source references](#references-and-register-layout)
+
+### Boot-reference cancellation and replay
+
+[`DpuNightShift.h`](../../package/PianoDpu/DpuNightShift.h) captures the first
+valid nonzero matrix `B`. For later callbacks it computes the relative
+transform `M × inverse(B)`. The boot reference is on the input side
+because `M = relative × B`. PianoDpu then composes that relative transform
+with the captured firmware PCC and applies the independent brightness gain.
+An exact reference yields identity for the matrix factor. An explicit identity
+also resets the gain to unity, restoring the firmware words and bypass state.
+A nearby OFF callback retains the small difference. Blanking, invalid
+callbacks, modesets and wake preserve the reference.
+
+Inversion uses 64-bit integer Q32 cofactors and a Q48 determinant. The first
+matrix is accepted as a reference only if its determinant has magnitude at
+least 1/64 and the inverse coefficients fit within ±4. Relative coefficients
+use the same ±4 bound.
+
+The [PCC host test](../../package/PianoDpu/tests/dpu_pcc_host.cpp) exercises
+both halves through decode, programming, latching, read-back and replay. It
+also checks multiplication order, integer limits, correction, rollback and
+restoration. It can emit snapshots for grading.
+
+```sh
+NS_TEST_DIR=$(mktemp -d)
+c++ -std=c++20 -Wall -Wextra -Werror -Ipackage/PianoDpu \
+  package/PianoDpu/tests/dpu_pcc_host.cpp -o "$NS_TEST_DIR/pcc-host"
+"$NS_TEST_DIR/pcc-host" "$NS_TEST_DIR"
+python3 -m unittest discover -s tooling/native/tests -p test_pcc_gray.py
+python3 tooling/native/pcc-gray.py --expect off "$NS_TEST_DIR/ns-off-dpu.txt"
+python3 tooling/native/pcc-gray.py --expect warm "$NS_TEST_DIR/ns-warm-dpu.txt"
+```
+
+The [gray grader](../../tooling/native/pcc-gray.py) checks both DSPPs.
+OFF accepts unity gray within 2%, including bypass. Warm requires both
+PCCs enabled and `R >= G >= B` with `R >= 0.9`. The earlier grader's
+minimum for every channel rejected full warmth when blue reached 0.059.

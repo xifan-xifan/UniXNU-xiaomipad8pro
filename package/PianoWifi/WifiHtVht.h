@@ -99,7 +99,8 @@ inline PhyChoice phyChoose(const ScanEntry &net, uint32_t wish, uint32_t chains,
     c.peerFlags |= kWmiPeerFlagStbc;
   }
   if (apHt & kDot11HtCapRxStbcMask) {
-    c.rateCaps |= ((apHt & kDot11HtCapRxStbcMask) >> kDot11HtCapRxStbcShift) << kWmiRcRxStbcShift;
+    const uint32_t rxStbc = (uint32_t(apHt) & kDot11HtCapRxStbcMask) >> kDot11HtCapRxStbcShift;
+    c.rateCaps |= rxStbc << kWmiRcRxStbcShift;
     c.peerFlags |= kWmiPeerFlagStbc;
   }
   switch (apHt & kDot11HtCapSmPsMask) {

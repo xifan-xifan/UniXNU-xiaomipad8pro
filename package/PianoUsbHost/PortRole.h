@@ -89,6 +89,20 @@ inline PortView portView(const PortWitnesses &w)
   return v;
 }
 
+// The real path's host gate (U1, the first real-device session; the port manager in PianoUsbHost.cpp): a fresh owner snapshot, a cable in, the decision host
+// (UCSI: the partner is a UFP, or a powered cable + UFP) and a known power direction. By default only while we source VBUS (an OTG
+// adapter, a bus-powered device: usb-host.md section 6.4); sinkHost (piano-usbhost-sinkhost=1) also while the partner powers the bus
+// (a hub or dock with PD pass-through after its data-role swap, section 6.1). The Mac is a DFP: its decision is device either way.
+inline bool hostGate(bool fresh, const PortView &v, bool sinkHost)
+{
+  if (!fresh || !v.known || !v.connected || v.role.role != Role::host) return false;
+  return v.vbus == 1 || (sinkHost && v.vbus == 0);
+}
+inline const char *powerName(int vbus)
+{
+  return vbus == 1 ? "we source VBUS" : vbus == 0 ? "we sink (the partner powers the bus)" : "power direction unknown";
+}
+
 // ------------------------------------------------------------------------------------------------------------ the switch
 enum class SwitchAction : uint8_t { none, toHost, toDevice };
 inline const char *actionName(SwitchAction a)
@@ -110,10 +124,11 @@ struct RoleSwitch {
   // The decision of this moment (none: device mode stays armed, as device), whether a cable is in. Returns what to do now.
   SwitchAction step(Role decided, bool connected, uint64_t now)
   {
-    const Role want = decided == Role::host ? Role::host : Role::device;
+    const Role want = connected && decided == Role::host ? Role::host : Role::device;
     if (want != wanted) {
       wanted = want;
       wantedSince = now;
+      deferred = false;
       if (want == Role::host && current == Role::device && !enabled) wouldSwitch++;
     }
     if (!connected) failedThisConnection = false;

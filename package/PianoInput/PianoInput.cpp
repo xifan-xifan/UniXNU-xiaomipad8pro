@@ -192,7 +192,7 @@ void registerSim()
   // Filled in at run time rather than by SYSCTL_OID's static initializer: its parent and handler are signed pointers on arm64e.
   gOidSim.oid_parent = &sysctl__machdep_children;
   gOidSim.oid_number = OID_AUTO;
-  gOidSim.oid_kind = CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_OID2;
+  gOidSim.oid_kind = int(CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_OID2);
   gOidSim.oid_arg1 = nullptr;
   gOidSim.oid_arg2 = 0;
   gOidSim.oid_name = "piano_input_sim";
@@ -562,7 +562,7 @@ void PianoInput::poll()
   const uint64_t at = nowMs();
   const uint32_t longs = fPower.longPresses();
   const PowerStep step = fPower.update(power, hold, at, &heldMs);
-  const uint8_t report = fPower.report(down, gArgs.mask);
+  const uint8_t report = fPower.report(down, uint8_t(gArgs.mask));
   if (step == PowerStep::ask) askPolicy(heldMs, report);
   else if (fPower.longPresses() != longs)
     note("power key: held %u ms: a long press, macOS's (HID Power usage down now, up at the release)", kLongPressMs);

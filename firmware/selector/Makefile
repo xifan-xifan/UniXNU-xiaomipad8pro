@@ -9,6 +9,7 @@ OBJCOPY := $(LLVM)/llvm-objcopy
 OBJDUMP := $(LLVM)/llvm-objdump
 OUT ?= ../../out/selector
 HOSTCC ?= cc
+HOSTCFLAGS ?= -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all
 
 # MMU off = Device memory: no unaligned accesses, no FP/SIMD.
 CFLAGS := --target=aarch64-none-elf -O2 -std=c11 -ffreestanding -fno-builtin -fno-stack-protector -fno-unwind-tables \
@@ -19,7 +20,7 @@ all: $(OUT)/selector.bin
 
 $(OUT):
 	mkdir -p $@
-$(OUT)/selector.o: selector.c bootflag.h | $(OUT)
+$(OUT)/selector.o: selector.c bootflag.h selector_fdt.h | $(OUT)
 	$(CC) $(CFLAGS) -c $< -o $@
 	@if $(OBJDUMP) -r $@ | grep -q R_AARCH64; then $(OBJDUMP) -r $@; echo "selector.o has relocations" >&2; rm -f $@; exit 1; fi
 	@n=$$($(OBJDUMP) -h $@ | awk '$$NF=="TEXT"||$$NF=="DATA"||$$NF=="BSS"' | wc -l | tr -d ' '); \
@@ -28,12 +29,12 @@ $(OUT)/selector.o: selector.c bootflag.h | $(OUT)
 $(OUT)/selector.bin: $(OUT)/selector.o
 	$(OBJCOPY) -O binary -j .text $< $@
 
-$(OUT)/test-bootflag: test/test-bootflag.c bootflag.h | $(OUT)
-	$(HOSTCC) -std=c99 -Wall -Wextra -Werror -O1 -I. $< -o $@
+$(OUT)/test-bootflag: test/test-bootflag.c bootflag.h selector_fdt.h | $(OUT)
+	$(HOSTCC) -std=c99 -Wall -Wextra -Werror $(HOSTCFLAGS) -I. $< -o $@
 
 test: $(OUT)/test-bootflag $(OUT)/selector.bin
 	$(OUT)/test-bootflag
-	python3 -I test/test-selector-bin.py $(OUT)/selector.o $(OUT)/selector.bin
+	LLVM="$(LLVM)" python3 -I test/test-selector-bin.py $(OUT)/selector.o $(OUT)/selector.bin
 
 clean:
 	rm -rf $(OUT)

@@ -26,7 +26,10 @@ say() {
 }
 
 [ "${PIANO_DATA_CONCURRENT_AT_BOOT:-0}" = 1 ] || { say "off (PIANO_DATA_CONCURRENT_AT_BOOT is not 1): nothing switched"; exit 0; }
-data_mounted() { mount 2> /dev/null | grep -q ' on /System/Volumes/Data (apfs'; }
+data_mounted() {
+  mounts=$(mount 2> /dev/null) || return 1
+  printf '%s\n' "$mounts" | grep -Eq ' on /System/Volumes/Data \(apfs[,)]'
+}
 w=0
 until data_mounted; do
   [ "$w" -lt "$wait_s" ] || { say "the Data volume not mounted after ${w} s: nothing switched"; exit 0; }

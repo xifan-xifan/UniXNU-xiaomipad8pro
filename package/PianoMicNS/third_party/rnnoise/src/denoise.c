@@ -165,10 +165,11 @@ static void interp_band_gain(float *g, const float *bandE) {
 
 CommonState common;
 
-static void check_init() {
+static int check_init(void) {
   int i;
-  if (common.init) return;
+  if (common.init) return 0;
   common.kfft = rnn_fft_alloc_twiddles(2*FRAME_SIZE, NULL, NULL, NULL, 0);
+  if (!common.kfft) return -1;
   for (i=0;i<FRAME_SIZE;i++)
     common.half_window[i] = sin(.5*M_PI*sin(.5*M_PI*(i+.5)/FRAME_SIZE) * sin(.5*M_PI*(i+.5)/FRAME_SIZE));
   for (i=0;i<NB_BANDS;i++) {
@@ -179,11 +180,11 @@ static void check_init() {
     }
   }
   common.init = 1;
+  return 0;
 }
 
 static void dct(float *out, const float *in) {
   int i;
-  check_init();
   for (i=0;i<NB_BANDS;i++) {
     int j;
     float sum = 0;
@@ -197,7 +198,6 @@ static void dct(float *out, const float *in) {
 #if 0
 static void idct(float *out, const float *in) {
   int i;
-  check_init();
   for (i=0;i<NB_BANDS;i++) {
     int j;
     float sum = 0;
@@ -213,7 +213,6 @@ static void forward_transform(kiss_fft_cpx *out, const float *in) {
   int i;
   kiss_fft_cpx x[WINDOW_SIZE];
   kiss_fft_cpx y[WINDOW_SIZE];
-  check_init();
   for (i=0;i<WINDOW_SIZE;i++) {
     x[i].r = in[i];
     x[i].i = 0;
@@ -228,7 +227,6 @@ static void inverse_transform(float *out, const kiss_fft_cpx *in) {
   int i;
   kiss_fft_cpx x[WINDOW_SIZE];
   kiss_fft_cpx y[WINDOW_SIZE];
-  check_init();
   for (i=0;i<FREQ_SIZE;i++) {
     x[i] = in[i];
   }
@@ -246,7 +244,6 @@ static void inverse_transform(float *out, const kiss_fft_cpx *in) {
 
 static void apply_window(float *x) {
   int i;
-  check_init();
   for (i=0;i<FRAME_SIZE;i++) {
     x[i] *= common.half_window[i];
     x[WINDOW_SIZE - 1 - i] *= common.half_window[i];
@@ -262,6 +259,7 @@ int rnnoise_get_frame_size() {
 }
 
 int rnnoise_init(DenoiseState *st, RNNModel *model) {
+  if (!st) return -1;
   memset(st, 0, sizeof(*st));
   if (model)
     st->rnn.model = model;
@@ -270,14 +268,33 @@ int rnnoise_init(DenoiseState *st, RNNModel *model) {
   st->rnn.vad_gru_state = calloc(sizeof(float), st->rnn.model->vad_gru_size);
   st->rnn.noise_gru_state = calloc(sizeof(float), st->rnn.model->noise_gru_size);
   st->rnn.denoise_gru_state = calloc(sizeof(float), st->rnn.model->denoise_gru_size);
+  if (!st->rnn.vad_gru_state || !st->rnn.noise_gru_state || !st->rnn.denoise_gru_state || check_init()) {
+    free(st->rnn.vad_gru_state);
+    free(st->rnn.noise_gru_state);
+    free(st->rnn.denoise_gru_state);
+    memset(st, 0, sizeof(*st));
+    return -1;
+  }
   return 0;
 }
 
 DenoiseState *rnnoise_create(RNNModel *model) {
   DenoiseState *st;
   st = malloc(rnnoise_get_size());
-  rnnoise_init(st, model);
+  if (rnnoise_init(st, model)) {
+    free(st);
+    return NULL;
+  }
   return st;
+}
+
+void rnnoise_reset(DenoiseState *st) {
+  const RNNState rnn = st->rnn;
+  memset(st, 0, sizeof(*st));
+  st->rnn = rnn;
+  memset(rnn.vad_gru_state, 0, sizeof(float) * rnn.model->vad_gru_size);
+  memset(rnn.noise_gru_state, 0, sizeof(float) * rnn.model->noise_gru_size);
+  memset(rnn.denoise_gru_state, 0, sizeof(float) * rnn.model->denoise_gru_size);
 }
 
 void rnnoise_destroy(DenoiseState *st) {

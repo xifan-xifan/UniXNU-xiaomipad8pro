@@ -4,5 +4,9 @@
 set -euo pipefail
 P=$(cd "$(dirname "$0")/.." && pwd)
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-"${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -Wno-unused-parameter "$P/tests/irq_host.cpp" -o "$T/irq_host"
+flags=(-Wno-unused-parameter)
+if [[ ${1:-} == --sanitize ]]; then
+  flags=(-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all)
+fi
+"${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror "${flags[@]}" "$P/tests/irq_host.cpp" -o "$T/irq_host"
 "$T/irq_host"

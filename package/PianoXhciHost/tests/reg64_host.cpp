@@ -4,7 +4,7 @@
 // 64-bit read is two 32-bit loads, low half first; the halves are not swapped, not truncated and not widened; a write of an
 // address above 4 GiB (where the order decides whether the controller latches the right ring address) still stores the high half
 // first; the register file is touched only at the two words of the register.
-//   c++ -std=c++20 -Wall -Wextra -Werror -I.. reg64_host.cpp -o /tmp/reg64_host && /tmp/reg64_host
+//   c++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -I.. reg64_host.cpp -o /tmp/reg64_host && /tmp/reg64_host
 #include "Reg64.h"
 #include <cstdio>
 #include <map>
@@ -79,6 +79,15 @@ int main()
     CHECK(pianoxhci::read64(r, 0x00) == 0x0123456789abcdefull);
     CHECK(pianoxhci::read64(r, 0x08) == 0xfedcba9876543210ull);
     CHECK(r.words.size() == 4);
+  }
+  {   // Recycling a ring above 4 GiB for a low address must clear its old high word before latching.
+    Regs r;
+    pianoxhci::write64(r, 0x18, 0x00000008c0001000ull);
+    r.trace.clear();
+    pianoxhci::write64(r, 0x18, 0x00102000ull);
+    const std::vector<Access> want = {{'w', 0x1c, 0}, {'b', 0, 0}, {'w', 0x18, 0x00102000u}, {'b', 0, 0}};
+    CHECK(r.trace == want);
+    CHECK(pianoxhci::read64(r, 0x18) == 0x00102000ull);
   }
   std::printf("%s: reg64_host\n", failures ? "FAILED" : "ok");
   return failures ? 1 : 0;

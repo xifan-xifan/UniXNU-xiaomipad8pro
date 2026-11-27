@@ -66,6 +66,7 @@
 #include "PianoUsbHw.h"
 #include "Dwc3Gadget.h"
 #include "SmmuStream.h"
+#include "ByteRing.h"
 #include "HidInput.h"
 #include "HidDescriptors.h"   // package/PianoKeyboard: the keyboard (+ consumer) and pointer report descriptors, shared
 #include "UsbNet.h"           // the network function's macOS side (PianoUsbNet.cpp)
@@ -303,28 +304,7 @@ bool qsWrite(uint32_t offset, uint32_t value);
 volatile uint32_t gColdAsk;
 uint64_t gColdAskAtMs;
 
-struct Ring {
-  uint8_t *buf;
-  uint32_t size, head, tail;   // size: a power of two
-  uint64_t dropped;
-  uint32_t used() const { return head - tail; }
-  uint32_t space() const { return size - used(); }
-  uint32_t put(const uint8_t *s, uint32_t n)
-  {
-    if (n > space()) { dropped += n - space(); n = space(); }
-    for (uint32_t i = 0; i < n; ++i) buf[(head + i) & (size - 1)] = s[i];
-    head += n;
-    return n;
-  }
-  uint32_t get(uint8_t *d, uint32_t n)
-  {
-    if (n > used()) n = used();
-    for (uint32_t i = 0; i < n; ++i) d[i] = buf[(tail + i) & (size - 1)];
-    tail += n;
-    return n;
-  }
-};
-Ring gTx[kPorts], gRx1, gRx2, gNotes;   // gRx2: the input port's command bytes (piano-usb-hid=1)
+ByteRing gTx[kPorts], gRx1, gRx2, gNotes;   // gRx2: the input port's command bytes (piano-usb-hid=1)
 volatile bool gHidReleaseWanted;        // the input port closed or the bus reset: the HID thread releases everything
 PianoUsbHID *gHidDevice[2];             // keyboard, pointer (piano-usb-hid=1)
 struct HidCounters {                    // counts only: what was typed is never kept or logged
@@ -335,7 +315,7 @@ uint16_t gLines[kPorts];
 bool gLive = true, gEcho = true;
 volatile bool gAbort;
 
-bool ringAlloc(Ring &r, uint32_t size)
+bool ringAlloc(ByteRing &r, uint32_t size)
 {
   r.buf = static_cast<uint8_t *>(IOMallocData(size));
   r.size = size;
@@ -757,12 +737,12 @@ int sysctlBootflag(struct sysctl_oid *oidp, void *, int, struct sysctl_req *req)
 // Filled at run time (arm64e signs the parent and handler pointers), as PianoPolicy's.
 struct sysctl_oid gOidSdamSurvey, gOidBootflag;
 
-void fillBootflagOid(struct sysctl_oid &o, const char *name, int kind, int (*handler)(struct sysctl_oid *, void *, int, struct sysctl_req *),
+void fillBootflagOid(struct sysctl_oid &o, const char *name, uint32_t kind, int (*handler)(struct sysctl_oid *, void *, int, struct sysctl_req *),
                      const char *fmt, const char *descr)
 {
   o.oid_parent = &sysctl__machdep_children;
   o.oid_number = OID_AUTO;
-  o.oid_kind = kind | CTLFLAG_OID2;
+  o.oid_kind = int(kind | CTLFLAG_OID2);
   o.oid_arg1 = nullptr;
   o.oid_arg2 = 0;
   o.oid_name = name;
@@ -833,13 +813,13 @@ void execute(const char *line)
     }
     usbStatus();
   } else if (word(s, "spmi")) {   // PianoSpmi.h: the shared words (every kext's counts) and this kext's own
-    char line[300], owner[5];
+    char spmiLine[300], owner[5];
     piano_spmi_tag_text(__atomic_load_n(&piano_spmi_words.owner, __ATOMIC_ACQUIRE), owner);
     cprintf("SPMI lock: owner now %s, depth %u\n", owner, piano_spmi_words.depth);
-    pianospmi::format(line, sizeof line, PianoSpmiLineAll);
-    cprintf("%s\n", line);
-    pianospmi::format(line, sizeof line, PianoSpmiLineOurs);
-    cprintf("PianoDwc3's: %s\n", line);
+    pianospmi::format(spmiLine, sizeof spmiLine, PianoSpmiLineAll);
+    cprintf("%s\n", spmiLine);
+    pianospmi::format(spmiLine, sizeof spmiLine, PianoSpmiLineOurs);
+    cprintf("PianoDwc3's: %s\n", spmiLine);
   } else if (word(s, "ioreg")) {
     if (!parseNumber(s, &a) || a > 32) a = 32;
     dumpEntry(IORegistryEntry::getRegistryRoot(), 0, unsigned(a));
@@ -1042,7 +1022,7 @@ void shellThread(void *, wait_result_t)
   // filt_specattach: EINVAL, so poll() answers POLLNVAL at once): unmarked, pianousb-shell's poll() loop spun and never read
   // (desk-dev, 2026-11-12). puSelect keeps the contract (a count when ready, selrecord otherwise). The helper uses select() anyway.
   const int kq = cdevsw_setkqueueok(gMajor, &gCdev, 0);
-  gDevNode = devfs_make_node(makedev(gMajor, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0600, "pianousb");
+  gDevNode = devfs_make_node(makedev(uint32_t(gMajor), 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0600, "pianousb");
   note("/dev/pianousb %s (major %d): port 1 is the user pipe; select%s", gDevNode ? "created" : "NOT created", gMajor,
        kq == 0 ? ", poll and kqueue" : " only (cdevsw_setkqueueok refused)");
 }
@@ -2151,7 +2131,7 @@ void waitAwake()
 
 // ------------------------------------------------------------------------------- the hand-off to PianoUsbHost (piano-usb-handoff=1)
 // PianoUsbHost asks through callPlatformFunction (UsbHandoff.h); the USB thread acts between passes: a release stops the device
-// controller (RUN_STOP 0, the halt awaited), masks its event interrupt and parks the thread until a reclaim; a reclaim re-reads the
+// controller, retires the gadget's transfers, masks its event interrupt and parks the thread until a reclaim; a reclaim re-reads the
 // core's power domain and clocks and, only when they read on, runs the whole takeover again (PianoUsbHost has put the core back in
 // device mode first). Without piano-usb-handoff nothing of this runs and the platform function answers unsupported.
 volatile uint32_t gHandoffState = kHoOff, gHandoffAsk = kAskState;
@@ -2168,24 +2148,17 @@ bool handoffRelease()
 {
   using namespace dwc3;
   gRunning = false;
-  const bool halted = gGadget.halt(100);
-  if (!halted) {
-    note("usb-a2b release REFUSED: device did not halt; host cannot borrow");
+  if (!gGadget.quiesceForHandoff()) {
+    note("usb-a2b release REFUSED: device quiescence unconfirmed; host cannot borrow");
     handoffSet(kHoUnsafe);
     return false;
   }
   __atomic_store_n(&gDomainConfigured, 0u, __ATOMIC_RELEASE);
   __atomic_store_n(&gDomainNet, 0u, __ATOMIC_RELEASE);
-  if (gLines[kPortConsole] & 1) consoleClosed();
-  IOLockLock(gLock);
-  for (uint16_t &line : gLines) line = 0;
-  IOLockUnlock(gLock);
-  gHal.wr(GEVNTSIZ, GEVNTSIZ_INTMASK | Layout::kEventBytes);
-  gHal.barrier();
   if (gIrqMode) irqOff("the controller is handed to PianoUsbHost");
   gHandoffReleases++;
-  gHal.note("hand-off: released to PianoUsbHost (%u): DCTL %08x DSTS %08x (%s); the console keeps its log for the replay", gHandoffReleases,
-            gHal.rd(DCTL), gHal.rd(DSTS), halted ? "halted" : "NOT halted within 100 ms");
+  gHal.note("hand-off: released to PianoUsbHost (%u): DCTL %08x DSTS %08x (halted); the console keeps its log for the replay",
+            gHandoffReleases, gHal.rd(DCTL), gHal.rd(DSTS));
   __atomic_store_n(&gRoleSeen, 0xffu, __ATOMIC_RELAXED);   // PianoUsbHost changes the role: not known until GCTL is read again
   handoffSet(kHoReleased);
   return true;

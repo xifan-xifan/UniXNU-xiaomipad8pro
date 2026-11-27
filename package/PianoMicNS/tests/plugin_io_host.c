@@ -5,6 +5,7 @@
 // batches; every frame the next tap frame or a counted slip, nothing missing once primed; a second IO context reading the same
 // times reads the same frames without taking more from the core; a jump in sample time re-syncs; negative times and a stopped
 // device read silence; the zero time stamps sit on the 16384-frame grid.
+// clang -std=c11 -O1 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -Wno-null-dereference -I../third_party/rnnoise/include -c ../third_party/rnnoise/src/rnn.c -o /tmp/plugin_io_host.rnn.o && clang -std=c11 -O1 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -DPIANO_MICNS_TEST_TAP -I.. -I../../PianoAudio -I../third_party/rnnoise/include plugin_io_host.c ../PianoMicNS.c ../MicNsCore.c ../third_party/rnnoise/src/{denoise,rnn_data,pitch,kiss_fft,celt_lpc}.c /tmp/plugin_io_host.rnn.o -framework CoreAudio -framework CoreFoundation -framework IOKit -lm -o /tmp/plugin_io_host && /tmp/plugin_io_host
 #include <CoreAudio/AudioServerPlugIn.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <math.h>
@@ -62,6 +63,19 @@ int main(void)
     for (int i = 0; i < 512; ++i) a[i] = 1;
     readAt(-1024, a, 512);
     for (int i = 0; i < 512; ++i) CHECK(a[i] == 0.0f);
+    const double bad_time[] = {NAN, INFINITY, 0x1p64};
+    for (size_t j = 0; j < sizeof bad_time / sizeof bad_time[0]; ++j) {
+        a[0] = a[511] = 1.0f;
+        readAt(bad_time[j], a, 512);
+        CHECK(a[0] == 0.0f && a[511] == 0.0f);
+    }
+    static float near_end[4096];
+    near_end[0] = near_end[4095] = 1.0f;
+    readAt(0x1.fffffffffffffp63, near_end, 4096);
+    CHECK(near_end[0] == 0.0f && near_end[4095] == 0.0f);
+    AudioServerPlugInIOCycleInfo oversized = {0};
+    CHECK((*drv)->DoIOOperation(drv, 2, 3, 1, kAudioServerPlugInIOOperationReadInput, 16385, &oversized, a, NULL)
+          == kAudioHardwareBadPropertySizeError);
     // cycles: the tap 100 ppm fast, two contexts on the same times
     double S = 0;
     int prev = -1;
@@ -86,6 +100,11 @@ int main(void)
     CHECK(slips > 50 && slips < 400);   // 100 ppm of 3.07 M frames: 307, less the band
     // a jump: produced from the new time on, continuity again after a re-prime
     S += 50000;
+    feed(512);
+    readAt(S, a, 512);
+    readAt(S - 512, b, 512);
+    for (int i = 0; i < 512; ++i) CHECK(b[i] == 0.0f);
+    S += 512;
     prev = -1; bad = 0;
     int resumed = 0;
     for (int c = 0; c < 400; ++c, S += 512) {

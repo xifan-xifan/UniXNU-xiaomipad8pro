@@ -1,7 +1,22 @@
 # Policy: the cover, the keyboard's wake, the power key and Low Power Mode (PianoPolicy)
 
-Status 2026-11-11: **built, host-tested (`policy_host: all 21670 checks passed`), linked into the KC with the current kext set
-(kernels 0059 and 0062: `com.unixnu.driver.PianoPolicy: linked, ... 322 pointers`), test images built; not run on the tablet.**
+## Status as of 2026-11-27
+
+**Cover and power key (B2).** PianoPolicy is armed on installed v13.1y12q, on the daily line since v13.1y12m. The daily rule
+locks and turns the display off when the cover closes on a charger, with charging continuing. On battery the rule requests
+system sleep. In the November 26 RAM checks, a simulated cover close on a charger locked without suspending, and a simulated
+short power-key press woke the dark display or suspended the system when the display was on. Suspend-to-idle with timer wake and
+the simulated lid and power-key policies passed again on RAM `v131y12t-qual1` on November 27. Closing the cover on battery and
+using the physical power key remain attended checks. [Hardware backlog, B2](BACKLOG-hardware.md#2-backlog-b1b15) · [November 26 policy results](results-2026-11-26.md#also-on-the-daily-line) · [November 27 RAM qualification](results-2026-11-27.md#ram-qualification)
+
+**Energy Modes (B5).** Low Power, Automatic and High Power reached the power and thermal policy through `pmset` on installed
+v13.1y12l on November 26. High Power is the daily setting and `powermode 2` was active on the November 27 v13.1y12q Metal
+sustain boot. Selecting the modes by hand in System Settings remains open. [Support status](STATUS.md) · [November 26 install results](results-2026-11-26.md#install) · [November 27 installed High Power run](results-2026-11-27.md#sustained-metal-3d-installed-v131y12q)
+
+## Original design and qualification notes (2026-11-11 to 2026-11-26)
+
+On 2026-11-11 PianoPolicy was built, host-tested (`policy_host: all 21670 checks passed`) and linked into the bring-up KC
+(kernels 0059 and 0062, `com.unixnu.driver.PianoPolicy: linked, ... 322 pointers`). The first test images were built offline.
 2026-11-12: the GPU ceiling as PianoA830's client 1 (§5.3: no interim arbitration with its slots), the profile checked end to end
 through PianoThermal's `Governor.h` (§5.2), `piano-policy-lpm=1` for an unattended test (P7); `policy_host: all 21915 checks passed`;
 not run. Later on 2026-11-12: NativeGopDisplay's display power is an event (§5.6: its messages listened to, the 5 s keyboard tick
@@ -12,7 +27,7 @@ Backlog B2 (cover / keyboard / power key) and B5 (Low Power Mode → power profi
 Facts are marked as in `power.md`: **verified** (read from source, a binary or a register a running driver uses), **spec**,
 **Ubuntu** (measured on this tablet by the Ubuntu project), **inferred**, **needs-boot**.
 
-## 1. Purpose and the split
+### 1. Purpose and the split
 
 The drivers stay mechanisms: PianoKeyboard reads the hall sensor and gpio95, PianoPower publishes the power source, NativeGopDisplay
 the display power, PianoThermal sets CPU caps, PianoA830 takes a GPU ceiling, k27 0062 suspends and polls the wake sources.
@@ -21,9 +36,9 @@ says so through public calls only: IOPMrootDomain's power notifications, PianoTh
 rules are a pure state machine (`Policy.h`), tested on the host for every combination of cover × power source × display × Low
 Power Mode × system sleep. A userland agent (`tooling/native/piano-policy-agent`) does the two things the kernel cannot (§2.1, §2.3).
 
-## 2. The signals
+### 2. The signals
 
-### 2.1 macOS Low Power Mode is not kernel-visible
+#### 2.1 macOS Low Power Mode is not kernel-visible
 
 | Fact | State | Source |
 |---|---|---|
@@ -35,11 +50,11 @@ Power Mode × system sleep. A userland agent (`tooling/native/piano-policy-agent
 | `IOPMFeatureIsAvailable("LowPowerMode")` is decided in IOKit.framework by the model, not by the kernel's Supported Features: MacBookPro above 12, MacBookAir above 7, `MacNN,M` except 13,1-2 and 14,8 | verified (macOS 26) | IOKit.framework `IOPMFeatureIsAvailableWithSupportedTable` |
 | The native ADT's model is `VirtualMac2,1`: Low Power Mode is then not offered (no toggle, `pmset` without `lowpowermode`) | inferred (macOS 27 not read); needs-boot: `pmset -g` | `configs/k27-adt.toml` |
 
-So the signal is made, not found: **`sysctl machdep.piano_policy_lpm`** (0/1, root writes, PianoPolicy wakes on the write). The agent
-mirrors `com.apple.system.lowpowermode` into it whenever macOS offers the mode; on piano today the switch is `sudo sysctl
-machdep.piano_policy_lpm=1`. Changing the model to a MacBook's was rejected (every daemon keys on it).
+The agent mirrors `com.apple.system.lowpowermode` into **`machdep.piano_policy_lpm`** (root writes 0/1, PianoPolicy wakes on the
+write). The original manual test used `sudo sysctl machdep.piano_policy_lpm=1`. The Energy Mode path added later uses the same
+notification (§12). Changing the model to a MacBook's was rejected because daemons also use it.
 
-### 2.2 The cover: IOPMrootDomain's clamshell
+#### 2.2 The cover: IOPMrootDomain's clamshell
 
 | Fact | State | Source |
 |---|---|---|
@@ -54,7 +69,7 @@ mode does (now in one place), with the AC adaptor mirrored so the root domain's 
 mode (WindowServer would treat the panel as an external display in clamshell mode and keep it lit), the private disable mask,
 `sleepSystemOptions` (a software sleep without the clamshell state).
 
-### 2.3 Display sleep and lock from the kernel: none
+#### 2.3 Display sleep and lock from the kernel: none
 
 | Fact | State | Source |
 |---|---|---|
@@ -67,7 +82,7 @@ Choice (least invasive): the clamshell state of §2.2 and, in userland, `pmset d
 sleep (the agent, on powerd's clamshell notification): the display sleeps and the session locks (System Settings › Lock Screen:
 require the password immediately). `piano-backlight-lid=1` (PianoBacklight) cuts the backlight on close regardless.
 
-### 2.4 The power key, the keyboard, the kernel's wake table, the profile outputs
+#### 2.4 The power key, the keyboard, the kernel's wake table, the profile outputs
 
 | Fact | State | Source |
 |---|---|---|
@@ -81,7 +96,7 @@ require the password immediately). `piano-backlight-lid=1` (PianoBacklight) cuts
 | PianoA830's `piano-gpu-ceiling` has a slot per caller since 2026-11-11 (`piano-gpu-ceiling-clients` = 4, published before its service is; the DCVS runs at the lowest slot); PianoThermal (level 2) puts 160 MHz in slot 0 (param2 null) at passive and clears it below; its `ThermalState` property is refreshed every 30 s, the breadcrumb `piano_thermal_state` at every policy update. A PianoA830 from before the slots had one slot, the last caller winning | verified | `board/PianoGpuCeiling.h`, `board/PianoA830.cpp`, `PianoThermal.cpp` |
 | PianoA830's own maximum is 342 MHz unless `piano-gpu-dcvs-max` / `piano-gpu-maxlevel` is given: the Power Saver ceiling is then a no-op and PianoPolicy sends none | verified | `adreno830/A830Dcvs.h`; `drivers/gpu.md` |
 
-## 3. The policy table
+### 3. The policy table
 
 | Event | Cover | Power | Display | System sleep (0062) | What happens |
 |---|---|---|---|---|---|
@@ -103,7 +118,7 @@ require the password immediately). `piano-backlight-lid=1` (PianoBacklight) cuts
 | profile | – | battery or unknown, or LPM on | – | – | **Power Saver**: PianoThermal's battery caps (`piano-thermal-profile` 1 with LPM), GPU ceiling 342 MHz when PianoA830's own maximum is above it, never over PianoThermal's passive ceiling |
 | idle | – | battery | – | on | macOS's idle sleep after 5 min (§7); PianoPolicy never overrides macOS's timers |
 
-## 4. Design
+### 4. Design
 
 - **The kext** (`PianoPolicy.cpp`): an IOService on IOPlatformExpertDevice, one thread blocked on an event. Events: PianoKeyboard's
   property messages (gpio95's rises are counted in the handler, so a short pulse is not lost), the power source's
@@ -123,21 +138,22 @@ require the password immediately). `piano-backlight-lid=1` (PianoBacklight) cuts
   keep their own behaviour). **Level 2** acts. The cover part needs `piano-policy-lid=1` as well (the hall polarity, `keyboard.md`
   §10.3) and refuses while `piano-keyboard-lid` is set (two clamshell controllers).
 - **Safety rules** (`Policy.h`): the cover sleeps the system only on battery, with system sleep on, the cover-open wake armed and the
-  cover seen open since boot (a boot inside a closed folio never sleeps at once); an unknown power source locks only; the order of
-  the root domain's messages leaves no window where a closed cover on power could sleep; PianoThermal's passive ceiling is never
-  lifted: with PianoA830's slots ours is client 1 and the lowest slot wins (§5.3), without them ours is never written over or
-  cleared (a race between the read and the write is repaired by putting it back).
+  cover seen open since boot (a boot inside a closed folio never sleeps at once). The lid-arm switch and unknown hall or power state
+  disallow clamshell sleep. The policy reports a reopening before an AC change or re-arm can re-evaluate a previously closed
+  cover. An abort with the cover still closed does not replay the notification. PianoA830 applies the lowest of PianoThermal's
+  protection ceiling and PianoPolicy's Energy Mode ceiling (§5.3).
 - **The agent** (`tooling/native/piano-policy-agent/piano-policy-agent.sh`, root): one `notifyutil -w` on
-  `com.apple.system.lowpowermode` and `com.apple.system.powermanagement.clamshellstate` (and the names of §4.1);
-  LPM → `sysctl -w machdep.piano_policy_lpm`;
-  closed without sleep (root domain's `AppleClamshellCausesSleep` No) → `pmset displaysleepnow`. Stock tools, no polling.
+  `com.apple.system.lowpowermode`, `com.apple.system.highpowermode`, `com.apple.system.powermanagement.clamshellstate` and the
+  names of §4.1. Either Energy Mode notification refreshes both kernel flags. The flags accept 0 or 1, and Low Power wins when
+  both are set during a transition. The agent calls `pmset displaysleepnow` only when the root domain reports
+  `AppleClamshellState` Yes and `AppleClamshellCausesSleep` No. The agent is event-driven.
   Installed by the userland pipeline (`configs/userland.toml`, `docs/userland.md`): `/usr/local/libexec/piano-policy-agent` and
   the LaunchDaemon `com.unixnu.piano-policy-agent.plist`, on in the installed profile, through the Data seed's boot job (a new
   seed identity, `docs/data-store.md`) or a live update. By hand from the USB root shell:
   `launchctl submit -l com.unixnu.piano-policy-agent -- /bin/sh <the script>`.
 - Nothing to power: no power-tree membership; across a suspend the thread is frozen with the rest (contract, `power.md` §4).
 
-### 4.1 The power state of background services (slim, 2026-11-22)
+#### 4.1 The power state of background services (slim, 2026-11-22)
 
 The static list of services turned off on piano was the VM-era Data-seed trim (a 4 GiB 27.0.1 guest); natively only the labels with
 native evidence stay off (class A: watchdogd, xprotectd, mobileactivationd, PerfPowerServices, cryptexd, passd, AppSSODaemon,
@@ -165,7 +181,7 @@ agent adds a power state on top:
   `fail.tsv`, `broken.tsv`; `test-pause` (test-only entries, read only while the file exists). `piano-policy-agent --status`.
 - Tests: `tooling/native/piano-policy-agent/test-piano-policy-agent.py` (the real script under sh and dash on a stub launchd).
 
-## 5. What the other drivers must add (their owners; nothing here changes their packages)
+### 5. What the other drivers must add (their owners; nothing here changes their packages)
 
 **5.1 PianoInput, the power key.** Look the policy up once by class (`IOService::copyMatchingService(IOService::serviceMatching(
 "PianoPolicy"))`, cached, released in `stop`; no link dependency). Power key only: on the debounced press send nothing yet and note
@@ -231,7 +247,7 @@ implement the cover-open-only and keyboard-only-when-open rules.
 | 5.6 | NativeGopDisplay, PianoPolicy | **done**: `piano-display-power` on every power change call whatever the arguments, a `kIOMessageServicePropertyChange` on each change; `piano-display-power-messages` (2026-11-12). PianoPolicy (2026-11-12, host-tested `policy_host` `displayEventsTick`, not run) registers interest on it and drops the 5 s keyboard tick when the property is there or a message was seen; the tick stays only as the fallback for an older NativeGopDisplay (logged once) and behind `piano-policy-display-tick=1` |
 | 5.7 | PianoBacklight | nothing for the policy; its system-sleep part (dark before the freeze) is `power.md` §4's |
 
-## 6. Boot arguments
+### 6. Boot arguments
 
 | Argument | Default | Meaning |
 |---|---|---|
@@ -253,7 +269,7 @@ property `piano-gpu-ceiling-clients`. sysctl:
 `machdep.piano_policy` (state, decisions, counters), `machdep.piano_policy_lpm` (root, 0/1), `machdep.piano_policy_hpm` (root, 0/1,
 §12.5), `machdep.piano_smc` (the stand-in's clients, keys and counters, §12).
 
-## 7. Idle sleep on battery: macOS's timers (pmset)
+### 7. Idle sleep on battery: macOS's timers (pmset)
 
 The 5-minute idle sleep on battery (Ubuntu since v0.8.0) is macOS's own timer; PianoPolicy does not touch it:
 ```sh
@@ -263,11 +279,11 @@ sudo pmset -c sleep 0 displaysleep 10
 (no hibernation natively; plugged in never sleeps, as stock and Ubuntu). powerd picks the Battery or AC set from PianoPower's
 `ExternalConnected` (`piano-power-ps=1`). The lock: System Settings › Lock Screen › require the password immediately after the display
 turns off. Installed as the one-shot LaunchDaemon `piano-pmset-defaults` (`docs/userland.md` §6): each power source's timers
-set once, unless the owner set that source's timers first. The sleep timer stays inert until the profile has `piano-sleep=1`
-(the ADT keeps sleep-disabled), which waits for `power.md` §6 S1-S4. Only display sleep acts before that, and its native wake is
-`userland.md`'s test U10.
+are set once, unless the owner set that source's timers first. System sleep requires `piano-sleep=1` to override the ADT's
+sleep-disabled setting. Display sleep uses its own timer. The original suspend and display-wake checks are `power.md` §6 and
+`userland.md` U10.
 
-## 8. Lines
+### 8. Lines
 
 ```
 PianoPolicy: start: piano-policy=2 (acting), cover acted on, profile on, GPU ceiling 342 MHz (a no-op: PianoA830's own maximum is 342 MHz), power key on, keyboard wake on (hold-off 1000 ms)
@@ -301,7 +317,7 @@ sleep); profile Power Saver (on battery); GPU ceiling 0 MHz (written 0, client 1
 `thermal not read (own GPU slot)`). Without slots: `PianoA830 publishes no piano-gpu-ceiling-clients (one shared slot): ...` and
 `PianoA830: GPU ceiling 342 MHz (Power Saver's GPU ceiling; the shared slot)`.
 
-## 9. Test plan (RAM boots, owner present, cable for the console)
+### 9. Test plan (RAM boots, owner present, cable for the console)
 
 **Build** (main checkout; the k27 tree at 0062 or 0063, which contains it):
 ```sh
@@ -350,9 +366,10 @@ before `sleep`.
 | P6 | `ram-pol-chargesleep` (900 s, by name only) | medium-high: PianoPower level 2 (the DSP), then two test sleeps of 30 s 240 s after boot | unattended on the Mac's cable | P5's lines plus `PianoPower: policy: system sleep: handing the charger over ...`, `policy: sleep handover done: acknowledged`, `policy: reports paused until the wake ...`, then `policy: awake again (wake N)`, `policy: reports again ...`, `policy: wake N: the codec is relinked and everything is sent again` | `handover not complete after 2 s`: the firmware's answers did not come (report the `mca:` lines) |
 | P7 | `ram-pol-gpuslot` (600 s) | low: nothing but the profile and the GPU ceiling | unattended on the Mac's cable (external power); `piano-policy-lpm=1`, PianoThermal level 2 with the governor, `piano-gpu-dcvs-max=607`; at the end of the window the console's `sysctl machdep.piano_policy` if a shell is there | `piano-policy-lpm=1: Low Power Mode on from boot ...`; `PianoA830: 4 GPU ceiling slots (piano-gpu-ceiling-clients): Power Saver's ceiling is client 1 ...`; `PianoA830: GPU ceiling 342 MHz (Power Saver's GPU ceiling; client 1, the power profile's slot)`; PianoA830's `gpu ceiling 342 MHz (power profile's; slots thermal 0, power profile 342, 0, 0 MHz; the lowest wins; #1)`; `PianoThermal: profile 1 (Low Power Mode: ...)` and PianoThermal's `cpufreq: profile Power Saver (PianoPolicy)`, its 30 s lines `ceiling 1785 MHz (on power; profile Power Saver)` (cluster 1: 1958); the `inputs:` lines say `thermal not read (own GPU slot)` | `(... the shared slot)` or `PianoA830 publishes no piano-gpu-ceiling-clients`: the KC's PianoA830 predates the slots; `ceiling 2400 MHz (on power)` (the image's cap; 3532 in an image built before 2026-11-12) with no profile line: PianoThermal did not take the profile (its `piano-cpufreq`) |
 
-## 10. Risks
+### 10. Risks
 
-1. The hall polarity is unverified: the cover part is opt-in and a boot with the cover closed never sleeps until it was open.
+1. A boot with the cover closed needs a subsequent open before the cover can trigger sleep. The early tests gated arming on a
+   physical hall polarity check. The November 26 policy update is recorded below.
 2. WindowServer may keep the "external" panel lit under a closed cover: the agent's display sleep and PianoBacklight's lid rule.
 3. A wake with the cover closed on battery may go straight back to sleep (the root domain's full-wake check; a Mac does the same);
    a charger wake (bit 4) with the cover closed races PianoPower's re-read and our kIOPMDisableClamshell against the root domain's
@@ -360,16 +377,18 @@ before `sleep`.
 4. powerd's own clamshell rule (lid-close assertions, desktop mode) can keep a closed cover awake: macOS's behaviour, by design.
    PianoPower's B4 charging hold (`ChargePolicy.h`: no idle sleep while protected charging runs below the limit) only concerns
    idle sleep on power, where the cover never sleeps the system anyway.
-5. Low Power Mode is likely not offered on VirtualMac2,1: the sysctl is the switch.
+5. The initial VirtualMac2,1 design used the sysctl directly. The later AppleSMC path and `pmset` checks are described in §12
+   and the status above.
 6. The GPU ceiling: with PianoA830's slots (since 2026-11-11) PianoPolicy is client 1 and the lowest slot wins, so nothing can lift
    PianoThermal's passive ceiling and there is no race; only a PianoA830 without `piano-gpu-ceiling-clients` falls back to the shared
    slot and its interim arbitration (a tiny race window, repaired). PianoThermal's profile call is in (§5.2) and checked end to end
-   on the host; on the tablet P4/P7 are its proof. With PianoA830's default maximum (342 MHz) PianoPolicy sends no GPU ceiling at all.
+   on the host. P4/P7 were the original tablet checks. With PianoA830 capped at the early test profile's 342 MHz maximum,
+   PianoPolicy would send no GPU ceiling.
 7. `requestUserActive` is the kernel's only display-wake request: needs-boot that powerd honours it natively.
 8. `kIOPMSetACAdaptorConnected` is a private root-domain message (IOPMPrivate.h); it also reaches DriverKit's power-source hook.
 9. PianoPolicy links PianoThermal's breadcrumb: PianoThermal must stay in the KC (it is listed first).
 
-## 11. Files
+### 11. Files
 
 `package/PianoPolicy/` (`PianoPolicy.cpp`, `Policy.h`, `tests/policy_host.cpp`, `AppleSmc.cpp`, `Smc.h`, `tests/smc_host.cpp`,
 `README.md`, `UPSTREAM`, `LICENSE`),
@@ -399,13 +418,12 @@ off while charging goes on (a demand sleep would stop charging below the limit, 
 The physical closed level was seen on a 27.3 boot (2026-11-16: `hall: cover closed (gpio80 0, ...)`, then `cover open
 (gpio80 1, ...)` 30 s later, same pull as the installed profile), so the daily profile arms the gate (`piano-policy-lid-arm=1`).
 
-## 12. Energy Mode: the AppleSMC stand-in (step E1, 2026-11-22)
+### 12. Energy Mode: the AppleSMC stand-in (step E1, 2026-11-22)
 
-Status 2026-11-22: **built, host-tested (`smc_host: 127 checks, 0 failures`); not run on the tablet.** The first of the Energy Mode
-steps (Automatic / Low Power / High Power in System Settings > Battery). This step only makes macOS offer the three options; it
-changes no clock (the mode's mapping onto PianoThermal and PianoA830 is a later step).
+The initial 2026-11-22 E1 build passed `smc_host` with 127 checks and 0 failures. E1 exposes the three Energy Mode options to
+macOS. E2 and E3 map them to PianoThermal and PianoA830. The same-day E1 tablet observations are recorded in §12.5.
 
-### 12.1 Why an AppleSMC
+#### 12.1 Why an AppleSMC
 
 | Fact | State | Source |
 |---|---|---|
@@ -416,7 +434,7 @@ changes no clock (the mode's mapping onto PianoThermal and PianoA830 is a later 
 | The sandboxed settings extension may open the user client class `AppleSMCClient` (its entitlements' `iokit-user-client-class`) | verified (entitlements); that the sandbox checks this class name: inferred | the extension's entitlements |
 | The selected mode never reaches the kernel: powerd keeps it per power source (PM preference `LowPowerMode` 0 Automatic, 1 Low Power, 2 High Power) and posts `com.apple.system.lowpowermode` / `com.apple.system.highpowermode` | verified (27.3) | powerd `PMPowerModeHandler`, `PowerModeState` |
 
-### 12.2 What the stand-in is
+#### 12.2 What the stand-in is
 
 `package/PianoPolicy/AppleSmc.cpp` (in PianoPolicy's kext, its own personality `AppleSMC` on IOResources, inert without
 `piano-smc`): a service of class `AppleSMC` (an IOService, deliberately not an `AppleSMCFamily`) with `IOUserClientClass =
@@ -428,7 +446,7 @@ without the stand-in; level 2 also opens type 0. Every process is logged once by
 `'MSHP' = 1 ... to NAME`, its first refusal), every key once with the first process that asked; `sysctl machdep.piano_smc` has the
 counters.
 
-### 12.3 What else sees an AppleSMC (each read before the image)
+#### 12.3 What else sees an AppleSMC (each read before the image)
 
 | Client | What it does with an AppleSMC that knows only `MSHP` | State |
 |---|---|---|
@@ -440,25 +458,26 @@ counters.
 | CoreBrightness, thermalmonitord, other libSMC users | open type 0: refused at level 1 (unchanged behaviour). At level 2: CoreBrightness's thermal brightness cap reads fail -> "no cap" (-1); thermalmonitord's sensor exchange writes fail and are logged | verified (27.3) |
 | other processes | whatever opens it is in the log and in `machdep.piano_smc` | needs-boot |
 
-### 12.4 Checks on the tablet (energy-e1)
+#### 12.4 Checks on the tablet (energy-e1)
 
-`pmset -g` lists `powermode` (not `lowpowermode`) and `pmset -g cap` the High Power Mode capability, on AC and battery; the console
-shows `PianoSmc: start: AppleSMC stand-in published`, `'MSHP' = 1 ... to powerd` and to the settings extension when System Settings >
-Battery opens; the picker with three options (a camera shot); `pmset -a powermode 0/1/2` flips the two notify states (Low Power still
-reaches PianoPolicy as before); a timer sleep/wake cycle with the stand-in present; the USB console and the charger lines unchanged;
-no `AppleUSBHostResourcesTypeC` in the registry; no panic.
+The E1 checklist expected `pmset -g` to list `powermode` and `pmset -g cap` to show High Power Mode on AC and battery. Expected
+console lines were `PianoSmc: start: AppleSMC stand-in published` and `'MSHP' = 1 ... to powerd` and to the settings extension
+when System Settings > Battery opens. The checklist called for a camera shot of the three-option picker, notify-state changes
+under `pmset -a powermode 0/1/2`, and a timer sleep/wake with the stand-in present. The USB console and charger lines were to
+continue as before, with no `AppleUSBHostResourcesTypeC` in the registry and no panic.
 
-### 12.5 High Power reaches the clocks (steps E2 and E3, 2026-11-22)
+#### 12.5 High Power reaches the clocks (steps E2 and E3, 2026-11-22)
 
-Status 2026-11-22: E1 ran on the tablet (energy-e1: `pmset -g custom` lists `powermode` for AC and battery, powerd and the Battery
-settings extension read `MSHP` = 1, `pmset -a powermode 2/1/0` flips `com.apple.system.highpowermode` / `lowpowermode`, Low Power
-reached PianoThermal as before, a timer sleep/wake cycle with the stand-in). E2/E3: **built, host-tested; not run on the tablet.**
+On 2026-11-22, the `energy-e1` run showed `powermode` for AC and battery in `pmset -g custom`. powerd and the Battery settings
+extension read `MSHP` = 1. `pmset -a powermode 2/1/0` flipped the high and low power notifications, Low Power reached
+PianoThermal, and a timer sleep/wake ran with the stand-in. E2 and E3 had passed host tests at that checkpoint. The November 26
+installed policy checks are recorded above.
 - E2 (the signal): `piano-policy-agent` also waits on `com.apple.system.highpowermode` and writes `sysctl machdep.piano_policy_hpm`
   (0/1). PianoPolicy (`Policy.h`): Low Power Mode -> Power Saver (PianoThermal 1, the GPU ceiling); else High Power Mode -> High Power
   (PianoThermal 3, no GPU ceiling) whatever the power source and the profile rule, sent only when PianoThermal publishes
   `piano-thermal-profiles` >= 3 (else Balanced, said in the decision line); else the rule's own choice (Automatic: with
   `piano-policy-profile=2` Balanced, with 1 by the power source). Low Power wins when both read 1 (a transient while powerd switches).
-  The GPU keeps PianoA830's own maximum (342 MHz on the daily line) and its input floor; High Power sends no GPU ceiling.
+  High Power leaves the GPU under PianoA830's own maximum and input floor. The 342 MHz maximum applied to the early profile.
 - E3 (the clocks): PianoThermal's profile 3 (`docs/drivers/thermal.md` §14): the top levels 3532.8 / 4320 MHz as the cap (over
   sustained unless refused), no skin table, the thermal limit on top.
 - Risks: heat and draw by the nature of the mode (the thermal limit is the guard); on the Mac's 5 V input High Power can draw more

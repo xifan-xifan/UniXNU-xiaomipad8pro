@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def run(command, **kwargs):
-    result = subprocess.run(command, capture_output=True, text=True, **kwargs)
+    result = subprocess.run(command, capture_output=True, text=True, timeout=60, **kwargs)
     if result.returncode:
         raise SystemExit(result.stdout + result.stderr)
     return result.stdout
@@ -58,7 +58,8 @@ def main():
     (output / 'capacity_backend.inc').write_text(generated)
     executable = output / 'capacity_recovery_host'
     test = ROOT / 'tooling/metal/turnip-a830/capacity_recovery_host.cpp'
-    run(['xcrun', 'clang++', '-std=c++17', '-O1', '-g', '-fsanitize=address,undefined',
+    run(['xcrun', 'clang++', '-std=c++17', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
+         '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
          '-Wno-c99-designator', '-I', str(output), str(test), '-o', str(executable)])
     print(run([str(executable)]), end='')
     if args.syntax:

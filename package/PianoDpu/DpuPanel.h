@@ -94,6 +94,7 @@ struct Options {
   bool lowPower = true;   // the panel's MIPI_DSI_MODE_LPM (piano-dpu-panel-hs=1: high speed)
   bool engines = true;    // stop the timing engines (piano-dpu-panel-engines=0: DCS only)
   uint32_t displayOffMs = 20, sleepInMs = 100, sleepOutMs = 120, displayOnMs = 10;
+  bool videoOnly = false; // clear CTRL.CMD_MODE_EN at the successful stopped-host wake handoff
 };
 
 struct LinkSaved {
@@ -169,11 +170,11 @@ Sent sendDcs(Io &io, uint8_t command, const Options &o, bool commandOnly = false
     else if ((k.trig & kTrigDmaMask) != kTrigDmaSw) s.why = "a DSI controller's command DMA is not software-triggered (TRIG_CTRL)";
     if (*s.why) return s;
   }
-  const uint64_t busyEnd = io.nowUs() + kDmaBusyTimeoutUs;
+  const uint64_t busyStart = io.nowUs();
   const uint32_t busy = kStatusDmaBusy | (commandOnly ? kStatusVideoBusy : 0);
   for (unsigned l = 0; l < 2; ++l)
     while ((s.before[l].status = io.rd(dsiReg(l, kDsiStatus0))) & busy) {
-      if (io.nowUs() >= busyEnd) {
+      if (io.nowUs() - busyStart >= kDmaBusyTimeoutUs) {
         s.why = "a DSI host stayed busy for 20 ms (nothing written)";
         return s;
       }
@@ -279,6 +280,7 @@ bool programFetch(Io &io, const Fetch &fetch, bool enable, Engines &e)
 template <class Io>
 int32_t stopEngine(Io &io, unsigned intf, Engines &e, const Trace &trace)
 {
+  if (intf < 1 || intf > 2) return -1;
   ++e.stores;
   if (!io.wr(intfReg(intf, kIntfEn), 0)) {
     ++e.refused;
@@ -294,7 +296,7 @@ int32_t stopEngine(Io &io, unsigned intf, Engines &e, const Trace &trace)
     const uint64_t elapsed = io.nowUs() - t0;
     if (stopped || elapsed >= kEngineStopUs) {
       trace.sample(io, {pa, st}, slave);
-      return stopped ? int32_t(elapsed) : -1;
+      return stopped && elapsed <= INT32_MAX ? int32_t(elapsed) : -1;
     }
     trace.pause(io, 1000, true, {pa, st}, slave);
   }
@@ -335,14 +337,14 @@ bool resetPanelCtl(Io &io, const LivePath &p, Engines &e, Trace &trace)
   trace.boundary(io, TraceStep::ctlReset);
   if (io.rd(ctlReg(ctl, kCtlFlush)) || (io.rd(reset) & 1u) || !timingQuiescent(io) ||
       !panelStore(io, p, kCtlSwReset, 1, e)) return false;
-  const uint64_t end = io.nowUs() + 2000;  // the reference CTL soft reset bound
+  const uint64_t start = io.nowUs();
   do {
     if (!(io.rd(reset) & 1u)) {
       trace.sample(io);
       return io.rd(ctlReg(ctl, kCtlTop)) == p.ctlTop && (io.rd(ctlReg(ctl, kCtlLayerActive)) & 0xffu) == p.lms;
     }
     trace.pause(io, 50, false);
-  } while (io.nowUs() < end);
+  } while (io.nowUs() - start < 2000);  // the reference CTL soft reset bound
   trace.sample(io);
   return false;
 }
@@ -367,7 +369,7 @@ int32_t submitPanelRoute(Io &io, const LivePath &p, uint32_t active, uint32_t ma
 // stop one engine may still run: INTF2 alone is started at INTF1's frame start (its line counter wrapping), so the halves stay in
 // phase; INTF1 alone (INTF2 running) cannot be aligned that way and is reported.
 template <class Io>
-Engines startEngines(Io &io, const LivePath &p, const Fetch &fetch, Trace &trace)
+Engines startEngines(Io &io, const LivePath &p, const Fetch &fetch, Trace &trace, bool traceWakeHosts = false)
 {
   Engines e;
   const unsigned ctl = unsigned(p.ctl);
@@ -398,6 +400,7 @@ Engines startEngines(Io &io, const LivePath &p, const Fetch &fetch, Trace &trace
       e.why = "the bonded wake route did not flush";
       return e;
     }
+    if (traceWakeHosts) trace.hostBoundary(io, TraceStep::afterRoute);
   } else {
     wr(ctlReg(ctl, kCtlIntfFlush), kIntfFlushDsi);
     wr(ctlReg(ctl, kCtlFlush), kFlushIntf);
@@ -415,8 +418,9 @@ Engines startEngines(Io &io, const LivePath &p, const Fetch &fetch, Trace &trace
   const char *phase = nullptr;
   if (on1 && !on2) {
     const unsigned vt = p.link[0].vtotal ? p.link[0].vtotal : kVtotal120;
+    const uint64_t alignTimeoutUs = 3ull * vt * kLineNs / 1000;
     trace.step = TraceStep::align;
-    if (!waitLines(io, 0, 2, vt, 3 * vt * kLineNs / 1000, kLineNs, trace))
+    if (alignTimeoutUs > UINT32_MAX || !waitLines(io, 0, 2, vt, uint32_t(alignTimeoutUs), kLineNs, trace))
       phase = "INTF1's line counter did not wrap: INTF2 started out of phase";
     const uintptr_t irq = io.irqOff();
     wr(intfReg(2, kIntfEn), 1);
@@ -522,11 +526,12 @@ bool resetDsiHosts(Io &io, int ctl, const DsiHost (&saved)[2], Trace &trace)
 }
 
 template <class Io>
-bool setDsiMode(Io &io, const DsiHost (&saved)[2], bool commandOnly)
+bool setDsiMode(Io &io, const DsiHost (&saved)[2], bool commandOnly, bool videoOnly = false)
 {
   bool ok = true;
   for (unsigned l = 0; l < 2; ++l) {
-    const uint32_t ctrl = commandOnly ? (saved[l].ctrl & ~kCtrlVideo) | kCtrlCommand : saved[l].ctrl;
+    const uint32_t ctrl = commandOnly ? (saved[l].ctrl & ~kCtrlVideo) | kCtrlCommand
+                                      : saved[l].ctrl & ~(videoOnly ? kCtrlCommand : 0u);
     ok &= io.wr(dsiReg(l, kDsiCtrl), ctrl);
     ok &= io.rd(dsiReg(l, kDsiCtrl)) == ctrl;
   }
@@ -694,7 +699,10 @@ Result panelOn(Io &io, const LivePath &p, const Options &o, bool enginesStopped,
     r.tUs[2] = io.nowUs() - t0;
     trace.boundary(io, TraceStep::displayOn);
     r.dcs[1] = sendDcs(io, kDcsDisplayOn, o, enginesStopped);
-    if (r.dcs[1].ok) io.sleepMs(o.displayOnMs);
+    if (r.dcs[1].ok) {
+      if (enginesStopped) trace.hostBoundary(io, TraceStep::after29);
+      io.sleepMs(o.displayOnMs);
+    }
   }
   const Sent &last = r.dcs[r.step - 2];
   r.tUs[3] = io.nowUs() - t0;
@@ -709,13 +717,16 @@ Result panelOn(Io &io, const LivePath &p, const Options &o, bool enginesStopped,
           restoreDcsLink(io, l, last.before[l], false, wr);
       }
     }
-    if (!clean || !setDsiMode(io, saved, false)) return finish("could not restore the DSI hosts after wake DCS");
-    r.engines = startEngines(io, p, fetch, trace);
+    if (!clean || !setDsiMode(io, saved, false, last.ok && o.videoOnly))
+      return finish("could not restore the DSI hosts after wake DCS");
+    if (last.ok) trace.hostBoundary(io, TraceStep::afterMode);
+    r.engines = startEngines(io, p, fetch, trace, last.ok);
     r.scanoutRestored = r.engines.ok;
     if (!r.engines.ok && last.ok) {
       r.step = 4;
       return finish(r.engines.why);
     }
+    if (last.ok) trace.hostBoundary(io, TraceStep::afterEnable);
   }
   if (!last.ok) return finish(last.why);
   r.scanoutRestored = true;

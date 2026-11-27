@@ -26,15 +26,18 @@ set -euo pipefail
 D=$(cd "$(dirname "$0")/../.." && pwd); cd "$D"
 MODE=run
 case ${1:-} in --dry-run) MODE=dry; shift ;; --check) MODE=check; shift ;; esac
-STEPS=("$@"); [ ${#STEPS[@]} -gt 0 ] || STEPS=(host inputs systemos root kernel fd image)
+if [ "$#" -eq 0 ]; then set -- host inputs systemos root kernel fd image; fi
 I=${K273_INPUTS:-$D/out/inputs/k273}
 M=$I/26C5035r
 R=$I/root
-SUDO=${SUDO:-sudo}
-PY="python3 -I"
+read -r -a SUDO_CMD <<< "${SUDO:-sudo}"
+PY=(python3 -I)
 die() { echo "FAIL: $*" >&2; exit 1; }
 say() { echo "== $*"; }
-run() { if [ "$MODE" = dry ]; then echo "would run: $*"; else echo "run: $*"; "$@"; fi; }
+run() {
+  if [ "$MODE" = dry ]; then printf 'would run:'; printf ' %q' "$@"; printf '\n'
+  else echo "run: $*"; "$@"; fi
+}
 maint_img() {
   local c
   for c in "${MAINT_IMG:-}" "${PIANO_V110:+$PIANO_V110/release/boot/boot-ram-maintenance.img}"; do
@@ -42,45 +45,52 @@ maint_img() {
   done
   return 1
 }
-for s in "${STEPS[@]}"; do
+for s; do
   case $s in
     host)
       say "host"
-      bash tooling/repro/check-host.sh || { [ "$MODE" = dry ] && echo "(dry run: a real run stops here)" || die "check-host.sh reported FAIL"; }
+      if ! bash tooling/repro/check-host.sh; then
+        [ "$MODE" = dry ] || die "check-host.sh reported FAIL"
+        echo "(dry run: a real run stops here)"
+      fi
       ;;
     inputs)
       say "inputs: the pinned IPSW members from Apple's CDN"
+      input_args=(--inputs "$I")
+      if [ "${REMOVE_AEA:-0}" = 1 ]; then input_args+=(--remove-aea); fi
       case $MODE in
-        dry) $PY tooling/repro/fetch-ipsw.py --dry-run --inputs "$I" ${REMOVE_AEA:+--remove-aea} ;;
-        check) $PY tooling/repro/fetch-ipsw.py --check --inputs "$I"; $PY tooling/repro/boot-dtb.py --check ;;
-        run) $PY tooling/repro/fetch-ipsw.py --inputs "$I" ${REMOVE_AEA:+--remove-aea}
-             if [ -f out/inputs/piano-boot.dtb ] && $PY tooling/repro/boot-dtb.py --check > /dev/null; then echo "ok    out/inputs/piano-boot.dtb"
+        dry) "${PY[@]}" tooling/repro/fetch-ipsw.py --dry-run "${input_args[@]}" ;;
+        check) "${PY[@]}" tooling/repro/fetch-ipsw.py --check --inputs "$I"; "${PY[@]}" tooling/repro/boot-dtb.py --check ;;
+        run) "${PY[@]}" tooling/repro/fetch-ipsw.py "${input_args[@]}"
+             if [ -f out/inputs/piano-boot.dtb ] && "${PY[@]}" tooling/repro/boot-dtb.py --check > /dev/null; then echo "ok    out/inputs/piano-boot.dtb"
              else MI=$(maint_img) || die "no maintenance image: set PIANO_V110 (the unpacked Ubuntu v1.1.0 release) or MAINT_IMG"
-                  $PY tooling/repro/boot-dtb.py "$MI"; fi ;;
+                  "${PY[@]}" tooling/repro/boot-dtb.py "$MI"; fi ;;
       esac
       ;;
     systemos)
       say "systemos: the SystemOS window, then its file-level manifest against the pin"
       if [ "$MODE" = check ]; then
         [ -f "$R/systemos.img" ] && [ -f "$R/systemos.img.json" ] || die "no $R/systemos.img(.json)"
-        echo "the manifest check needs root: $SUDO $PY tooling/repro/volume-manifest.py --image $R/systemos.img --compare tooling/repro/pins.json"
-        $SUDO $PY tooling/repro/volume-manifest.py --image "$R/systemos.img" --compare tooling/repro/pins.json
+        echo "the manifest check needs root: ${SUDO_CMD[*]} ${PY[*]} tooling/repro/volume-manifest.py --image $R/systemos.img --compare tooling/repro/pins.json"
+        "${SUDO_CMD[@]}" "${PY[@]}" tooling/repro/volume-manifest.py --image "$R/systemos.img" --compare tooling/repro/pins.json
       else
         if [ -f "$R/systemos.img" ] && [ -f "$R/systemos.img.json" ]; then echo "kept: $R/systemos.img (remove it and its .json to rebuild)"
         else run mkdir -p "$R"
              run bash tooling/k273/make-systemos.sh "$M/141-22233-021.dmg" "$M/141-22145-021.dmg" "$M/141-22106-021.dmg" "$R/systemos.img"; fi
-        run $SUDO $PY tooling/repro/volume-manifest.py --image "$R/systemos.img" --json "$R/systemos.manifest.json" --compare tooling/repro/pins.json
+        run "${SUDO_CMD[@]}" "${PY[@]}" tooling/repro/volume-manifest.py --image "$R/systemos.img" --json "$R/systemos.manifest.json" --compare tooling/repro/pins.json
       fi
       ;;
     root)
       say "root: the root image (OS + SystemOS windows), trust bundle and seed"
-      if [ "$MODE" = check ]; then $PY tooling/repro/verify-root.py "$R" ${QUICK:+--quick} \
-           $([ -f "$R/systemos.manifest.json" ] && echo --manifest-json "$R/systemos.manifest.json")
+      root_args=("$R")
+      if [ "$MODE" = check ] && [ "${QUICK:-0}" = 1 ]; then root_args+=(--quick); fi
+      if [ -f "$R/systemos.manifest.json" ]; then root_args+=(--manifest-json "$R/systemos.manifest.json"); fi
+      if [ "$MODE" = check ]; then "${PY[@]}" tooling/repro/verify-root.py "${root_args[@]}"
       else
         [ -f out/inputs/kernel.macho.trustcache ] || [ "$MODE" = dry ] || die "no out/inputs/kernel.macho.trustcache (Known gap G2)"
         [ -n "${K273_SEED:-}" ] || [ -f out/inputs/scratch-data.img ] || [ "$MODE" = dry ] || die "no Data seed: K273_SEED or out/inputs/scratch-data.img (Known gap G3)"
         run bash tooling/k273/make-root-image.sh "$R"
-        run $PY tooling/repro/verify-root.py "$R" $([ -f "$R/systemos.manifest.json" ] && echo --manifest-json "$R/systemos.manifest.json")
+        run "${PY[@]}" tooling/repro/verify-root.py "${root_args[@]}"
       fi
       ;;
     kernel)
@@ -90,6 +100,7 @@ for s in "${STEPS[@]}"; do
         ls "$T"/out/k27/kernel-k273-*-native.macho > /dev/null 2>&1 || die "no relinked kernel in $T/out/k27"
         for k in "$T"/out/k27/kernel-k273-*-native.macho; do echo "kernel $(basename "$k") $(shasum -a 256 "$k" | cut -c1-16)..."; done
       else
+        # shellcheck disable=SC1091 # The checkout helper is sourced only for the real build.
         [ "$MODE" = dry ] || (. tooling/k27/k27-tree.sh) || die "PIANO_K27_TREE is not set (Known gap G1)"
         run bash tooling/k273/prepare-k27-tree.sh
       fi
@@ -98,15 +109,16 @@ for s in "${STEPS[@]}"; do
       say "fd: the UEFI firmware volume"
       if [ "$MODE" = check ]; then
         F=out/fd/piano-uefi-A-bundled.fd
-        [ -f "$F" ] && [ "$(cat "$F.ram-payload-first" 2> /dev/null)" = "$(shasum -a 256 "$F" | cut -c1-64)" ] \
-          && echo "ok    $F (ram-payload-first stamp matches)" || die "no stamped $F"
+        [ -f "$F" ] && [ -f "$F.ram-payload-first" ] \
+          && [ "$(cat "$F.ram-payload-first")" = "$(shasum -a 256 "$F" | cut -c1-64)" ] || die "no stamped $F"
+        echo "ok    $F (ram-payload-first stamp matches)"
       else run bash tooling/firmware/build-fd.sh; fi
       ;;
     image)
       say "image: KC, ADT and the RAM images in out/ram"
       if [ "$MODE" = check ]; then
         [ -f out/ram/build-A-bundled.json ] || die "no out/ram/build-A-bundled.json"
-        $PY tooling/bootimg/verify-ram-images.py out/ram/build-A-bundled.json
+        "${PY[@]}" tooling/bootimg/verify-ram-images.py out/ram/build-A-bundled.json
       else
         run env K273_ROOT=k273 K273_ROOT_PART="${K273_ROOT_PART:-linux_data}" PIANO_GPU="${PIANO_GPU:-2}" \
           PIANO_DATA_PERSIST=0 PIANO_RESET_AFTER="${PIANO_RESET_AFTER:-900}" bash tooling/k273/build-k273-image.sh
@@ -115,4 +127,4 @@ for s in "${STEPS[@]}"; do
     *) die "unknown step $s (host inputs systemos root kernel fd image)" ;;
   esac
 done
-case $MODE in dry) echo "dry run: nothing was fetched, built or written" ;; check) echo "PASS: ${STEPS[*]}" ;; run) echo "PASS: ${STEPS[*]}" ;; esac
+if [ "$MODE" = dry ]; then echo "dry run: nothing was fetched, built or written"; else echo "PASS: $*"; fi

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// The location-9 matrix and independent brightness correction from IOMobileFramebuffer on 27.3.
+// The composed location-9 white-point matrix and independent brightness correction on 27.3.
+// This opt-in path retains only changes relative to the boot reference (docs/drivers/dpu-m4-pcc-colour.md).
 #pragma once
 #include "DpuPcc.h"
 
@@ -22,7 +23,21 @@ class NightShift {
     }
     // M1 observed zero matrices around display blanking. A zero matrix would black out the panel.
     if (blank) return Input::blank;
-    matrix_ = d.m;
+    // Location 9 includes adaptation even with Night Shift OFF. It is not a
+    // panel calibration for this GOP framebuffer. Capture once, before any
+    // slider changes; blanking, mode sets and wake must never rebase it.
+    // There is no Night Shift enable bit in this ABI: qualification must boot
+    // with Night Shift OFF. A persisted warm startup cannot be distinguished.
+    if (!haveReference_) {
+      Matrix inverse;
+      if (!invertReference(d.m, inverse)) return Input::invalid;
+      reference_ = d.m;
+      inverseReference_ = inverse;
+      haveReference_ = true;
+    }
+    // M = relative * reference, hence relative = M * inverse(reference).
+    // Preserve explicit identity reset, and exact reference/bypass restoration.
+    matrix_ = identityInput || same(d.m, reference_) ? identity() : multiply(d.m, inverseReference_, 4 * kOne);
     if (identityInput) correction_ = kOne;
     return Input::accepted;
   }
@@ -44,7 +59,35 @@ class NightShift {
   }
 
  private:
+  static bool invertReference(const Matrix &m, Matrix &inverse)
+  {
+    // Adjugate in Q32, determinant in Q48. decodeS3132 bounds inputs to
+    // +-4, so all intermediate products fit int64_t (no FP / 128-bit divide).
+    int64_t adj[3][3];
+    for (unsigned o = 0; o < 3; ++o)
+      for (unsigned i = 0; i < 3; ++i)
+        adj[o][i] = int64_t(m.m[(i + 1) % 3][(o + 1) % 3]) * m.m[(i + 2) % 3][(o + 2) % 3] -
+                    int64_t(m.m[(i + 1) % 3][(o + 2) % 3]) * m.m[(i + 2) % 3][(o + 1) % 3];
+    int64_t det = 0;
+    for (unsigned i = 0; i < 3; ++i) det += int64_t(m.m[0][i]) * adj[i][0];
+    // Refuse a singular / small-determinant reference without consuming it;
+    // also bound its inverse below, so noise cannot be amplified arbitrarily.
+    if (det > -(1ll << 42) && det < (1ll << 42)) return false;   // |det| < 1/64
+    det /= kOne;   // Q32, avoids overflowing the inverse numerator
+    Matrix result;
+    for (unsigned o = 0; o < 3; ++o)
+      for (unsigned i = 0; i < 3; ++i) {
+        const int64_t q = adj[o][i] * kOne / det;
+        if (q < -4 * kOne || q > 4 * kOne) return false;
+        result.m[o][i] = int32_t(q);
+      }
+    inverse = result;
+    return true;
+  }
+
   Matrix matrix_ = identity();
+  Matrix reference_ = identity(), inverseReference_ = identity();
+  bool haveReference_ = false;
   uint32_t correction_ = kOne;
 };
 
