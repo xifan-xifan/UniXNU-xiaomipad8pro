@@ -1824,3 +1824,36 @@ swap 被接受、被显示、被上栅栏，拷过去的东西是黑的。dpu.md
 下一步顺序：看 DPU 变体是否出首帧（`PianoDpu:` 探测行与 `non-black` 百分比是判据）出帧才谈输入与 Data 落盘；
 仍黑则按 dpu.md 4.2 查零拷贝扫描的 DPU 管道条件，而不是继续加 GPU 参数。另外 `ssh mac-lan` 的 `zhangqideMBP.lan` 已不解析，
 `~/.ssh/config` 里 `Host mac-lan` 的 HostName 已改成 `192.168.31.183`（备份 `config.bak-20261127`）。
+
+## 2026-11-27 深夜：线上有了 root shell、Data 真的落在介质上、面板画面第一次变成文件
+
+镜像 `dc54552255da0eae…`（Windows `out\k273-ram-a830-shot\`，配方 `tooling/k273/recipes/a830-shot.sh`），
+运行 `logs/native-runs/ram-k273-a830shot-20261127-215044`，串口 `logs/usb-console/a830shot-20261127-215041-com.log`，
+921 s 自复位回 ABL，22:07:53 HyperOS 回到 adb。仍然只 `fastboot boot`，没写任何分区。详见
+[results-2026-11-27-shell-data-and-panel-still.md](docs/results-2026-11-27-shell-data-and-panel-still.md)。
+
+**卡住整条 userland 管线的原因查清了**：27.3 的 verified-root 种子里 `Library/LaunchDaemons` 只有 `amsdstat.plist` 和
+`com.apple.postfixsetup.plist`，**没有 `org.droidvm.run.0.plist`**（在 Mac 上把种子解包挂载看到的就是这两个）。boot job 是种子唯一的
+root 入口，所以 install.sh 从来没跑过，`stage.py` 也直接拒绝构建这种种子。新增 `stage.py --seed-install-root UNIT`：把指定 unit 的文件
+装到种子里的最终路径，再二次 `hdiutil attach -owners on` 用 sudo 把文件和它整条路径 `chown 0:0`（和相机 bake 的
+`camera_seed_ownership` 同一套动作）。真机的 Data 卷上 `/`、`/Library`、`/usr/local` 本来就是 root:wheel，种子只是因为不带属主打包才全是 501。
+
+结果（三条以前都没有的证据）：
+
+1. **root shell**：port 1 回 `root@Xiaomi-Pad-8-Pro ~ #`，launchd 加载了种子里的 `com.unixnu.pianousb-shell`。
+   `sw_vers` = macOS 27.3 / 26C5035r，`hw.model` = Mac17,11，501 个进程，`ifconfig -l` 有 en0，`pmset -g batt` 显示 AC。
+   踩过的坑：zsh 的提示符是 zle 画出来的（bracketed paste、反白 `#`、`[J`），靠提示符形状认端口不可靠，
+   `piano-shell.ps1` 改成让对端算 `echo PIANO_$((6*8))` 再看 `PIANO_48`（port 0 的内核 monitor 会回显输入，所以只能用会被求值的串）；
+   取文件用 base64 分块，48 KiB 一块会少约 8 KiB，**12 KiB 一块逐字节正确**。
+2. **Data 落盘**：`machdep.piano_data_io` 报 `state=3 … seed=bb6dd1c3 store_seed=bb6dd1c3 persist=2 generation=3
+   store_wr=87889/11818089us`——不再是 `state 7 (kept)` + volatile。种子身份 `bb6dd1c365a6a827`。
+   已在 Data 里留下 `/private/var/db/piano-persist.txt`（内容 `piano-20261127-a830shot`）和 `/private/tmp/{shot.png,shot320.png,diag.txt}`。
+3. **面板画面**：`gop-shot` 出 `source=boot format=BGRA layout=8-bit`，`/private/tmp/shot.png` 8,714,178 字节；
+   在平板上 `sips -Z 320` 后从线拉回（113,893 字节，sha256 `2f5f062b…`，Windows `out\shot320-b1.png`）：
+   菜单栏 + 壁纸 + Dock + 右上角一个通知。**桌面第一次以文件形式被看到**。
+   `source=boot` 这点要追：`piano-dpu-flip=4` 下 DPU 应该已 latch，按 native-gop-display.md 9 应该走 IOSurface 而不是 GOP 映射。
+
+**下一步（正在进行）**：同一枚种子、去掉 `data-store-replace=1` 再启一次（`SHOT_REPLACE=keep bash tooling/k273/recipes/a830-shot.sh`，
+Mac `out/build-a830-shot3-8748.log`，完成标志 `A830-SHOT-8748-BUILD-DONE`），读回上面那几个文件：期望 `NativeRamBlock: Data store state 2`。
+读回通过后，才是输入（触摸/键盘/背光，参考 `tooling/k27/build-desktop-images.sh` 的 desk 档案）、三次冷启动、两轮 Android↔macOS、硬复位恢复。
+另外记下这一版跑起来后出现的 `PianoA830: gpu BoAlloc refused … 16777216 status=0xe00002bd`（池 805 MiB/1 GiB）。
