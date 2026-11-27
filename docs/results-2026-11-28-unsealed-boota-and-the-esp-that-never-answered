@@ -1,0 +1,64 @@
+# 2026-11-28: an unsealed boot_a costs the RAM-boot channel too, and the ESP was never the volume UniXNU booted from
+
+Two things this unit taught us, both from the same persistent pair (`boot-piano-macos-persistent-v5-sealed.img` 8f0a83f7...,
+`esp-7ccdd855-k273.img` 5626a411...).
+
+## 1. `padded` was not enough: ABL's verifier needs a vbmeta struct in `boot_a`
+
+The pair went on cleanly (write, whole-partition read-back, `check` green, GPT and every other partition unchanged), then
+
+- the first `fastboot reboot` (01:22:15) and a second one (01:24:50) both came back to ABL fastboot about **6.4 s** after the
+  command, with no `piano-uefi` enumeration (Windows: `DEVPKEY_Device_LastArrivalDate` for
+  `USB\VID_18D1&PID_D00D\PIANO-UEFI` still read 00:37:17, the last RAM boot) and no XNU console port;
+- ABL then reported `slot-unbootable:a: yes` with `slot-retry-count:a: 6` still full, i.e. not retry exhaustion but a refused
+  load;
+- and `fastboot boot` of the **release maintenance image**, which had booted minutes earlier, failed with
+  `Failed to load/authenticate boot image: Load Error`. It kept failing across an ABL restart. ABL authenticates the boot
+  device's image as part of the RAM-boot path, so an unsealed `boot_a` takes the diagnostic channel down with it.
+
+Signing was the missing half, and `pad-boot-image.py` only does the other half. This unit does not hold the key that signed
+the maintainer's installed Ubuntu set (`f5151930...`), but it does hold its own AVB key (`out/keys/piano-boot-v4-local.pem`,
+public key sha1 `aae7ce67628a4ef3252be20bc507be682ae98750`, used for the 2026-11-26 selector images); this tablet's own stock
+`boot_a` is signed by `de5be2a57e0cfbb83ec5c9523806eb6b7a72f809` (read with `avbtool info_image`, rollback index
+1788220800). **New tool** [seal-boot-image.py](../tooling/persist/seal-boot-image.py) adds the hash footer with the host key,
+over the stock 3.0.309 rollback index and the stock three `com.android.build.boot.*` properties, checks the result with
+`verify_image`, and records it under the `signed` ledger of `out/persistent/boot-v5-sealed.json`, so `boot-a`, `ram-boot-a`
+and friends take it without `--allow-unsigned-boot`. It is a self-consistent seal, not a trusted one: `vbmeta` is untouched,
+so ABL still shows the orange state for `boot_a`. What a footer changes is that the verifier gets a structurally valid vbmeta
+instead of nothing.
+
+After the sealed image was written (`fastboot flash boot_a`, read back through the maintenance image: `map` reported
+`8f0a83f777eeba59...`), the cold boot behaved differently - ABL held the device for **67 s** instead of 6.4 s, and
+`fastboot boot` of the maintenance image worked again. The slot was returned with `fastboot --set-active=a`, which is what
+`tooling/native/ensure-hyperos.ps1` does for exactly this state; it also reset `slot-successful:a` to `no`, so
+`slot-success-crc` in maintenance is still owed.
+
+## 2. The ESP never answered: `config: none found, using built-in configuration`
+
+`ram-boot-a` with the sealed image is the designed no-write test of exactly this pair, and its UEFI log (`oem dump` on the
+in-RAM `piano-uefi` device) says what happened:
+
+```text
+UNIXNURAMDISK: initrd 0xB5E4A000-0xB7FFE7DC rounded to 0x21B4800 bytes   (ABL hands over the vendor ramdisk)
+UNIXNU: config: enumerate Block I/O Success
+UNIXNU: config: matched RAM handle D678AD98, Block I/O Success
+UNIXNU: config: RAM Simple File System Unsupported
+UNIXNU: config: RAM TOML read Unsupported
+UNIXNU: config: none found, using built-in configuration
+UNIXNU: config: 4 entries, 0 drivers, 0 dt patches, ...
+UNIXNU: menu: shown 4 entries, default 0 'exit', timeout 10000 ms, input yes
+```
+
+`UniXNUConfigLoad` picks a volume by `LocateHandleBuffer (ByProtocol, gEfiSimpleFileSystemProtocolGuid)`. At that moment the
+**only** file-system handle in the firmware was the RAM disk ABL had just handed over - the ESP on UFS LUN 0 was not offered
+at all, so pass 1 had nothing to try and UniXNU fell back to its built-in configuration (`default 0 'exit'`), which is why
+the boot neither reached XNU nor stayed at a menu. The DEBUG ring around it shows `DiskIoDxe`, `PartitionDxe` and `Fat.efi`
+being loaded in the same late batch, and the shell's `Block IO Devices:` listing in the same dump reads `No Media`.
+
+[0004-UniXNULib-config-look-again-for-the-ESP-on-UFS.patch](../firmware/patches/unixnu/0004-UniXNULib-config-look-again-for-the-ESP-on-UFS.patch)
+therefore connects every controller once (`gBS->ConnectController (NULL, NULL, NULL, TRUE)`, what the boot manager's
+connect-all does) and re-looks for the configuration volume up to ten times, 200 ms apart, logging how many file-system
+handles it can see on each try. The count is the point: the next run says either "the ESP appeared late" (and the retry
+fixes the boot) or "one handle, every try" (and UFS in this firmware is the thing to fix).
+
+**Built, to be run:** the FD rebuilt with 0004, then `ram-boot-a` with the same sealed image.

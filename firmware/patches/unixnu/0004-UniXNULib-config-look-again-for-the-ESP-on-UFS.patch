@@ -1,0 +1,48 @@
+--- a/package/UniXNUPkg/Library/UniXNULib/Config.c	2026-11-28 01:52:47
++++ b/package/UniXNUPkg/Library/UniXNULib/Config.c	2026-11-28 01:52:47
+@@ -1497,6 +1497,8 @@
+ // UniXNU-piano: the vendor node of UniXNURamDiskDxe's block device, the FAT payload a boot image carries as its ramdisk
+ // (UniXNURamDiskDxe.c mDevicePath). Its file system handle has this node first: the payload has no partition table.
+ //
++#define PIANO_CONFIG_RETRY_US  200000  // UniXNU-piano: 200 ms between looks for the ESP on UFS
++
+ STATIC CONST EFI_GUID  mRamPayloadVendorGuid = {
+   0xA9C6827C, 0x1BD8, 0x410C, { 0x88, 0x5A, 0xC4, 0x65, 0x00, 0xF7, 0xD8, 0x36 }
+ };
+@@ -1584,6 +1586,7 @@
+   UINTN                      Count;
+   UINTN                      Index;
+   UINTN                      Pass;
++  UINTN                      Attempt;
+   BOOLEAN                    Loaded;
+   TOML_NODE                  *Root;
+   CHAR8                      Error[96];
+@@ -1599,8 +1602,27 @@
+     Loaded = TryVolume (Config, Self->DeviceHandle);
+   }
+ 
+-  if (!Loaded && (Config->Error[0] == '\0')) {
++  //
++  // UniXNU-piano: ABL hands the boot image's ramdisk over as a RAM block device, so a file system handle exists here
++  // before UFS has published anything - and on piano-7ccdd855 (2026-11-28, 01:47) that was the only one: the ESP on UFS
++  // LUN 0 was never offered, UniXNU fell back to its built-in configuration ("config: none found") and no XNU entry of
++  // the installed ESP ever ran. Connect every controller, so the partition and FAT drivers get their chance at the UFS
++  // block devices, and keep looking for a short while: the ESP is what this firmware is meant to boot from.
++  //
++  gBS->ConnectController (NULL, NULL, NULL, TRUE);
++
++  for (Attempt = 0; !Loaded && (Config->Error[0] == '\0') && (Attempt < 10); Attempt++) {
++    if (Attempt != 0) {
++      gBS->Stall (PIANO_CONFIG_RETRY_US);
++    }
++
+     Status = gBS->LocateHandleBuffer (ByProtocol, &gEfiSimpleFileSystemProtocolGuid, NULL, &Count, &Handles);
++    if (EFI_ERROR (Status)) {
++      UniXNULog ("config: no file system handles (%r)", Status);
++      break;
++    }
++
++    UniXNULog ("config: %d file system handles, try %d", (UINT32)Count, (UINT32)Attempt);
+     if (!EFI_ERROR (Status)) {
+       //
+       // UniXNU-piano: pass 0 tries only the RAM payload's volume, pass 1 every other volume in firmware order. The UFS
