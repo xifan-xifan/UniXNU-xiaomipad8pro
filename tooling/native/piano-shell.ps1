@@ -46,14 +46,18 @@ try{
   $shell.DiscardInBuffer()
   $shell.Write("stty columns 500 2>/dev/null; export PS1='P> '`r")
   ReadQuiet $shell 4000 900 | Out-Null
-  $shell.Write($Command + "; echo " + $sentinel + '`$?' + "`r")
+  $shell.Write(([string][char]3) + "`r")
+  Start-Sleep -Milliseconds 150
+  $shell.DiscardInBuffer()
+  $shell.Write($Command + "; echo " + $sentinel + "`r")
   $sb=New-Object Text.StringBuilder; $end=(Get-Date).AddSeconds($WaitSeconds)
   while((Get-Date) -lt $end){
     $chunk=ReadQuiet $shell 4000 1200
-    if($chunk){ $sb.Append($chunk) | Out-Null; if($sb.ToString() -match [regex]::Escape($sentinel)){ break } }
+    if($chunk){ $sb.Append($chunk) | Out-Null; $nc = [regex]::Matches($sb.ToString(), [regex]::Escape($sentinel)).Count; if ($nc -ge 2) { break } }
   }
   $text=[regex]::Replace($sb.ToString(), [char]27 + '\[[0-9;?]*[a-zA-Z]', '')
   if($OutFile -ne ''){ [IO.File]::AppendAllText($OutFile, $text) }
   $text
-  if($text -notmatch [regex]::Escape($sentinel)){ '(no ' + $sentinel + ' within ' + $WaitSeconds + ' s)' }
+  $nfin = [regex]::Matches($text, [regex]::Escape($sentinel)).Count
+  if ($nfin -lt 2) { '(no ' + $sentinel + ' within ' + $WaitSeconds + ' s)' }
 }finally{ $shell.Close() }
