@@ -44,7 +44,12 @@ if matches(best):
         printed = re.search(rb'mirroring the console to 0x[0-9a-f]+ [(][+]0x([0-9a-f]{6,8})[)]', raw[base:base + 4096])
         def agree(c):
             return sum(1 for x, y in zip(raw[base:base + 8192], raw[base + c:base + c + 8192]) if x == y)
-        for want in ([int(sys.argv[3], 16)] if len(sys.argv) > 3 else []) + ([int(printed.group(1), 16) - base] if printed else []) + [size - base]:
+        # The dump is usually pstore-console-size while the mirror is that minus the retained reset-reason block (PRR_BYTES),
+        # so size - 0x10000 is the stride to try before size itself: the 420 s run of 2026-11-27 was read at 661294 that way, and
+        # a byte-noisy copy 0 hides the printed line from the regex above, which left only the wrong stride as a candidate.
+        cands = ([int(sys.argv[3], 16)] if len(sys.argv) > 3 else []) + (
+            [int(printed.group(1), 16) - base] if printed else []) + [size - 0x10000 - base, size - base]
+        for want in cands:
             if want // n * n + base > size:
                 continue
             if agree(want // n) > agree(cap):
