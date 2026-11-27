@@ -24,6 +24,28 @@ with open(sys.argv[1], encoding='utf-8') as lock:
     print(tomllib.loads(lock.read())['pin'][sys.argv[2]][sys.argv[3]])
 PY
 }
+refit_patches() {
+  # The tree carries exactly these deltas, in name order. Two deltas in one file mean a patch does not reverse-check
+  # while a later one is applied (0001 and 0004 both edit Config.c), so the patched state is judged as a set: when
+  # every patch reverse-checks the deltas are in and nothing moves; otherwise the set is taken back in reverse name
+  # order and re-applied forwards, which is the sequence a fresh checkout gets. Rerun-safe, and it fails on a patch
+  # that genuinely does not apply.
+  local tree=$1 p
+  shift
+  local -a fwd=("$@") rev=()
+  local i
+  for (( i=${#fwd[@]}-1; i>=0; i-- )); do rev+=("${fwd[$i]}"); done
+  for p in "${fwd[@]}"; do
+    git -C "$tree" apply --reverse --check "$p" 2>/dev/null && continue
+    for p in "${rev[@]}"; do
+      git -C "$tree" apply --reverse --check "$p" 2>/dev/null && git -C "$tree" apply --reverse "$p"
+    done
+    break
+  done
+  for p in "${fwd[@]}"; do
+    git -C "$tree" apply --reverse --check "$p" 2>/dev/null || git -C "$tree" apply "$p"
+  done
+}
 M=$R/Mu-Silicium-piano
 if [ ! -d "$M/.git" ]; then
   url=$(pin Mu-Silicium git)
@@ -56,11 +78,11 @@ if [ ! -d "$P" ]; then
   git -C "$R/piano-uefi" worktree add -q --detach "$P" "$commit"
   for p in "$D"/firmware/patches/*.patch; do git -C "$P" apply "$p"; done
 fi
-for p in "$D"/firmware/patches/*.patch; do git -C "$P" apply --reverse --check "$p" 2>/dev/null || git -C "$P" apply "$p"; done
+refit_patches "$P" "$D"/firmware/patches/*.patch
 # Mu-Silicium deltas (SEC keeps the boot loader's x0 = DT in the entry-argument HOB UniXNURamDiskDxe reads).
-for p in "$D"/firmware/patches/mu-silicium/*.patch; do git -C "$M" apply --reverse --check "$p" 2>/dev/null || git -C "$M" apply "$p"; done
+refit_patches "$M" "$D"/firmware/patches/mu-silicium/*.patch
 # UniXNU core deltas (UniXNULib: a boot image's RAM payload wins over a FAT ESP on UFS; docs/persistent-boot.md).
-for p in "$D"/firmware/patches/unixnu/*.patch; do git -C "$R/UniXNU" apply --reverse --check "$p" 2>/dev/null || git -C "$R/UniXNU" apply "$p"; done
+refit_patches "$R/UniXNU" "$D"/firmware/patches/unixnu/*.patch
 mkdir -p "$M/Resources/MuPatches"
 ln -sfn "$P/uefi/pianoPkg" "$M/Platforms/Xiaomi/pianoPkg"
 ln -sfn "$P/uefi/piano.toml" "$M/Resources/Configs/piano.toml"
