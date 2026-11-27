@@ -1736,3 +1736,27 @@ nightly Rust + `rust-src` 正在从网络快的机器下载再拷过去（Mac �
 顺带记一句历史资产：WSL 发行版 `UbuntuPiano` 里有上一轮深度任务的树（`/root/piano-native`：`k27-tree`、`UniXNU`、`device` 等）
 和 2026-11-14 的 `NativeAdrenoMetal*.bundle`，但那些 `gpu-build.json` 全是 `target=ios chip=a740 mesa=85fda3b364`，
 是 iPadOS/Adreno740 那条，不能当 native A830 的插件用。
+
+## 2026-11-27 晚：桥的输入锁定到一条自洽的线，脚本已移植到 macOS 并开跑
+
+上一条里那组输入（NativeMetal main 7 个补丁、wip/droidvm 28 个、`963f0e64`）是错的搭配，作废。真正的账本：
+k27 树的 `configs/sources.lock.json` 把 `sources/UniXNU` 钉在 `Droid-VM/UniXNU baeb8f0c`（其 json 钉 translator
+`720ef1ce`，子模块 `drivers/NativeMetal 6dcd4cbb` 只有 5 个 bridge 补丁且没有 `shaders/scanout_convert.ll`），
+比脚本本身旧，按它照抄缺文件。我们自己的 Mesa/Turnip 是从 `527b8b7` 编的，而同一个 `527b8b7` 把
+`drivers/AdrenoMetal` 钉在 `fb063de55cbb5429bde12a8bb55538726f8b1a0f`（就是 UPSTREAM 给插件前端记的那个 `fb063de`）、
+带 `patches/metal2vulkan` 21 个、其 json 钉 translator `624bab3918de5b978e1101517abca2b4fa426565`。
+桥和前端同修订，正是 `build-turnip-a830.sh` 要的（`U=$T/drivers/AdrenoMetal`）。这条线三个哈希逐一对上，
+24 + 21 + 我们 1 个补丁按顺序全部干净应用。两点教训：本机 `core.autocrlf=true` 让 `out/deps-mac/AdrenoMetal` 里的
+`.patch` 变成 CRLF，所以对不上源码——补丁必须按 LF 传（GitHub 源归档或 `checkout-index -c core.autocrlf=false`）；
+上游脚本排除的 `0020` 在这条线上与 board 的 `0013-trim-kept-memory.patch` 耦合，去掉它后者就贴不上，
+所以整串都要进，同时它依赖的 Mesa 侧 `turnip-render-mode-for-attachment-memory.patch`（`build-mesa-work.sh`
+报的两条 leftover 之一）也得补进 Mesa 工作树并重编 Turnip，这一步在插件上平板之前必须做。
+移植脚本 `tooling/metal/build-metal-bridge-macos-host.py`（只换工具链与 SDK：Homebrew LLVM 23.1.6 的
+`llvm-as/clang/llvm-ar`、Xcode macOS 27.2 SDK、`/Users/zhangqi/rust-nightly` 的 nightly `6c709eb42`（2026-11-25）带
+`rust-src`；源修订、补丁集、target spec、`RUSTFLAGS`、release profile 一律照上游），
+pin 记录 `tooling/metal/metal2vulkan-pin.json`，证据
+[results-2026-11-27-metal-bridge-inputs-pinned-to-one-line.md](docs/results-2026-11-27-metal-bridge-inputs-pinned-to-one-line.md)。
+Mac 上 `/tmp/bridge-build.log` 与 `$K/out/metal/bridge/build.log` 跟进度，产物落在
+`$K/out/metal/bridge/libnative_metal_bridge.a`；`$K` = `/Users/zhangqi/Codex/k27-tree`。
+下一步顺序：桥编出来 → `build-turnip-a830.sh` 出 `NativeAdrenoMetal.bundle` → 补 Mesa 那条 render-mode 补丁重编
+`libvulkan_freedreno.dylib` → 用 `PIANO_EXTRA_KEXTS=.../out/k27/kext/PianoA830.json PIANO_A830_METAL=1` 做 seed 上机。
