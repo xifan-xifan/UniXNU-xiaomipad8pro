@@ -143,6 +143,22 @@ def set_boot_commands(job, commands, early=()):
     return script
 
 
+def copy_bundle(source, dest):
+    """The bundle, byte for byte, without shutil.copytree. copytree ends every entry with copystat, and chflags or xattr on
+    the mounted seed's volume is denied here (EPERM on this host, 2026-11-27) even though the bytes themselves land, so the
+    modes stay to the chmod below and the tags to the xattr -cr after it."""
+    for root, _, names in os.walk(source):
+        rel = Path(root).relative_to(source)
+        (dest / rel).mkdir(parents=True, exist_ok=True)
+        for name in names:
+            one = Path(root) / name
+            into = dest / rel / name
+            if one.is_symlink():
+                into.symlink_to(os.readlink(one))
+            else:
+                shutil.copyfile(one, into)
+
+
 def data_volume(container_disk):
     """The device of the APFS volume named Data (else the first volume) of the container on CONTAINER_DISK."""
     listing = plistlib.loads(run('diskutil', 'apfs', 'list', '-plist', capture_output=True).stdout)
@@ -220,7 +236,7 @@ def main():
                 target = mount / GPU_BUNDLES
                 target.mkdir(parents=True, exist_ok=True)
                 shutil.rmtree(target / bundle.name, ignore_errors=True)
-                shutil.copytree(bundle, target / bundle.name, symlinks=True)
+                copy_bundle(bundle, target / bundle.name)
                 for path in [target, *(target / bundle.name).rglob('*'), target / bundle.name]:
                     os.chmod(path, 0o755 if path.is_dir() or os.access(path, os.X_OK) else 0o644)
                 # The build Mac tags files its sandboxed tools write (com.apple.provenance): not carried into the tablet's volume.
