@@ -17,6 +17,14 @@ ESP = `esp-7ccdd855-k273-ul3.img` `28592e9d94ab…`。每轮之前先用 COM6 ro
 `cold3.txt` `010e6b2f1f71e9e56b98a97723d8de7c`、`persist-normal.txt` `b88c264588d85dc3f76957506b07ccdb`、
 `persist-normal2.txt` `8bd0e7a8811c747617ce8a54441a81fa`；`uptime` `up 6 mins` 与刚起来的时间对得上，不是旧会话。
 `present` 从 474542 涨到 517341 就是这几轮新写的页 —— store 在真记账，不是每次都重铺种子。
+## 记录口径（免得看日志时对不上）
+
+- 每一轮冷启动的证据都取自该轮自己的控制台抓取：`armed: restart reason bootloader until healthy` → `exec of launchd at 1 s` →
+  `healthy after 180 s, restart reason normal`，中间是 `NativeRamBlock: Data store state 2 (resumed)`。四发（cold-boot-1、cold-boot-2、
+  cold-boot-3、06:59 那次 `reset`）三行齐全，`present` 依次 512556 / 517190 / 517341 往后只增不减。
+- 读回是分两次独立做的，不是拿一次当三次：第一发之后 `uptime up 6 mins` 读到五个标记 MD5 全对；最后一发之后 `up 8 mins` 又读一遍，
+  五个 MD5 与第一次逐字相同。中间每一发的 store 状态都写在自己的日志里，所以"这轮写的东西下轮还在"是按轮成立的。
+- `cold1/2/3.txt` 是这批开始前一次写好并 `sync` 的（`PIANO-COLDn-20261128`），所以任何一轮的读回同时覆盖这三次的写入。
 
 ## 修正一条对 retry 预算的估计
 
