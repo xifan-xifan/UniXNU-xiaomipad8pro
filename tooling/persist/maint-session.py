@@ -35,6 +35,9 @@ Order (sessions as in the plan; s = the maintenance RAM image, a = ABL fastboot)
 The pair on the tablet stays bootable: an ESP whose ADT asks for a larger RAM window than boot_a's DarwinBoot takes never boots,
 so esp-final refuses such an ESP until boot-a has written an FD that takes it, and boot-a / rollback boot-a refuse an older FD
 while such an ESP is on the tablet (rollback esp-final first). Each is checked against the tablet's bytes, not the state file.
+A new Data seed is a one-time switch (build-esp.py --replace-data, build-k273-esp.py --arg data-store-replace=HEX8): its first boot
+initialises the store from that seed and what the old store held is not carried over. Such an ESP is written only with --replace-seed,
+which first backs up the store header it replaces and still refuses a store that differs in anything other than its seed identity.
 Never used: fastboot flash, erase, set_active, any oem to ABL; nothing is written to xbl, abl, tz, hyp, vbmeta, dtbo, persist or
 any _b partition (boot_b is backed up only); vendor_boot_a and init_boot_a are only read and backed up. No password anywhere.
 The tablet side is tooling/persist/tablet.sh (served over HTTP from the host's USB-link address, a fixed list of files, sha256
@@ -1065,6 +1068,52 @@ def bound_store(s, record):
                   f'{header["bound_lba"]}) IS the one this ESP resumes (seed {seed["identity_sha256"][:16]})')
 
 
+def need_bound_store(s, record):
+    """The bound-store gate of an ESP write: the store on the tablet must be the one this ESP resumes.
+
+    An ESP built with data-store-replace (build-esp.py --replace-data, or build-k273-esp.py --arg data-store-replace=HEX8) is a
+    deliberate one-time switch to a NEW seed: its first boot initialises the store from that seed and what the old store held is not
+    carried over (docs/data-store.md section 9). Until that first boot the tablet's store is by design not the record's seed, so
+    bound_store fails; this allows that one difference and only it. The record must name the seed it replaces (data_store.replace:
+    1 for any other seed's store, or its 8 hex digits), --replace-seed must say so on the command line, the window and the bound LBA
+    must already be the record's, and the header whose store is about to be replaced is backed up under its own key. Any other
+    problem bound_store found (the window at another LBA, a header bound elsewhere, no valid header) stays a refusal, as does a
+    switch that names a store other than the one on the tablet.
+    """
+    ok, text = bound_store(s, record)
+    if ok is None or ok:
+        s.log(('  check ' if ok is None else '  ok    ') + text)
+        return
+    replace = str(((record or {}).get('data_store') or {}).get('replace') or '')
+    seen = s.state.get('esp_store') or {}
+    header = seen.get('header') or {}
+    problems = seen.get('problems') or []
+    if not replace:
+        raise Stop(text + f': {record["image"]} carries no data-store-replace, so every boot of it keeps that store and runs the '
+                          "owner's Data volatile (build it with the store's base, or with --replace-data when Data is to begin again)")
+    if not s.a.replace_seed:
+        raise Stop(text + f': {record["image"]} declares data-store-replace={replace}, which starts that store over; a session '
+                          'writes it only with --replace-seed')
+    if len(problems) != 1 or not problems[0].startswith('it is of seed '):
+        raise Stop(text + ': a store switch may differ in the seed identity alone')
+    now = header.get('identity') or ''
+    if replace != '1' and not now.lower().startswith(replace.lower()):
+        raise Stop(f'data-store-replace={replace} does not name the store on the tablet ({now[:16]}): not the intended switch')
+    if not s.execute:
+        s.log(f'  check the store of seed {now[:16]} at LBA {seen["first_lba"]} on {seen["partition"]} is the one '
+              f'data-store-replace={replace} starts over from {record["seed"]["identity_sha256"][:16]} (--replace-seed)')
+        return
+    _, start, _ = part_geometry(s, seen['partition'])
+    s.backup('k273-store-header', seen['node'], seen['first_lba'] - start, 1, B,
+             f'LUN 0 LBA {seen["first_lba"]} on {seen["partition"]}: the store header of seed {now[:16]} that '
+             f'data-store-replace={replace} starts over')
+    s.save(store_replace={'from': now, 'to': record['seed']['identity_sha256'], 'esp': record['image'],
+                          'partition': seen['partition'], 'first_lba': seen['first_lba'], 'replace': replace})
+    s.log(f'  ok    the store of seed {now[:16]} at LBA {seen["first_lba"]} on {seen["partition"]} is the one '
+          f'data-store-replace={replace} starts over: the first boot of {record["image"]} initialises a new store of seed '
+          f'{record["seed"]["identity_sha256"][:16]} there (its header is backed up as k273-store-header)')
+
+
 def root_manifest(s, part):
     """Block 0 of partition PART: (sha256, the SHNGROOT manifest's image bytes or None, the first 8 bytes); a dry run (None, None, None)."""
     node, _, _ = part_geometry(s, part)
@@ -1902,8 +1951,7 @@ def write_esp(s, image_name):
     current = s.state.get('store_new') or {}
     if esp_store(record):
         # the 27.3-only ESP (build-k273-esp.py): the store it resumes is on its own partition, bound to its LBA; read it now
-        ok, text = bound_store(s, record)
-        s.need(ok, text)
+        need_bound_store(s, record)
     elif s.state.get('gpt_state') == 'new' and current.get('state') == 'valid' and not common.store_usable(current, record['seed']) \
             and not (record.get('data_store') or {}).get('replace'):
         raise Stop(f'{record["image"]}: its seed {record["seed"]["identity_sha256"][:16]} is not the seed of the store at LBA {store_new(s)} '
@@ -1965,8 +2013,7 @@ def esp_delta(s):
     now = s.region_sha(esp, 0, blocks, MiB, name='esp-now')
     s.need(now == old['sha256'] if s.execute else None, f'the tablet\'s ESP = the installed {old_name}: {now}')
     if esp_store(record):
-        ok, text = bound_store(s, record)
-        s.need(ok, text)
+        need_bound_store(s, record)
     window = s.esp_window(record)
     if window and window > common.OLD_DARWINBOOT_WINDOW_MAX:
         s.pair(s.tablet_boot_a(), record, f'{record["image"]} asks for {window >> 20} MiB')
@@ -2133,8 +2180,7 @@ def check_step(s):
                   f'(map ran without --esp {rec["image"]}: nothing to compare with)')
         if s.execute:
             s.need(image is not None, f'{part} block 0 is a root manifest (the root {rec["image"]} mounts)')
-        ok, text = bound_store(s, rec)
-        s.need(ok, text)
+        need_bound_store(s, rec)
         return
     h = s.t('peek', rootfs, rel(store_new(s)), 0, 8)
     if h:
@@ -3271,6 +3317,11 @@ def main():
     p.add_argument('--dev-image', default=str(D / 'out/ram-precedence/boot-piano-macos-ram-A-bundled.img'))
     p.add_argument('--session', type=Path, default=OUT / 'session')
     p.add_argument('--new-backup', action='store_true', help='start a new NAS backup set (the old one stays on the NAS)')
+    p.add_argument('--replace-seed', action='store_true',
+                   help='let step esp/esp-delta/esp-final write an ESP whose record declares data-store-replace: its first boot '
+                        'starts the Data store over from its own seed and what the old store held is not carried over (the owner '
+                        'decided that Data begins again). The store header being replaced is backed up first; a store that differs '
+                        'in anything but the seed identity stays a refusal.')
     p.add_argument('--rootfs-piece-mib', type=int, default=4096, metavar='MIB',
                    help='rootfs-backup: the size of a piece (each its own stream, checked, retried, resumed)')
     p.add_argument('--rootfs-compress', choices=('gzip', 'none'), default='gzip',

@@ -42,6 +42,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -292,6 +293,10 @@ def build(a, base_json, base, base_img, image):
         if lba is None or named.get('data-persist') != '2':
             raise SystemExit(f'{a.entry}: its line has no bound read-write store (data-store-lba, data-persist=2)')
         common.check_store_size(seed, args)
+        replace = named.get('data-store-replace')
+        if replace is not None and replace != '1' and not re.fullmatch(r'[0-9a-f]{8}', replace):
+            raise SystemExit(f'data-store-replace={replace}: 1 (any other seed\'s store) or the store\'s seed as 8 hex digits '
+                               '(the 8 hex digits NativeRamBlock prints)')
         if a.expect_seed and not seed['identity_sha256'].startswith(a.expect_seed.lower()):
             raise SystemExit(f'{a.entry}\'s seed is {seed["identity_sha256"][:16]}, not {a.expect_seed}')
         if a.expect_store_lba is not None and lba != a.expect_store_lba:
@@ -463,7 +468,8 @@ def build(a, base_json, base, base_img, image):
                      **({'added_from_firmware_dir': sorted(added)} if added else {})},
         'seed': seed,
         'store': store,
-        'data_store': {'seed': seed['identity_sha256'], 'partition': part, 'first_lba': lba, 'bound': True, 'replace': None,
+        # the one-time switch as the line carries it: maint-session.py writes such an ESP only with --replace-seed
+        'data_store': {'seed': seed['identity_sha256'], 'partition': part, 'first_lba': lba, 'bound': True, 'replace': replace,
                        'kc_has_store_guard': store_guard},
         'linux_rootfs': 'no entry uses it (checked: no entry names it, every UFS root and store is on ' + part + ')',
         'dropped': dropped,
@@ -472,6 +478,10 @@ def build(a, base_json, base, base_img, image):
                       any(pin['private'] and n == f'{firmware.ESP_DIR}/{pin["path"]}' for pin in fw) else v) for n, v in want.items()},
         'unixnu_toml': new_text,
     }
+    if replace:
+        print(f'NOTE data-store-replace={replace}: the FIRST BOOT of this ESP starts the Data store over from seed '
+              f'{seed["identity_sha256"][:16]} ({seed["pages"]} pages); what the store of the seed it replaces holds is not carried '
+              'over, and that earlier ESP boots Data volatile afterwards (docs/data-store.md section 9)')
     common.write_json(image.with_suffix('.json'), record)
     print(f'{image.name}: {record["bytes"]} bytes sha256 {record["sha256"]}; from {base["image"]}: {a.entry} ({len(line)} bytes, '
           f'byte for byte), payload {payload_dir.removeprefix(ROOT)}, store on {part} LBA {lba}-{store["last_lba"]} bound, seed '
