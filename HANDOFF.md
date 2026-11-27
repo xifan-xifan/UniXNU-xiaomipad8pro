@@ -1784,3 +1784,14 @@ Turnip 也已带 `0016` 重编：`libvulkan_freedreno.dylib` 17,770,472 B `c360c
 出我们自己的 `out/turnip-a830/NativeAdrenoMetal.bundle`，再 `PIANO_GPU=2`（`configs/k27-native-kexts.txt` 里已经有 PianoA830，脚本会自动
 staging 插件+trustcache）做 RAM 镜像，`fastboot boot` 看 AGXAccelerator 是否被匹配、WindowServer 是否能起。注意启动行预算：现在 985 字符，
 加 `piano-gpu=2 piano-gpu-delay=20` 是 997，DarwinBoot 上限约 1000，要减参数就明确减哪一个。
+
+### 补：gen80000 的四个固件要按 pin 备齐（ZAP 是坑）
+
+`out/build-a830-8748.sh`（Mac `out/` 下，A830 RAM 镜像配方）第一次跑到 `stage-piano-gpu-firmware` 就停：
+`.../xiaomipad-8pro-mainline/firmware/qcom/sm8750/xiaomi/piano/gen80000_zap.mbn` 报"缺或与 pin 不符"。
+不是缺文件——那个 mainline 目录里的 ZAP 是 `e73f3a4c…`（12,088 B），pin 要的是 piano 自己签的 `bb942413…`（同尺寸，不同内容）。
+本机已有正确那份：`E:\project\UniXNU-xiaomipad8pro\out\tmp-upstream-mainline\firmware\qcom\sm8750\xiaomi\piano\gen80000_zap.mbn`
+（还有 `out\k27-independent-20261120\host-run\gpu-pinned\...` 一份同哈希）；历史深度任务 `E:\codex\2026-11-01\ni` 里的五份都是 `e73f3a4c…`，
+那台是 iPadOS/A740 那条线，别拿。做法：在 Mac 上组一个干净的 `PIANO_GPU_FW=/Users/zhangqi/Codex/piano-gpu-fw`
+（`qcom/gen80000_{gmu.bin,sqe.fw,aqe.fw}` 取自已 staged 且过 pin 的副本，`qcom/sm8750/xiaomi/piano/gen80000_zap.mbn` 用 `bb942413…`），
+四个哈希逐一对上 `package/PianoA830/board/piano-gpu-firmware.json`；不要直接覆盖 mainline 目录（那儿自带 `piano-gpu.json` 会交叉校验）。
