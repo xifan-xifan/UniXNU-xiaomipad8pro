@@ -462,3 +462,12 @@ handed BGRA instead of `'&BGA'`. Run `logs/native-runs/ram-k273-fbc-20261127-153
 screen at 154386 ms, the panel reads back `BGRA`, one WindowServer abort (`prepare_layers_roi` backdrop assertion) and one
 relaunch that survived to the 420 s self-reset; every swap is black. Read
 [results-2026-11-27-soft-metal-first-frame-backdrop-assert.md](../docs/results-2026-11-27-soft-metal-first-frame-backdrop-assert.md).
+
+## 2026-11-27 (later) - the same image with Reduce transparency staged root:wheel
+
+`out/k273-ram-8748-sm/boot-piano-macos-ram-A-bundled.img`
+(`05a94b5c0a75317d9ea0715af24652d648a74fbdabab49b148a51b4481f0fd86`, Mac `out/ram-verified-8748-sm/`) is the image above plus the
+Accessibility preference written into the seed as `root:wheel` in five domains (`PIANO_REDUCE_TRANSPARENCY=files`). Run
+`logs/native-runs/ram-k273-rt-20261127-163542/`: the backdrop assertion is unchanged, the first swap lands at 147.5 s, every frame
+is black. Read
+[results-2026-11-27-reduce-transparency-files-still-asserts.md](../docs/results-2026-11-27-reduce-transparency-files-still-asserts.md).

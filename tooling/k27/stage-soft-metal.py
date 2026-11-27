@@ -18,6 +18,9 @@ Then: PIANO_SEED=out/soft-metal/scratch-data.img PIANO_TRUST=out/soft-metal/kern
 The seed is the packed DBRDISK1 disk (NativeRamBlock SeedDisk.h). It is unpacked to a sparse raw file, attached with hdiutil (no mount),
 its APFS volume mounted with diskutil (no sudo: the volume then ignores ownership, so the copies are stored as uid/gid 99, mode 755/644),
 the bundle copied, the volume unmounted and the disk packed again. Nothing outside --out is written.
+--reduce-transparency-files is the exception: it enables ownership on the mount (sudo diskutil enableOwnership) and installs the
+preferences with sudo so they are stored root:wheel, which is the one thing the no-sudo mount cannot do (docs/drivers/soft-metal.md
+section 11). It exists for a seed that carries no org.droidvm.run.0.plist: --reduce-transparency can only extend that job.
 
 A new seed has a new identity, which the tablet's Data store was not made for (docs/data-store.md). NativeRamBlock with the store guard
 keeps such a store untouched and runs Data volatile for that boot (earlier kernels started it over, dropping the Data changes of
@@ -186,6 +189,40 @@ def data_volume(container_disk):
     raise SystemExit(f'no APFS container on {container_disk}')
 
 
+
+# Accessibility's Reduce transparency, written as files instead of by a boot job. Clients then draw opaque views where they
+# would otherwise add a backdrop layer, which is what Core Animation's software renderer asserts on: the 2026-11-27 15:39 run
+# reached its first frame and then died in CA::OGL::prepare_layers_roi with
+# "Assertion failed: (r.update()->_backdrop_invalidations_finalized), file ogl-layer.cpp, line 7151", from
+# CompositorSW::CompositeLayersToDevice -> layer_blit_entry -> CARenderOGLRender (docs/drivers/soft-metal.md section 11).
+# Managed preferences for the computer and for every home, plus the plain domains, because 2026-11-11 measured that the managed
+# files alone changed nothing. root:wheel matters: a preference file the daemon did not write is not trusted.
+RT_DOMAIN = "com.apple.universalaccess.plist"
+
+
+def stage_reduce_transparency_files(mount: Path) -> list[str]:
+    payload = plistlib.dumps({"reduceTransparency": True})
+    targets = [Path("Library/Managed Preferences") / RT_DOMAIN,
+               Path("Library/Preferences") / RT_DOMAIN,
+               Path("private/var/root/Library/Preferences") / RT_DOMAIN]
+    for home in sorted((mount / "Users").glob("*")):
+        if not home.is_dir() or home.name == "Shared":
+            continue
+        targets.append(Path("Library/Managed Preferences") / home.name / RT_DOMAIN)
+        targets.append(Path("Users") / home.name / "Library/Preferences" / RT_DOMAIN)   # relative, like the rest
+    written = []
+    with tempfile.TemporaryDirectory(prefix="rt-") as tmp:
+        source = Path(tmp) / RT_DOMAIN
+        source.write_bytes(payload)
+        for rel in targets:
+            run("sudo", "mkdir", "-p", str((mount / rel).parent))
+            run("sudo", "install", "-o", "root", "-g", "wheel", "-m", "644", str(source), str(mount / rel))
+            written.append(str(rel))
+    listing = run("sudo", "ls", "-ln", *[str(mount / t) for t in written], capture_output=True, text=True)   # sudo: /private/var/root is 700
+    print("Reduce transparency written root:wheel:\n" + listing.stdout + listing.stderr)
+    return written
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--seed', type=Path, default=D / 'out/inputs/scratch-data.img')
@@ -195,6 +232,8 @@ def main():
     p.add_argument('--log-stream', metavar='PREDICATE')
     p.add_argument('--log-errors', metavar='PREDICATE')
     p.add_argument('--reduce-transparency', action='store_true')
+    p.add_argument('--reduce-transparency-files', action='store_true',
+                   help='write Reduce transparency into the seed as root:wheel files (needs sudo) instead of through a boot job')
     p.add_argument('--file', metavar='SOURCE:DEST', action='append', default=[])
     p.add_argument('bundle', nargs='?', type=Path, default=D / 'out/soft-metal/NativeSoftMetal.bundle')
     a = p.parse_args()
@@ -244,6 +283,11 @@ def main():
         try:
             volume = data_volume(whole)
             run('diskutil', 'mount', '-mountPoint', str(mount), volume, stdout=subprocess.DEVNULL)
+            # diskutil's owners flag lives in the volume, so a run that enabled it (below) leaves every later mount enforcing the
+            # stored owners - and the bundle the previous staging left in the seed belongs to another uid, which then refuses the
+            # copy (2026-11-27). Normalise it, so the copies land as they do on a volume that ignores ownership, as before that flag.
+            if a.reduce_transparency_files:
+                run('sudo', 'diskutil', 'disableOwnership', str(mount))
             try:
                 target = mount / GPU_BUNDLES
                 target.mkdir(parents=True, exist_ok=True)
@@ -265,6 +309,12 @@ def main():
                     os.chmod(target_file, 0o644)
                     subprocess.run(['xattr', '-c', str(target_file)], check=False)
                     print(f'{volume}: /{dest} <- {source} ({target_file.stat().st_size} bytes)')
+                if a.reduce_transparency_files:
+                    # Only now: once ownership is on, the volume honours the stored owners, and the bundle copied
+                    # above belongs to another uid, so nothing of this Mac could be written under it (2026-11-27).
+                    run('sudo', 'diskutil', 'enableOwnership', str(mount))   # by mount point, as tooling/k273/make-systemos.sh does
+                    stage_reduce_transparency_files(mount)
+                    run('sudo', 'diskutil', 'disableOwnership', str(mount))   # back to the state the volume arrives with
                 if commands or early:
                     print(f'/{BOOT_JOB} runs: ' + set_boot_commands(mount / BOOT_JOB, commands, early))
             finally:

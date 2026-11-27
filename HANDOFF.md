@@ -1699,3 +1699,21 @@ Mesa `Droid-VM/mesa cecc0e9`、`Shad0w23333/Adreno830 1a13210`、`steelbrain/met
 `scripts/ci/test-repo-manifests.py` 在这台机器上有 46 个环境性 error（`D:\Temp` 文件占用／bash 相关），`test-doc-links.py` 干净通过
 （顺手修了 §12 末尾一条少了 `../` 的死链）。持久化轨（给这颗 root 重建 ESP、让 seed 与 store 对上，从 `state 7` 变 `state 2 resumed`）
 排在桌面之后，`fbc` 这轮的 `state 7 kept; Data is volatile this boot` 就是每次重 stage 的后果。
+## 2026-11-27（续）- `files` 那一发实测：Reduce transparency 以 root:wheel 落盘也拆不掉 backdrop 断言；Mesa 工作树按公开输入重建出来了
+
+镜像 `05a94b5c0a75317d9ea0715af24652d648a74fbdabab49b148a51b4481f0fd86`（`logs/native-runs/ram-k273-rt-20261127-163542/`，
+16:36:01 起，420 s 自复位，16:44:54 HyperOS 回 adb）：五个域的配置都以 uid/gid 0/0、mode 644 落盘，`universalaccessd` 在跑，
+断言原样在（`prepare_layers_roi` / `_backdrop_invalidations_finalized`，`ogl-layer.cpp:7151`），首个 swap 147.5 s，帧还是全黑。
+这条杠杆到此为止：软件合成这条不是客户端配置能修的，§11/§12 的结论在 27.3 + 本机成立。细节见
+[results-2026-11-27-reduce-transparency-files-still-asserts.md](docs/results-2026-11-27-reduce-transparency-files-still-asserts.md)。
+`stage-soft-metal.py` 这次连带修了两处自己的坑（owners 标志存在卷里、验证 `ls` 读不了 700 的 `/private/var/root`），已提交。
+
+**Mesa 工作树重建（GPU 主线的第一步，已完成到能编之前）**：公开 pin 的 `patches/mesa` 23 个 + k27 树 `patches/mesa-macos` 2 个
+按字母序不能一次过（`turnip-builtin-shader-pack` 要 kmd 的 meson 行、`turnip-darwin-deadline-queue` 要 virtgpu 的文件），
+所以写了个不猜的排序器（`/tmp/mesa-solve.sh`，本机 `/Users/zhangqi/Codex/upstream-tip/out/turnip-inputs/` 收着补丁）：
+每轮取第一个能干净套上的；多个能套时逐个试套（`patch -R` 撤销）选“解锁别人最多”的那个。结果 **23 个通过、0 fuzz**，
+剩 `turnip-gmem-mutable-swap`、`turnip-render-mode-for-attachment-memory` 两个怎么都不合 —— 用掉的 21 个正好等于
+`tooling/metal/UPSTREAM` 记的 “`patches/mesa`（21）”，说明那两个不属于那份工作树。树在 Mac
+`/Users/zhangqi/Codex/turnip-mesa-check/.cache/mesa-work`（12842 个文件），顺序记在 `/tmp/mesa-order.log`。
+下一步是 `tooling/metal/build-turnip-a830.sh` 还缺的两件：`drivers/AdrenoMetal`（公开 `UniXNU/AdrenoMetal`，按 NativeMetal fb063de 那条 pin）
+和桥 `out/metal/bridge/libnative_metal_bridge.a`（用 k27 树公开的 `scripts/build-metal-bridge-macos.py` 现编）。

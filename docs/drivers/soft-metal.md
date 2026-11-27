@@ -429,3 +429,9 @@ path end to end (format, first frame, swap and damage accounting); it has not pr
 the A830 path, whose inputs turn out to be public
 ([results-2026-11-27-turnip-inputs-are-public.md](../results-2026-11-27-turnip-inputs-are-public.md)). Full detail of the
 run in [results-2026-11-27-soft-metal-first-frame-backdrop-assert.md](../results-2026-11-27-soft-metal-first-frame-backdrop-assert.md).
+
+Measured 2026-11-27 16:36 (`05a94b5c`, Reduce transparency staged root:wheel in the five domains, this unit): the same single
+abort, `prepare_layers_roi` / `_backdrop_invalidations_finalized` at `ogl-layer.cpp:7151`, `universalaccessd` running, first
+swap at 147.5 s, every frame black. So on 27.3 as on 26.6 the assertion is not a client preference, and 11's and 12's
+conclusion holds here: past it is Metal compositing, not this device.
+[results-2026-11-27-reduce-transparency-files-still-asserts.md](../results-2026-11-27-reduce-transparency-files-still-asserts.md).
