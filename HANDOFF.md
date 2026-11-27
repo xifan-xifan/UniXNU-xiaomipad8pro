@@ -1652,3 +1652,19 @@ watchdogd 那四个标签灌进 seed 的 launchd override 库之后：`mount-pha
 124/125 两个强开本来就关、也没有 `… cleared` 行，所以 §8 指向 EDR／能力位那条分支（NativeGopDisplay 发的属性）。
 **但这颗信箱有字符衰减（同份日志里 `dyld+0x#1f90` 应为 `0x31f90`），下一发之前必须先把 N 从原始多副本里表决定死，别照一个坏数字改代码。**
 细节见 [results-2026-11-27-shim-root-early-boot-complete-windowserver-format.md](docs/results-2026-11-27-shim-root-early-boot-complete-windowserver-format.md)。
+## 2026-11-27 - `&BGA` 读出来了：27.3 把 framebuffer 压成 `&BGA`，SkyLight 软件合成器写不了；已改插件 + `exec-env`，镜像在 Mac 上重编
+
+先钉数字：信箱里 14 处独立副本、表决阈值扫到 4..7 都读同一个 `641877825 = 0x26424741 = ''&BGA''`，
+而且这值我们自己早命名过（`package/NativeGopDisplay/GopShot.h` 的 `GOP_SHOT_BGA`），不是位衰减。
+再读实现（pin 的 27.3 SystemOS 缓存 `/private/tmp/soscheck/mnt/System/Library/dyld/dyld_shared_cache_arm64e`，
+`OS Version = 27.3`，4142 image；宿主 27.2.1 没有共享缓存、OS 盘里只有骨架，读不到）：
+27.3 的 `IOMFBDisplay::framebuffer_pixel_format()`（`0x18e1e1048`）把选好的格式交给
+`AppleDisplay::compressed_pixel_format()`（`0x18defb0ec`）再返回它的结果，门是
+`CADeviceUseFramebufferCompression`（`0x18e12b26c`，读一次就缓存），名字在 QuartzCore 串表 `0x18e285b1f`
+= `CA_DISABLE_FRAMEBUFFER_COMPRESSION`。本机的 ADT 早就 `vmm-present = 0`，所以 §9 那条 VM 分支不是本机的病根。
+改动两处（`soft-metal-fb8=0` 一起关）：插件 `coreAnimationOptions` 现在按名字把那个选项**置 on**（原来只处理 on 的，
+默认 off 的名字永远碰不到），表里没这个名字就明说；`build-ram-images.py` 的 `exec-env` 加第二组
+`WindowServer:CA_DISABLE_FRAMEBUFFER_COMPRESSION=1` 抢在缓存前。Mac `upstream-tip` 已同步这两个文件并在重编
+`out/build-softmetal-8748.sh`（日志 `/tmp/build-fbc.log`），编完拷到 `out\k273-ram-8748-sm\` 用
+`run-console-ram-k273.ps1 -Tag fbc` 判读。细节与三种判读见
+[results-2026-11-27-27-3-framebuffer-compression-bga.md](docs/results-2026-11-27-27-3-framebuffer-compression-bga.md)。

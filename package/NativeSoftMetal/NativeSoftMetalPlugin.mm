@@ -271,13 +271,26 @@ static bool isFramebufferForce(const char *name)
     return !strcmp(name, "CA_FORCE_FP16_FRAMEBUFFER") || !strcmp(name, "CA_FORCE_CIF10_FRAMEBUFFER");
 }
 
+// 27.3's addition. Its framebuffer_pixel_format() runs the format it picked through
+// AppleDisplay::compressed_pixel_format(), which is gated by CADeviceUseFramebufferCompression(); the answer is the
+// lossless-compressed spelling of the same pixels (BGRA becomes '&BGA' = 641877825, b3a8 becomes '&b38', w40a becomes
+// '&w4a'). SkyLight's software compositor writes only uncompressed formats, so the option that turns framebuffer
+// compression off is turned on here. Read off 27.3's QuartzCore (the SystemOS cryptex's dyld cache, 4142 images):
+// CA_DISABLE_FRAMEBUFFER_COMPRESSION is the name in its string table; CADeviceUseFramebufferCompression caches its
+// answer after the first read, which is why the same variable is also set in WindowServer's environment (the image's
+// exec-env= boot argument) so that it is in place before the display's framebuffers are made.
+static bool isFramebufferCompression(const char *name)
+{
+    return !strcmp(name, "CA_DISABLE_FRAMEBUFFER_COMPRESSION");
+}
+
 // Lists each option that is on (once), and with CLEAR turns the framebuffer-forcing ones off again.
 static void coreAnimationOptions(const char *when, bool clear)
 {
     static GetOption get = reinterpret_cast<GetOption>(dlsym(RTLD_DEFAULT, "CAGetDebugOption"));
     static SetOption set = reinterpret_cast<SetOption>(dlsym(RTLD_DEFAULT, "CASetDebugOption"));
     static OptionName name = reinterpret_cast<OptionName>(dlsym(RTLD_DEFAULT, "CAGetDebugOptionEnvVariableName"));
-    static bool reported[kMaxOption], missing;
+    static bool reported[kMaxOption], missing, found, asked;
     if (!get || !set || !name) {
         if (!missing) report("QuartzCore has no CAGetDebugOption / CASetDebugOption / CAGetDebugOptionEnvVariableName");
         missing = true;
@@ -285,15 +298,25 @@ static void coreAnimationOptions(const char *when, bool clear)
     }
     for (unsigned id = 0; id < kMaxOption; id++) {
         const char *option = name(id);
-        if (!option || !get(id)) continue;
-        if (!reported[id]) {
+        if (!option) continue;
+        const bool on = get(id);
+        if (on && !reported[id]) {
             reported[id] = true;
             report("%s: CA option %u %.60s is on", when, id, option);
         }
-        if (clear && isFramebufferForce(option)) {
+        if (!clear) continue;
+        if (on && isFramebufferForce(option)) {
             set(id, false);
             report("%s: CA option %u %.60s cleared (soft-metal-fb8=0 keeps it)", when, id, option);
+        } else if (!on && isFramebufferCompression(option)) {
+            found = true;
+            set(id, true);
+            report("%s: CA option %u %.60s set (soft-metal-fb8=0 leaves it)", when, id, option);
         }
+    }
+    if (clear && !found && !asked) {   // the name is not in this release's table: say so once, rather than say nothing
+        asked = true;
+        report("%s: no CA debug option named CA_DISABLE_FRAMEBUFFER_COMPRESSION", when);
     }
 }
 

@@ -102,7 +102,10 @@ K27_ARGS = ['-v', 'debug=0x14e', 'kt_fixed_zones=120', '-no_slto_panic', 'tlto_u
             'mac-amfi-launch-permissive=1', 'union-hide-lower=1', 'malloc-ranges-off=1', 'arm64_maxoffset=0x7FFFFE000000',
             # 0042: userspace sees 24 MHz over the architected counter (19.2 MHz on SM8750 as in the VM).
             'droidvm-timebase-hz=24000000',
-            'exec-env=com.apple.WebKit.WebContent:GIGACAGE_ENABLED=no',
+            # WindowServer: 27.3's Core Animation hands SkyLight a lossless-compressed display framebuffer ('&BGA'), which
+            # SkyLight's software compositor cannot write; the kernel's exec-env appends the variable before WindowServer
+            # starts, so the option is in place before CADeviceUseFramebufferCompression caches its answer (docs/drivers/soft-metal.md).
+            'exec-env=com.apple.WebKit.WebContent:GIGACAGE_ENABLED=no,WindowServer:CA_DISABLE_FRAMEBUFFER_COMPRESSION=1',
             'rootauth=0', 'vm_compression_limit=1572864', 'droidvm-tz=Asia/Singapore',
             # Unattended native runs (k27 0055/0056, docs/bringup-debugging.md): the console mirrored into cvp@9cb00000 (retained
             # across resets, unused by Ubuntu and the firmware; Ubuntu's ramoops zone is overwritten by the firmware's demura), a reset after PIANO_RESET_AFTER s (Gunyah watchdog as the backstop), and no panic-spin, so a panic restarts
