@@ -71,7 +71,8 @@ for name, args in (rec['cmdlines'] or {}).items():
     assert len(args) <= 999, (name, len(args))
     print(f'{name}: {len(args)} bytes, root {got.get("native-ufs-root-part", "linux_rootfs")}, store {part}@{lba}, data-persist=2')
 assert rec['seed']['identity_sha256'].startswith('bb6dd1c3'), rec['seed']['identity_sha256'][:16]
-assert (rec['data_store'] or {}).get('same_seed') is True, rec['data_store']
+ds = rec.get('data_store') or {}
+assert ds.get('seed', '').startswith('bb6dd1c3') and ds.get('bound') is True and str(ds.get('first_lba')) == lba and ds.get('partition') == part, ds
 print(f"built {rec['image']} {rec['sha256'][:16]} default {rec['default']} seed {rec['seed']['identity_sha256'][:8]} store {store['partition']}@{store['first_lba']}")
 PY
 shasum -a 256 out/persistent-k273/boot-piano-macos-persistent-v5.img out/persistent/esp-7ccdd855-k273.img
