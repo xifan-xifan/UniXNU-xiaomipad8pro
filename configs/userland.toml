@@ -512,3 +512,19 @@ source = "tooling/native/piano-charge-config/com.unixnu.piano-charge-config.plis
 build = "copy"
 dest = "/Library/LaunchDaemons/com.unixnu.piano-charge-config.plist"
 mode = "0644"
+
+[[unit]]
+name = "gop-shot"
+about = "the internal panel's scanout as a PNG (docs/drivers/native-gop-display.md 9): reads machdep.native_gop_display_shot, so the boot line needs native-gop-display-shot=1 and the caller needs root. Off by default: a daily image has no reason to carry it, and a flip-mode boot is otherwise judged by what the CPU sampler guesses rather than by the bytes the DPU is scanning. --on gop-shot for an acceptance boot whose picture has to be read."
+default_on = false
+
+[[unit.file]]
+source = "tooling/native/gop-shot/gop-shot.c"
+build = "cc"
+arch = "arm64"
+min_os = "13.0"
+cflags = ["-D_DARWIN_C_SOURCE", "-std=c11"]
+frameworks = ["CoreFoundation", "CoreGraphics", "ImageIO"]
+inputs = ["tooling/native/gop-shot/Pixels.h", "package/NativeGopDisplay/GopShot.h"]
+dest = "/usr/local/bin/gop-shot"
+mode = "0755"
