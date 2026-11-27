@@ -521,3 +521,18 @@ trust cache). Its command line is 882 bytes with `piano-gpu=2 piano-gpu-delay=20
 line past the under-1000 budget with `-v`, so the recipe runs `PIANO_FAST_BOOT=1` (docs/boot-time.md: no `-v`, no `droidvm-disable-jobs`, which
 nothing in the native KC reads; the console still mirrors into the pstore mailbox). `verify-ram-images.py` passes every container check; its
 payload listing needs `mdir` (mtools), which neither host has, so that one check is not run. First boot: `logs/native-runs/ram-k273-a830-20261127-193736`.
+
+
+## 2026-11-27 (evening) - the desktop run's image, and the DPU variant that follows it
+
+`boot-piano-macos-ram-A-bundled.img` `65f41bea525c8c3a56a16b19484fd081451fd9be1f8a286f8a1272875d880772` (203,726,848 bytes, UEFI wrapper
+`eb570025859ee90f3b3fb96d3b41414ceda5bf34747a9e94a1ad6dca57e1d128`) is the boot where WindowServer, loginwindow, MenuBarAgent,
+NotificationCenter and iconservicesagent each hold `device Adreno (TM) 830` and PianoA830 reports `submitted=23 completed=23`: the first
+desktop session on this unit driven by the real GPU. It is `out/ram-verified-8748-a830/boot-piano-macos-ram-A-bundled.img` on the Mac as built
+at 19:57, and the same bytes survive on the Windows host at `out/k273-ram-a830/boot-piano-macos-ram-A-bundled.img` (re-verified 20:21:30),
+because `out/build-a830-8748.sh` ends in `rm -rf` + `cp` and its 20:18 run replaced the Mac copy with:
+
+`df6bea7c52cac80823abf1703c47e2dbbbd322b233da9ea41e289e44736650c2` (203,726,848 bytes, same wrapper `eb570025...`, same kernel `d921655f...`) -
+the same recipe plus `piano-dpu=2 piano-dpu-flip=4`, i.e. PianoDpu serving with each swap flipped (dpu.md 4, native-gop-display.md 5a), which is
+what the black panel in `logs/native-runs/ram-k273-a830b-20261127-195858` calls for. Kept on Windows at `out/k273-ram-a830-dpu/`. Read
+[results-2026-11-27-a830-real-gpu-black-panel.md](../docs/results-2026-11-27-a830-real-gpu-black-panel.md).

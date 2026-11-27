@@ -1795,3 +1795,32 @@ staging 插件+trustcache）做 RAM 镜像，`fastboot boot` 看 AGXAccelerator 
 那台是 iPadOS/A740 那条线，别拿。做法：在 Mac 上组一个干净的 `PIANO_GPU_FW=/Users/zhangqi/Codex/piano-gpu-fw`
 （`qcom/gen80000_{gmu.bin,sqe.fw,aqe.fw}` 取自已 staged 且过 pin 的副本，`qcom/sm8750/xiaomi/piano/gen80000_zap.mbn` 用 `bb942413…`），
 四个哈希逐一对上 `package/PianoA830/board/piano-gpu-firmware.json`；不要直接覆盖 mainline 目录（那儿自带 `piano-gpu.json` 会交叉校验）。
+
+## 2026-11-27 晚：Metal 设备第一次是真 Adreno 830，桌面起来了但画面全黑
+
+`logs/native-runs/ram-k273-a830b-20261127-195858`（镜像 `65f41bea…`，19:59:19 `fastboot boot`，420 s 自复位，20:06:33 回 ABL，20:08:05 HyperOS 自己起来）
+是本机第一次由真显卡驱动桌面：`NativeAdrenoMetal: … device Adreno (TM) 830` 被 Installer Progress（91 s）、MenuBarAgent（95 s）、loginwindow（102 s）分别拿到，
+`PianoA830: R3b WORK … submitted=23 completed=23 missed=0`（234 s），`gpu clients … 0:WindowServer 729M`，SMMU 全部 translated 或 fault。
+之前 11-26 记的"没有公开 A830 用户态就没有桌面"这条边界就此作废：桥、Turnip、插件在 Mac 上用公开件重建可用。
+`Dock`(489)、`ControlCenter`(491)、`SystemUIServer`(493) 都 exec 了。详见 [这一篇](docs/results-2026-11-27-a830-real-gpu-black-panel.md)。
+
+**当前拦路的是画面不是显卡**：这版命令行没有 `piano-dpu=`，PianoDpu 挂着但不生效，面板只有 GOP 拷贝，
+NativeGopDisplay 11 次采样全是 `last frame 0.0% non-black mean #000000 centre #000000`，另有 21 次 `swap_wait(6, 0x80000001, 0) = 0xe00002d5`：
+swap 被接受、被显示、被上栅栏，拷过去的东西是黑的。dpu.md 4 与 native-gop-display.md 5a 把桌面配置写成 PianoDpu 服务 + 每帧 flip，
+即 `piano-dpu=2 piano-dpu-flip=4`；20:18 编出的 `df6bea7c…` 就是这条配方（GPU 参数一字未动），20:22 已上机。
+
+**两条日志毛病都已定位**：(1) 串口抓取比启动晚，19:59 那轮前 78 s 全是 `open failed COM5/COM6`（上一轮读端还占着端口），
+内核第一行出现在 `at-us=77648513`；改成"先抓、确认 OPEN，再 fastboot boot"后，20:21:37 起跑、20:22:12 `OPEN COM5/COM6`，
+`reset-reason: armed v1 producer=kernel copies=11` 之后的整段启动都在。(2) pstore mailbox 在这类镜像上已经不可读，
+`decode2.py decode` 报 `copies-at-1 histogram [699972, …]`、`655837 bytes corrected by majority`，11 份副本各自烂掉，多数表决出来是乱码（19:37 那轮同样）；
+191 MiB 负载 + 420 s 镜像写控制台，跨复位衰减到这个地步，USB 实时日志是唯一的记录。
+
+**Data 持久化这一轮仍不能定论**：全程 `NativeRamBlock: volatile … peak 196 MiB`，root 是 shim SystemOS 根；
+`data-persist=2 / data-store-part=linux_data / data-store-lba=117735999` 确实在命令行里（`build-A-bundled.json`），
+但开 store 那几行落在丢掉的第 1 分钟里，所以既没证实也没排除。三次冷启动、两轮 AndroidmacOSAndroid、重启读回、硬复位恢复依旧全部未开始。
+
+**镜像位置**（`out/build-a830-8748.sh` 末尾是 `rm -rf` + `cp`，Mac 上会被下一版覆盖）：跑出桌面的 `65f41bea…` 存在
+`out/k273-ram-a830/boot-piano-macos-ram-A-bundled.img`（Windows，20:21:30 复验），DPU 变体 `df6bea7c…` 存在 `out/k273-ram-a830-dpu/`。
+下一步顺序：看 DPU 变体是否出首帧（`PianoDpu:` 探测行与 `non-black` 百分比是判据）出帧才谈输入与 Data 落盘；
+仍黑则按 dpu.md 4.2 查零拷贝扫描的 DPU 管道条件，而不是继续加 GPU 参数。另外 `ssh mac-lan` 的 `zhangqideMBP.lan` 已不解析，
+`~/.ssh/config` 里 `Host mac-lan` 的 HostName 已改成 `192.168.31.183`（备份 `config.bak-20261127`）。
