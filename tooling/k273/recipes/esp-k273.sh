@@ -22,6 +22,14 @@
 # and no power policy yet. --default macos-diag keeps the unattended rule, so a cold start that does not reach a healthy desktop
 # returns to ABL by itself. Unsigned on purpose: WRITE-PLAN.md section "Slot A boot triplet write" - ABL on this unlocked unit
 # takes a v4 container whose AVB chain does not match, and the reference signing host is not ours (G7).
+# Why build-k273-esp.py rather than build-esp.py (2026-11-28 00:40). The ESP built with build-esp.py carried neither the store block
+# the session reads (a record store with partition and first_lba, which is what puts maint-session.py on the bound-store path in
+# esp_store) nor, before this change, the store arguments in its entries; an entry without data-store-part/data-store-lba opens the
+# store on the root's own partition, where a 24 GiB seed has no window on this unit. build-k273-esp.py is the 27.3-line builder: it
+# carries the base entry byte for byte - the ESP now on the medium (out/persistent/esp-device.json), whose line already names
+# native-ufs-root-part=linux_rootfs, data-store-part=linux_data, data-store-lba=117735999 and the maintainer's daily driver set -
+# swaps only the four payloads, takes the store facts from them, and refuses a window that is not the one NativeUfs puts there for
+# this seed. piano-usb-shell=1 goes in and piano-usb-hid out: the shell on the cable is this unit's only way to read a failing boot.
 set -euo pipefail
 cd /Users/zhangqi/Codex/upstream-tip
 export PATH=/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/zhangqi/bin:/opt/homebrew/opt/llvm/bin:/Users/zhangqi/Codex/mtools/install/bin
@@ -38,22 +46,33 @@ STORE_PART=$(python3 -c "import json,os;print(json.load(open(os.environ['PIANO_U
 STORE_LBA=$(python3 -c "import json,os;print(json.load(open(os.environ['PIANO_UNIT_PROFILE']))['boot_esp']['store_first_lba'])")
 # The seed whose store is on the medium, so the build record states same_seed instead of guessing (NativeRamBlock: seed bb6dd1c3).
 export PIANO_INSTALLED_SEED=${PIANO_INSTALLED_SEED:-bb6dd1c365a6a827}
+EXPECT_SEED=bb6dd1c365a6a827   # the seed identity NativeRamBlock reports for the store on linux_data
+DIAG_AFTER=240                 # unattended: a default entry that reaches no healthy desktop returns to ABL by itself
 python3 tooling/persist/build-boot.py --series 5 --fd out/fd/piano-uefi-A-bundled.fd --dtb out/inputs/piano-boot.dtb --same-kernel-as out/ram/build-A-bundled.json --out out/persistent-k273
-python3 tooling/persist/build-esp.py --profile gpu --trust out/a830-shot-stage/kernel.macho.trustcache --seed out/a830-shot-stage/scratch-data.img --default macos-diag --diag-reset-after 240 --timeout 3 --fast-boot 1 --boot-guard 180 --deny-exec /usr/libexec/watchdogd --deny-exec /usr/libexec/PerfPowerServices --arg piano-usb=2 --arg piano-usb-shell=1 --arg piano-touch=2 --arg piano-keyboard=2 --arg piano-dpu=2 --arg piano-dpu-flip=4 --arg native-gop-display-flip-lossless=1 --arg data-store-part=$STORE_PART --arg data-store-lba=$STORE_LBA --firmware-dir "${PIANO_ESP_FIRMWARE_DIR:-/Users/zhangqi/Codex/k273-esp/inputs/firmware}" --name esp-7ccdd855-k273 --out out/persistent-k273
+python3 tooling/k273/build-k273-esp.py --base out/persistent/esp-device.json --entry macos --name esp-7ccdd855-k273 --out out/persistent \
+  --kc out/k27/kc-k27-native.bin --adt out/adt/piano-k27.adt \
+  --trust out/a830-shot-stage/kernel.macho.trustcache --seed out/a830-shot-stage/scratch-data.img \
+  --arg piano-usb-shell=1 --drop-arg piano-usb-hid --arg droidvm-utc=$(date +%s) \
+  --arg piano-reset-after=$DIAG_AFTER --arg piano-reset-to=bootloader \
+  --expect-seed $EXPECT_SEED --expect-store-part $STORE_PART --expect-store-lba $STORE_LBA \
+  --diag-reset-after $DIAG_AFTER --firmware-dir "${PIANO_ESP_FIRMWARE_DIR:-/Users/zhangqi/Codex/k273-esp/inputs/firmware}"
 python3 - "$STORE_PART" "$STORE_LBA" <<'PY'
-import json, sys, re
-rec = json.load(open('out/persistent-k273/esp-7ccdd855-k273.json'))
+import json, sys
+rec = json.load(open('out/persistent/esp-7ccdd855-k273.json'))
 part, lba = sys.argv[1], sys.argv[2]
-for name in ('macos', 'macos-diag'):
-    args = rec['cmdlines'][name]
+store = rec.get('store') or {}
+assert store.get('partition') == part and str(store.get('first_lba')) == lba, store
+for name, args in (rec['cmdlines'] or {}).items():
     got = dict(t.split('=', 1) for t in args.split() if '=' in t)
-    assert got.get('data-store-part') == part, (name, got.get('data-store-part'))
-    assert got.get('data-store-lba') == lba, (name, got.get('data-store-lba'))
-    assert got.get('data-persist') == '2', (name, got.get('data-persist'))
+    if got.get('data-persist') != '2':
+        continue
+    assert got.get('data-store-part') == part and got.get('data-store-lba') == lba, (name, got.get('data-store-part'), got.get('data-store-lba'))
+    assert got.get('piano-usb-shell') == '1' and 'piano-usb-hid' not in got, name
     assert len(args) <= 999, (name, len(args))
-    print(f'{name}: {len(args)} bytes, store {part}@{lba}, data-persist=2')
-assert rec['data_store']['same_seed'] is True, rec['data_store']
-print('same_seed True,', rec['data_store']['installed_seed_from'])
+    print(f'{name}: {len(args)} bytes, root {got.get("native-ufs-root-part", "linux_rootfs")}, store {part}@{lba}, data-persist=2')
+assert rec['seed']['identity_sha256'].startswith('bb6dd1c3'), rec['seed']['identity_sha256'][:16]
+assert (rec['data_store'] or {}).get('same_seed') is True, rec['data_store']
+print(f"built {rec['image']} {rec['sha256'][:16]} default {rec['default']} seed {rec['seed']['identity_sha256'][:8]} store {store['partition']}@{store['first_lba']}")
 PY
-shasum -a 256 out/persistent-k273/boot-piano-macos-persistent-v5.img out/persistent-k273/esp-7ccdd855-k273.img
+shasum -a 256 out/persistent-k273/boot-piano-macos-persistent-v5.img out/persistent/esp-7ccdd855-k273.img
 echo PERSISTENT-K273-BUILT
