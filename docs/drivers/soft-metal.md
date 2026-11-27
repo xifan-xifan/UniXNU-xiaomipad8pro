@@ -399,4 +399,33 @@ being handed to `AppleDisplay::compressed_pixel_format()` and the *answer* retur
 `vmm-present` is not involved on this unit: the 27.3 ADT already carries 0 (§9's branch is the 26.6 line's).
 So `framebufferPolicy()` now also *sets* that option by name, and the image's `exec-env=` gives WindowServer the same
 variable in its environment before it starts, because both gates cache their answer on the first read.
-Full reading and the run's judgement lines: [results-2026-11-27-27-3-framebuffer-compression-bga.md](results-2026-11-27-27-3-framebuffer-compression-bga.md).
+Full reading and the run's judgement lines: [results-2026-11-27-27-3-framebuffer-compression-bga.md](../results-2026-11-27-27-3-framebuffer-compression-bga.md).
+
+## 13. First frame on this unit, and the empty swaps (2026-11-27)
+
+Measured (`f27f7deb`, this unit, 27.3, image built by `out/build-softmetal-8748.sh` with the framebuffer-compression option
+off): the plugin gets Core Animation's option 66 set, WindowServer's first swap releases the boot console from the panel,
+and the display driver reads the framebuffer back as `'BGRA'`:
+
+```
+NativeSoftMetal: WindowServer: load: CA option 66 CA_DISABLE_FRAMEBUFFER_COMPRESSION set
+NativeGopDisplay: first frame (swap 1); boot console released from the screen (at 154386 ms)
+NativeGopDisplay: thumb frame 1: 3200x2136 'BGRA', 0.0% non-black, mean #000000, centre #000000
+NativeGopDisplay: 5 swaps submitted, 5 shown, 0 dropped ... last frame 0.0% non-black
+```
+
+One WindowServer abort in the whole run, on 11's assertion (`_backdrop_invalidations_finalized`, `prepare_layers_roi`),
+and its successor (pid 301) alive at the reset - so the crash loop of the section 8/9 era is gone, and what is left is that
+the compositor's frames are empty: five full-frame swaps, none with a dirty region, every one black. Section 12 already
+answers that on 26.6 (neither managed Reduce transparency nor `soft-metal-all=1` cleared it, and the conclusion there is
+Metal compositing). This unit's next image also stages Reduce transparency into the seed itself, root:wheel, because this
+seed carries no `org.droidvm.run.0.plist` for the boot-job route: `PIANO_REDUCE_TRANSPARENCY=files`, which needed
+`stage-soft-metal.py --reduce-transparency-files` and, once that flag existed, a fix in the same file - ownership has to be
+enabled on the mount *after* the bundle is copied, not before, or the bundle that the previous staging left in the seed
+(another uid's) refuses the copy.
+
+Read this section as section 7 says: the CPU device is a diagnostic instrument. On this unit it now measures the display
+path end to end (format, first frame, swap and damage accounting); it has not produced a desktop, and the desktop line is
+the A830 path, whose inputs turn out to be public
+([results-2026-11-27-turnip-inputs-are-public.md](../results-2026-11-27-turnip-inputs-are-public.md)). Full detail of the
+run in [results-2026-11-27-soft-metal-first-frame-backdrop-assert.md](../results-2026-11-27-soft-metal-first-frame-backdrop-assert.md).

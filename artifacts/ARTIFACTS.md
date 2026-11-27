@@ -452,3 +452,13 @@ the image's own digest, caches dropped; the bytes it replaced had first been pro
 (`db3629e5…`), and the 867,328 blocks the image newly takes read zero. GPT, ESP, `boot_a`, `vendor_boot_a`, `init_boot_a`,
 `boot_b` re-read unchanged. Read
 [results-2026-11-27-shim-root-written-verified.md](../docs/results-2026-11-27-shim-root-written-verified.md).
+
+## 2026-11-27 (later) - the first frame on this unit
+
+`out/k273-ram-8748-sm/boot-piano-macos-ram-A-bundled.img`
+(`f27f7debb95610f34098dc4984a592a5258ccacec5a66f06b35deb779cee8c18`, Mac `out/ram-verified-8748-sm/`) is the verified shim-root
+RAM image with Core Animation's `CA_DISABLE_FRAMEBUFFER_COMPRESSION` set for WindowServer, so the software compositor is
+handed BGRA instead of `'&BGA'`. Run `logs/native-runs/ram-k273-fbc-20261127-153912/`: WindowServer's first swap took the
+screen at 154386 ms, the panel reads back `BGRA`, one WindowServer abort (`prepare_layers_roi` backdrop assertion) and one
+relaunch that survived to the 420 s self-reset; every swap is black. Read
+[results-2026-11-27-soft-metal-first-frame-backdrop-assert.md](../docs/results-2026-11-27-soft-metal-first-frame-backdrop-assert.md).

@@ -1667,4 +1667,35 @@ watchdogd 那四个标签灌进 seed 的 launchd override 库之后：`mount-pha
 `WindowServer:CA_DISABLE_FRAMEBUFFER_COMPRESSION=1` 抢在缓存前。Mac `upstream-tip` 已同步这两个文件并在重编
 `out/build-softmetal-8748.sh`（日志 `/tmp/build-fbc.log`），编完拷到 `out\k273-ram-8748-sm\` 用
 `run-console-ram-k273.ps1 -Tag fbc` 判读。细节与三种判读见
-[results-2026-11-27-27-3-framebuffer-compression-bga.md](docs/results-2026-11-27-27-3-framebuffer-compression-bga.md)。
+[results-2026-11-27-27-3-framebuffer-compression-bga.md](docs/results-2026-11-27-27-3-framebuffer-compression-bga.md)。## 2026-11-27（续）- 首个画面到手：格式修好了、WindowServer 只崩一次，但五帧全空；同时更正 G4：turnip 的输入其实是公开的
+
+镜像 `f27f7debb95610f34098dc4984a592a5258ccacec5a66f06b35deb779cee8c18`（`logs/native-runs/ram-k273-fbc-20261127-153912/`）：
+`CA option 66 CA_DISABLE_FRAMEBUFFER_COMPRESSION set`，SkyLight 的 `Unimplemented pixel format` 一行没有（上一轮 15 行），
+`NativeGopDisplay: first frame (swap 1); boot console released from the screen (at 154386 ms)`，缩略图回读是 `'BGRA'`。
+WindowServer 整轮只崩一次（pid 163 在 `_backdrop_invalidations_finalized` / `prepare_layers_roi`，就是 §11 那条断言），
+pid 301 接棒活到 420 s 自复位，HyperOS 15:48:25 回 adb，无 kernel panic。**新的墙**：合成出来的帧是空的 ——
+`5 swaps submitted, 5 shown`、`last frame 0.0% non-black`、`damage: 0 of 2 frames from their dirty regions`，
+即整帧交换不带脏区也不带内容。§11/§12 在 26.6 上已经量过这条（托管版 Reduce transparency 和 `soft-metal-all=1` 都没能拆掉断言，
+结论是走 Metal 合成）。所以只做一发 `PIANO_REDUCE_TRANSPARENCY=files`（这颗 seed 没有 `org.droidvm.run.0.plist`，
+boot job 那条路走不通）在 27.3 上复核一次，主线改走 A830。细节见
+[results-2026-11-27-soft-metal-first-frame-backdrop-assert.md](docs/results-2026-11-27-soft-metal-first-frame-backdrop-assert.md)。
+
+**重编时踩到自己埋的坑**：`--reduce-transparency-files` 在拷 bundle *之前* 就 `enableOwnership`，于是上一次 staging 留在 seed 里
+那份别人 uid 的 `Library/GPUBundles/NativeSoftMetal.bundle` 拒绝写入（`PermissionError`）。顺序改成先拷 bundle 再开属主，
+已在 `tooling/k27/stage-soft-metal.py` 修好；`build-native-image.sh` 的 `PIANO_REDUCE_TRANSPARENCY` 现在收 `1|files|0`。
+
+**更正 11-26 的 G4 结论**：`tooling/metal/UPSTREAM` 写的 `UniXNU-turnip` 就是公开 fork `Droid-VM/UniXNU`（`UniXNU/UniXNU` 的分支），
+它点名的 `527b8b7a31192df14b96d10a70c339845ed2cd12` 在 fork 和上游都能解析（API 200），该提交本身就是 turnip-darwin 的弱符号补丁、
+正文点名 `scripts/macho-weak-self-binds.py`。按 contents API 在该提交核对：`patches/mesa` 23 个补丁（UPSTREAM 记 21，逐条比对还没做），
+`scripts/macho-weak-self-binds.py`、`scripts/build-turnip-darwin.py` 都在，前端 `drivers/AdrenoMetal` = 公开 `UniXNU/AdrenoMetal`，
+Mesa `Droid-VM/mesa cecc0e9`、`Shad0w23333/Adreno830 1a13210`、`steelbrain/metal2vulkan 963f0e64` 各自 200；
+桥的构建脚本 `scripts/build-metal-bridge-macos.py` 在上游公开的 k27 树里。Mac 上 `/Users/zhangqi/Downloads/XiaomiPad8Pro-Ubuntu/unixnu-research/`
+另有一份旧 monorepo（`drivers/AdrenoMetal` 在 `cc0a4e8`、`patches/mesa` 17 个）和 `Adreno830`、`AdrenoMetal`、`DarwinBoot` 等，只作旁证不作 pin。
+还没证的按顺序是：这些补丁 + 我们的 `tooling/metal/turnip-a830/mesa/*.patch` 能在本机（Xcode 26.6 + `/Users/zhangqi/bin/ld-classic`）配过并编过、
+桥能编、插件能在 27.3 上装载、PianoA830 在这台机器上驱动 GPU（从未上机）。从这台网络 `git fetch --filter=blob:none` 拉那个提交会被
+`curl 28` 掐断，所以按路径逐个取文件。见 [results-2026-11-27-turnip-inputs-are-public.md](docs/results-2026-11-27-turnip-inputs-are-public.md)。
+
+上游这阵子没有新提交（`0117719d` 仍是 `origin/main` 的 tip）。主机测试在 Windows 上跑不动的那条要记住：
+`scripts/ci/test-repo-manifests.py` 在这台机器上有 46 个环境性 error（`D:\Temp` 文件占用／bash 相关），`test-doc-links.py` 干净通过
+（顺手修了 §12 末尾一条少了 `../` 的死链）。持久化轨（给这颗 root 重建 ESP、让 seed 与 store 对上，从 `state 7` 变 `state 2 resumed`）
+排在桌面之后，`fbc` 这轮的 `state 7 kept; Data is volatile this boot` 就是每次重 stage 的后果。
