@@ -1638,3 +1638,17 @@ launchd 的 `fsck`、**`mount-phase-1`**、`data-protection`、`mount-phase-2`�
 提醒：盘上 `linux_data` 那个 store 就是这发镜像自己的 seed（`8e1a87e1…`），所以 `data-store-replace=1` 对它无效；
 store 没占的页仍然读 seed，这正是灌 override 库能被读到的原因。详见
 [results-2026-11-27-mount-phase-1-passes-watchdogd-panics.md](docs/results-2026-11-27-mount-phase-1-passes-watchdogd-panics.md)。
+
+## 2026-11-27 - 14:42 那发跑满 420 s：内核一次没 panic，`Early boot complete` + `loginwindow` 都到了，WindowServer 崩在 framebuffer 像素格式（数字对不上 `soft-metal.md` 的表，要先从原始副本定死）
+
+`logs/native-runs/ram-k273-sm-20261127-144201/`（镜像 `b63ee621b5c3c024…`，seed `8e1a87e1…`，盘上那份 `9e4ef505…` 根）。
+watchdogd 那四个标签灌进 seed 的 launchd override 库之后：`mount-phase-1`/`data-protection`/`mount-phase-2`/`init-with-data-volume`
+四个启动任务全过，九条 firmlink `: 0`，Data 用盘上已有 store（`state 7 … kept`，没新建），`NativeGopDisplay … display on`，
+`Early boot complete`（21:53:41），`loginwindow` 起来。447 s 由镜像自带的 `piano-reset-after=420` 准点带回 ABL，HyperOS 自启（adb `7ccdd855`）。
+
+**新的墙**：WindowServer 用 `NativeSoftMetal` 拿到软件合成设备（`64 selectors stubbed, 0 left to forwarding`、`device made … no queue`），
+420 s 内崩 15 次，全在 `WSCompositeDestinationCreateWithIOSurface`，`crash message (SkyLight): Unimplemented pixel format of 641877825`
+= `0x26424741` = `&BGA` —— 表里八种可写的和三种会 abort 的都不是它。CA 侧只有 `option 206 CA_HDR10_SET_EDR_SCALE is on`，
+124/125 两个强开本来就关、也没有 `… cleared` 行，所以 §8 指向 EDR／能力位那条分支（NativeGopDisplay 发的属性）。
+**但这颗信箱有字符衰减（同份日志里 `dyld+0x#1f90` 应为 `0x31f90`），下一发之前必须先把 N 从原始多副本里表决定死，别照一个坏数字改代码。**
+细节见 [results-2026-11-27-shim-root-early-boot-complete-windowserver-format.md](docs/results-2026-11-27-shim-root-early-boot-complete-windowserver-format.md)。
