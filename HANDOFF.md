@@ -1583,3 +1583,58 @@ netsh advfirewall firewall add rule name="piano-maint-usb-link" dir=in action=al
 
 8000 是平板 `wget` 的端口，9000 是导出/回灌流的端口，作用域只有 USB 链路那一网段；把 `add rule ... enable=yes` 换成
 `delete rule` 就能撤销。详见 [results-2026-11-27-shim-systemos-root-assembled.md](docs/results-2026-11-27-shim-systemos-root-assembled.md)。
+
+## 2026-11-27 - 带 `/sbin/mount` 垫片的根已写入并整机回读通过；卡住一小时的原因是主机侧 `os.open` 的文本模式
+
+**结论**：`out/root-shim/piano-shim-root-26C5035r.img`（21,100,494,848 B `9e4ef505…`）已落在 `linux_rootfs` 块
+0..5151487（LUN 0 4K LBA 102269696..107421183）。写之前用设备自己（丢页缓存）证明两件事：被覆盖的 4,284,160 块
+等于主机持有的 `out/piano-stock-root-26C5035r.img`（`db3629e5…`），新镜像多占的 867,328 块读为零；写完设备再
+整机回读 21.1 GB = `9e4ef505…`。其余一律没动：两份 GPT 仍是本机自己的表（`12710135…`/`9acf2225…`）、
+`sgdisk -v` 干净、ESP 区仍 `68c28df1…`、boot_a `7c444a2d…`、vendor_boot_a `7f766f1d…`、init_boot_a `56197797…`、
+boot_b `ec345e82…` 全不变。全程没按键、没新备份、没改分区表。
+
+**前面两次为什么停在同一条判据上**：`sha_nocache` 用的 `os.open(path, os.O_RDONLY)` 在 Windows 上是**文本句柄**，
+`os.read()` 走 CRT 换行转换 —— 2 MiB 含 `0d 0a` 的二进制样本只回来 26 字节。于是主机把这份文件算成 `25535e6e…`，
+设备算成 `db3629e5…`，看起来像"主机那份拷贝和介质不一致"。修完（`1e47c0ff`：`O_RDONLY_RAW` 带 `O_BINARY`，
+两处 no-cache 读合并成 `read_nocache` 一处，新增 `tooling/native/test-nocache-read.py`）同一个函数读出
+`db3629e5…`，和介质逐字节一致。`map` 还单独死过一次：日志里的十六进制转储解出 U+FFFD，重定向时 stdout 是 cp936
+→ `UnicodeEncodeError`（`3057cd0b` 改掉）。这台机器自己的两份 GPT 与自己的 Android slot-A 对
+（`7f766f1d…+56197797…`，`fetch-slot-a-pair.py` 从介质读、`fetch-lun0-tail.py` 取尾部 5 块，`f6de5be8`）
+这次也真被 `map` 接受了。
+
+**`check` 仍然拒的那件事**：`linux_data` LBA 117735999 上的 Data store 属于 seed `8e1a87e1d5888960`，而装在盘上的
+ESP（`esp-device.img`）resume 的是 seed `7e9bd39b72da851d` —— ESP 与 Data 窗口不是同一套，按这台 ESP 启动会保住
+一个不属于它的 store 而把 Data 跑成易失，或者干脆找不到它。根写入与回读不受影响；持久那条线本来就得为这份根重做
+ESP（ADT 要指 SystemOS `A8D7C405`、锚 `9cfab48d`），重做时按 seed `8e1a87e1…` 出图就能对齐。
+
+**在跑的那一步**：`6001bc1c…` 这发 RAM 镜像对这份新根的判读，目录
+`logs/native-runs/ram-k273-shimroot-20261127-110401/`，判据仍是 `mount-phase-1` 是不是 `exit 0`。无人值守跑法
+（镜像自己 `piano-reset-after=420 piano-reset-to=bootloader` 回 ABL，再由 reader 镜像把 pstore 信箱取出来）：
+
+```
+powershell -NoProfile -File tooling/native/run-console-ram-k273.ps1 `
+  -ImgRel out\k273-ram-8748-shim\boot-piano-macos-ram-A-bundled.img -Tag shimroot `
+  -ImageSha 6001bc1c06559e1f1434631c8824dedb744e3c47511da1b7b8b67399a449c70b
+```
+
+信箱用 `tooling/native/xnu-log.py decode` 解。细节与全部证据见
+[results-2026-11-27-shim-root-written-verified.md](docs/results-2026-11-27-shim-root-written-verified.md)。
+
+## 2026-11-27 - `mount-phase-1` 过了：这堵墙在这台机器上是靠带垫片的 SystemOS 窗口拆掉的
+
+11:04 那发 RAM 判读（`6001bc1c…` 对刚写入的 `9e4ef505…` 根，`logs/native-runs/ram-k273-shimroot-20261127-110401/`）：
+launchd 的 `fsck`、**`mount-phase-1`**、`data-protection`、`mount-phase-2`、`init-with-data-volume` 一路全部
+`Doing boot task` 并完成，控制台里再也找不到 `posix_spawn(): 1: Operation not permitted`。SystemOS 卷挂上、Data 卷挂上、
+八条 firmlink 全 `: 0`；`NativeGopDisplay: display on`、`en0` 挂上、`authd`/`systemstatusd`/`PerfPowerService`/
+`mDNSResponderHelper`/DriverKit `IOUserDockChannelSerial` 都起来了。
+
+**新的死法**：`watchdogd` 原生没有 `IOWatchdog` 提供者，起来就 SIGTRAP 退出（`namespace 2 subcode 0x5`），launchd 把它的退出当致命
+→ `panic(watchdogd (pid 182) exited … description: none)` → `Kernel data abort`。前面还有 `locationd` 一次
+`FATAL exception type=0x1 reason=0x1c` 被 SIGKILL。154 s 回 ABL（镜像自己的 420 s 复位没到），reader 取到 7 MiB 信箱，
+平板随后自己回到能开机的系统。**这正是桌面那条线早就写过的现象**（`docs/attended-desktop.md` §2、`docs/userland.md` §5）：
+`droidvm-disable-jobs=` 原生无效，桌面镜像是在 seed 的 launchd override 库里禁用
+`com.apple.watchdogd`、`com.apple.mobileactivationd`、`com.apple.security.xprotectd`、`com.apple.PerfPowerServices`
+（`tooling/k27/stage-boot-run.py --disable-job`），这条 verified-root 线还没做这一步 —— 下一发就把这四个标签灌进 8748 seed 重建 RAM 镜像。
+提醒：盘上 `linux_data` 那个 store 就是这发镜像自己的 seed（`8e1a87e1…`），所以 `data-store-replace=1` 对它无效；
+store 没占的页仍然读 seed，这正是灌 override 库能被读到的原因。详见
+[results-2026-11-27-mount-phase-1-passes-watchdogd-panics.md](docs/results-2026-11-27-mount-phase-1-passes-watchdogd-panics.md)。
