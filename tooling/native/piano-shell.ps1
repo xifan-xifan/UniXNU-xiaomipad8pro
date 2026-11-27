@@ -30,9 +30,9 @@ foreach($name in $cands){
   }catch{ "open failed $name : " + $_.Exception.Message; continue }
   try{
     $sp.DiscardInBuffer()
-    $sp.Write("`r")
+    $sp.Write("echo PIANO_$((6*8))`r")
     $probe=ReadQuiet $sp 2500 700
-    if($probe -match 'root#|root %|pianousb|#\s*$'){
+    if($probe -match 'PIANO_48'){
       "shell: $name (probe: " + (($probe -replace '\s+',' ').Trim() -replace '^(.{0,60}).*','$1') + ')'
       $shell=$sp
       break
@@ -44,13 +44,15 @@ foreach($name in $cands){
 if(-not $shell){ 'no user pipe answered; boot with piano-usb-shell=1 and the pianousb-shell helper'; exit 3 }
 try{
   $shell.DiscardInBuffer()
+  $shell.Write("stty columns 500 2>/dev/null; export PS1='P> '`r")
+  ReadQuiet $shell 4000 900 | Out-Null
   $shell.Write($Command + "; echo " + $sentinel + '`$?' + "`r")
   $sb=New-Object Text.StringBuilder; $end=(Get-Date).AddSeconds($WaitSeconds)
   while((Get-Date) -lt $end){
     $chunk=ReadQuiet $shell 4000 1200
     if($chunk){ $sb.Append($chunk) | Out-Null; if($sb.ToString() -match [regex]::Escape($sentinel)){ break } }
   }
-  $text=$sb.ToString()
+  $text=[regex]::Replace($sb.ToString(), [char]27 + '\[[0-9;?]*[a-zA-Z]', '')
   if($OutFile -ne ''){ [IO.File]::AppendAllText($OutFile, $text) }
   $text
   if($text -notmatch [regex]::Escape($sentinel)){ '(no ' + $sentinel + ' within ' + $WaitSeconds + ' s)' }

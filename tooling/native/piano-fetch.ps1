@@ -28,7 +28,7 @@ function OpenShell([string]$Port){
     }catch{ "open failed $name : " + $_.Exception.Message; continue }
     $sp.DiscardInBuffer(); $sp.Write("`r")
     $probe=ReadQuiet $sp 2500 700
-    if($probe -match 'root#|root %|pianousb|#\s*$'){ "shell: $name"; return $sp }
+    if($probe -match 'root#|root@|root %|pianousb|#\s*$'){ "shell: $name"; return $sp }
     "not the user pipe: $name (" + (($probe -replace '\s+',' ').Trim() -replace '^(.{0,60}).*','$1') + ')'
     $sp.Close()
   }
@@ -43,13 +43,14 @@ function Ask($sp,[string]$command,[int]$seconds){
     $c=ReadQuiet $sp 5000 900
     if($c){ $sb.Append($c) | Out-Null; if($sb.ToString() -match ("(?m)^E-" + $id + "\s*$")){ break } }
   }
-  $text=($sb.ToString() -replace "`r",'')
+  $text=([regex]::Replace($sb.ToString(), [char]27 + '\[[0-9;?]*[a-zA-Z]', '') -replace "`r",'')
   $m=[regex]::Match($text,"(?m)^B-$id\s*\n([\s\S]*?)\n?E-$id")
   if(-not $m.Success){ return $null }
   return $m.Groups[1].Value.Trim()
 }
 $sp = OpenShell $Port
 if(-not $sp){ 'no user pipe answered; boot with piano-usb-shell=1 and the pianousb-shell helper'; exit 3 }
+$sp.Write("stty columns 500 2>/dev/null; export PS1='P> '`r"); ReadQuiet $sp 4000 900 | Out-Null
 try{
   $sizeText = Ask $sp "stat -f%z '$Remote'" $WaitSeconds
   if($null -eq $sizeText){ "no size for $Remote (does it exist?)"; exit 4 }
