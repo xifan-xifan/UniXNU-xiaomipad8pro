@@ -1654,7 +1654,7 @@ watchdogd 那四个标签灌进 seed 的 launchd override 库之后：`mount-pha
 细节见 [results-2026-11-27-shim-root-early-boot-complete-windowserver-format.md](docs/results-2026-11-27-shim-root-early-boot-complete-windowserver-format.md)。
 ## 2026-11-27 - `&BGA` 读出来了：27.3 把 framebuffer 压成 `&BGA`，SkyLight 软件合成器写不了；已改插件 + `exec-env`，镜像在 Mac 上重编
 
-先钉数字：信箱里 14 处独立副本、表决阈值扫到 4..7 都读同一个 `641877825 = 0x26424741 = ''&BGA''`，
+先钉数字：信箱里 14 处独立副本、表决阈值扫到 4..7 都读同一个 `641877825 = 0x26424741 = '&BGA'`，
 而且这值我们自己早命名过（`package/NativeGopDisplay/GopShot.h` 的 `GOP_SHOT_BGA`），不是位衰减。
 再读实现（pin 的 27.3 SystemOS 缓存 `/private/tmp/soscheck/mnt/System/Library/dyld/dyld_shared_cache_arm64e`，
 `OS Version = 27.3`，4142 image；宿主 27.2.1 没有共享缓存、OS 盘里只有骨架，读不到）：

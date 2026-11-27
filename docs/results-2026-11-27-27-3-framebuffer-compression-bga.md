@@ -2,7 +2,7 @@
 
 ## 先把那个数字钉死
 
-`641877825 = 0x26424741 = ''&BGA''`。三件独立的事说明它不是 pstore 位衰减造出来的：
+`641877825 = 0x26424741 = '&BGA'`。三件独立的事说明它不是 pstore 位衰减造出来的：
 
 - 那颗信箱（`logs/native-runs/ram-k273-sm-20261127-144201/mailbox-9cb00000-700000.bin`，11 副本、容量 661294）里
   `Unimplemented pixel format of` 出现 **14 次，在 14 个不同的 ring 偏移**（102924、135206、145631、159036、177032、190937、
@@ -11,7 +11,7 @@
   同一份日志别处确实有衰减（`dyld+0x#1f90` 应为 `0x31f90`，`need=7` 时还会把某个 `pid 430` 读成 `.30`），
   所以这不是"整份日志都可靠"，而是"这一行的数字稳到能扛住阈值变化"。
 - 我们自己已经给这个值起过名字：`package/NativeGopDisplay/GopShot.h` 里
-  `#define GOP_SHOT_BGA 0x26424741u  // ''&BGA'', linear plane 0 with BGRA8 pixels`；
+  `#define GOP_SHOT_BGA 0x26424741u  // '&BGA', linear plane 0 with BGRA8 pixels`；
   `docs/k273-line.md:134` 记的维护者 27.3 首启也是 `a frame surface 3200x2136 format 0x26424741 …`。
   上游那句解释是"Apple 的无损压缩 BGRA 写法，单 plane"。
 
@@ -23,11 +23,11 @@ Mac `/private/tmp/soscheck/mnt`，它的 `System/Library/dyld/dyld_shared_cache_
 OS 盘 `141-22233-021.dmg` 里也只有骨架没有 Mach-O，所以能读的只有这份。用 `/opt/homebrew/bin/ipsw dyld` 读：
 
 - `CA::WindowServer::IOMFBDisplay::framebuffer_pixel_format()` 在 `0x18e1e1048`。它先备好候选
-  `''RGhA''`（`mov w19,#0x6841 ; movk w19,#0x5247,lsl 16`），按 EDR/能力位可能换成 `''b3a8''`（`0x62336138`）或
-  `''BGRA''`（`0x42475241`），**然后把这个候选交给一条 vtable 调用**（`blraa`，参数 `(this, fmt, 0, 0)`，
+  `'RGhA'`（`mov w19,#0x6841 ; movk w19,#0x5247,lsl 16`），按 EDR/能力位可能换成 `'b3a8'`（`0x62336138`）或
+  `'BGRA'`（`0x42475241`），**然后把这个候选交给一条 vtable 调用**（`blraa`，参数 `(this, fmt, 0, 0)`，
   符号 `CA::WindowServer::AppleDisplay::compressed_pixel_format(unsigned, unsigned long, SurfaceUsage)` 在 `0x18defb0ec`），
-  返回的是那条调用的结果。函数尾部还有 `''&b38''`（`0x26623338`）到 `''&w4a''`（`0x26773461`）、`''b3a8''` 到 `''w40a''`
-  （`0x77343061`）两条换算 —— 也就是 `''&xxx''` 一族就是同一批像素的压缩写法。
+  返回的是那条调用的结果。函数尾部还有 `'&b38'`（`0x26623338`）到 `'&w4a'`（`0x26773461`）、`'b3a8'` 到 `'w40a'`
+  （`0x77343061`）两条换算 —— 也就是 `'&xxx'` 一族就是同一批像素的压缩写法。
 - 决定压不压的两个门都是"读一次就缓存"的布尔：
   `CADeviceUseFramebufferCompression` 在 `0x18e12b26c`（两道 once-init，各带一个名字串），
   `CADeviceSupportsUniversalCompression` 在 `0x18e12b564`（能力字节 `& ~` 一个标志）。
@@ -39,7 +39,7 @@ OS 盘 `141-22233-021.dmg` 里也只有骨架没有 Mach-O，所以能读的只�
 （`configs/k273-adt.toml:86`，`tooling/k273/build-k273-image.sh:39` 也默认 0），
 这发的 `out/adt/piano-k27.adt`（`8ebbcdb6…`，就是镜像里那份）里读得到 `vmm-present` 且 k273 身份是 Mac17,11 / chip 0x6050。
 所以 26.6 上那台"半浮点 framebuffer"的病根和这台 27.3 上的病根不是同一个：**27.3 是 framebuffer 压缩开着**，
-`''BGRA''` 在交给软件合成器之前被改写成了 `''&BGA''`，而 SkyLight 的软件合成器只会写不压缩的格式。
+`'BGRA'` 在交给软件合成器之前被改写成了 `'&BGA'`，而 SkyLight 的软件合成器只会写不压缩的格式。
 （上游那条线不会撞这堵墙：他们的 WindowServer 有真 GPU，走的是 `WSCompositeDestinationCreateWithMetalTexture`。）
 
 ## 这一轮改了什么

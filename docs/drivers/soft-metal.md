@@ -388,12 +388,12 @@ layers, and SwiftUI/RenderBox needs Metal buffers. Next: a real Metal device, ei
 metal2vulkan plugin) or the A830 driver (docs/drivers/gpu.md, the local plan `gpu-native-plan.md` (not published)).
 
 
-## Measured 2026-11-27 (27.3, this unit): the format is `''&BGA''`, and it is the framebuffer-compression branch
+## Measured 2026-11-27 (27.3, this unit): the format is `'&BGA'`, and it is the framebuffer-compression branch
 
 The first 27.3 run with the plugin (`ram-k273-sm`, 14:42, image `b63ee621…`) aborts 15 times with
-`Unimplemented pixel format of 641877825 used in WSCompositeDestinationCreateWithIOSurface`. That is `0x26424741`, `''&BGA''` —
+`Unimplemented pixel format of 641877825 used in WSCompositeDestinationCreateWithIOSurface`. That is `0x26424741`, `'&BGA'` —
 not one of §8's eight writable formats nor of its three aborting ones, because 27.3 renamed the decision: reading
-`framebuffer_pixel_format()` in the pinned 27.3 SystemOS cache shows the format it picks (one of `''RGhA''`/`''b3a8''`/`''BGRA''`)
+`framebuffer_pixel_format()` in the pinned 27.3 SystemOS cache shows the format it picks (one of `'RGhA'`/`'b3a8'`/`'BGRA'`)
 being handed to `AppleDisplay::compressed_pixel_format()` and the *answer* returned, and that call is gated by
 `CADeviceUseFramebufferCompression()`, whose name in QuartzCore's table is `CA_DISABLE_FRAMEBUFFER_COMPRESSION`.
 `vmm-present` is not involved on this unit: the 27.3 ADT already carries 0 (§9's branch is the 26.6 line's).
