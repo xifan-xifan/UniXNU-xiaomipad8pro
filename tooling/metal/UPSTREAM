@@ -36,6 +36,9 @@ Mesa (MIT): https://github.com/Droid-VM/mesa cecc0e96d7193c72356a31abb0cc589e4fc
   0014-turnip-darwin-cs-reserve.patch: keeps a bounded reserve of mapped command-stream BOs for the render server.
   0015-turnip-darwin-private-tier.patch: requests private backing only for GPU-only blit scratch when the kernel advertises
   support. The optional request uses BoAlloc's existing contiguous field and keeps the ABI v2 layout.
+  0016-turnip-render-mode-for-attachment-memory.patch: the board's patches/mesa patch of that name (Droid-VM/UniXNU wip/droidvm, one of the two that
+  are left over against the pinned 21), with one context line adapted to this Mesa's three-argument tu_trace_end_render_pass. It is the Mesa half of
+  NativeMetal's 0020, which this bridge series needs; read docs/results-2026-11-27-metal-bridge-inputs-pinned-to-one-line.md (MIT, as the file).
   Build options: UniXNU-turnip build-turnip-macos-piano.py's, with -Dtu-darwin-abi-dir pointing at the ABI below.
 Kernel ABI (MIT): https://github.com/Shad0w23333/Adreno830 1a1321056ffc5428ae925f4680093718b46ca7c2, NativeAdrenoABI.h
   (sha256 20ac9298bb390d86788c1fc58155e1f9581ffa942e222752efc95c67cb5670d2), superseded by the in-tree

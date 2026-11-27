@@ -480,3 +480,15 @@ A830 kernel ABI, built by `tooling/metal/build-turnip-a830.sh` against a work tr
 (`Droid-VM/mesa cecc0e96` + `Droid-VM/UniXNU 527b8b7a3119`'s `patches/mesa` + the k27 tree's `patches/mesa-macos`, ordered by
 unblock-count, then this repository's own 15 patches). Built, to be run: never on the tablet. Read
 [results-2026-11-27-turnip-a830-built-on-this-mac.md](../docs/results-2026-11-27-turnip-a830-built-on-this-mac.md).
+
+## 2026-11-27 (later still) - the Metal bridge, built on this Mac
+
+`out/metal/bridge/libnative_metal_bridge.a` on the Mac build host (`/Users/zhangqi/Codex/k27-tree/out/metal/bridge/`,
+223,067,976 bytes, `83c29eafb4abc729556d1e07659f2f2eb035e579a4cd3406ede876fcafdb709f`) is the Rust bridge the Metal plugin links:
+`drivers/NativeMetal/bridge/NativeMetalBridge.rs` over `steelbrain/metal2vulkan 624bab3918de5b978e1101517abca2b4fa426565`,
+arm64e-apple-darwin (tier 3, nightly 2026-11-25 `6c709eb42` with `-Zbuild-std`, pauthtest ABI,
+`-Zpointer-authentication=-init-fini`), fat LTO, built by `tooling/metal/build-metal-bridge-macos-host.py` in 7m08s. It is *not*
+the VM's prebuilt `81d46fae51ee...` and was never checked against it: same recipe, different host and patch line, so
+`build-turnip-a830.sh` prints its "not the bridge this was checked with" note by design. Built, to be run: never on the tablet.
+Inputs and their verification:
+[results-2026-11-27-metal-bridge-inputs-pinned-to-one-line.md](../docs/results-2026-11-27-metal-bridge-inputs-pinned-to-one-line.md).

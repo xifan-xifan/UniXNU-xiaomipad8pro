@@ -65,3 +65,21 @@ target spec, `RUSTFLAGS` and release profile: Homebrew LLVM 23.1.6 for `llvm-as`
 the recorded file hashes are the pin check, and only with `NMB_ALLOW_HASH_PIN=1`, so the substitution is deliberate and logged.
 `tooling/metal/metal2vulkan-pin.json` is this repository's copy of the record, because the k27 checkout here carries `drivers/`
 only, not the whole monorepo.
+## The Mesa side of `0020`, adapted to this Mesa
+
+`tooling/metal/turnip-a830/mesa/0016-turnip-render-mode-for-attachment-memory.patch` is the board's
+`turnip-render-mode-for-attachment-memory.patch` (from `Droid-VM/UniXNU wip/droidvm`'s `patches/mesa`, one of the two files
+`build-mesa-work.sh` reports as left over against the pinned 23) with one context line adapted: this Mesa's
+`tu_trace_end_render_pass<CHIP>` takes the Perfetto iterator (`(cmd, false, NULL)`), where the upstream hunk was written against the
+two-argument form. Nothing else changed.
+
+It is not optional at this line. NativeMetal's `0020-written-host-page-textures-in-place-at-any-size.patch` - which this series needs,
+since dropping it makes the board's `0013-trim-kept-memory.patch` fail to apply - removes the runtime's fallback that turns a *written*
+host-page texture whose tile stores do not fit into a shadow, on the stated ground that the driver renders such a linear image over a
+host allocation without tile memory. That is exactly what this Mesa patch implements; without it the same texture goes to a driver that
+was never told to handle it, and the note in 0020 names the size involved (3048x2032 RGBA16Float, this board's own panel).
+
+Verified on the Mac, on a tree rebuilt by `tooling/metal/build-mesa-work.sh --expect-left
+turnip-gmem-mutable-swap.patch,turnip-render-mode-for-attachment-memory.patch --must-apply .../0016-...patch`: 23 applied, the two
+leftovers expected, 0016 in, 12,844 files; all 15 of this repository's own Mesa patches then apply on top in their own order. Built,
+to be run: not on the tablet.
