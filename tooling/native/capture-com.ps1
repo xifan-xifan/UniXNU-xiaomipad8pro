@@ -2,7 +2,8 @@
 # Ports appear/disappear with the gadget; every byte is written raw and the open/close events are logged inline.
 param([string]$OutFile='ufs227-com.log',[int]$Seconds=200,[string[]]$ExcludePorts=@())
 $ErrorActionPreference='Continue'
-$sw=New-Object IO.StreamWriter((Join-Path (Get-Location).Path $OutFile),$false,[Text.Encoding]::UTF8)
+if([IO.Path]::IsPathRooted($OutFile)){ $log=$OutFile } else { $log=Join-Path (Get-Location).Path $OutFile }   # Join-Path in 5.1 glues an absolute child onto the cwd instead of using it, which used to throw here and leave the boot uncaptured
+$sw=New-Object IO.StreamWriter($log,$false,[Text.Encoding]::UTF8)
 function Log($s){ $sw.WriteLine(('### {0:HH:mm:ss.fff} {1}' -f (Get-Date),$s)); $sw.Flush() }
 $ports=@{}
 $deadline=(Get-Date).AddSeconds($Seconds)
