@@ -1857,3 +1857,23 @@ root 入口，所以 install.sh 从来没跑过，`stage.py` 也直接拒绝构�
 Mac `out/build-a830-shot3-8748.log`，完成标志 `A830-SHOT-8748-BUILD-DONE`），读回上面那几个文件：期望 `NativeRamBlock: Data store state 2`。
 读回通过后，才是输入（触摸/键盘/背光，参考 `tooling/k27/build-desktop-images.sh` 的 desk 档案）、三次冷启动、两轮 Android↔macOS、硬复位恢复。
 另外记下这一版跑起来后出现的 `PianoA830: gpu BoAlloc refused … 16777216 status=0xe00002bd`（池 805 MiB/1 GiB）。
+
+## 2026-11-27 深夜第二次启动（store 续上、上次写的文件还在）
+
+镜像 `boot-piano-macos-ram-A-bundled.img` 205,824,000 字节，SHA-256
+`0e3447ed3fa6c0f35f11b2d0aa3edd4bcea1050ee5b8d556ac7398ff4865af2f`（`SHOT_REPLACE=keep`，Windows
+`out/k273-ram-a830-shot2/`，Mac `out/ram-verified-8748-a830-shot/`）。运行
+`logs/native-runs/ram-k273-a830read-20261127-222607`，串口 `logs/usb-console/a830read-20261127-222603-com.log`。
+详见 [这一篇](../docs/results-2026-11-27-store-resumed-across-a-reboot.md)。
+
+- `NativeRamBlock: Data store state 2`（resumed），`seed bb6dd1c3 / store seed bb6dd1c3`，`generation 3`；
+  `machdep.piano_data_io` 里 `state=2 store_state=2 store_rd=21946/2111174us store_wr=9403/1110864us errors=0`。
+- **上次启动写的文件这次读到了**：`/private/var/db/piano-persist.txt` 仍是 `piano-20261127-a830shot`（24 字节，root:wheel）。
+  这是写入后重启读回第一次成立。
+- `/private/tmp` 每次启动被清空，所以 PNG 不保留；要留的东西放 `/private/var` 下面。
+- 本轮 `gop-shot` 报 `source=flip`（上次是 `source=boot`），说明 `piano-dpu-flip=4` 下取的是翻给 DPU 的那张 surface。
+- 留给下次读回：`/private/var/db/piano-persist2.txt`（`boot2-20261127-222644`）、
+  `/private/var/db/piano-persist.d/{nested.txt,blob.bin,blob.sha}`，blob 1 MiB 随机，
+  SHA-256 `b3bfdacf44bb15ea8d223f9d93e9acc847c78c35c2dd30e357582492dafd2e21`。
+- 串口 shell 两个真 bug 已修（哨兵前的反引号让 zsh 卡在命令替换里；回显行本身含哨兵导致提前收尾），
+  `capture-com.ps1` 加了 `-ExcludePorts`。`diskutil list` 会挂住用户管道，别再在线上跑。

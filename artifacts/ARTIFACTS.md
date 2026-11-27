@@ -560,3 +560,11 @@ pieces; 48 KiB pieces arrived short, so the smaller size is what the tool asks f
   Windows: `out/diag-b1.txt`.
 - Left on the tablet's Data for the read-boot: `/private/var/db/piano-persist.txt` (holding `piano-20261127-a830shot`) and
   `/private/tmp/{shot.png,shot320.png,diag.txt}`.
+
+Same seed, second boot (store resumed, `state 2`): boot image `boot-piano-macos-ram-A-bundled.img` 205,824,000 bytes
+`0e3447ed3fa6c0f35f11b2d0aa3edd4bcea1050ee5b8d556ac7398ff4865af2f` (Windows `out/k273-ram-a830-shot2/`, Mac
+`out/ram-verified-8748-a830-shot/`). Read back over the user pipe: `/private/var/db/piano-persist.txt` =
+`piano-20261127-a830shot`, 24 bytes, written by the boot before. `gop-shot` reported `source=flip format=#BGA layout=8-bit`.
+Left on the store for the next read-back: `/private/var/db/piano-persist2.txt` (`boot2-20261127-222644`) and
+`/private/var/db/piano-persist.d/{nested.txt,blob.bin,blob.sha}` with `blob.bin` 1,048,576 bytes
+`b3bfdacf44bb15ea8d223f9d93e9acc847c78c35c2dd30e357582492dafd2e21`.
