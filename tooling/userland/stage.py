@@ -920,6 +920,61 @@ def seed_camera_apps(mount, staging, built):
     return installed
 
 
+def seed_install_units(mount, staging, built, units):
+    """Install the named units' files at their final paths inside the seed itself, for a seed with no boot job: install.sh is what
+    normally copies the staging to the dest paths as root, and on such a seed nothing runs it (the 27.3 verified-root seed has no
+    org.droidvm.run.0.plist, so no boot of it has ever had a root hook of ours). The copies come out with the volume's uid like
+    every other write from this Mac; root_seed_ownership below makes them and their path root:wheel. Returns (files, directories)
+    relative to the volume root, the directories being every step of the way to an installed file, whether the seed had it or not,
+    since launchd also refuses a job file whose directory is not root's. A real Data volume owns all of those to root:wheel, so this
+    only undoes what packing a seed without ownership did."""
+    files, directories = [], []
+    for f, _ in built:
+        if f['unit'] not in units:
+            continue
+        dest = f['dest'].lstrip('/')
+        target = mount / dest
+        if target.is_symlink():
+            raise SystemExit(f'{f["dest"]}: the seed has a symlink where {f["unit"]} installs a file')
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(mount / staging / (f['staged'] or f'files/{f["unit"]}/{f["name"]}'), target)
+        os.chmod(target, int(f['mode'], 8))
+        sh(['xattr', '-c', str(target)], timeout=60, check=False)
+        if sha(target.read_bytes()) != f['sha256']:
+            raise SystemExit(f'{f["dest"]}: the installed bytes differ from the manifest')
+        files.append(dest)
+        for parent in Path(dest).parents:
+            if parent.as_posix() not in directories:
+                directories.append(parent.as_posix())
+    if not files:
+        raise SystemExit(f'--seed-install-root: {" ".join(sorted(units))} install no file')
+    directories.remove('.')   # the volume root, which launchd reaches first: last of the list
+    directories.append('.')
+    return files, directories
+
+
+def root_seed_ownership(raw, mount, files, directories):
+    """Reopen the raw seed with ownership enabled and persist real root ids on the installed files and on every directory of their
+    path (camera_seed_ownership below is the same re-attach for the camera's staging area, and where this dance comes from)."""
+    entities = sh(['hdiutil', 'attach', '-imagekey', 'diskimage-class=CRawDiskImage', '-owners', 'on', '-nobrowse',
+                   '-mountpoint', str(mount), '-plist', str(raw)], timeout=120, check=True, capture_output=True).stdout
+    attached = plistlib.loads(entities)['system-entities']
+    whole = min((e['dev-entry'] for e in attached), key=lambda d: (len(d), d))
+    try:
+        if not any(e.get('mount-point') == str(mount.resolve()) for e in attached):
+            raise SystemExit('installed root ownership: wrong mounted volume')
+        sh(['sudo', '-n', 'chown', '-h', '0:0', *[str(mount / d) for d in directories]], timeout=120, check=True)
+        sh(['sudo', '-n', 'chown', '-h', '0:0', *[str(mount / f) for f in files]], timeout=120, check=True)
+        sh(['sudo', '-n', 'xattr', '-cr', *[str(mount / f) for f in files]], timeout=120, check=False)
+        for name in (*directories, *files):
+            st = (mount / name).lstat()
+            if (st.st_uid, st.st_gid) != (0, 0):
+                raise SystemExit(f'{name}: ownership did not persist as root:wheel')
+        print('root:wheel: ' + ', '.join([*directories, *files]))
+    finally:
+        sh(['hdiutil', 'detach', whole], timeout=120, check=True, stdout=subprocess.DEVNULL)
+
+
 def check_camera_seed_directories(mount, apps):
     """Verify the public path with ownership enabled, after the metadata writes."""
     applications = mount / 'Applications'
@@ -1078,6 +1133,8 @@ def mounted_seed(seed, out, result):
                 sh(['hdiutil', 'detach', '-force', '/dev/' + whole], timeout=120, check=False, stdout=subprocess.DEVNULL)
         if result.get('camera_ownership'):
             camera_seed_ownership(raw, mount)
+        if result.get('root_install'):
+            root_seed_ownership(raw, mount, *result['root_install'])
         if compact:
             result['zero_sparsified_bytes'] = sparsify_zero_ranges(raw)
         packed = out / 'scratch-data.img.new'
@@ -1146,6 +1203,9 @@ def stage_seed(a, plan):
     tree = staging_tree(plan, built)
     command = boot_wifi_profile(tree, boot_command(plan))
     addon_mode, addon_name = gpu_addon_request()
+    install_units = set(a.seed_install_root)
+    if install_units and sh(['sudo', '-n', 'true'], timeout=10, capture_output=True).returncode:
+        raise SystemExit('--seed-install-root needs noninteractive sudo to make the installed files root:wheel')
     seed_info_in = common.seed_info(seed_in)
     trust_bytes = trust_in.read_bytes()
     trusted_cdhashes = sorted({f['cdhash'] for f, _ in built if f['cdhash']})
@@ -1154,6 +1214,7 @@ def stage_seed(a, plan):
                             'camera_approval': bake['record'] if bake else None,
                             **({'camera_directory_mode': '0755'} if bake else {}),
                             'trusted_cdhashes': trusted_cdhashes,
+                            'install_at_dest': sorted(install_units),
                             **({'gpu_addon': [addon_mode, addon_name]} if addon_mode else {}),
                             'staging': plan['staging'], 'tree': {k: [sha(v), m] for k, (v, m) in sorted(tree.items())}},
                            sort_keys=True).encode())
@@ -1201,7 +1262,22 @@ def stage_seed(a, plan):
         if bake:
             plan['camera_bake_module'].seed(mount, bake)
             packed['camera_ownership'] = True
-        script, changed = add_boot_command(mount / ssm.BOOT_JOB, command, ssm.SETTIME)
+        if install_units:
+            unknown = install_units - {u['name'] for u in plan['units']}
+            if unknown:
+                raise SystemExit(f'--seed-install-root: no such unit: {" ".join(sorted(unknown))}')
+            installed, directories = seed_install_units(mount, staging, built, install_units)
+            packed['root_install'] = (installed, directories)
+            print(f'{volume}: {len(installed)} file(s) of {" ".join(sorted(install_units))} installed at their dest paths')
+        if (mount / ssm.BOOT_JOB).is_file():
+            script, changed = add_boot_command(mount / ssm.BOOT_JOB, command, ssm.SETTIME)
+            print(f'the boot job {"now runs" if changed else "already ran"}: {script}')
+        elif install_units:
+            print(f'/{ssm.BOOT_JOB}: the seed has no boot job, so nothing runs {command}: those units are installed in the seed '
+                  'itself instead')
+        else:
+            raise SystemExit(f'/{ssm.BOOT_JOB}: the seed has no boot job; a new plist would not be root\'s and launchd would '
+                             'refuse it (--seed-install-root installs the units into the seed instead)')
         listing = sh(['ls', '-lnR', str(mount / staging)], timeout=60, capture_output=True, text=True).stdout
         listing = listing.replace(str(mount), '')
         print(f'{volume}: /{staging}: {len(written)} written, {len(removed)} removed{": " + " ".join(removed) if removed else ""}\n'
@@ -1210,7 +1286,6 @@ def stage_seed(a, plan):
         if addon:
             print(f'seed GPU addon ({addon["mode"]}): {addon["dest"]}, {len(addon["files"])} files; boot with '
                   f'{addon["boot_arg"]}' + ('' if addon['gpu_bundles_copy_kept'] else f'; {GPU_BUNDLES}/{addon_name}.bundle removed'))
-        print(f'the boot job {"now runs" if changed else "already ran"}: {script}')
     seed_info_out = common.seed_info(seed_out)
     record = {
         'format': FORMAT, 'stamp': stamp, 'manifest': rel(plan['path']), 'staging': plan['staging'], 'boot_command': command,
@@ -1220,6 +1295,7 @@ def stage_seed(a, plan):
         'seed_gpu_files': gpu_files,
         **({'seed_gpu_addon': addon} if addon else {}),
         'seed_camera_files': camera_files,
+        'installed_at_dest': sorted(install_units),
         'camera_approval': bake['record'] if bake else None,
         'compaction': {key: packed[key] for key in ('zero_filled_bytes', 'zero_sparsified_bytes') if key in packed},
         'planned': [u['name'] for u in plan['units'] if u['planned']],
@@ -1341,6 +1417,9 @@ def main():
     p.add_argument('--out', type=Path, default=D / 'out/userland/stage')
     p.add_argument('--on', action='append', default=[], metavar='UNIT', help='this unit\'s job on in this build')
     p.add_argument('--off', action='append', default=[], metavar='UNIT', help='this unit\'s job off (Disabled) in this build')
+    p.add_argument('--seed-install-root', action='append', default=[], metavar='UNIT',
+                   help='seed mode: install UNIT\'s files at their final paths in the seed itself and chown them and their whole '
+                        'path root:wheel with sudo, for a seed with no boot job to run install.sh (docs/userland.md 11); repeatable')
     p.add_argument('--force', action='store_true', help='restage even when the stamp says the outputs are up to date')
     p.add_argument('--live', type=Path, metavar='DIR', help='write a live update\'s bundle to DIR instead of a seed')
     p.add_argument('--installed-trust', type=Path, help='the trust cache of the installed ESP (default: from its record)')
@@ -1352,6 +1431,8 @@ def main():
     a = p.parse_args()
     plan = add_camera_package(add_bluetooth_runtime(add_hal_bundles(add_gpu_bundles(load_manifest(a.manifest, a.on, a.off), a.gpu_bundle),
                                                                     a.hal_bundle)))
+    if a.seed_install_root and (a.plan or a.live):
+        raise SystemExit('--seed-install-root is a seed-mode option (a live update installs as root on the running system anyway)')
     if a.plan:
         show_plan(plan)
     elif a.live:
