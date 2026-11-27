@@ -443,3 +443,12 @@ and [results-2026-11-26-k273-data-store-on-this-unit.md](../docs/results-2026-11
 
 Built, to be run: none of these has been on the tablet. Read
 [results-2026-11-27-shim-systemos-root-assembled.md](../docs/results-2026-11-27-shim-systemos-root-assembled.md).
+
+## 2026-11-27 (later) - the root above is on the medium
+
+`out/root-shim/piano-shim-root-26C5035r.img` (`9e4ef505…`) occupies `linux_rootfs` blocks 0..5151487
+(LUN 0 4 KiB LBAs 102269696..107421183). The tablet hashed the whole 21,100,494,848-byte span back after the write and got
+the image's own digest, caches dropped; the bytes it replaced had first been proved equal to the host's held copy
+(`db3629e5…`), and the 867,328 blocks the image newly takes read zero. GPT, ESP, `boot_a`, `vendor_boot_a`, `init_boot_a`,
+`boot_b` re-read unchanged. Read
+[results-2026-11-27-shim-root-written-verified.md](../docs/results-2026-11-27-shim-root-written-verified.md).
