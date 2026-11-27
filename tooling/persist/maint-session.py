@@ -293,18 +293,31 @@ class Session:
 
     @staticmethod
     def boot_records():
-        """The signed boot_a images of boot.json (series 4) and every boot-v*.json (build-boot.py --series N), each with its record's
-        name and its FD's DarwinBoot window bound (common.boot_fd_bound)."""
-        signed, unsigned = {}, {}
+        """The boot_a images of boot.json (series 4) and every boot-v*.json (build-boot.py --series N), each with its record's name and
+        its FD's DarwinBoot window bound (common.boot_fd_bound): the signed ledger, the containers (unsigned, not writable), and the
+        partition-sized padded images of pad-boot-image.py - a unit without the signing host has those and nothing sealed."""
+        signed, unsigned, padded = {}, {}, {}
         for path in [OUT / 'boot.json', *sorted(OUT.glob('boot-v*.json'))]:
             if path.is_file():
                 record = json.loads(path.read_text())
                 bound = common.boot_fd_bound(record)
                 for name, entry in (record.get('signed') or {}).items():
                     signed[name] = {**entry, 'record': path.name, 'fd_bound': bound}
+                for name, entry in (record.get('padded') or {}).items():
+                    padded[name] = {**entry, 'unsigned': True, 'record': path.name, 'fd_bound': bound,
+                                    'unsigned_evidence': record.get('unsigned_evidence')}
                 for name in record.get('images') or {}:
                     unsigned[name] = {'record': path.name, 'fd_bound': bound}
-        return {'signed': signed, 'unsigned': unsigned}
+        return {'signed': signed, 'unsigned': unsigned, 'padded': padded}
+
+    def boot_images(self):
+        """Every boot_a image a step may write, each entry saying whether it carries an AVB seal: the signed ledger plus the padded
+        images of pad-boot-image.py. Steps accept an unsigned one only with --allow-unsigned-boot, and say so when they do."""
+        if not self.boot:
+            return {}
+        merged = {name: {**entry, 'unsigned': False} for name, entry in self.boot['signed'].items()}
+        merged.update(self.boot.get('padded') or {})
+        return merged
 
     def boot_identity(self, sha):
         """(name, DarwinBoot window bound) of the boot_a contents with this sha256; the bound is None for Ubuntu's boot_a (no UEFI: no
@@ -317,7 +330,7 @@ class Session:
             name = sha.removeprefix('planned:')
             entry = self.boot['unsigned'].get(name.replace('-signed.img', '.img')) or {}
             return f'{name} (not signed yet)', entry.get('fd_bound')
-        for name, entry in self.boot['signed'].items():
+        for name, entry in self.boot_images().items():
             if entry.get('sha256') == sha:
                 return name, entry['fd_bound']
         return 'unknown contents', None
@@ -1562,7 +1575,7 @@ def map_step(s):
         s.log(f'  check GPT head/tail = {common.REFERENCE["GPT_PRIMARY_SHA256"][:16]}/'
               f'{common.REFERENCE["GPT_BACKUP_SHA256"][:16]} (factory), gpt.json\'s (new), or'
               f'{unit[0][:16] if unit else "-"}/{unit[1][:16] if unit else "-"} (this unit)')
-    signed = ((s.boot or {}).get('signed') or {}).get(s.a.boot_image, {}).get('sha256')
+    signed = s.boot_images().get(s.a.boot_image, {}).get('sha256')
     pair = {}
     for key, digest in (('boot_a', common.BOOT_A_SHA256), ('vendor_boot_a', common.VENDOR_BOOT_A_SHA256),
                         ('init_boot_a', common.INIT_BOOT_A_SHA256), ('boot_b', None)):
@@ -2282,13 +2295,26 @@ def need_known_pair(s, vendor_boot, init_boot, what):
 
 
 def signed_boot_image(s):
+    """The --boot-image a step may write: a signed image of the boot ledger, or - only with --allow-unsigned-boot - a partition-sized
+    padded image of pad-boot-image.py, which carries no AVB seal (WRITE-PLAN.md, Slot A boot triplet write)."""
     image = OUT / s.a.boot_image
-    entry = s.boot['signed'].get(s.a.boot_image) or {}
+    entry = s.boot_images().get(s.a.boot_image) or {}
+    if entry.get('unsigned') and not s.a.allow_unsigned_boot:
+        raise Stop(f'{s.a.boot_image} is padded but unsigned ({entry.get("avb")}): sign it with tooling/persist/sign.sh, or pass '
+                   '--allow-unsigned-boot to say the owner accepted an AVB-mismatched boot_a on this unlocked unit')
     digest = entry.get('sha256')
     data = image.read_bytes() if image.is_file() and image.stat().st_size == common.BOOT_PARTITION_BYTES else b''
     s.need(bool(data and digest and hashlib.sha256(data).hexdigest() == digest),
-           f'{image.name} is a partition-sized signed image matching its boot.json/boot-v*.json SHA-256')
+           f'{image.name} is a partition-sized image matching the SHA-256 of its '
+           f'{entry.get("record", "boot.json/boot-v*.json")}' + (' (padded, unsigned)' if entry.get('unsigned') else ''))
+    if entry.get('unsigned'):
+        base = entry.get('base') or {}
+        s.log(f'  WARNING  {image.name} has NO AVB seal ({entry.get("avb")}): written because --allow-unsigned-boot was given. '
+              f'Evidence it boots: {entry.get("unsigned_evidence")}')
+        s.log(f'  WARNING  it is {base.get("image")} ({str(base.get("sha256"))[:16]}) padded with zeros to {entry.get("bytes")} '
+              f'bytes; rollback boot-a streams back the verified backup of what is on boot_a now')
     return image, entry, SELECTOR_TAG in data
+
 
 
 def require_abl_check(s):
@@ -2356,7 +2382,7 @@ def boot_a_step(s):
             saved = s.state.get('backups', {}).get(key, {})
             s.need(saved.get('verified') is True and saved.get('sha256') == digest,
                    f'{key} matches the verified companion SHA-256 recorded with the boot_a backup')
-        s.need(any(e.get('sha256') == now for e in s.boot['signed'].values()), 'selector replaces a known signed macOS boot_a')
+        s.need(any(e.get('sha256') == now for e in s.boot_images().values()), 'selector replaces a known macOS boot_a')
         s.pair(now, esp, 'the boot_a being replaced remains compatible for rollback')
     s.require_backup('boot_a', now if s.execute else None)
     s.require_backup('boot_b')
@@ -3217,6 +3243,10 @@ def main():
                    'linux_rootfs where the installed ESP mounts its root from there and rootfs-clear rightly refuses)')
     p.add_argument('--esp-final', default='esp-base-macos.img', help='the ESP image of step esp-final')
     p.add_argument('--boot-image', default='boot-piano-macos-persistent-v4-signed.img', help='the boot_a image (out/persistent)')
+    p.add_argument('--allow-unsigned-boot', action='store_true',
+                   help='let --boot-image be a pad-boot-image.py image: partition-sized and with NO AVB seal, the owner-approved '
+                        'route for a unit that does not hold the boot_a signing key (WRITE-PLAN.md, Slot A boot triplet write). '
+                        'Every use is printed twice, and rollback boot-a still restores the verified backup.')
     p.add_argument('--selector-r1', nargs=2, metavar=('BOOT_SHA256', 'ESP_SHA256'),
                    help='attest an observed write-free selector R1 pass for the signed boot image and live ESP')
     p.add_argument('--dump-image', default=str(D / 'out/ram-dump/boot-piano-macos-ram-A-bundled.img'))
