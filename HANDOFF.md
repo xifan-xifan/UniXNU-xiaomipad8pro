@@ -1877,3 +1877,27 @@ Mac `out/build-a830-shot3-8748.log`，完成标志 `A830-SHOT-8748-BUILD-DONE`�
   SHA-256 `b3bfdacf44bb15ea8d223f9d93e9acc847c78c35c2dd30e357582492dafd2e21`。
 - 串口 shell 两个真 bug 已修（哨兵前的反引号让 zsh 卡在命令替换里；回显行本身含哨兵导致提前收尾），
   `capture-com.ps1` 加了 `-ExcludePorts`。`diskutil list` 会挂住用户管道，别再在线上跑。
+
+## 2026-11-27 深夜第五次启动：触摸出帧了，Y 轴反向已按本机事实打进构建；这台机器改不了密码
+
+镜像 `c0c1e2afc1659557…`（205,824,000 字节，Windows `out\k273-ram-a830-touch\`，Mac `out/ram-verified-8748-a830-touch/`，
+配方 `tooling/k273/recipes/a830-touch.sh`），运行 `logs/native-runs/ram-k273-a830touch-20261127-234031`，
+串口 `logs/usb-console/a830touch-live-com.log`。仍然只 `fastboot boot`，没写任何分区。详见
+[results-2026-11-27-touch-serves-frames-and-no-password-change.md](docs/results-2026-11-27-touch-serves-frames-and-no-password-change.md)。
+
+- 上次卡住的 step 5 过去了：`frames at 145 s: 20 reads/s, 20 edges/s; edges 1272, reads 1271`，owner 手指按屏能看到指针动。
+  两件事要接着追：`checksum … bad 460`（1271 帧里 460 帧校验和不对），以及没人碰屏时它一直跟着一个 palm 假触点。
+- 方向：左右对、上下反。这是这台 BOE 本机的 Y 反向（`docs/drivers/touch.md` 第 5、7 节写的就是 `PIANO_TOUCH_INVERT_Y=1`），
+  以前从没打进构建（因为面板镜像本来就没进来）。配方现在 `export PIANO_TOUCH_INVERT_Y=1`，是编译期常量，不占那 999 字节命令行。
+- 登录页是空闲锁屏，不是自动登录失败：种子里 `autoLoginUser => piano` 和 `/private/etc/kcpassword` 都在，启动自己就进桌面。
+  已在真机 Data 上关掉询问：`pmset -a displaysleep 0`、`pmset -a sleep 0`（`pmset -g custom` 已确认），
+  `com.apple.screensaver` 的 `askForPassword=0`、`idleTime=0`。
+- **改密码这条路在这版 userland 上不通**，证据：`dscl . -passwd` 回 `eDSOperationFailed (-14483)`；BSD `passwd piano` 走完两次提示但哈希没变
+  （旧密码仍 `-authonly` 通过、新密码 `eDSAuthFailed`）；`launchctl print system/com.apple.localauthenticationd` 报找不到该服务，
+  镜像里没有 `/usr/libexec/localauthenticationd`，串口里那句 `_aks_verify_password:1956: aks connection failed` 同一件事。
+  认证能走（`-authonly` 会答），只有改密码这条依赖那个守护进程的路走不通。所以 `kcpassword` 没动——自动登录要求它和账号口令一致，
+  在目录服务无法校验的情况下手写账号哈希只会把机器锁死。
+- 串口 shell 的新工具：`tmp-send.ps1`（裸收发、不抢先发 Ctrl-C），这样才能交互喂 `passwd` 的两次提示；`dscl`、`ps`、`diskutil`
+  在这个 pipe 上会卡住，别在线上跑。
+- 还没做：这版 Y 反向镜像的实机复验、任何冷启动、任何持久 macOS 启动、硬复位恢复、Wi-Fi/音频/亮度/电池、
+  GPU 池 `BoAlloc refused … 0xe00002bd`（1 GiB 池只剩几 MiB，loginwindow 是最大占用者）。
