@@ -536,3 +536,27 @@ because `out/build-a830-8748.sh` ends in `rm -rf` + `cp` and its 20:18 run repla
 the same recipe plus `piano-dpu=2 piano-dpu-flip=4`, i.e. PianoDpu serving with each swap flipped (dpu.md 4, native-gop-display.md 5a), which is
 what the black panel in `logs/native-runs/ram-k273-a830b-20261127-195858` calls for. Kept on Windows at `out/k273-ram-a830-dpu/`. Read
 [results-2026-11-27-a830-real-gpu-black-panel.md](../docs/results-2026-11-27-a830-real-gpu-black-panel.md).
+
+
+## 2026-11-27 (night) - the shell/Data/still image, and what came off the cable
+
+`boot-piano-macos-ram-A-bundled.img` `dc54552255da0eae50ba5768c5767549d4dbd882ebd44925f2c375b28b29113f` (205,824,000 bytes, UEFI
+wrapper `eb570025859ee90f3b3fb96d3b41414ceda5bf34747a9e94a1ad6dca57e1d128`, kernel `d921655f...`, DTB `50636eff...`) is
+`tooling/k273/recipes/a830-shot.sh` on the Mac and `out/k273-ram-a830-shot/boot-piano-macos-ram-A-bundled.img` on the Windows host
+(re-verified 21:49:52). It is the A830 line above plus `piano-usb-shell=1 native-gop-display-shot=1`, `data-store-replace=1`,
+`piano-reset-after=900` and a 999-byte command line, on a Data seed whose identity is `bb6dd1c365a6a827` - the seed that
+`stage.py --seed-install-root` installed `pianousb-shell` and `gop-shot` into as `root:wheel`, because this seed has no boot job.
+Boot: `logs/native-runs/ram-k273-a830shot-20261127-215044`; read
+[results-2026-11-27-shell-data-and-panel-still.md](../docs/results-2026-11-27-shell-data-and-panel-still.md).
+
+Files taken off the tablet through the user pipe, byte for byte (size and sha256 checked after reassembling base64 in 12 KiB
+pieces; 48 KiB pieces arrived short, so the smaller size is what the tool asks for until the burst limit is measured):
+
+- `shot320.png` 113,893 bytes `2f5f062b0736c81718e35b12c1e6aa9b0b5a55d4d7a9ca6ad382edf3c1c69fc8` - `sips -Z 320` on the tablet of
+  `gop-shot`'s `/private/tmp/shot.png` (8,714,178 bytes, `source=boot format=BGRA layout=8-bit`): menu bar, wallpaper, Dock, and a
+  notification at the top right. Windows: `out/shot320-b1.png`.
+- `diag.txt` 1,120 bytes `d1a5a66c133795d81753f7c5177548666970f62d3be374915ab650eac86d509d` - `sw_vers`, `hw.model`,
+  `machdep.piano_data_io`, `mount`, `ls -l /Library/LaunchDaemons`, `ps ax | wc -l`, `pmset -g batt`, `ifconfig -l`.
+  Windows: `out/diag-b1.txt`.
+- Left on the tablet's Data for the read-boot: `/private/var/db/piano-persist.txt` (holding `piano-20261127-a830shot`) and
+  `/private/tmp/{shot.png,shot320.png,diag.txt}`.
