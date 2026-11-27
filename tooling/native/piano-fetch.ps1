@@ -5,7 +5,7 @@
 #   tooling/native/piano-fetch.ps1 -Remote /private/tmp/x.png -Local out\x.png
 #   tooling/native/piano-fetch.ps1 -Remote /private/var/log/pianousb-shell.log -Local out\pianousb-shell.log -Chunk 32768
 param([Parameter(Mandatory=$true)][string]$Remote, [Parameter(Mandatory=$true)][string]$Local,
-      [int]$Chunk=65536, [string]$Port='', [int]$WaitSeconds=90, [string]$Sha256='')
+      [int]$Chunk=12288, [string]$Port='', [int]$WaitSeconds=90, [string]$Sha256='')
 $ErrorActionPreference='Continue'
 function ReadQuiet($sp,[int]$ms,[int]$quietMs){
   $sb=New-Object Text.StringBuilder; $last=Get-Date; $end=(Get-Date).AddMilliseconds($ms)
