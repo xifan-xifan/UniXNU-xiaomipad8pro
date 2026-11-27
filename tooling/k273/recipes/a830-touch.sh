@@ -16,6 +16,7 @@
 # Everything else is a830-input.sh unchanged, including SHOT_REPLACE=keep (the store stays resumed) and the 1800 s self-reset.
 set -euo pipefail
 export PIANO_TOUCH_FW_DIR=${PIANO_TOUCH_FW_DIR:-/Users/zhangqi/Downloads/XiaomiPad8Pro-Ubuntu/xiaomipad-8pro-mainline/firmware/novatek}
+export PIANO_TOUCH_INVERT_Y=${PIANO_TOUCH_INVERT_Y:-1}   # this BOE unit reads Y reversed (docs/drivers/touch.md section 5 and 7); the build stamps kUnitInvertYOverride and piano-touch-flip=auto takes it, which costs no command-line bytes
 export PIANO_TOUCH_CALIBRATION=${PIANO_TOUCH_CALIBRATION-}
 bash tooling/k273/recipes/a830-input.sh
 cd /Users/zhangqi/Codex/upstream-tip
