@@ -96,7 +96,7 @@ The frontend patches (`tooling/metal/turnip-a830/frontend/`, applied in order af
 - `0001-…patch`: the stderr copy of its `NBLOG` lines is rate-limited per call site (8 lines, then the 16th, 32nd, … with the count);
   `no device answer` goes to the unified log only; `computeCommandEncoderWithDispatchType:` with a concurrent type returns the serial
   encoder instead of failing the command buffer.
-- `0002-frontend-render-barrier-policy.patch` (2026-11-12): which render-pass memory barriers are kept, `piano-metal-barriers=all|small|none`
+- `0002-frontend-render-barrier-policy.patch` (2026-11-12; retired on the pinned `fb063de` frontend, which has no render-barrier block at all - [results](../results-2026-11-27-frontend-patches-on-fb063de.md). Described here as the VM-era record): which render-pass memory barriers are kept, `piano-metal-barriers=all|small|none`
   on the boot line, else the first word of `/private/var/ngpu/debug/render-barriers`, else `none` with `com.droidvm.nmb-no-render-barrier`,
   else `small` (the VM's rule: none in a pass into an IOSurface of more than 4 Mpx, which every full-screen window's surface is natively).
   Each barrier left out in such a pass is an `NBLOG` line (`render memory barrier left out in a N-pixel surface pass (M so far; ...)`).
@@ -671,7 +671,7 @@ DYLD_INSERT_LIBRARIES=$O/hostsim/libhostiokit.dylib HOSTSIM_GPU=a830 HOSTSIM_PAG
   they render to (first: input attachments of the subpass): in a sysmem pass each waits ...`. `TU_DEBUG=nofbflush` is the control;
   `fbflushall` puts the flush before every draw of those passes. Host checks: all 18 pass (`check-turnip-a830-host.py`). The trace
   shows the line for the glass and backdrop scene and for RenderBox's clip, blend and shadow scene, and none for plain shapes.
-- **Frontend `0002-frontend-render-barrier-policy.patch`** (§1). `piano-metal-barriers=all` keeps RenderBox's render-pass barriers in
+- **Frontend `0002-frontend-render-barrier-policy.patch`** (§1; retired on the pinned frontend, [results](../results-2026-11-27-frontend-patches-on-fb063de.md)). `piano-metal-barriers=all` keeps RenderBox's render-pass barriers in
   panel-sized surface passes (SecurityAgent's full-screen window), and each barrier left out is now on the console. The default is
   unchanged (`small`). The VM's lock-up with them was a GMEM split of the whole surface, and these passes render in sysmem. None
   occurred in the traced scenes, so whether the login window asks for any is the run's question.

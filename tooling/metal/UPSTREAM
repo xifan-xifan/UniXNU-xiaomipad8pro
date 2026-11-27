@@ -57,8 +57,8 @@ Frontend (MIT): UniXNU-turnip drivers/AdrenoMetal (NativeMetal fb063de per the V
   0001-frontend-console-rate-limit-serial-concurrent-compute.patch (2026-11-11, MIT as the file: NBLOG's stderr copy rate-limited per
   call site, "no device answer" to the unified log only, a concurrent compute encoder run serially instead of refused). With it the
   plugin executable is linked here (objects without objc_msgSend selector stubs, so the link is reproducible), not taken from the VM.
-  0002-frontend-render-barrier-policy.patch (2026-11-12, MIT as the file: piano-metal-barriers=all|small|none or
-  /private/var/ngpu/debug/render-barriers for the render-pass barriers of panel-sized surface passes, each one left out on stderr).
+  (0002-frontend-render-barrier-policy.patch, 2026-11-12, is retired on this frontend: the barrier block it rewrites is not in fb063de, so it sits in
+  frontend/not-on-this-frontend/, which this glob does not take. docs/results-2026-11-27-frontend-patches-on-fb063de.md.)
   0003-frontend-surface-texture-sizes-limits.patch (2026-11-12, MIT as the file: no fixed cap on two-plane YCbCr surface textures,
   every refused or large texture, buffer and surface texture on the console with its geometry and the runtime's memory for it, the
   device's texture dimensions and memory figures answered from Turnip's tu_darwin_limits, a limits line per process).

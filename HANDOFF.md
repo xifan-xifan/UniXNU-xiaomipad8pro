@@ -1760,3 +1760,27 @@ Mac 上 `/tmp/bridge-build.log` 与 `$K/out/metal/bridge/build.log` 跟进度，
 `$K/out/metal/bridge/libnative_metal_bridge.a`；`$K` = `/Users/zhangqi/Codex/k27-tree`。
 下一步顺序：桥编出来 → `build-turnip-a830.sh` 出 `NativeAdrenoMetal.bundle` → 补 Mesa 那条 render-mode 补丁重编
 `libvulkan_freedreno.dylib` → 用 `PIANO_EXTRA_KEXTS=.../out/k27/kext/PianoA830.json PIANO_A830_METAL=1` 做 seed 上机。
+
+
+## 2026-11-27 深夜：前端补丁集在 `fb063de` 上实测过，上游配方也在这台 Mac 上跑通
+
+前端 `frontend/*.patch` 从来没在这套前端上贴过（以前插件都是拿作者预编的）。今天在 Mac 上按顺序实测：
+`piano-frontend-patch.py`（对 `fb063de` 的 `NativeBridgeMetalFrontend.mm`，373,220 字节，报 1 处 skip：iOS/VM 才有的
+`convertedYCbCrTexture` 尾调用）之后，11 个补丁里 **10 个干净套上，只有 `0002-frontend-render-barrier-policy.patch` 失败**。
+原因不是上下文漂移：它要改的 `kBarrierMaxPassPixels`/`nbRenderBarriers` 这一整块在 `fb063de` 里根本不存在（全树 `grep -rn` 无匹配），
+那是 iOS/VM 前端的 render barrier 开关。于是把它移进 `frontend/not-on-this-frontend/`（`build-turnip-a830.sh` 的 glob 不取这个目录，
+插件源目录也不再停在"补丁贴不上"），`UPSTREAM` 与 `docs/drivers/gpu-userspace.md` 两处提到它的地方都标了退休并指回证据：
+[results-2026-11-27-frontend-patches-on-fb063de.md](docs/results-2026-11-27-frontend-patches-on-fb063de.md)。
+
+同一晚上，k27 树自带的 `build-metal-plugin-piano.sh` 在这台 Mac 上把插件做出来了（上游对账用）：
+`/out/metal/plugin/NativeAdrenoMetal.bundle/Contents/MacOS/` 里 `NativeAdrenoMetal` 23,174,448 B
+`65563e6a…`（arm64e、ad hoc）+ `libvulkan_freedreno.dylib` 17,667,328 B `ffae67cb…`（重签副本）。
+它需要 `~/Codex/UniXNU-turnip/{drivers/AdrenoMetal, build/mesa-tu-macos/src/freedreno/vulkan/libvulkan_freedreno.dylib}` 这两个入口，已建好。
+上平板的插件仍须是 `build-turnip-a830.sh` 编的那份（带我们 10 个前端补丁与 abort reporter）。
+Turnip 也已带 `0016` 重编：`libvulkan_freedreno.dylib` 17,770,472 B `c360c30d…`（替掉 `6eeb3d2d…`）。
+
+下一步（顺序已定，全部不需要用户操作）：把 Mac 上 `~/Codex/upstream-tip` 同步到 `main` 的最新提交（那台机器停在 `0117719d` 且有本地改动，
+先 `git stash` 再取），`TURNIP_TREE=~/Codex/turnip-native`（`.cache/mesa-work` 指向干净的 `mesa-pinned` 树）跑 `tooling/metal/build-turnip-a830.sh`
+出我们自己的 `out/turnip-a830/NativeAdrenoMetal.bundle`，再 `PIANO_GPU=2`（`configs/k27-native-kexts.txt` 里已经有 PianoA830，脚本会自动
+staging 插件+trustcache）做 RAM 镜像，`fastboot boot` 看 AGXAccelerator 是否被匹配、WindowServer 是否能起。注意启动行预算：现在 985 字符，
+加 `piano-gpu=2 piano-gpu-delay=20` 是 997，DarwinBoot 上限约 1000，要减参数就明确减哪一个。

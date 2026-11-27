@@ -492,3 +492,19 @@ the VM's prebuilt `81d46fae51ee...` and was never checked against it: same recip
 `build-turnip-a830.sh` prints its "not the bridge this was checked with" note by design. Built, to be run: never on the tablet.
 Inputs and their verification:
 [results-2026-11-27-metal-bridge-inputs-pinned-to-one-line.md](../docs/results-2026-11-27-metal-bridge-inputs-pinned-to-one-line.md).
+
+
+## 2026-11-27 (late) - Turnip rebuilt with the bridge's Mesa half, and the plugin bundle the pinned tree builds here
+
+`out/turnip-a830/build/src/freedreno/vulkan/libvulkan_freedreno.dylib` on the Mac build host (17,770,472 bytes,
+`c360c30dbc0b32bed7e025e797259bb020129fdaac5b63e87158af442e39e639`, Mach-O arm64e) is the Turnip above rebuilt with
+`tooling/metal/turnip-a830/mesa/0016-turnip-render-mode-for-attachment-memory.patch`, which supersedes
+`6eeb3d2dffa4f7f709cc976235f2f71d3459b89c2bcc0527fa296b762cd069ac`. Built, to be run: never on the tablet.
+
+`/out/metal/plugin/NativeAdrenoMetal.bundle/Contents/MacOS/` (`` = `/Users/zhangqi/Codex/k27-tree`), built by the pinned tree's own
+`build-metal-plugin-piano.sh` with our bridge and this Turnip: `NativeAdrenoMetal` 23,174,448 bytes
+`65563e6a90623d2be7edfb0ee2a0c3f22a21d0ba31a062f1d3ad6fa627163711` (arm64e, ad hoc) and `libvulkan_freedreno.dylib` 17,667,328 bytes
+`ffae67cb0a238df81d322d739942da38766c6541616f57392ae82a68da8f607d`. This is the upstream-parity bundle - it does not carry this repository's
+frontend patches, which are what `build-turnip-a830.sh` adds; `frontend/0002` is retired on this frontend and the other ten apply. Built,
+to be run: never on the tablet. Read
+[results-2026-11-27-frontend-patches-on-fb063de.md](../docs/results-2026-11-27-frontend-patches-on-fb063de.md).
