@@ -26,9 +26,9 @@ function OpenShell([string]$Port){
       $sp.ReadBufferSize=1048576; $sp.ReadTimeout=200; $sp.WriteTimeout=5000; $sp.DtrEnable=$true; $sp.RtsEnable=$true
       $sp.Open()
     }catch{ "open failed $name : " + $_.Exception.Message; continue }
-    $sp.DiscardInBuffer(); $sp.Write("`r")
+    $sp.DiscardInBuffer(); $sp.Write('echo PIANO_$((6*8))'); $sp.Write("`r")
     $probe=ReadQuiet $sp 2500 700
-    if($probe -match 'root#|root@|root %|pianousb|#\s*$'){ "shell: $name"; return $sp }
+    if($probe -match 'PIANO_48'){ "shell: $name"; return $sp }
     "not the user pipe: $name (" + (($probe -replace '\s+',' ').Trim() -replace '^(.{0,60}).*','$1') + ')'
     $sp.Close()
   }
@@ -48,7 +48,9 @@ function Ask($sp,[string]$command,[int]$seconds){
   if(-not $m.Success){ return $null }
   return $m.Groups[1].Value.Trim()
 }
-$sp = OpenShell $Port
+  $found = @(OpenShell $Port)
+  $sp = @($found | Where-Object { $_ -is [System.IO.Ports.SerialPort] }) | Select-Object -First 1
+  foreach ($line in ($found | Where-Object { $_ -isnot [System.IO.Ports.SerialPort] })) { Write-Host $line }
 if(-not $sp){ 'no user pipe answered; boot with piano-usb-shell=1 and the pianousb-shell helper'; exit 3 }
 $sp.Write("stty columns 500 2>/dev/null; export PS1='P> '`r"); ReadQuiet $sp 4000 900 | Out-Null
 try{
