@@ -568,3 +568,23 @@ Same seed, second boot (store resumed, `state 2`): boot image `boot-piano-macos-
 Left on the store for the next read-back: `/private/var/db/piano-persist2.txt` (`boot2-20261127-222644`) and
 `/private/var/db/piano-persist.d/{nested.txt,blob.bin,blob.sha}` with `blob.bin` 1,048,576 bytes
 `b3bfdacf44bb15ea8d223f9d93e9acc847c78c35c2dd30e357582492dafd2e21`.
+
+## Locked persistent pair of this unit's k273 line (2026-11-28, built twice with `cmp` identical)
+
+- `esp-7ccdd855-k273.img` 1,073,741,824 bytes `5626a41110f5477b0d3b5a8a36742d24f5989e22195d6a92743e412128379ce6` - the ESP this
+  unit's own installed ESP (`esp-device.img` `68c28df1...`) carried its `macos` entry byte for byte through
+  `tooling/k273/build-k273-esp.py`, with tonight's kernel collection, ADT, trust cache and seed swapped in; store bound to
+  `linux_data` LBA 117735999-124027647 of seed `bb6dd1c365a6a827` (the store that resumed across three reboots); default `macos`,
+  968-byte line, `piano-reset-after=240 piano-reset-to=bootloader` on both macOS entries, `piano-usb-shell=1` in and
+  `piano-usb-hid` out. Record `out/persistent/esp-7ccdd855-k273.json`; Windows and Mac each hold a copy of both.
+- `boot-piano-macos-persistent-v5.img` 3,301,376 bytes `b267c758d0659c9975d71bd06549d4800ee98ad2390c8b8092c4648b075077bd` -
+  BootShim + `out/fd/piano-uefi-A-bundled.fd` + `out/inputs/piano-boot.dtb`, the kernel field of `out/ram/build-A-bundled.json`
+  (the FD and DTB that ran on the glass all night), no ramdisk, no signature.
+- `boot-piano-macos-persistent-v5-padded.img` 100,663,296 bytes `8a4fd34ab2a5d761847504e22d98393d91493a0ed31f83ca5c1dcbf910b3734b` -
+  the container above zero-padded to the boot_a partition by `tooling/persist/pad-boot-image.py`, recorded by
+  `out/persistent/boot-v5-padded.json` under `padded` (never under `signed`). This is the unsigned route of WRITE-PLAN.md's
+  "Slot A boot triplet write": no AVB seal, accepted only with `--allow-unsigned-boot`, and the tablet's stock boot_a
+  (`7c444a2d...`) is backed up and hash-verified in `out/backup-20261125/`.
+
+Touch on this unit, owner-confirmed on the glass: reversed Y on `c0c1e2af...` (no flip), both axes correct on `98fefcac...`
+(`PIANO_TOUCH_INVERT_Y=1` stamped at build, console `orientation: flip X 0, Y 1`).
