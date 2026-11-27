@@ -43,7 +43,10 @@ export K273_KERNEL=/Users/zhangqi/Codex/upstream-tip/out/k273/k27-tree/out/k27/k
 # Long enough to drop the console capture and work from the shell before the image resets itself.
 export PIANO_RESET_AFTER=${PIANO_RESET_AFTER:-900}
 export PIANO_DATA_PERSIST=2
-export PIANO_DATA_STORE_REPLACE=${SHOT_REPLACE:-1}
+# SHOT_REPLACE=1 (the default) rebuilds linux_data's store for this seed. SHOT_REPLACE=keep leaves the argument out of the command
+# line entirely, which is what resumes the store: PIANO_DATA_STORE_REPLACE only accepts 1 or a store seed's 8 hex digits, so an empty
+# value is refused, and naming this seed's own digits would replace it as well.
+if [ "${SHOT_REPLACE:-1}" = 1 ]; then export PIANO_DATA_STORE_REPLACE=1; fi
 export PIANO_EXTRA_ARGS="${PIANO_EXTRA_ARGS:-} piano-usb=2 piano-usb-shell=1 native-gop-display-shot=1 piano-dpu=2 piano-dpu-flip=4 native-gop-display-flip-lossless=1 panic_on_crash_disabled=1 data-store-part=linux_data data-store-lba=117735999"
 export PIANO_FAST_BOOT=1
 export PIANO_DENY_EXEC=/usr/libexec/watchdogd,/usr/libexec/PerfPowerServices
