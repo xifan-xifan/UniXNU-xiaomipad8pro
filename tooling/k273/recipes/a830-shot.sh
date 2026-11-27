@@ -47,7 +47,10 @@ export PIANO_DATA_PERSIST=2
 # line entirely, which is what resumes the store: PIANO_DATA_STORE_REPLACE only accepts 1 or a store seed's 8 hex digits, so an empty
 # value is refused, and naming this seed's own digits would replace it as well.
 if [ "${SHOT_REPLACE:-1}" = 1 ]; then export PIANO_DATA_STORE_REPLACE=1; fi
-export PIANO_EXTRA_ARGS="${PIANO_EXTRA_ARGS:-} piano-usb=2 piano-usb-shell=1 native-gop-display-shot=1 piano-dpu=2 piano-dpu-flip=4 native-gop-display-flip-lossless=1 panic_on_crash_disabled=1 data-store-part=linux_data data-store-lba=117735999"
+# The still costs 26 bytes of a 999-byte command line, so a830-input.sh gives those bytes to the touch screen and the keyboard
+# cover by exporting PIANO_SHOT_ARG empty; :+ keeps the space out of the line when it is empty.
+SHOT_ARG=${PIANO_SHOT_ARG:-native-gop-display-shot=1}
+export PIANO_EXTRA_ARGS="${PIANO_EXTRA_ARGS:-} piano-usb=2 piano-usb-shell=1${SHOT_ARG:+ $SHOT_ARG} piano-dpu=2 piano-dpu-flip=4 native-gop-display-flip-lossless=1 panic_on_crash_disabled=1 data-store-part=linux_data data-store-lba=117735999"
 export PIANO_FAST_BOOT=1
 export PIANO_DENY_EXEC=/usr/libexec/watchdogd,/usr/libexec/PerfPowerServices
 export PIANO_GPU=2
