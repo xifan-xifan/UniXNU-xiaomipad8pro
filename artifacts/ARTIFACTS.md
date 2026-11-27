@@ -588,3 +588,29 @@ Left on the store for the next read-back: `/private/var/db/piano-persist2.txt` (
 
 Touch on this unit, owner-confirmed on the glass: reversed Y on `c0c1e2af...` (no flip), both axes correct on `98fefcac...`
 (`PIANO_TOUCH_INVERT_Y=1` stamped at build, console `orientation: flip X 0, Y 1`).
+
+## 2026-11-28 - the ul1/ul2/ul3 ESPs, the sealed v6 boot, and the store seed that is installed now
+
+- `esp-7ccdd855-k273-ul1.img` 1,073,741,824 bytes `67b0bad52cf1f17d68eada2feff32cecc1e2d3c7a97ce4f12c56cb2cf2e08de8` - first ESP of this trio; its `macos` line asked for
+  `data-store-replace=bb6dd1c3`, which `NativeRamBlock` silently ignores (it wants `1` or `0x<8 hex>`), so this booted
+  `state 7 kept / Data volatile`. Kept as evidence of the bug, not for flashing.
+- `esp-7ccdd855-k273-ul2.img` 1,073,741,824 bytes `c80592784b9c2c3fe624c87145f69a1cad8616cc0912eeac73b980ffb276a9bf` - same trio with the replace spelled correctly; this is the ESP
+  that created the installed store (`state 3 fresh`, seed `b2583ea5`), and whose Desktop marker survived a hard reset.
+- `esp-7ccdd855-k273-ul3.img` 1,073,741,824 bytes
+  `28592e9d94abe57e78ed999fc4c07f214f8b1624a2835f20050d6fdef3b6723a` - **installed now**. `macos` entry 936 bytes,
+  entries `macos` / `macos-diag` / `fastboot`, default `macos`, seed `b2583ea5`, no `data-store-replace`, no `piano-reset-to`
+  (the latter is what kept parking every restart in ABL fastboot - see `docs/boot-guard.md` lines 70 and 105),
+  `piano-usb-hid=1 piano-usb-shell=1 piano-boot-guard=180 data-persist=2 data-store-lba=117735999
+  native-ufs-root-part=linux_rootfs`. Flashed in session `out/persistent/session-k273-ul1-20261128`, log
+  `logs/session-flash-ul3-20261128-050915.log`, `done`; lineage in `out/persistent/installed.json`.
+- staged userland seed `scratch-data.img` 145,506,592 bytes `a1d64f60cc052bb4e86ed8842d29728ed6ddfcd2daaba0f97ef2e43cbc0fd787`
+  (26 units / 50 files, identity `b2583ea517732505b716600572ec8382ae832d0b239cc7971e1b52c280492a0f`, 6,291,456 pages,
+  272 extents) - the seed the installed store resumes against, so keep it; the kernel it was built with is
+  `d4892e26d367f003c297632acee1e0840b01e1eff5b579dae581ba1b1a25c427`, ADT `7e28304aedaa72d627c70be6f634f4074437a7d35e98aaefa4f6bb71c72a71c6`,
+  trust cache `12c24bc46451b5354318594d87b0dcff269f263bd62257a98d643074079e1081`.
+- `boot-piano-macos-persistent-v6-sealed.img` 100,663,296 bytes `df6d5a18f27054e69a394810e2b4d3452818d428cbed8795ea0b11641c5b1f30` - **written to `boot_a` now**, the
+  DarwinBoot-sealed v6 whose FD binds 13312 MiB. The unsigned v5 pair (`8f0a83f7...` padded) stays flashable as a fallback.
+
+Rollback sets on `E:/piano-backup`: `persistent-boot-20261128-010938-fe5vsrzx` holds the stock Android `boot_a`
+(`7c444a2d...`, the Android side of the switch), `...-035946-ssie59ep` the ul1 boot_a, `...-041947-b699qgi7` the ul2 boot_a
+plus `k273-store-header.img` `e36018d4...` (the old `bb6dd1c3` store header, should a store rollback ever be wanted).

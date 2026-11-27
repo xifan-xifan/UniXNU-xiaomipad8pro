@@ -1,3 +1,34 @@
+## 2026-11-28 - 装机集换成 ul3（无 `piano-reset-to`）：Data 持久 + 正常重启 + 重启读回三条实机通过；详情见 `docs/results-2026-11-28-normal-reboot-and-data-readback.md`
+
+装机集（`out\persistent\installed.json` 记血统）：`boot_a` = `boot-piano-macos-persistent-v6-sealed.img` `df6d5a18f27054e6...`，
+ESP = `esp-7ccdd855-k273-ul3.img` `28592e9d94abe57e78ed999fc4c07f214f8b1624a2835f20050d6fdef3b6723a`（macos 条目启动行 936 B，
+默认条目 `macos`，seed `b2583ea5`，`data-persist=2 data-store-part=linux_data data-store-lba=117735999 native-ufs-root-part=linux_rootfs
+piano-boot-guard=180 piano-usb-shell=1 piano-usb-hid=1`；**不含** `piano-reset-to`、**不含** `data-store-replace`）。
+写入会话 `out\persistent\session-k273-ul1-20261128`，日志 `logs\session-flash-ul3-20261128-050915.log`（`done`）。
+回滚 Android 用的 stock `boot_a` `7c444a2d...` 仍在 `E:\piano-backup\persistent-boot-20261128-010938-fe5vsrzx`。
+
+本轮实机结论（三条以前不成立或没证据的，现在成立）：
+
+1. **Data 真的持久**：`Data store state 2 (resumed) ... seed b2583ea5, generation 4, present 474542`；ul2 写的
+   `/Users/piano/Desktop/persist-normal.txt` 在 ul3 这一轮逐字读回。
+2. **正常重启不再回 ABL**：根因是 `piano-reset-to=bootloader` 让健康检查把复位原因永久留在 `bootloader`
+   （`docs/boot-guard.md:70,105`）；ul3 去掉该行后 `healthy after 180 s, restart reason normal`。
+3. **`/sbin/shutdown -r +1` 确实复位并回到 macOS**：`05:44:32 CLOSED COM5/6/7` → `05:44:59 OPEN ...`，
+   重启后 `uptime up 5 mins`，两个标记文件（`persist-normal.txt`、`persist-normal2.txt`）MD5 未变读回。
+   ul2 那轮 `shutdown -r now` 完全不复位的现象仍未复现，暂按 `+1` 这条可用路径验收。
+
+顺手修掉的坑（已提交 `9ef477a7`）：`data-store-replace` 只认 `1` 或 `0x<8位十六进制>`，裸写 `bb6dd1c3` 会被静默忽略，
+于是 ul1 起来是 `state 7 kept / Data volatile`；`build-k273-esp.py` 现在会规范化并打 NOTE，`maint-session.py` 的闸门接受 `0x...`，
+`tooling/persist/test-store-switch.py` 加了两条检查（本机全绿）。
+
+无人值守读法（别再要求按键）：COM5 监视器 / COM6 root shell / COM7 HID；`tooling\native\piano-shell.ps1` 发命令读回执；
+`tooling\native\piano-console.ps1 -Port COM5 -Line 'reset fastboot'` 约 10 s 进 ABL，`-Line 'reset'` 正常重启；
+`capture-com.ps1` 占住所有 COM 口，用 shell 前必须先停它。机器时钟被 `droidvm-utc=1795478400` 带偏，打标记用 `uptime`。
+
+下一步（按验收顺序）：两轮 Android↔macOS 往返并记 `slot-successful`/`slot-retry-count` 前后值 → 冷启动日志按口径归档 →
+单帧/连续视频 → Wi-Fi、音频、亮度、电池 → GPU 池（`BoAlloc refused 0xe00002bd`、`swap_wait 0xe00002d5` 23.1 万次、GPU 硬顶 160 MHz）。
+Mac 侧同步走 bundle：`git bundle create tmp-sync.bundle <macHEAD>..HEAD` + scp + `git fetch tmp-sync.bundle HEAD`（Mac 直接 fetch GitHub 会卡死）。
+
 ## 2026-11-26（续）- 本机 Data store 建成（state 3、窗口 117735999），owner Data 卷仍缺：`offline scratch Data mount failed: 2`
 
 镜像 `c00039100df40233b75fbecfe647386308c1282f59ec13e45596f93216daf3ea`（`tooling/k27/build-verified-store.sh` 的产物，
