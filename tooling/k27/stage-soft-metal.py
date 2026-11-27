@@ -207,15 +207,23 @@ def main():
             for offset, data in extents:
                 handle.seek(offset)
                 handle.write(data)
-        attached = plistlib.loads(run('hdiutil', 'attach', '-imagekey', 'diskimage-class=CRawDiskImage', '-nomount', '-nobrowse',
-                                      '-plist', str(raw), capture_output=True).stdout)
-        disks = [e['dev-entry'] for e in attached['system-entities']]
-        whole = min(disks, key=len).removeprefix('/dev/')
         mount = Path(scratch) / 'mnt'
         mount.mkdir()
+        # Attach and mount in one step. Attaching -nomount and then `diskutil mount` gives a read-only volume on some Macs,
+        # where every copy into it fails with EPERM (this host, 2026-11-27); tooling/k27/stage-boot-run.py mounts with
+        # hdiutil for the same reason. Fall back to diskutil only when hdiutil attached without mounting.
+        attached = plistlib.loads(run('hdiutil', 'attach', '-imagekey', 'diskimage-class=CRawDiskImage', '-nobrowse',
+                                      '-mountpoint', str(mount), '-plist', str(raw), capture_output=True).stdout)
+        entities = attached['system-entities']
+        disks = [e['dev-entry'] for e in entities]
+        whole = min(disks, key=len).removeprefix('/dev/')
         try:
-            volume = data_volume(whole)
-            run('diskutil', 'mount', '-mountPoint', str(mount), volume, stdout=subprocess.DEVNULL)
+            # hdiutil names the mount point by its realpath (/private/... for /tmp/...)
+            volume = next((e['dev-entry'].removeprefix('/dev/') for e in entities
+                           if e.get('mount-point') == str(mount.resolve())), None)
+            if volume is None:
+                volume = data_volume(whole)
+                run('diskutil', 'mount', '-mountPoint', str(mount), volume, stdout=subprocess.DEVNULL)
             try:
                 target = mount / GPU_BUNDLES
                 target.mkdir(parents=True, exist_ok=True)
