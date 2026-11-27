@@ -60,8 +60,20 @@ from pathlib import Path
 D = Path(__file__).resolve().parents[2]
 from k27_tree import k27_tree  # noqa: E402  (tooling/k27/k27_tree.py: PIANO_K27_TREE)
 K27 = k27_tree()
-sys.path.insert(0, str(K27 / 'sources/UniXNU/drivers/DarwinBoot/Test'))
-import packed_ramdisk  # noqa: E402  (read from the k27 tree, not changed)
+# The packed-DBRDISK1 reader comes from the pinned DarwinBoot checkout. Where it sits depends on whose tree this is: the k27 tree
+# carries it under sources/UniXNU/drivers/DarwinBoot/Test, a bare DarwinBoot checkout keeps it in Test/ at its top, and the clone
+# that prepare-k27-tree.sh makes has no sources/ at all (2026-11-27: build-k273-image.sh points PIANO_K27_TREE at that clone, and
+# the import failed). Try each, and say which were looked at.
+_CANDIDATES = [K27 / 'sources/UniXNU/drivers/DarwinBoot/Test', K27 / 'sources/DarwinBoot/Test',
+               Path(os.environ.get('UNIXNU_RESEARCH', '')) / 'DarwinBoot/Test', Path.cwd() / 'Test']
+for _cand in _CANDIDATES:
+    if (_cand / 'packed_ramdisk.py').is_file():
+        sys.path.insert(0, str(_cand))
+        break
+else:
+    raise SystemExit('packed_ramdisk.py: not in ' + ', '.join(str(c) for c in _CANDIDATES)
+                     + ' (scripts/fetch-pins.py brings the DarwinBoot checkout)')
+import packed_ramdisk  # noqa: E402  (read from the pinned checkout, not changed)
 
 LC_CODE_SIGNATURE = 0x1d
 GPU_BUNDLES = 'Library/GPUBundles'
