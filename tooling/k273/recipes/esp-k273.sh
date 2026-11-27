@@ -29,7 +29,31 @@ export PIANO_K27_TREE=/Users/zhangqi/Codex/k27-tree
 export PIANO_UNIT_PROFILE=${PIANO_UNIT_PROFILE:-/Users/zhangqi/Codex/piano-unit/piano-7ccdd855-shim.json}
 export PIANO_DATA_STORE_RELAYOUT=1
 export PIANO_BOOT_FD_RAM_WINDOW=1
+# The Data store's place, taken from this unit's own profile rather than a constant: build-esp.py only carries the store window over
+# when the macos entries name it, and a k273 ESP whose entries omit data-store-part/data-store-lba falls back to the root's partition
+# (common.store_args_of), which for this root has no 24 GiB window at all - the first boot would look for the store header elsewhere,
+# find a blank window and initialise it over the installed root. linux_data at 117735999 is where the store resumed across three
+# reboots tonight, and it is what the ESP now on the medium says (out/unit-profile/piano-7ccdd855-shim.json boot_esp).
+STORE_PART=$(python3 -c "import json,os;print(json.load(open(os.environ['PIANO_UNIT_PROFILE']))['boot_esp']['store_partition'])")
+STORE_LBA=$(python3 -c "import json,os;print(json.load(open(os.environ['PIANO_UNIT_PROFILE']))['boot_esp']['store_first_lba'])")
+# The seed whose store is on the medium, so the build record states same_seed instead of guessing (NativeRamBlock: seed bb6dd1c3).
+export PIANO_INSTALLED_SEED=${PIANO_INSTALLED_SEED:-bb6dd1c365a6a827}
 python3 tooling/persist/build-boot.py --series 5 --fd out/fd/piano-uefi-A-bundled.fd --dtb out/inputs/piano-boot.dtb --same-kernel-as out/ram/build-A-bundled.json --out out/persistent-k273
-python3 tooling/persist/build-esp.py --profile gpu --trust out/a830-shot-stage/kernel.macho.trustcache --seed out/a830-shot-stage/scratch-data.img --default macos-diag --diag-reset-after 240 --timeout 3 --fast-boot 1 --boot-guard 180 --deny-exec /usr/libexec/watchdogd --deny-exec /usr/libexec/PerfPowerServices --arg piano-usb=2 --arg piano-usb-shell=1 --arg piano-touch=2 --arg piano-keyboard=2 --arg piano-dpu=2 --arg piano-dpu-flip=4 --arg native-gop-display-flip-lossless=1 --firmware-dir "${PIANO_ESP_FIRMWARE_DIR:-/Users/zhangqi/Codex/k273-esp/inputs/firmware}" --name esp-7ccdd855-k273 --out out/persistent-k273
+python3 tooling/persist/build-esp.py --profile gpu --trust out/a830-shot-stage/kernel.macho.trustcache --seed out/a830-shot-stage/scratch-data.img --default macos-diag --diag-reset-after 240 --timeout 3 --fast-boot 1 --boot-guard 180 --deny-exec /usr/libexec/watchdogd --deny-exec /usr/libexec/PerfPowerServices --arg piano-usb=2 --arg piano-usb-shell=1 --arg piano-touch=2 --arg piano-keyboard=2 --arg piano-dpu=2 --arg piano-dpu-flip=4 --arg native-gop-display-flip-lossless=1 --arg data-store-part=$STORE_PART --arg data-store-lba=$STORE_LBA --firmware-dir "${PIANO_ESP_FIRMWARE_DIR:-/Users/zhangqi/Codex/k273-esp/inputs/firmware}" --name esp-7ccdd855-k273 --out out/persistent-k273
+python3 - "$STORE_PART" "$STORE_LBA" <<'PY'
+import json, sys, re
+rec = json.load(open('out/persistent-k273/esp-7ccdd855-k273.json'))
+part, lba = sys.argv[1], sys.argv[2]
+for name in ('macos', 'macos-diag'):
+    args = rec['cmdlines'][name]
+    got = dict(t.split('=', 1) for t in args.split() if '=' in t)
+    assert got.get('data-store-part') == part, (name, got.get('data-store-part'))
+    assert got.get('data-store-lba') == lba, (name, got.get('data-store-lba'))
+    assert got.get('data-persist') == '2', (name, got.get('data-persist'))
+    assert len(args) <= 999, (name, len(args))
+    print(f'{name}: {len(args)} bytes, store {part}@{lba}, data-persist=2')
+assert rec['data_store']['same_seed'] is True, rec['data_store']
+print('same_seed True,', rec['data_store']['installed_seed_from'])
+PY
 shasum -a 256 out/persistent-k273/boot-piano-macos-persistent-v5.img out/persistent-k273/esp-7ccdd855-k273.img
 echo PERSISTENT-K273-BUILT
