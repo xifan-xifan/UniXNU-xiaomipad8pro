@@ -54,7 +54,7 @@ python3 tooling/k273/build-k273-esp.py --base out/persistent/esp-device.json --e
   --trust out/a830-shot-stage/kernel.macho.trustcache --seed out/a830-shot-stage/scratch-data.img \
   --arg piano-usb-shell=1 --drop-arg piano-usb-hid --arg droidvm-utc=$(date +%s) \
   --arg piano-reset-after=$DIAG_AFTER --arg piano-reset-to=bootloader \
-  --expect-seed $EXPECT_SEED --expect-store-part $STORE_PART --expect-store-lba $STORE_LBA \
+  --root-part linux_rootfs --expect-seed $EXPECT_SEED --expect-store-part $STORE_PART --expect-store-lba $STORE_LBA \
   --diag-reset-after $DIAG_AFTER --firmware-dir "${PIANO_ESP_FIRMWARE_DIR:-/Users/zhangqi/Codex/k273-esp/inputs/firmware}"
 python3 - "$STORE_PART" "$STORE_LBA" <<'PY'
 import json, sys
