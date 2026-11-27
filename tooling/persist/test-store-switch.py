@@ -114,6 +114,12 @@ def unit():
         s = Stub([seed_problem], identity='111111111111111107542d3e730f282b', execute=True, replace_seed=True)
         call(s, record('1'))
         tp.check(s.logs[-1].startswith('  ok    the store of seed 1111111111'), '"1" (any other seed store) is accepted as the intent')
+        s = Stub([seed_problem], execute=True, replace_seed=True)
+        call(s, record('0xbb6dd1c3'))
+        tp.check([b[0] for b in s.backups] == ['k273-store-header'],
+                 'the record naming the store as the line carries it (0x<8 hex>, build-k273-esp.py) switches the same store')
+        s = Stub([seed_problem], identity='111111111111111107542d3e730f282b', execute=True, replace_seed=True)
+        refused('a 0x<8 hex> that names another store is refused', call, s, record('0xbb6dd1c3'))
 
 
 def main():

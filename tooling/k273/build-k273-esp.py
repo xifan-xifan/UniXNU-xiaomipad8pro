@@ -294,9 +294,20 @@ def build(a, base_json, base, base_img, image):
             raise SystemExit(f'{a.entry}: its line has no bound read-write store (data-store-lba, data-persist=2)')
         common.check_store_size(seed, args)
         replace = named.get('data-store-replace')
-        if replace is not None and replace != '1' and not re.fullmatch(r'[0-9a-f]{8}', replace):
-            raise SystemExit(f'data-store-replace={replace}: 1 (any other seed\'s store) or the store\'s seed as 8 hex digits '
-                               '(the 8 hex digits NativeRamBlock prints)')
+        if replace is not None and replace != '1':
+            digits = replace.lower().removeprefix('0x')
+            if not re.fullmatch(r'[0-9a-f]{8}', digits):
+                raise SystemExit(f'data-store-replace={replace}: 1 (any other seed\'s store) or the store\'s seed as 8 hex digits '
+                                   '(the 8 hex digits NativeRamBlock prints)')
+            # NativeRamBlock acts on 1 or 0x<8 hex> only (docs/data-store.md section 3): a bare bb6dd1c3 on the line is an argument
+            # it ignores, so the boot keeps that store and runs Data volatile. The line always carries the form it acts on.
+            canonical = '0x' + digits
+            if replace != canonical:
+                line = ' '.join([canonical if x == f'data-store-replace={replace}' else x for x in line.split()])
+                args = line.split()
+                named = dict(x.split('=', 1) for x in args if '=' in x)
+                print(f'NOTE data-store-replace={canonical}: written as NativeRamBlock reads it (bare {digits} on the line is ignored)')
+                replace = canonical
         if a.expect_seed and not seed['identity_sha256'].startswith(a.expect_seed.lower()):
             raise SystemExit(f'{a.entry}\'s seed is {seed["identity_sha256"][:16]}, not {a.expect_seed}')
         if a.expect_store_lba is not None and lba != a.expect_store_lba:

@@ -1097,7 +1097,8 @@ def need_bound_store(s, record):
     if len(problems) != 1 or not problems[0].startswith('it is of seed '):
         raise Stop(text + ': a store switch may differ in the seed identity alone')
     now = header.get('identity') or ''
-    if replace != '1' and not now.lower().startswith(replace.lower()):
+    digits = replace.lower().removeprefix('0x')      # the line's form is 0x<8 hex> (build-k273-esp.py); the record may carry either
+    if replace != '1' and not now.lower().startswith(digits):
         raise Stop(f'data-store-replace={replace} does not name the store on the tablet ({now[:16]}): not the intended switch')
     if not s.execute:
         s.log(f'  check the store of seed {now[:16]} at LBA {seen["first_lba"]} on {seen["partition"]} is the one '
