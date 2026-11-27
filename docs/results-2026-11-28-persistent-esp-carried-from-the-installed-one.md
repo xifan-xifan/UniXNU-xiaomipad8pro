@@ -90,3 +90,11 @@ place to settle it, and it is the next read. Host-side, not device: no boot was 
   checksum and a retry. Until then a panel image is not trustworthy evidence over this pipe.
 - The self-reset left a pstore mailbox of 7,340,032 bytes with 7,004,524 nonzero (`run-console-ram-k273.ps1`),
   staged before the reader boot; it has not been decoded since the console capture already carries the boot.
+
+## 5. The touch orientation is proven on the glass (owner, 01:0x)
+
+The owner's "Y reversed" report was about `c0c1e2af...` (touch firmware, no flip). On `98fefcac...` - the same image with
+`PIANO_TOUCH_INVERT_Y=1` stamped at build time, whose console read `orientation: flip X 0, Y 1` - the owner reports both
+axes correct. So this BOE unit of `7ccdd855` runs Y reversed against the panel default, exactly what `docs/drivers/touch.md`
+sections 5 and 7 record for piano's per-device `invert_y`, and the recipe's compile-time stamp is the right place for it.
+Device-proven, not maintainer-reported.
