@@ -1,3 +1,20 @@
+## 2026-11-28 - 三次冷启动归档完成；retry 预算的估计按实测改弱
+
+冷启动三轮：`shutdown -r +1` 两轮（`logs\usb-console\cold-boot-1-com.log`、`cold-boot-2-com.log`）+ ABL `fastboot reboot` 一轮
+（`cold-boot-3-com.log`，槽位读数 `logs\cold-boot-3.txt`），加上这套装机集的第一发 `ul3-cold1-com.log` 共四发。
+每轮都是 `Data store state 2 (resumed) … seed b2583ea5, generation 4`、`piano-boot-guard: healthy after 180 s, restart reason normal`，
+写过的五个标记（`cold1/2/3.txt`、`persist-normal.txt`、`persist-normal2.txt`）MD5 全部不变读回，`present` 从 474542 涨到 517341
+说明 store 在真记账。细节 `docs/results-2026-11-28-cold-boots-recorded.md`。
+
+改掉一条早上写急了的规则：并不是"macOS 每开一次机扣一次 retry"。实测刷完 `boot_a` 读 `7`，第一次回 ABL 读 `6`，
+之后跨四五次启动仍读到 `6`（06:14 / 06:37 / 06:45 一致）。成功位仍然只有 Android 写回，所以长循环之前还是要回一趟 Android 或补 bit 54，
+但短时间里不会归零。
+
+无人值守操作顺序（这轮反复用到，记下来）：`shutdown -r +1` 之前先用 COM6 写好标记并 `sync`；重启后先 `tmp-kill-caps.ps1` 放掉 COM 口再开 shell；
+`piano-console.ps1` 一定要带 `-OutFile`，否则会把整个 pstore 环打到输出里（本轮踩了三次，每次几万 token）。
+
+剩下：单帧/连续视频、Wi-Fi、音频、亮度、电池、GPU 池。
+
 ## 2026-11-28 - 两轮 Android↔macOS 往返实机通过：切换只写 `boot_a` 一个分区，全程无按键，两边的 Data 都活着
 
 切换就是换 `boot_a` 镜像（ESP 不动）：Android 侧 `E:\piano-backup\persistent-boot-20261128-010938-fe5vsrzx\boot_a.img`
