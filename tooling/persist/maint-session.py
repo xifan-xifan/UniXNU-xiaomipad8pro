@@ -61,6 +61,13 @@ except ModuleNotFoundError:
     # What a write step proves about the medium is read back by the tablet itself, and that path does not change.
     fcntl = None
 
+# A session log is full of tablet replies where a hex dump or a kernel console line held bytes that are not UTF-8, and
+# they arrive here already decoded to U+FFFD. Redirected on Windows, stdout defaults to the console codepage (cp936 on
+# this host), so printing one of those characters killed the session mid-step - after a map, before any write.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, 'reconfigure'):
+        _stream.reconfigure(encoding='utf-8', errors='replace')
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common  # noqa: E402
 import localnet  # noqa: E402
@@ -396,7 +403,7 @@ class Session:
 
     def log(self, text):
         print(text, flush=True)
-        with open(self.dir / 'session.log', 'a') as f:
+        with open(self.dir / 'session.log', 'a', encoding='utf-8', errors='replace') as f:
             f.write(time.strftime('%H:%M:%S ') + text + '\n')
 
     def need(self, condition, what):
@@ -1986,7 +1993,7 @@ def ram_test(s, image, expect_uefi, reset_after):
     s.log(f'  check the Data store opens at LBA {store_new(s)} (the new partition end): "NativeRamBlock: Data store state ... first LBA"')
     if s.execute:
         r = subprocess.run([sys.executable, str(XNU_LOG), 'decode', str(s.dir / f'{name}-xnu.bin')], capture_output=True, text=True)
-        (s.dir / f'{name}-xnu.txt').write_text(r.stdout)
+        (s.dir / f'{name}-xnu.txt').write_text(r.stdout, encoding='utf-8', errors='replace')
         for line in r.stdout.splitlines():
             if re.search(r'NativeRamBlock: Data store|NativeUfs:.*(root|window|store)|panic\(|launchd\[1\]', line):
                 s.log('        | ' + line[:200])
