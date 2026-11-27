@@ -187,10 +187,17 @@ def esp_root_part(record):
 PART_KEYS = {'linux_rootfs': 'rootfs', 'linux_data': 'linux_data', 'esp': 'esp'}
 
 
+# Without O_BINARY, os.open on Windows opens the handle in TEXT mode and the CRT _read() behind os.read() translates it: a
+# 2 MiB binary fixture with CRLF pairs came back as 26 bytes, so every sha_nocache of an image or backup read on this host
+# was a digest of something other than its bytes (a held root copy mismatched the medium the tablet had just hashed).
+# os.O_BINARY is absent on Linux, where the flag is not needed and 0 leaves the call as it was.
+O_RDONLY_RAW = os.O_RDONLY | getattr(os, 'O_BINARY', 0)
+
+
 def read_nocache(path, digest=None):
     """A file's bytes in 4 MiB chunks, read with the page cache off (F_NOCACHE): the backup as stored, not the bytes just written.
     DIGEST (a hashlib object) is fed them."""
-    fd = os.open(path, os.O_RDONLY)
+    fd = os.open(path, O_RDONLY_RAW)
     try:
         if fcntl:
             fcntl.fcntl(fd, fcntl.F_NOCACHE, 1)
@@ -634,14 +641,8 @@ class Session:
     def sha_nocache(path):
         """SHA-256 of a file read with the page cache off (F_NOCACHE): the NAS copy as stored, not the bytes just sent."""
         h = hashlib.sha256()
-        fd = os.open(path, os.O_RDONLY)
-        try:
-            if fcntl:
-                fcntl.fcntl(fd, fcntl.F_NOCACHE, 1)
-            while chunk := os.read(fd, 4 * MiB):
-                h.update(chunk)
-        finally:
-            os.close(fd)
+        for _ in read_nocache(path, h):      # the one no-cache reader, so the O_BINARY rule above has one place to live
+            pass
         return h.hexdigest()
 
     def receive_piece(self, dev, skip, count, bs, dest, compress, name):
