@@ -1,3 +1,20 @@
+## 2026-11-28 - 两轮 Android↔macOS 往返实机通过：切换只写 `boot_a` 一个分区，全程无按键，两边的 Data 都活着
+
+切换就是换 `boot_a` 镜像（ESP 不动）：Android 侧 `E:\piano-backup\persistent-boot-20261128-010938-fe5vsrzx\boot_a.img`
+（`7c444a2d6aa930cd…`，原厂），macOS 侧 `out\persistent\boot-piano-macos-persistent-v6-sealed.img`（`df6d5a18f27054e6…`）。
+进 ABL 不需要按键：macOS 侧 `piano-console.ps1 -Port COM5 -Line 'reset fastboot'`（约 10 s），Android 侧 `adb reboot bootloader`。
+证据 `docs/results-2026-11-28-roundtrip-1-android-macos.md`，日志 `logs\roundtrip-*.txt`。
+
+- 第一轮：macOS→Android 起来 `OS3.0.309.0.WPYCNXM`、`sys.boot_completed=1`、`Enforcing`、`/data` 在 `dm-56`；
+  Android→macOS 回桌面，`persist-normal.txt`/`persist-normal2.txt` MD5 与切换前一致。
+- 第二轮：同一对镜像再来一遍，`/data/local/tmp/piano-rt1.txt`（sha1 `7f984d37…`）在 Android 侧逐字读回，
+  macOS 侧两个标记同样读回。**两个系统的 Data 互不影响。**
+- 槽位规则的实机数字：刷 `boot_a` 立刻 `successful:no`、`retry 7`（bit 54 被清）；Android 起来后回 ABL 读到 `successful:a yes`、`retry 6`（Android 写回）；
+  macOS 起来后再读是 `successful:no`、`retry 6`（macOS 永不写回）。**连续做 macOS 冷启动前先看 `slot-retry-count:a`**，
+  快到底就回一趟 Android 或用 `slot-success-crc` 补 bit 54，别等归零被标 unbootable（那之后连 RAM 镜像都被拒）。
+
+验收进度：正常重启 + 硬复位恢复 + Data 读回 + 两轮双向切换都已通过；还差三次冷启动的口径归档、单帧/连续视频、Wi-Fi、音频、亮度、电池、GPU 池。
+
 ## 2026-11-28 - 装机集换成 ul3（无 `piano-reset-to`）：Data 持久 + 正常重启 + 重启读回三条实机通过；详情见 `docs/results-2026-11-28-normal-reboot-and-data-readback.md`
 
 装机集（`out\persistent\installed.json` 记血统）：`boot_a` = `boot-piano-macos-persistent-v6-sealed.img` `df6d5a18f27054e6...`，

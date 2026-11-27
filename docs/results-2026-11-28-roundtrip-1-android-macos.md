@@ -31,7 +31,18 @@ ESP 不动（`esp-7ccdd855-k273-ul3.img` `28592e9d...`）。往返日志：`logs
 所以**每次连续做 macOS 冷启动之前先看一次 `slot-retry-count:a`**，接近 0 就先回一趟 Android 或按 `slot-success-crc` 把 bit 54 补上，
 不要等它归零后再补救。
 
-## 剩下的
+## 第二轮往返（同一台、同一对镜像，06:14:26 → 06:15:10 + 回桌面）
 
-第二轮同样的往返（顺带读回 Android 侧那个 sha1 `7f984d37…`）；冷启动日志按验收口径归档；单帧/连续视频；Wi-Fi、音频、亮度、电池；GPU 池。
+`logs\roundtrip-macos-to-android-2.txt`、`logs\roundtrip-android-to-macos-2.txt`。
+
+- 发送前 `successful:no`、`retry 6`（上一轮 macOS 起来后没有写回成功位，retry 从 7 掉到 6 —— 与规则一致，见下）。
+- 刷原厂 `boot_a` → `retry 7`；`adb` 约 20 s 内出现 `7ccdd855 device`，`sys.boot_completed=1`、`OS3.0.309.0.WPYCNXM`、`Enforcing`。
+- **Android 侧的 Data 也没被碰**：第一轮留的 `/data/local/tmp/piano-rt1.txt` 读回仍是 `PIANO-RT1-ANDROID-20261128`，
+  sha1 `7f984d37a5f1b61565a5c7b1e462d70ff5fe4b5f` 一字不差；这轮又留了 `piano-rt2.txt`（sha1 `abd9fd6e095c32ffadfb1e10043434a2da786287`）。
+- `adb reboot bootloader` 回 ABL：`successful:a yes`、`retry 6`（Android 又一次写回成功位）。
+- 刷回 `boot-piano-macos-persistent-v6-sealed.img`（`df6d5a18…`）→ `retry 7` → `reboot`；约 25 s 后 COM5/6/7 回来，
+  `piano-boot-guard: healthy after 180 s, restart reason normal`，root shell 读回两个 macOS 标记：
+  `persist-normal.txt` `b88c264588d85dc3f76957506b07ccdb`、`persist-normal2.txt` `8bd0e7a8811c747617ce8a54441a81fa`（与切换前一致），`uptime up 5 mins` 对应这一轮的新会话。
+
+两轮 `Android→macOS→Android` 都成立：两个系统各自的 Data 都活着，切换只需要写 `boot_a` 一个分区，全程无按键。
 
