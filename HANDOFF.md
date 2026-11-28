@@ -1,3 +1,31 @@
+## 2026-11-28 日常 ESP 换成 ul14（开机历元误差 0.1 秒）；上游第三轮：piano 仓依旧零提交，可挖的只剩四条**开着**的 PR，#326 排进下一次换装机集
+
+**装机集现状（权威口径）**：`boot_a` 不变 `out\persistent\boot-piano-macos-persistent-v6-sealed.img` `df6d5a18f27054e69a394810e2b4d3452818d428cbed8795ea0b11641c5b1f30`（装机以来从未重写过）；
+**日常 ESP 现在是 `out\persistent\esp-7ccdd855-k273-ul14.img` `252d25696db55071b07a4787a48874d36fc0df76ca639171ed03612e09d51f4d`**（相对 ul11 只在 `macos` 入口多
+`piano-rtc=1 piano-rtc-offset=1776516618`，入口行 694 字节逐字节不变）；回滚目标仍是 ul11 `44de650a17c6de8e8e784a0db005dc25db72662183239cfb86986b3105147b38`；
+Data store 不变（`linux_data` LBA 117735999，seed `b2583ea517732505`，generation 4，`state 2 resumed`）。中间态 ul13 `82203354c6c4b613922878ec2cc3896139e3d6ee40e27e2b19e35fa60b701707`
+只是那个数写错（1776516615，慢 3.4 秒）的那一版，别当资产用。
+
+- RTC 收尾：`docs/results-2026-11-28-rtc-offset-on-the-installed-esp.md` + `tooling/native/rtc-stamp.ps1` + `artifacts/ARTIFACTS.md` 两条镜像条目 +
+  `docs/power.md` 那一格（"The calendar from the PMIC RTC"从 off 改成"日常 ESP 已带，误差 0.1 秒"）。定偏移不能用被 `timed` 纠过的 `kern.boottime`
+  配对（自证循环，ul13 就是这么错的），要用 `mac-lan` 这类网络时间服务纠过的参考钟 + 毫秒到达时间戳（本机 Windows 稳定慢 2.0 秒）。
+- 两条流程纠正，别再走弯路：**进 ABL 不需要按键也不需要诊断 ESP** —— macOS 侧 `tooling\native\piano-console.ps1 -Port COM5 -Line 'reset fastboot'`，
+  19 秒到 `7ccdd855 fastboot`（ul13/ul14 两轮都成立），`-Line 'reset'` 是正常重启；`patches/k27/0057` 的 `piano-reset-to` 只在同时给
+  `piano-reset-after` 时生效，而且日常 ESP 不能带它（`docs/boot-guard.md:70,105`）。
+- 上游第三轮（`docs/results-2026-11-28-upstream-sweep-third-pass.md`）：`git fetch upstream --prune` 之后 `git rev-list --count HEAD..upstream/main` = **0**、
+  `upstream/main..HEAD` = **1937**，piano 仓 `main` 还是 `751a0a12`（11-27 10:30），open issue/PR 0；14 个"近期动过"的依赖仓 tip 与 17:41 那轮**逐个相同**，
+  上游 `UniXNU` org 最后一个 push 还是 11-27 19:10 UTC。`CrossDarwin/UniXNU_macOS` 是 `UniXNU/UniXNU` 的 fork（默认分支 `test_27`、39 分支、
+  pushed 11-25 15:03 UTC），比上游 main 还旧，只能当参考。
+- 这轮真正新读的是 `UniXNU/UniXNU` 上四条 **open** PR（上一轮只扫了已合并那批）：**#326** 新增
+  `patches/xnu-12377/macos-clean-gop-handoff.patch`，在 `initialize_screen()` 的 `kPEGraphicsMode` 里把 GOP 帧缓冲刷黑，且必须用
+  `volatile uint64_t/uint32_t` 逐单元写而不是 `bzero`/`memset`（否则编译器对 `ml_io_map_unmappable` 的 Device 内存发 `dc zva`，
+  `ESR=0x96000061` 对齐异常）——落点和我们 `patches/k27/0073-…` 是同一个 `osfmk/console/video_console.c`，合之前要逐行看上下文；
+  代价是重编内核 → 重封 → **重写 `boot_a`**，属换装机集那一档，排在 ul14 验收之后单独开一轮。 **#325**（icon-cache job 里 prune `/private/var/folders/zz`）
+  对我们**不适用**：设备 `/Library/LaunchDaemons/` 18 条全是 `com.unixnu.piano-*`，没有这个 job，我们构建链路也不调用上游 `scripts/build-boot-runtime.py`，
+  而且 `zz/zyxvpxvq6csfxvn_n0000000000000` 是 `drwxr-xr-x root wheel`，故障形态也不存在。**#331**（nubia `nx769j`，SM8650 + iPadOS 27.0.1）与
+  **#320**（`scripts/porting-record.py` 渲染容错）不适用。
+- 下一步按顺序：ul14 上跑目标验收项 —— 三次冷启动 → 两轮 Android/macOS 往返（记 `slot-successful`/`slot-retry-count` 前后值）→ 写入后重启读回
+  → 正常重启与硬复位恢复 → v2 日用项；RTC 还欠"跨 Android 往返后偏移是否仍成立"和走时速率两条。
 ## 2026-11-28 上游第二轮：piano 仓零提交，动的是依赖侧 —— macOS profile 里进来 5 条 PR，4 条对着我们的未完项
 
 细节 `docs/results-2026-11-28-upstream-sweep-second-pass.md`。装机集没换（`boot_a` `df6d5a18…`、ESP `44de650a…`（ul11）、
@@ -2217,7 +2245,7 @@ swap 被接受、被显示、被上栅栏，拷过去的东西是黑的。dpu.md
 
 **Data 持久化这一轮仍不能定论**：全程 `NativeRamBlock: volatile … peak 196 MiB`，root 是 shim SystemOS 根；
 `data-persist=2 / data-store-part=linux_data / data-store-lba=117735999` 确实在命令行里（`build-A-bundled.json`），
-但开 store 那几行落在丢掉的第 1 分钟里，所以既没证实也没排除。三次冷启动、两轮 AndroidmacOSAndroid、重启读回、硬复位恢复依旧全部未开始。
+但开 store 那几行落在丢掉的第 1 分钟里，所以既没证实也没排除。三次冷启动、两轮 Android/macOSAndroid、重启读回、硬复位恢复依旧全部未开始。
 
 **镜像位置**（`out/build-a830-8748.sh` 末尾是 `rm -rf` + `cp`，Mac 上会被下一版覆盖）：跑出桌面的 `65f41bea…` 存在
 `out/k273-ram-a830/boot-piano-macos-ram-A-bundled.img`（Windows，20:21:30 复验），DPU 变体 `df6bea7c…` 存在 `out/k273-ram-a830-dpu/`。
