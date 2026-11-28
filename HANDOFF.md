@@ -1,3 +1,21 @@
+## 2026-11-28 停用 PowerLog 的开机作业已落地；更正两条读数，开机风暴另立案
+
+细节 `docs/results-2026-11-28-powerlog-holds-the-machine.md`、`docs/results-2026-11-28-the-boot-storm-is-not-perfpowerservices.md`。装机集没换。
+
+- 新 unit `piano-powerlog-policy`（`tooling/userland/piano-powerlog-policy.sh` + `com.unixnu.piano-powerlog-policy.plist` +
+  `configs/userland.toml`，`default_on = true`）：`launchctl disable` + `bootout` `system/com.apple.PerfPowerServices`，
+  动手前的 override 记在 `/private/var/db/piano-userland/powerlog-policy/original`，`--remove` 原样交回。
+  主机测试 `tooling/userland/test-powerlog-policy.py`（launchctl 桩）WSL 里 PASS；`stage.load_manifest` 认下这个 unit；
+  设备 `--apply`/`--check` 都 PASS，`plutil -lint` 过，跨一次启动有效（那次启动里它压根没有作业）。
+- 为什么要停它：powerlog 的 SMC 探针按 Mac 键表反复 `SMCGetKeyFromIndex`，而默认 `piano-smc=0` 时这台板子根本没有 AppleSMC 服务；
+  它一个进程 45–68 % 全速跑。停掉后（boot+25 min 那次量）`58.3 % idle`、`Load Avg` 700→17、`networksetup` 几十秒→0.07 s。
+- 两条更正（都写进结果文件了）：一、`/etc/ssh/ssh_host_*` 每次读到同一个 mtime 不是"每次现做"，是因为 `kern.boottime` 是常数、
+  密钥其实留在盘上 —— sshd 晚不是密钥的锅；二、58 % idle 那组是开机风暴过去以后测的，boot+271 s 仍然 `0.0 % idle`、load 399，
+  **开机那 5 分钟满了跟 PPS 无关**，root shell 还是要 boot+289 s。开机风暴（`watchdogd` 崩溃循环 + `ReportCrash`/`coresymbolicationd`/`sips`）单独立案。
+- `piano-sshd` 的 `say()` 第二条 printf 原来走 stdout，launchd 的 `StandardErrorPath` 收不到（日志 0 字节的真正原因），改成 `>&2`；
+  下次启动 `/private/var/log/piano-sshd.log` 就有它自己的时间线了。
+- 标记读回的位置：`/Users/piano/Desktop/`，七个 MD5 与记录一致（这一轮重启之后重测）。
+- 出网仍未解：`ssh: Could not resolve hostname github.com: Name or service not known`，本地未推提交累计 18 个。
 ## 2026-11-28 找到整机负载的持有者：`PerfPowerServices`（powerlog）；壁纸那条启动路径同时改完
 
 细节 `docs/results-2026-11-28-the-still-wallpaper-arrives-before-the-login-window.md`。装机集没换。
