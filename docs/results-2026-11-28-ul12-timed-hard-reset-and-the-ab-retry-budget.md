@@ -51,3 +51,24 @@ fastboot 层面能把这一位翻回来的只有 ABL 自己，于是用了 `fast
 `--set-active` 只写 slot 属性位，没碰 boot_a 内容、没碰 vendor_boot/init_boot/super/userdata；备份与读回见
 `logs/session-ul11-back-*.log`。**结论：日常集必须让 bit 54 一直是置位的，否则每 7 次 macOS 启动就要人工救一次；
 这条要进 HANDOFF 的待办（ESP 或 BootShim 里把 slot 标成 successful，或者每 N 次补一次）。**
+## 四、补上第二轮的读回，以及装回 ul11
+
+补跑 `map esp-final check maint-exit` 把 ESP 装回日常集：`esp-7ccdd855-k273-ul11.img` `44de650a…`，
+两条路读回一致（`logs/session-ul11back3-20261128-155757.log`，`done`、`rc=0`，`check` 里 `boot_a as expected (df6d5a18…)`、
+`root manifest`/`vendor_boot_a`/`init_boot_a`/`boot_b` 全部 unchanged）。`16:03:27 fastboot reboot` 之后 ABL 正常启动 ESP，
+**root shell 只用了 boot+230 s**（本会话最快的一次：289 / 331 / 436 / 470 / 230）。
+
+第二轮那个"复位时正在写"的文件读回来了，一条不差：
+
+```
+   10550 /Users/piano/Desktop/ul12-dirty2.log
+hot 1 at 1795850259        （boot+388，写循环的第一行）
+hot 10550 at 1795850764    （boot+895，最后一行）
+```
+
+10550 行、顺序完整、没有半行，最后是 boot+895 写的，5 s 之后 boot+900 的 PSCI SYSTEM_RESET 落下。
+同一时刻六个老标记 MD5 全不变：`ul12-c1.txt fe817565…`、`ul11-rt1 a3f8428d…`、`ul11-rt2 843081c6…`、
+`ul11-hard ef00c0de…`、`ul11-cold1 0480425f…`、`ul11-cold2 4b90aae3…`。
+
+**这两轮把"硬复位之后 Data 完好"结实地记上了**：不是协同关机，是内核定时器到点直接 PSCI 复位、APFS 不 unmount、
+复位时盘上还在写。还差的是真断电那种冷启动（`pmset schedule poweron` 那条路没试），以及 v2 剩下的日用项。
