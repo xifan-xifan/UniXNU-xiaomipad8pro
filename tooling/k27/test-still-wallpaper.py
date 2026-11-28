@@ -8,6 +8,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -80,30 +81,45 @@ done
             'PIANO_WALLPAPER_STOCK': str(stock),
             'PIANO_WALLPAPER_DSLOCAL': str(users),
             'PIANO_WALLPAPER_NOCHOWN': '1',
+            'PIANO_WALLPAPER_CACHE': str(tmp / 'stock-cache.png'),
         }
         account = database / GUID.upper()
         store = home / 'Library/Application Support/com.apple.wallpaper/Store/Index.plist'
+        cache = Path(env['PIANO_WALLPAPER_CACHE'])
+
+        def settled():
+            # the stock conversion is a background job; boot() only returns once its end of the pipe is closed, but wait anyway
+            for _ in range(200):
+                if not cache.exists() or cache.read_bytes() == stock.read_bytes():
+                    return
+                time.sleep(0.05)
 
         def boot():
             sips_log.write_text('')
             return run('/bin/sh', str(SCRIPT), str(stage), env=env).stdout
 
         out = boot()
-        assert 'uid 501: login picture written, store written' in out
-        assert (account / 'Wallpaper.png').read_bytes() == stock.read_bytes()
+        assert 'uid 501: login picture written, store written' in out, out
+        assert 'staged still picture now' in out, out
+        assert (account / 'Wallpaper.png').read_bytes() == png   # the choice lands without waiting for any conversion
+        settled()
+        assert cache.read_bytes() == stock.read_bytes()
         assert not (database / 'Wallpaper.png').exists()
         assert not (database / 'MISSING-UUID').exists()
         assert (account / 'Metadata.plist').read_bytes() == (stage / 'Metadata.plist').read_bytes()
         assert store.read_bytes() == (stage / 'Index.plist').read_bytes()
         for identifier in (ROOT_ID, AGENT_ID):
-            assert (database / identifier / 'Wallpaper.png').read_bytes() == stock.read_bytes()
+            assert (database / identifier / 'Wallpaper.png').read_bytes() == png
         args = sips_log.read_text().splitlines()
         assert args[:6] == ['-s', 'format', 'png', '--resampleHeight', '2136', str(stock)]
         assert args[6] == '--out' and args[7].startswith(str(database))
         assert args[8:11] == ['-c', '2136', '3200'] and args[11] == args[7]
 
-        out = boot()
+        out = boot()   # the cache written by the previous boot is what the picture comes from now on
         assert 'uid 501: login picture replaced ours, store replaced ours' in out
+        assert 'cached on an earlier boot' in out, out
+        assert (account / 'Wallpaper.png').read_bytes() == stock.read_bytes()
+        assert sips_log.read_text() == ''   # nothing converted a second time
         (account / 'Metadata.plist').write_bytes(b'binary plist with our old UniXNU Still choice')
         (account / 'Wallpaper.png').write_bytes(b'old ochre export')
         store.parent.mkdir(parents=True, exist_ok=True)
@@ -129,23 +145,25 @@ done
         assert "uid 501: login picture kept the user's, store kept the user's" in out
         assert (account / 'Wallpaper.png').read_bytes() == b'the user picture'
 
+        cache.unlink()
+        stock.unlink()
         (account / 'Metadata.plist').write_bytes(b'our UniXNU Still choice')
         store.write_bytes(b'our UniXNU Still choice')
-        stock.unlink()
         out = boot()
-        assert 'stock picture' in out and 'missing; using the one-colour fallback' in out
-        assert (account / 'Wallpaper.png').read_bytes() == png
+        assert (account / 'Wallpaper.png').read_bytes() == png   # no cache and no stock picture: the staged still is the fallback
+        assert not cache.exists()
         assert store.read_bytes() == (stage / 'Index.plist').read_bytes()
 
         stock.write_bytes(b'synthetic stock picture')
         (account / 'Metadata.plist').write_bytes(b'our UniXNU Still choice')
         env['FAKE_SIPS_FAIL'] = '1'
         out = boot()
-        assert 'stock picture conversion failed; using the one-colour fallback' in out
+        assert 'staged still picture now' in out, out
         assert (account / 'Wallpaper.png').read_bytes() == png
-        assert not list(database.glob('.piano-still-wallpaper.*.png'))
+        assert not cache.exists()   # a conversion that failed caches nothing
+        assert not list(database.glob('.piano-*'))
 
-    print('PASS: generated stock choice; stock conversion; written/replaced/kept rules; both fallbacks; temporary-file cleanup')
+    print('PASS: generated stock choice; still first with the stock conversion cached; written/replaced/kept rules; fallbacks; cleanup')
 
 
 if __name__ == '__main__':

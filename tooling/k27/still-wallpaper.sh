@@ -11,8 +11,8 @@
 #    _securityagent's own ids (the login window's fallback for its process's uid).
 #  - The account's wallpaper store ~/Library/Application Support/com.apple.wallpaper/Store/Index.plist, the same stock picture as its
 #    choice, so the desktop after the login is still as well.
-#  - The picture comes from macOS 27.3's own /System/Library/CoreServices/DefaultDesktop.heic, converted once per boot by sips to the
-#    panel's 3200x2136 PNG (scaled to its height, the middle cropped: no stretching). Nothing from Apple is staged or copied into the repository. The staged one-colour still.png is the fallback
+#  - The picture comes from macOS 27.3's own /System/Library/CoreServices/DefaultDesktop.heic, converted by sips, in the background, to the
+#    panel's 3200x2136 PNG (scaled to its height, the middle cropped: no stretching). The conversion is cached at /private/var/piano/wallpaper-stock.png and a later boot uses the cache; until it exists the staged still is what lands, so the login window never waits on a conversion. Nothing from Apple is staged or copied into the repository. The staged one-colour still.png is the fallback
 #    when the stock picture is absent or sips cannot convert it.
 # An absent choice is written, and our earlier ochre choice (the string "UniXNU Still" in its binary plist) or the current generated
 # choice is replaced. Anything else is the user's and stays byte for byte. One line per account on the console (stderr-log=1):
@@ -34,21 +34,27 @@ RO='-o root -g wheel'
 [ -n "${PIANO_WALLPAPER_NOCHOWN:-}" ] && RO=
 [ -n "$S" ] || { echo "still-wallpaper: no files in ${1:+$1, }/private/var/piano/wallpaper or /usr/local/share/piano/wallpaper"; exit 0; }
 install -d $RO -m 755 "$W" || exit 0
-T="$W/.piano-still-wallpaper.$$.png"
-trap 'rm -f "$T"' 0 1 2 3 15
+# The picture has to be a file that already exists when this script exits: SecurityAgent reads the login window's picture seconds
+# after the boot job's predecessor, and a foreground conversion of the 4096x2160 stock heic ran for minutes on this machine (sips
+# still going minutes into the boot, 2026-11-28), so the choice was never in place and the login window played the default aerial
+# wallpaper -- a video decoded in software, ~40 % of the CPU every boot. So: cached conversion if there is one, else the staged still
+# immediately, and the stock conversion runs in the background to be cached for a later boot.
+CACHE=${PIANO_WALLPAPER_CACHE:-/private/var/piano/wallpaper-stock.png}
+rm -f "$W"/.piano-still-wallpaper.*.png "$W"/.piano-stock.*.png 2> /dev/null
 I="$S/still.png"
-if [ -f "$STOCK" ]; then
-  rm -f "$T"
-  # scaled to the panel's height, then the middle 3200 columns (the stock picture is 16:9, the panel 3:2: no stretching)
-  if sips -s format png --resampleHeight 2136 "$STOCK" --out "$T" >/dev/null 2>&1 && sips -c 2136 3200 "$T" >/dev/null 2>&1 &&
-      [ -s "$T" ]; then
-    I=$T
-    echo "still-wallpaper: picture from the system volume's stock $STOCK"
-  else
-    echo "still-wallpaper: stock picture conversion failed; using the one-colour fallback"
-  fi
-else
-  echo "still-wallpaper: stock picture $STOCK missing; using the one-colour fallback"
+if [ -s "$CACHE" ]; then
+  I=$CACHE
+  echo "still-wallpaper: picture from the stock conversion cached on an earlier boot"
+elif [ -f "$STOCK" ]; then
+  echo "still-wallpaper: staged still picture now, stock picture converting in the background for a later boot"
+  ( T="$W/.piano-stock.$$.png"
+    if sips -s format png --resampleHeight 2136 "$STOCK" --out "$T" >/dev/null 2>&1 && sips -c 2136 3200 "$T" >/dev/null 2>&1 &&
+        [ -s "$T" ]; then
+      install -d -o root -g wheel -m 755 "${CACHE%/*}" 2> /dev/null
+      mv -f "$T" "$CACHE" 2> /dev/null || rm -f "$T"
+    else
+      rm -f "$T"
+    fi ) &
 fi
 # The login window's picture of one GeneratedUID: absent and ours are written; a different existing choice is the user's.
 put() {
