@@ -1,3 +1,23 @@
+## 2026-11-28 watchdogd 的 SIGTRAP 查到根：它开 `IOWatchdog`，我们没有；新单元 `piano-watchdog-policy` 让它别再循环，重启实测崩溃归零
+
+细节 `docs/results-2026-11-28-watchdogd-cannot-open-iowatchdog.md`。装机集没换（`boot_a` `df6d5a18…`、ESP `44de650a…`、seed `b2583ea5`）。
+
+- 符号化链：崩溃报告只有 `watchdogd+0xc948 / +0x2bd8 / +0x5b50 / dyld start`；把设备上的 `/usr/libexec/watchdogd`
+  （sha256 `78bdcbdf…`，arm64e UUID `3258367C-…` 与报告一致）取到 `mac-lan` 反汇编，看清 `+0x2af8` 用
+  `IOServiceMatching("IOWatchdog")` → `IOServiceOpen`；找不到服务时**只有** `kern.hv_vmm_present` 为真才走
+  "detected virtual machine environment … exiting" 的安静出口，否则 `__os_crash("connect_to_kext() unexpectedly failed -
+  unable to lookup watchdog KEXT service")` 紧跟 `brk #1`，那条 `brk` 的返回地址正是 `+0xc948`。真正的修法是发一个原生
+  `IOWatchdog` 服务接住那五个标量方法，后面接 PianoPower 已经在拨的 Gunyah 看门狗。
+- 新单元照 `piano-powerlog-policy` 那套做：`piano-watchdog-policy.sh` + plist + `configs/userland.toml`（`default_on = true`）、
+  主机测试 `test-watchdog-policy.py` WSL PASS、`stage.load_manifest` 认下（32 个单元）、设备 `--install`/`--check` 都 PASS。
+- 无人值守重启实测（17:15:01 下 `shutdown -r`，抓 900 s）：单元**开机自己跑**并留 `PASS disabled=true loaded=false`；
+  整段控制台 `Process[…] crashed` 只剩 2 条 `AppSSODaemon`，**watchdogd 一条没有**（对照 12:24 那次六分钟窗口 crashed 944）；
+  `healthy after 180 s, restart reason normal`、`Data store state 2 (resumed) seed b2583ea5`、root shell boot+256 s、
+  七个标记 MD5 全部读回一致。
+- 两件顺手钉死的事：一、cryptexd 那两条补不了是**真的补不了** —— `/System/Volumes/Preboot` 和 `/` 同一个 dev（16777221），
+  在那儿 `mkdir`/`touch` 一律 `ENOENT`，只能回 `tooling/k273/make-systemos.sh:70` 组装时补；二、时钟不持久的具体那一位找到了：
+  `PianoPower: [0s] rtc: 19340766 (+ offset 0 from the SDAM cell … year 1970: not a date, measure piano-rtc-offset)` ——
+  RTC 计数器在走，缺的是纪元偏移那一格，现在的时间是靠 `timed` 联网纠回来的（这次开机后 `date` 先是差三天多，17:21:44 才对）。
 ## 2026-11-28 视频收口：avc1 连续播放跑在自研 VT 解码器上，三条证据都指向 VPU；探针的内容哈希之前是假的
 
 细节 `docs/results-2026-11-28-avc1-playback-on-our-own-vt-decoder.md`，产物记在 `artifacts/ARTIFACTS.md`。装机集没换
