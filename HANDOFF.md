@@ -1,3 +1,32 @@
+## 2026-11-28 ul11：两轮重启过了，root shell 改成开机即起，802.1X 客户晚到的原因找到了（还没修）
+
+装机集：`boot_a` `df6d5a18…` + ESP `esp-7ccdd855-k273-ul11.img` `44de650a…`；Data store 没动（seed `b2583ea5`、`linux_data` LBA 117735999、generation 4）。
+细节 `docs/results-2026-11-28-ul11-two-restarts-a-boot-time-sshd-and-the-late-client.md`。
+
+- 两轮重启按轮记账：SSH 里 `shutdown -r +1` 一轮、COM5 控制台 `reset` 一轮，都是 `Data store state 2 (resumed) … seed b2583ea5` +
+  `healthy after 180 s, restart reason normal`，复位之前写的标记 MD5 读回不变（`ul11-cold1.txt` `0480425f…`、`ul11-cold2.txt` `4b90aae3…`、
+  `ul11-hard.txt` `ef00c0de…`，另加 `ul10-cold-1.txt` `6c71c71d…`、`cold1.txt` `0d50e3f8…` 一起没变）。
+  注意：COM5 的 `reset` 走的是内核协同关机（`ASP: System is shutting down`、PianoWifi `the ladder's end`、PianoPower `shutdown handover done`），
+  不是断电那种硬复位；断电/长按那一档还是要人做一次，别拿这条冒充。
+- `piano-wifi-clientwait=120000` 等满了但等不到：三次启动里 802.1X 客户分别在 boot+285.5 s、+285.5 s、+476.7 s 才连上端口，
+  前面每次关联都撞 `reason 15`。驱动的端口早就 registered（`portRegister()` 在 `start()` 最开头），晚的是 `piano-wifi-supplicant` 自己：
+  进程 boot+61 s 就在，可它 `run()` 的第一条日志（`load_pmk` 读完 profile）在 boot+471 s，之后 4 ms 就连上端口、7 s 完成握手。
+  加大 clientwait 不是修法。背景：`top` 报 `315 running`、`0.0% idle`、`Load Avg 765`，大户只有 kernel_task 27%、VTDecoderXPCService 25.6%、
+  WindowServer 16.2%，整机用户态被拖慢（`networksetup` 也要几十秒）；这条根因待查。
+- 新 unit `piano-sshd`（`tooling/native/piano-sshd/` + `configs/userland.toml`，`default_on = true`）：launchd 在 boot+41 s 起
+  `sshd -D -p 2222 -o UsePAM=no`，没 key 不起、缺主机密钥先补。ul11 第二次启动实机验证：控制台 `piano-sshd: exec /usr/sbin/sshd -D …`，
+  PC 直接 `ssh -p 2222` 进，不再依赖 COM6。
+- 平板上持久设了 `networksetup -setmanual "Ethernet Adapter (en1)" 169.254.80.2 255.255.0.0`，PC 的 `以太网 4`（`02-50-49-41-4E-03`）本身是
+  `169.254.142.124/16`，同段 —— 现在 `ssh -p 2222 root@169.254.80.2` 不等 Wi-Fi 就能进（本机验证）。以后所有无人值守走这条。
+- 时钟：每次启动 `kern.boottime` 都是常数 `1795585949`（比真实 UTC 晚约 2 d 22 h，来自 `droidvm-utc=1795478400` 加固定偏移），
+  `date` 改了不跨启动保留，`/etc/localtime` 改成 `Asia/Shanghai` 保留。装完系统的头一次联网前日期是错的，这条要写进日用验收。
+- 还是没做到：Wi-Fi 首次关联 5–8 分钟；COM6 用户管道这两轮都没回应（绕过了，没修）；aerial 壁纸还在跑；load 高的根因；
+  出网仍断（路由器 REFUSED、223.5.5.5 三台设备都不通、PC 代理只回 200 不转字节），`git push` 原文照抄：
+  `ssh: Could not resolve hostname github.com: Name or service not known`。
+
+下一步（顺序）：ul11 上再做一轮冷口径复位 + 读回 → 走 `boot-a` 回灌 Android 做一次往返 → 查 `piano-wifi-supplicant` 第一条日志之前那 470 s 卡在哪
+（`load_pmk` 之前只有进程建立，怀疑是调度/CPU 被占满，先抓 `fs_usage`/`sample` 或直接看 `piano-still-wallpaper` 为什么没挡住 aerial）→
+`NativeGopDisplay` 那处 Busy→Success 判据放宽（`options & 0x7fffffff` 从 `== 0` 到 `<= 1`）打 ul12 再测同一窗口帧率。
 ## 2026-11-28 ul10：Wi-Fi 关联成功（WPA2 密钥已装、DHCP 拿到地址、双向有流量），没有重新刷写
 
 装机集不变（`boot_a` `df6d5a18…` + ESP `5b357cb9…`，seed `b2583ea5`、store LBA 117735999 未动）。细节
