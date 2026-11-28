@@ -1,3 +1,19 @@
+## 2026-11-28 ul8 装机：audio 提到 level 8 真的往 ADSP 送数了；retry 归零的恢复流程走通
+
+现在装的是 `boot_a` `df6d5a18…` + ESP `esp-7ccdd855-k273-ul8.img`（`2cb111ea…`）：ul7 只把 `piano-audio=2` 改成 `8`（字节数不变，行仍 981 B）。
+写入日志 `logs\session-flash-ul8b-20261128-093050.log`（`done`），seed `b2583ea5`、store LBA 117735999 未动。
+
+- 先复现并修好了 retry 归零：`fastboot flash boot_a` 原厂 Android 镜像 → 起 Android（`OS3.0.309.0.WPYCNXM`、`/data` 在 `dm-56`、
+  上一轮 `piano-rt1.txt` 逐字读回）→ 回 ABL `successful:a yes`、`retry 6`。之后 `esp-final` 仍要求先把 macOS 的 boot_a 放回去（RAM 窗口配对），同一会话里做完了。
+- **音频**：`piano-audio-dsp` = `APM ready`；`say`/`afplay` 能走通 CoreAudio，放两遍 `/tmp/hello.aiff` 之后
+  `piano-audio-live` 从 `3 starts, 1983 periods, 723 with sound, 2 underruns, 59 slips` 变成 `4 starts, 3283 periods, 1447 with sound, 3 underruns, 105 slips`，
+  播放期间 `machdep.piano_audio_spk_state` 是 `speaker running`。**样本确实到了 DSP，但有没有真出声要人耳确认**（本仓库没有 `spk-prot.bin`/`spk-re25.bin`，走的是直通图、level 8 增益上限 160），
+  麦克风还是 `mic down (0 starts)`。
+- ul8 之后 USB 口重排：COM5 是内核控制台和它的 shell，root shell 在 COM6（`root@Xiaomi-Pad-8-Pro ~ #`）。
+  `piano-shell.ps1` 有时会把内核 shell 的 `unknown command` 当成回复，稳妥办法是用 `tmp-c6.ps1`（裸 COM6，记得 DTR/RTS）。`sysctl -a`/`-A` 在这个内核上会挂住，只查单个 OID。
+- **推送没成**：这台机器现在解析不了 `github.com`（`ssh: Could not resolve hostname github.com`，Windows ssh、msys2 ssh、WSL 都一样），提交停在本地 `c1950f6b` 和这一条。
+
+细节 `docs/results-2026-11-28-ul8-audio-level-8-and-the-retry-recovery.md`。剩下：出声确认、麦克风、Wi-Fi 关联（等 SSID/密码）、GPU 硬顶 160 MHz。
 ## 2026-11-28 ul7：Wi-Fi 到 level 8 真扫到 32 个网；audio 写错了级别；retry 归零后 ABL 拒收维护镜像，靠回刷 Android boot_a 复位
 
 装机集 `esp-7ccdd855-k273-ul7.img`（`a106ed514a77f5b9…`），从 ul6 记录出发，只改 `unixnu.toml`，payload/ADT/trust/seed 与 ul6 逐字节相同，
