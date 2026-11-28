@@ -1,3 +1,26 @@
+## 2026-11-28 ul7：Wi-Fi 到 level 8 真扫到 32 个网；audio 写错了级别；retry 归零后 ABL 拒收维护镜像，靠回刷 Android boot_a 复位
+
+装机集 `esp-7ccdd855-k273-ul7.img`（`a106ed514a77f5b9…`），从 ul6 记录出发，只改 `unixnu.toml`，payload/ADT/trust/seed 与 ul6 逐字节相同，
+store 仍绑 `linux_data` LBA 117735999、seed `b2583ea5`。启动行 981 B（上限 999）：去掉 `piano-video=6`、`piano-video-vt=1`、`piano-usb-hid=1`
+（48 B，视频验收在 ul6 已过），换 `piano-wifi=8 piano-wifi-iova=1 piano-audio=2`（46 B）。
+ESP 构建必须在 WSL `UbuntuPiano` 里跑（mtools 只在那里），而且必须带 `PIANO_UNIT_PROFILE`，否则 `DATA_LAST` 用默认值，会要求
+`data-store-lba=117998394` —— 那是别的单元的分区表，照做就会把 store 挪走。写入日志 `logs\session-flash-ul7-20261128-090630.log`（`done`）。
+
+- **Wi-Fi 在装机系统上起来了**：`piano-wifi-link` = `level 8 step 311 link up gen 2`、国家码 `CN`、
+  `piano-wifi-scan-summary` = `32 network(s), 84 frame(s) (65 beacon…)`，`en0` UP/RUNNING、`ether 02:50:49:41:4e:01`。
+  还差关联：`machdep.piano_wifi_join: not set`，要 `/private/var/db/piano-wifi/profile`（`ssid=`/`security=wpa2-psk`/`psk=`，root 600），需要机主的网络名和密码。
+- **audio 我把级别写小了**：`piano-audio=2` 只是 GPR/APM（`APM ready`），macOS Speaker 在 level 8，CoreAudio 因此没有设备。
+  `piano-audio=8` 字节数不变，已经构好 `esp-7ccdd855-k273-ul8.img`（`2cb111ea…`）待发。
+- **亮度/电池不用改任何东西**（ul6 上读的）：backlight `percent=45`、`code=921`、`floor=128`、`writes=6`、主副路各 `readbacks=1` 且 `errors=0`；
+  `PianoCharge` 双包 `SOC 94/95`、`VBUS 4978 mV`、`InputMW 2548`、`AppliedFCC 1500`、`Pack0TempDC 391`，`TemperaturesDeciC {nsp 517 gpu 525 cpu0 560 cpu1 521}`。
+- **retry 陷阱兑现了**：ul6+ul7 连刷带启动后 `slot-retry-count:a` 从 6 掉到 0，下一次 `maint-boot` 被 ABL 拒收：
+  `Booting FAILED (remote: 'Failed to load/authenticate boot image: Load Error')`，此时 `slot-unbootable` 仍是 `no`。
+  恢复办法实测有效：`fastboot flash boot_a` 原厂镜像（`7c444a2d…`）→ 起 Android（`OS3.0.309.0.WPYCNXM`、`sys.boot_completed=1`、
+  `/data` 在 `dm-56`、上一轮的 `piano-rt1.txt` 逐字读回）→ 回 ABL 读到 `successful:a yes`、`retry 6`。
+  **规则加强：每两轮 macOS 冷启动就回一趟 Android 补成功位，别等 0。**
+  细节 `docs/results-2026-11-28-ul7-wifi-scan-and-the-retry-count-trap.md`。
+
+剩下：音频出声音（ul8）、Wi-Fi 关联（等 SSID/密码）、GPU 池硬顶 160 MHz。
 ## 2026-11-28 - 三次冷启动归档完成；retry 预算的估计按实测改弱
 
 冷启动三轮：`shutdown -r +1` 两轮（`logs\usb-console\cold-boot-1-com.log`、`cold-boot-2-com.log`）+ ABL `fastboot reboot` 一轮
@@ -2017,3 +2040,4 @@ data-store-lba=117735999 data-persist=2` ????????????? base??? entry ???????????
 
 ????ESP ???boot_a ??????/????????????`piano-persist3.txt` ?????????
 Wi-Fi/??/??/???GPU ? `0xe00002bd`?
+
