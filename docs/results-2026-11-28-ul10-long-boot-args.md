@@ -64,4 +64,4 @@ unchanged behaviour rather than a regression: the decode path is good, the negat
 (`logs\ul10-boot.log`, 411 KB, boot through login and the video and audio work above) contains no `swap_wait` line at all. That is a
 difference worth noting, not yet a verdict: the two captures differ in length, and the later `log` dump from the PianoDwc3 monitor on COM5
 carries no NativeGopDisplay lines at all, so it cannot confirm the counter. This claim needs a capture of a UI-active session before it is
-called fixed.
+called fixed. Resolved later the same day against this reading: the missing lines were only the logging threshold, and the defect is present on ul10 - see `docs/results-2026-11-28-swap-wait-rate-and-fps.md`.
