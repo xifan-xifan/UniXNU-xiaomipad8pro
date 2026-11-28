@@ -1,3 +1,16 @@
+## 2026-11-28 ul11 第三轮复位 + 第二轮往返都过；"开机几分钟后才有 shell"确认是主机密钥
+
+细节 `docs/results-2026-11-28-ul11-third-reset-second-roundtrip-and-the-host-key-delay.md`。装机集没换：`boot_a` macOS `df6d5a18…` /
+Android `7c444a2d…`，ESP `44de650a…`，Data store seed `b2583ea5` 未动。
+
+- 复位记账：`shutdown -r +1` 一轮、COM5 `reset` 两轮（都是协同关机，不是断电那种硬复位）；往返两轮，每次 HyperOS 都回来
+  （`OS3.0.309.0.WPYCNXM`、`sys.boot_completed=1`），七个标记跨复位跨换系统 MD5 全不变。
+- 晚到 root shell 的根因坐实：`/etc/ssh/ssh_host_*` 时间戳在 boot+~280 s，主机密钥是启动现做的，macOS 27 的 `ssh-keygen -A`
+  还要做后量子那把 `mldsa44`，随机源慢，`sshd` 就没法监听、launchd 每 10 s 重试。`piano-sshd` 改成只做 ed25519 并用 `-h` 交出去，
+  整套 `-A` 放后台。**设备上文件已是新版的 md5 `e8d23af9…`，但还没被一次启动跑到过** —— 下一轮启动要量的就是"第几秒能 ssh"。
+- 这台机器负载是异常量级而不是背景噪声：`0.0% idle`、`309 running`、`Load Avg 660+`，同片土壤上长出 `watchdogd` 崩溃循环（boot+150 s，
+  `Too many corpses`，7 次 AMFI 拒核心转储）、每次重启都被记成 `shutdown_stall`、`PianoTouch` 近半读取校验不过。这几条按顺序查。
+- 出网仍未解（路由器 REFUSED、`223.5.5.5` 三台设备都不通），`git push` 原文：`ssh: Could not resolve hostname github.com: Name or service not known`。
 ## 2026-11-28 ul11 第一轮 macOS→Android→macOS 往返通过，Data 里的标记穿过换系统还在
 
 细节 `docs/results-2026-11-28-ul11-roundtrip-1-macos-android-macos.md`。要点：去程 `COM5 reset fastboot` → 刷 Android `boot_a` `7c444a2d…` →
