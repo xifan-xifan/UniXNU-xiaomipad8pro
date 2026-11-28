@@ -565,7 +565,7 @@ dest = "/Library/LaunchDaemons/com.unixnu.piano-powerlog-policy.plist"
 mode = "0644"
 [[unit]]
 name = "piano-boot-probe"
-about = "diagnostic only, off by default: one CPU/load record every 15 s for 20 min from the moment launchd gets round to it, so a boot can be attributed after the fact (docs/results-2026-11-28-the-boot-storm-is-a-crash-loop-of-daemons-that-cannot-start.md); a 5 s loop with top -l 1 was measured at 12 s per record and pushed the root shell out by ~150 s, so it stays off on a daily boot"
+about = "diagnostic only, off by default: one CPU/load record every 15 s for 20 min from the moment launchd gets round to it, so a boot can be attributed after the fact (docs/results-2026-11-28-the-boot-storm-measured.md); a 5 s loop with top -l 1 was measured at 12 s per record and pushed the root shell out by ~150 s, so it stays off on a daily boot"
 default_on = false
 
 [[unit.file]]

@@ -1,3 +1,21 @@
+## 2026-11-28 开机风暴定案：不是单一大户；三个代办在无限循环重启；停 xprotectd/cryptexd 无收益已还原
+
+细节 `docs/results-2026-11-28-the-boot-storm-measured.md`。装机集没换（`boot_a` `df6d5a18…`、ESP `44de650a…`、seed `b2583ea5`）。
+
+- launchd 开机 6 分钟窗口日志（40 万行）：`com.apple.security.cryptexd` 每次 25–130 ms 就带 `Failed to copy grafted system cryptexes
+  [2: No such file or directory]` 退出、`com.apple.security.xprotectd` `exit(1)`、`com.apple.watchdogd` SIGTRAP（`+0xc948`，
+  `Too many corpses`）；窗口里 throttle 6144 次、crashed 944 次。cryptexd 缺的东西定位到：`/System/Cryptexes/{ExclaveOS,Rosetta}`
+  的软链目标 `Preboot/Cryptexes/{ExclaveOS,Rosetta}` 不存在（Preboot 侧只有 `App` 和 `OS -> /`）。
+- **实验结论**：把 xprotectd + cryptexd `disable`+`bootout` 后重启，root shell 反而更晚（470.4 s vs 只停 powerlog 的 289.0 s），
+  所以它们不是关键路径 —— 已经 `launchctl enable` 还原，不动安全代办。
+- **launchd 排到我们的 `RunAtLoad` 系统作业要 ~400 s**（`piano-sshd.log` 的 exec 行、探针首条记录都是这个点），
+  到那时 `top` 前几名是 `dasd/photolibraryd/imagent/linkd/mobileassetd/remindd` 一片几 % 的代办：开机那几分钟没有单一大户。
+  PowerLog 是"稳态运行期"的大户（停掉才有 58 % idle），两件事分开记账。
+- 探针教训与落地：5 s + `top -l 1` 每记录 12 s、把 root shell 推到 436 s；改成 15 s + `top -l 2`，
+  以 `default_on = false` 的 unit 收进 `tooling/native/piano-boot-probe/`（`d896211b`）。
+- 未推提交今天已全部推到 `origin/main`（出网恢复；平板侧 `dig`/`ping` 都通）。
+- 下一步顺序：补 `Preboot/Cryptexes/{ExclaveOS,Rosetta}` 看 cryptexd 是否收敛（可逆，一个 rmdir）；符号化设备上的
+  `/usr/libexec/watchdogd` 定 SIGTRAP；`dd if=/dev/rdiskN bs=1m count=400` 定一次读带宽；然后才是裁开机集合的策略讨论。
 ## 2026-11-28 停用 PowerLog 的开机作业已落地；更正两条读数，开机风暴另立案
 
 细节 `docs/results-2026-11-28-powerlog-holds-the-machine.md`、`docs/results-2026-11-28-the-boot-storm-is-not-perfpowerservices.md`。装机集没换。
