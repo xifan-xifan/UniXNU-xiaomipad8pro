@@ -1,3 +1,18 @@
+## 2026-11-28 视频收口：avc1 连续播放跑在自研 VT 解码器上，三条证据都指向 VPU；探针的内容哈希之前是假的
+
+细节 `docs/results-2026-11-28-avc1-playback-on-our-own-vt-decoder.md`，产物记在 `artifacts/ARTIFACTS.md`。装机集没换
+（`boot_a` `df6d5a18…`、ESP `44de650a…`、seed `b2583ea5`），测量都在冷启动 3 那次开机（boot 16:14:53）上做。
+
+- 探针 `tooling/native/piano-play-probe.m` 修了一处会骗人的地方：IOSurface 后端的 `CVPixelBuffer` 不 lock 就没有基地址，
+  `sha256=` 一直打印空串。补上 `CVPixelBufferLockBaseAddress` 之后拿到真哈希
+  `afc32c16e3bd549ff99be1615d34808d`（frame0 BGRA 1920x1080，8,294,400 字节，`MetalCompatibility=1`）。
+- 播放：`wall=30.01 s / 30.04 s、stalls=0`，两轮一致（`played=28.00` 是 2 s tick 的最后读数，不是掉尾巴）。
+- 归属：控制台 `+dec selected com.unixnu.pianovideo.decoder.avc … pid 7114`（7114 就是探针）；窗口里 `decision accept` 957 条
+  （30 s×30 fps=900），kext `dfrm` 计数 3247 → 6168；播放后 45 s 空闲抓取里 `PianoVideoVT` 一行都没有；CPU 侧探针 9.1–16.0 %、
+  三个 `VTDecoderXPCService` 全 0.0 %。软解 1080p30 至少要一个大核，所以对不上"CPU 在解"这种解释。
+- 还欠的：画面没人眼看过（`screencapture` 起不来、Apple Events 被 TCC 挡）；HEVC 这轮没重测（本轮片子是 avc1，
+  开机日志里的 hevc 选择 pid 是 372/539）；内容哈希只跑了一次；`dfrm` 消息数与帧数的换算还没吃透。
+- 顺手量到的否定回复：`reply dset 101/102 -12900`、`reply dcop 107 -12900` 共 7 条，未实现的 VT 消息类型，不影响播放。
 ## 2026-11-28 上游巡查：作者仓库没有新提交，需要合的东西一件都没有
 
 细节 `docs/results-2026-11-28-upstream-sweep.md`。只读巡查，pin 与装机集都没动。

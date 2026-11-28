@@ -624,3 +624,13 @@ plus `k273-store-header.img` `e36018d4...` (the old `bb6dd1c3` store header, sho
   `ba5e055020eb9f4a` by both `/dev/sda37` and `/dev/sda`); two hard PSCI SYSTEM_RESETs at exactly boot+900 s, then the tablet
   was parked in ABL fastboot by Android's A/B retry budget and the ESP was reverted to ul11. Evidence
   [results-2026-11-28-ul12-timed-hard-reset-and-the-ab-retry-budget.md](../docs/results-2026-11-28-ul12-timed-hard-reset-and-the-ab-retry-budget.md).
+
+## 2026-11-28 piano-play-probe - the playback / single-frame probe for the VPU decode verdict
+
+- `piano-play-probe` (from `tooling/native/piano-play-probe.m`) 57,120 bytes
+  `0b1fd14e92611b9dca74bec669dcf20714fe497661fc2238e3d53397b03196d1` - built on `mac-lan` (Xcode SDK MacOSX27.2,
+  `clang -arch arm64 -mmacosx-version-min=14.0 -fobjc-arc`, AppKit/AVFoundation/CoreMedia/CoreVideo/IOSurface, ad-hoc
+  `codesign -s -`). Ran on the tablet as `/tmp/probe2` (same SHA-256 after the `mac-lan:8123` + `curl` transfer, since
+  `scp` from this Windows host silently no-ops). Input clip `/tmp/clip.mp4` 1,019,562 bytes
+  `4e7107b03189ad90086302db8b91c086fab4407e286fac97297a179e0ad70001` (avc1 1920x1080, 30 s).
+  Evidence [results-2026-11-28-avc1-playback-on-our-own-vt-decoder.md](../docs/results-2026-11-28-avc1-playback-on-our-own-vt-decoder.md).
