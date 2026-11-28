@@ -1,3 +1,19 @@
+## 2026-11-28 找到整机负载的持有者：`PerfPowerServices`（powerlog）；壁纸那条启动路径同时改完
+
+细节 `docs/results-2026-11-28-the-still-wallpaper-arrives-before-the-login-window.md`。装机集没换。
+
+- 无人值守重启计时（13:11:19 下 `shutdown -r`）：TCP 2222 在 **boot+331 s** 才回来。`/etc/ssh/ssh_host_*` 又落在 boot+~309 s，
+  ed25519 快路径没救回来 —— 晚到是结果不是原因。顺手记一个刻度：`kern.boottime` 每次都是常数 `1795585949`，
+  所以设备上 `$(date +%s) - 1795585949` 就是真实开机秒数。
+- 壁纸：`piano-still-wallpaper` 每次启动都卡在 `sips` 转 `DefaultDesktop.heic`（11 MB 临时文件留在 `/private/var/db/Wallpapers/`，
+  几分钟后 `sips` 还在跑）→ 登录窗口读到空选择 → 放默认 aerial（软解，`VTDecoderXPCService` 39 %）。
+  改成"图片只取已存在的文件，转换放后台并缓存到 `/private/var/piano/wallpaper-stock.png`"，`tooling/k27/test-still-wallpaper.py`
+  按新契约重写并在 **mac-lan 上 PASS**（这个测试要 `plutil`，在 WSL 里必红，改动前就是红的）；设备上手跑 63 s 返回。
+  另一半没解决：uid 501 的选择是苹果默认，按"不动用户的选择"就不覆盖，aerial 照放 —— 强塞我们的 store 后 aerial 和解码进程再起不来，
+  备份在设备 `/tmp/piano-index-backup.plist`；策略要不要只认"出厂默认那一档"待定。
+- **负载的持有者抓到了**：杀掉 aerial + `PerfPowerServices` 之后 `Load Avg` 从 ~770 掉到 **34.9**，`WindowServer` 只剩 3 %；
+  但 `PerfPowerServices` 马上被重新拉起，又是 52–68 % CPU、`0.0 % idle`。所以整机慢、sshd 晚、supplicant 晚、帧率低很可能都是它一个的下游。
+  `sample` 里它所有线程都在 `mach_msg`/`kevent` 等，`56 % sys` —— 下一步查它到底在被谁反复唤醒（怀疑是我们自己驱动报给 IOReport 的 GPU/能量计数让它空转重试）。
 ## 2026-11-28 ul11 第三轮复位 + 第二轮往返都过；"开机几分钟后才有 shell"确认是主机密钥
 
 细节 `docs/results-2026-11-28-ul11-third-reset-second-roundtrip-and-the-host-key-delay.md`。装机集没换：`boot_a` macOS `df6d5a18…` /
