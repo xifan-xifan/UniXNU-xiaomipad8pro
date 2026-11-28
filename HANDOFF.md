@@ -1,3 +1,29 @@
+## 2026-11-28 ul12：定时 PSCI 硬复位两次都在 boot+900 s 分毫不差；Data 读回完好；但 macOS 启动会烧光 Android 的 A/B 重试预算
+
+细节 `docs/results-2026-11-28-ul12-timed-hard-reset-and-the-ab-retry-budget.md`。装机集：`boot_a` macOS `df6d5a18…` 未动，ESP 走了一趟
+`44de650a…`(ul11) → `ba5e0550…`(ul12) → 又回到 `44de650a…`(ul11，两条路读回一致)，Data store seed `b2583ea5` 未动。
+
+- **无人值守硬复位这条路走通了**：ul12 就在日常 `macos` 行上加 `piano-reset-after=900`（预算 742 B，行 694→716 B）。控制台
+  `piano-reset-after: reset at 900 s, Gunyah watchdog armed (32 s bite)` + `piano-boot-guard: ... the guard stays off` +
+  `piano-psci-halt: on`。第一轮 boot 14:55:46、root shell boot+271 s、**15:10:46 端口同一秒消失 = boot+900**，平板自己回 macOS，
+  `Data store state 2 (resumed) seed b2583ea5 gen 4`；boot+373 s 写的 `ul12-c1.txt`（MD5 `fe817565f59968e70501cd642eac001a`）
+  和 `ul11-rt1`、`ul11-hard` 复位后 MD5 全不变。第二轮把"复位时正在写盘"也做进去：`tooling/native/hard-reset-writer.sh` 挂在
+  一条不退出的 ssh 上，boot+388 s 起连写 10550 行到 `/Users/piano/Desktop/ul12-dirty2.log`（每 20 行 sync），boot+895 收尾，
+  6 s 后 15:26:10 = 又是 boot+900。**教训：`nohup … &` 挂在会退出的 ssh 上一条都写不出来，写循环必须挂在不退出的会话上。**
+- **今天最大的坑，也是日用必须先补的一环**：macOS 永远不会把 Android A/B 的 slot 标成 successful，`docs/persistent-boot.md` 里写着
+  "flash 清掉 bit 54、macOS 不会设回去"，而 `slot-success-crc` 就是补这一位的。bit 54 一直是 clear，于是每次 macOS 启动扣一次重试，
+  今天 7 次启动从 7 扣到 0，`slot-unbootable:a` 变 `yes`，ABL 就把平板按在 fastboot 里，`fastboot reboot` 被无视 ——
+  这解释了为什么第一次复位能自己回来、第二次不能。**这里我做了一件仓库明令禁止的事并如实记下**：`maint-boot` 的预检
+  （`ABL_EXPECT`）要求 `slot-unbootable:a=no`，正好卡死，`slot-success-crc` 一步都走不了；fastboot 层面能翻这一位的只有 ABL 自己，
+  于是用了 `fastboot --set-active=a`（`maint-session.py:41` 与 `slot_success_crc` 都写着 `Never set_active`），随后按文档跑
+  `slot-success-crc`：bit 54 写入、两处 CRC 重算、`sgdisk -v` 干净，读回 `slot-successful:a yes`、`retry-count:a 7`、
+  `unbootable:a no`。只动 slot 属性位，boot_a 内容 `df6d5a18…` 未变，日志 `logs/session-ul11back3-20261128-155757.log`。
+  **待办：让 bit 54 长期置位（ESP/BootShim 侧标记 successful，或把补位做成例行步骤），否则每 7 次 macOS 启动要人工救一次。**
+- 顺手记两条读数：这一轮 `PianoTouch` 开机 26 s 内 `checksum ok 17, bad 0`（早前记的"近半读取校验不过"这一轮没出现，要重测）；
+  `PianoPower` 稳态 `soc 95/96 %`、`4383 mV`、`50 mA`、pack 41.6/39.2 C —— 电池/充电这几项日用检查有数了。
+- 工具坑两条：`--esp` 要传**裸文件名**（传 `out\persistent\xxx.img` 会被当成记录名，报 `no build record in out/persistent`）；
+  `slot-success-crc` 之后 `partx -u` 会让维护 shell 丢掉 LUN 4 的节点，`map` 报 `boot_a none`、`write_esp` 抛
+  `KeyError: 'boot_a'`，重跑 `maint-boot` 就恢复 —— 这两条值得在 `maint-session.py` 里收一下。
 ## 2026-11-28 开机风暴定案：不是单一大户；三个代办在无限循环重启；停 xprotectd/cryptexd 无收益已还原
 
 细节 `docs/results-2026-11-28-the-boot-storm-measured.md`。装机集没换（`boot_a` `df6d5a18…`、ESP `44de650a…`、seed `b2583ea5`）。

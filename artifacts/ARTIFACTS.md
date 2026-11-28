@@ -614,3 +614,13 @@ Touch on this unit, owner-confirmed on the glass: reversed Y on `c0c1e2af...` (n
 Rollback sets on `E:/piano-backup`: `persistent-boot-20261128-010938-fe5vsrzx` holds the stock Android `boot_a`
 (`7c444a2d...`, the Android side of the switch), `...-035946-ssie59ep` the ul1 boot_a, `...-041947-b699qgi7` the ul2 boot_a
 plus `k273-store-header.img` `e36018d4...` (the old `bb6dd1c3` store header, should a store rollback ever be wanted).
+
+## 2026-11-28 ul12 - the timed hard-reset ESP (run on the tablet, then reverted)
+
+- `esp-7ccdd855-k273-ul12.img` 1,073,741,824 bytes `ba5e055020eb9f4af27d659177e0d631c04b528adcfcdbc8c0ea7d2b19ccfc50` -
+  `build-k273-esp.py --base esp-7ccdd855-k273-ul11.json --entry macos --root-part linux_rootfs --arg piano-reset-after=900`:
+  the ul11 trio (payload byte for byte, seed `b2583ea5`, store bound to `linux_data` LBA 117735999) with the default `macos` line
+  694 -> 716 bytes. Flashed in `logs/session-flash-ul12c-20261128-145039.log` (`WRITE ... -> /dev/sda37`, read back
+  `ba5e055020eb9f4a` by both `/dev/sda37` and `/dev/sda`); two hard PSCI SYSTEM_RESETs at exactly boot+900 s, then the tablet
+  was parked in ABL fastboot by Android's A/B retry budget and the ESP was reverted to ul11. Evidence
+  [results-2026-11-28-ul12-timed-hard-reset-and-the-ab-retry-budget.md](../docs/results-2026-11-28-ul12-timed-hard-reset-and-the-ab-retry-budget.md).
