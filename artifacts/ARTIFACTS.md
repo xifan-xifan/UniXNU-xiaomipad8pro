@@ -646,7 +646,8 @@ plus `k273-store-header.img` `e36018d4...` (the old `bb6dd1c3` store header, sho
   the same build with only that number changed to `1776516618`, i.e. **the daily ESP**. Flashed in
   `logs/session-flash-ul14b-20261128-182737.log` (`done rc=0`), device-side read back
   `252d25696db55071b07a...`. First console RTC read `18:36:36.901 count=19345580 cal=10:36:38 UTC` against a reference-clock
-  wall time of 1795862198.1 = **0.1 s** error; `date +%s` minus `kern.boottime` = 398 s at 18:36+ (no NTP step). Rollback target
+  wall time of 1795862198.1 = **0.1 s** error. That is the calendar readout only: the next cold boot (19:01:18) still reported
+  `kern.boottime` 1795585949, so the kernel epoch is not on the RTC yet - see section 6 of the evidence file. Rollback target
   stays ul11 `44de650a17c6de8e8e784a0db005dc25db72662183239cfb86986b3105147b38`.
 - `tooling/native/rtc-stamp.ps1` - stamps millisecond arrival times on every `PianoPower: ... rtc:` line and reopens the port
   across a reset; this is what made the offset measurable (the host Windows clock runs 2.0 s behind `mac-lan`).

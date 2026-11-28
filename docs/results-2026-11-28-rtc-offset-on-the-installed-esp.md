@@ -112,3 +112,31 @@ tooling/native/rtc-stamp.ps1 -Ports COM5 -Seconds 330 -OutFile logs\rtc-stamp-li
 # 3. 偏移 = 真实 UTC - count，取整即 piano-rtc-offset；本轮 1795862198.1 - 19345580 -> 1776516618
 # 4. 重打日常 ESP 并刷（见 §1 的命令），进 ABL 用 COM5 的 'reset fastboot'
 ```
+
+## 6. 修正（同日 19:25，冷启动第 1 发实测之后）：0.1 秒那句只对 RTC 日历读数成立，内核历元这轮又回到常数
+
+19:01:18 那次冷启动（日常 ESP 就是 ul14，`kern.bootargs` 见下）起来之后：`sysctl kern.boottime` = `1795585949`（Wed Nov 25 13:52:29 2026），
+boot+13 分钟 `date` 还是 `2026-11-25 14:05:23 +0800`，也就是说**内核历元一点没变**，还是老那个常数基（HANDOFF 早就记过"每次启动都是
+`1795585949`"）。这轮 Wi-Fi 没连上（`PianoWifi: level 7: the association ended: a deauthentication, reason 15 (the four-way handshake timed out)`
+每 4 秒一轮，boot+481 s 还在失败），`ping time.apple.com` 解析不了，所以连 NTP 兜底都没有。
+
+由此作废第 0 节和 §2 里两处推断：
+
+- **"开机历元误差 0.1 秒"只对 RTC 日历读数成立**：那一行是 `PianoPower: … rtc: …`，等于"PMK8550 计数 + `piano-rtc-offset`"，
+  它和 `mac-lan` 对表确实差 0.1 秒；但内核的 Mach 时钟没走这条路。
+- **"`date +%s` 减 `kern.boottime` = 流逝时间所以没被 NTP 拽过"是循环论证**：`kern.boottime` 就是 `当前时间 - uptime` 推出来的，
+  任何一次校时都会把它一起搬走，所以那个差恒等于 uptime，不能用来判断有没有校时。这条结论删除。
+
+根因线索（还没证实，下一步就查它）：这轮 `sysctl kern.bootargs` 全文里**没有** `piano-rtc`，也没有 `piano-rtc-offset`
+（完整串里能看到的最后一批是 `piano-audio=8 piano-thermal-adc-s=5`）；而 PianoPower 确实打印了
+`offset 1776516618 from piano-rtc-offset`，说明这对着陆在 ADT 尾巴上、只有晚起的 IOKit 驱动读得到。
+`patches/k27/0060` 的接法是在 `PEGetUTCTimeOfDay()` 里"平台答 0 才调 `piano_rtc_calendar()`"，那是极早期的调用，
+它拿参数走的是命令行那份 boot-args。所以怀疑：**参数位置不对**（ADT 尾巴 vs 命令行），不是 RTC 读不出。
+可验证的下一步：把 `piano-rtc=1 piano-rtc-offset=1776516618` 放进命令行那一份（我们有 `piano-long-boot-args=1`，
+DarwinBoot 预算 1023 字节、当前入口行 694 字节），只看一次开机 60 秒内的 `kern.boottime` 是不是 RTC 值。
+
+顺带两条操作口径（都是这轮踩到的）：
+
+- 设备重启之后 Windows 会为 `169.254.80.2` 留着**旧 MAC 的 ARP 项**，表现是 TCP `Connection timed out`（不是 refused），
+  `arp -d 169.254.80.2` 之后立刻通（ping 21 ms）。以后每次重启后的第一次 SSH 之前先 `arp -d`。
+- 设备上 `sysctl -a` 会挂住（和 `kextstat`、`df` 同一类），只查具体 oid。

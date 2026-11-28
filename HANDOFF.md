@@ -1,3 +1,21 @@
+## 2026-11-28 ul14 第 1 发冷启动过了，但同时**作废**上一条里"开机历元 0.1 秒"的口径：RTC 日历读数对，内核历元没变
+
+细节 `docs/results-2026-11-28-ul14-cold-boot-1.md`（判据、九个标记 MD5、日志重放口径）与
+`docs/results-2026-11-28-rtc-offset-on-the-installed-esp.md` §6（修正全文）。装机集不变：`boot_a` `df6d5a18…`、日常 ESP ul14 `252d2569…`、seed `b2583ea5`。
+
+- 冷启动第 1 发（19:00:22 `shutdown -r +1`，起来 19:01:18）三行判据齐全：`armed: restart reason bootloader until healthy` →
+  `exec of launchd at 2 s` → `healthy after 180 s, restart reason normal`；`NativeRamBlock: Data store state 2 (resumed) … present 867337`
+  （早上归档是 517341，只增不减）。九个标记 boot+12 min 读回 MD5 全对，含本轮新写的 `ul14-cold1.txt` `dec18f5f…`。
+- **作废两条推断**：一、"开机历元误差 0.1 秒"只描述 `PianoPower: … rtc:` 那行（RTC 计数 + `piano-rtc-offset`，与 `mac-lan` 确实差 0.1 秒）；
+  这发 `kern.boottime` 又是常数 `1795585949`（Nov 25 13:52:29），boot+13 min `date` 还在 Nov 25 14:05。二、"用 `date` 减 `kern.boottime`
+  等于 uptime 说明没被 NTP 拽过"是循环论证（`kern.boottime` 本身就是 `当前时间 - uptime`），这条结论删掉。
+- 下一步（RTC 那条的真正修法，先验证再动）：这发 `sysctl kern.bootargs` 全文里**没有** `piano-rtc`/`piano-rtc-offset`，
+  那对着陆在 ADT 尾巴上（PianoPower 读得到并打印 offset），而 `patches/k27/0060` 是在极早期的 `PEGetUTCTimeOfDay()` 里"平台答 0 才问 RTC"。
+  所以怀疑是**参数位置**问题而不是 RTC 读不出：下一发 ESP 把这对放进命令行那份（我们有 `piano-long-boot-args=1`，
+  入口行现在 694 字节、DarwinBoot 预算 1023），只看开机 60 秒内 `kern.boottime` 是不是 RTC 值，再谈别的。
+- 这发的两个环境坑（以后每次都用得上）：重启后第一次 SSH 之前 `arp -d 169.254.80.2`（否则 TCP 是 `Connection timed out`，不是 refused）；
+  设备上 `sysctl -a` 会挂住，只查具体 oid。Wi-Fi 这发全程 `deauthentication reason 15`（四次握手超时），所以没 NTP 兜底，这单独记。
+- 验收进度：ul14 上冷启动 1/3 完成；两轮 Android/macOS 往返、写入后重启读回、正常重启与硬复位恢复、v2 日用项仍待跑（旧证据都在 ul11 上）。
 ## 2026-11-28 日常 ESP 换成 ul14（开机历元误差 0.1 秒）；上游第三轮：piano 仓依旧零提交，可挖的只剩四条**开着**的 PR，#326 排进下一次换装机集
 
 **装机集现状（权威口径）**：`boot_a` 不变 `out\persistent\boot-piano-macos-persistent-v6-sealed.img` `df6d5a18f27054e69a394810e2b4d3452818d428cbed8795ea0b11641c5b1f30`（装机以来从未重写过）；
