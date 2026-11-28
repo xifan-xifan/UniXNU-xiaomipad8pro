@@ -634,3 +634,20 @@ plus `k273-store-header.img` `e36018d4...` (the old `bb6dd1c3` store header, sho
   `scp` from this Windows host silently no-ops). Input clip `/tmp/clip.mp4` 1,019,562 bytes
   `4e7107b03189ad90086302db8b91c086fab4407e286fac97297a179e0ad70001` (avc1 1920x1080, 30 s).
   Evidence [results-2026-11-28-avc1-playback-on-our-own-vt-decoder.md](../docs/results-2026-11-28-avc1-playback-on-our-own-vt-decoder.md).
+
+## 2026-11-28 ul13 / ul14 - the PMIC RTC calendar on the daily ESP (ul14 is the daily ESP now)
+
+- `esp-7ccdd855-k273-ul13.img` 1,073,741,824 bytes `82203354c6c4b613922878ec2cc3896139e3d6ee40e27e2b19e35fa60b701707` -
+  the ul11 trio (payload byte for byte, seed `b2583ea5`, store on `linux_data` LBA 117735999) with
+  `--arg piano-rtc=1 --arg piano-rtc-offset=1776516615` on the `macos` entry (694-byte entry line unchanged, the pair rides the
+  ADT tail). Flashed in `logs/session-flash-ul13b-20261128-175843.log` (`done rc=0`). Measured boot epoch 3.4 s slow: the offset
+  had been paired against a `kern.boottime` that a previous `timed` correction had already moved.
+- `esp-7ccdd855-k273-ul14.img` 1,073,741,824 bytes `252d25696db55071b07a4787a48874d36fc0df76ca639171ed03612e09d51f4d` -
+  the same build with only that number changed to `1776516618`, i.e. **the daily ESP**. Flashed in
+  `logs/session-flash-ul14b-20261128-182737.log` (`done rc=0`), device-side read back
+  `252d25696db55071b07a...`. First console RTC read `18:36:36.901 count=19345580 cal=10:36:38 UTC` against a reference-clock
+  wall time of 1795862198.1 = **0.1 s** error; `date +%s` minus `kern.boottime` = 398 s at 18:36+ (no NTP step). Rollback target
+  stays ul11 `44de650a17c6de8e8e784a0db005dc25db72662183239cfb86986b3105147b38`.
+- `tooling/native/rtc-stamp.ps1` - stamps millisecond arrival times on every `PianoPower: ... rtc:` line and reopens the port
+  across a reset; this is what made the offset measurable (the host Windows clock runs 2.0 s behind `mac-lan`).
+  Evidence [results-2026-11-28-rtc-offset-on-the-installed-esp.md](../docs/results-2026-11-28-rtc-offset-on-the-installed-esp.md).

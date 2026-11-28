@@ -515,7 +515,7 @@ power-key policy. The `piano-keyboard-lid` path below was used in the early test
 | Power key short press | sleep / wake | wake: the kernel (bit 1, default); sleep: PianoPolicy at level 2, asked by PianoInput on the release (`policy.md` §5.1, built 2026-11-11); without it the Apple menu or `pmset sleepnow` |
 | Volume-down, keyboard, USB-C as wake sources | off | `piano-sleep-wake` bits 8, 16, 4 |
 | CPU idle | off; target `piano-cpuidle=2` (ret + cl5) in the daily profile after §6 I1-I2 | `piano-cpuidle=N` |
-| The calendar from the PMIC RTC | off (`build-esp.py --rtc-offset N` planned for the daily ESP): every boot starts at 1970 until `settime.sh` | `piano-rtc=1 piano-rtc-offset=N` (k27 0060); §1.2: likely what makes PerfPowerServices spin (`ram-p9-rtc`) |
+| The calendar from the PMIC RTC | on the daily ESP since ul14: `piano-rtc=1 piano-rtc-offset=1776516618`, the boot epoch is within 0.1 s of the reference clock and no longer waits on `timed` (`results-2026-11-28-rtc-offset-on-the-installed-esp.md`) | `piano-rtc=1 piano-rtc-offset=N` (k27 0060); §1.2: likely what makes PerfPowerServices spin (`ram-p9-rtc`) |
 | PerfPowerServices, audiomxd (the idle spinners of §1.2) | on (stock) until §6.5's A/B | test images: `stage-boot-run.py --disable-job LABEL`; arguments: `PIANO_DENY_EXEC` / `build-esp.py --deny-exec PATH`; installed: `launchctl disable system/LABEL` |
 | CPU clock in unattended test images | the fixed Power Saver level (`piano-cpufreq=2`) unless the governor is what is tested, then capped (`build-policy-test-images.sh`, 2026-11-12) | `drivers/thermal.md` §8 item 8 |
 
