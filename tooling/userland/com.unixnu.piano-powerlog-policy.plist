@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- UniXNU-piano: keep PowerLog's SMC polling off a machine with no SMC (tooling/userland/piano-powerlog-policy.sh).
+     Install as /Library/LaunchDaemons/com.unixnu.piano-powerlog-policy.plist (root:wheel 644) with the script at
+     /usr/local/libexec/piano-powerlog-policy (root:wheel 755): configs/userland.toml, docs/userland.md.
+     One run per boot (LaunchOnlyOnce); it disables and boots out com.apple.PerfPowerServices and returns. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.unixnu.piano-powerlog-policy</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>/usr/local/libexec/piano-powerlog-policy</string>
+    <string>--apply</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>LaunchOnlyOnce</key><true/>
+</dict>
+</plist>

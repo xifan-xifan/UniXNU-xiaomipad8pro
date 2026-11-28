@@ -547,3 +547,19 @@ source = "tooling/native/piano-sshd/com.unixnu.piano-sshd.plist"
 build = "copy"
 dest = "/Library/LaunchDaemons/com.unixnu.piano-sshd.plist"
 mode = "0644"
+[[unit]]
+name = "piano-powerlog-policy"
+about = "com.apple.PerfPowerServices disabled and booted out (PowerLog's SMC metrics agent polls a Mac key table against an SMC this board does not have, and held 45-68 % of every core: docs/results-2026-11-28-powerlog-holds-the-machine.md); the override that was in place before us is recorded and --remove restores it"
+default_on = true
+
+[[unit.file]]
+source = "tooling/userland/piano-powerlog-policy.sh"
+build = "copy"
+dest = "/usr/local/libexec/piano-powerlog-policy"
+mode = "0755"
+
+[[unit.file]]
+source = "tooling/userland/com.unixnu.piano-powerlog-policy.plist"
+build = "copy"
+dest = "/Library/LaunchDaemons/com.unixnu.piano-powerlog-policy.plist"
+mode = "0644"
