@@ -530,3 +530,20 @@ frameworks = ["CoreFoundation", "CoreGraphics", "ImageIO"]
 inputs = ["tooling/native/gop-shot/Pixels.h", "package/NativeGopDisplay/GopShot.h"]
 dest = "/usr/local/bin/gop-shot"
 mode = "0755"
+
+[[unit]]
+name = "piano-sshd"
+about = "sshd on 2222 at boot (the console-free shell: launchd starts it, so a root shell does not wait for the COM6 user pipe): refuses without a key in /var/root/.ssh/authorized_keys, generates the host keys the image does not ship, and keeps -o UsePAM=no because port 22 dies in pam_restriction here and Apple's ssh.plist cannot be bootstrapped while Remote Login is off (docs/results-2026-11-28-usb-net-ssh-and-the-arg-budget.md)"
+default_on = true
+
+[[unit.file]]
+source = "tooling/native/piano-sshd/piano-sshd.sh"
+build = "copy"
+dest = "/usr/local/libexec/piano-sshd"
+mode = "0755"
+
+[[unit.file]]
+source = "tooling/native/piano-sshd/com.unixnu.piano-sshd.plist"
+build = "copy"
+dest = "/Library/LaunchDaemons/com.unixnu.piano-sshd.plist"
+mode = "0644"
