@@ -1,3 +1,37 @@
+## 2026-11-28 上游第二轮：piano 仓零提交，动的是依赖侧 —— macOS profile 里进来 5 条 PR，4 条对着我们的未完项
+
+细节 `docs/results-2026-11-28-upstream-sweep-second-pass.md`。装机集没换（`boot_a` `df6d5a18…`、ESP `44de650a…`（ul11）、
+seed `b2583ea5`），没 bump 任何 pin，没重编内核。
+
+- `lenzhang/UniXNU-xiaomipad8pro` `main` 还是 `751a0a12`（11-27 10:30），`git merge-base --is-ancestor 751a0a12 HEAD`
+  退出码 0，open issue/PR = 0（`#1`…`#5` 全 closed）。所以"piano 上游"这一侧确实没东西可合。
+- 动的是 `UniXNU` 组织（北京 11-28 02:29~03:10 合的一批），5 条落在我们装机用的 `profiles/os/macos-27.3-26C5035r`：
+  **#317** 去掉 iOS 全局代码签名/库校验强制（改 `config/MASTER.arm64.bcm2837` 两行）；**#318** ACM 进 roots +
+  `acm_fastsim=1` + 排除 `AppleSEPManager`/`IOSlaveProcessor`，配 `AppleKeyStoreState` 逐用户句柄返回
+  `kIOReturnNotFound` 让 `MobileKeyBag` 报 `NotFound(-8)`；**#319** `sysctl_vmm_present` 只对 `corebrightnessd`
+  报 0（治 `CBU_IsVirtualMachine()` → VMBLControl mode 3 丢亮度请求）；**#324** `profile.toml` roots 加
+  `com.apple.driver.FairPlayIOKit`，并新增通用机制 **`vmm-hide=<逗号进程名>`**（`proc_best_name` 全等匹配、
+  `native_vmm_hide_hits` 计数、设备树 `/defaults/vmm-present` 保持 1 所以 AMFI 不变，带 ASan/UBSan 主机测试）；
+  **#328** `native_deny_exec` 默认名单加 `/usr/libexec/wifip2pd`（治 30 秒睡眠超时）。
+- 对我们最有用的三条判断：一、`vmm-hide` 正好是 watchdogd 那条"安静出口只在 `hv_vmm_present` 为真时打开"的上游级
+  解法（`--arg vmm-hide=watchdogd`），但它要重编内核（我们系列现在到 `patches/k27/0077-…`）；上游用它是为了 FairPlay，
+  注释里明确"不打扰 watchdogd"，我们算反用，真正的修法还是原生 `IOWatchdog`。二、#318 的 `AppleCredentialManager`
+  我们大概**拿不到**：我们的 KC 基是 k27 的 VM 线（`tooling/kc/build-kc-k27.sh` 的 `KC_BASE` 默认
+  `$PIANO_K27_TREE/out/kc/kc27.bin`），keep 列表里是 `AppleVPCredentialManager`，真机那条要换 Mac17,11 的 27.3 KC
+  也就是 `docs/identity.md` 的 option C。三、`native_deny_exec` 我们内核里根本没有（`patches/` 全量 grep
+  `deny-exec`/`native_deny_exec`/`k27-parity` = 0 命中），所以 cryptexd 那事还是只能走 `make-systemos.sh:70` 组装期补。
+- 顺手钉住一个假证据：**压缩过的 boot 镜像上做字符串搜索无效** —— 在
+  `out/persistent/boot-piano-macos-persistent-v6-sealed.img` 上 grep，连确定在我们 keep 列表里的
+  `com.apple.driver.AppleVPCredentialManager` 都是 0 命中；查 KC 内容要读未压缩产物。设备侧 `kextstat` 会挂住。
+- 本轮新记的组件漂移：`Ath12kWifi` ahead 16（WPA1/TKIP/WPA3-SAE + SAE 三处修复，最后一笔 11-28 03:05）、
+  `ShengUfs` ahead 12（APFS 容器布局、内部介质身份、RPMB W-LUN 钩子）、`GopFramebuffer` ahead 4
+  （进度条交接 + 每帧路径计数 + 两个主机测试）、`AdrenoMetal` ahead 205/behind 52 且 11-26 有 16 字节
+  IOSurface 行对齐、`XnuPrelink` ahead 3、`AppleKeyStoreState` ahead 4、`QcaBluetooth` ahead 15。
+  `pin."k27"` 的 `local` 那格 `11ac316b…` 在 `Droid-VM/macOS-DroidVM` 上仍然取不到（`main` `524d27bf`、
+  `macOS` `abe33e0f`、`wip/hackintosh` `f7d070fe`）。
+- 一个待查的异常，别和这批混：17:47 设备 `uptime` 报 load average **730.90/723.34/608.11**，而 `ps` 里最忙的是
+  `VTDecoderXPCService` 43.0 %（pid 542）和 `WindowServer` 13.4 %，对不上，怀疑有线程卡在不可中断等待
+  （可能与 `NativeGopDisplay::swap_wait` 的 `0xe00002d5` 同源）。
 ## 2026-11-28 watchdogd 的 SIGTRAP 查到根：它开 `IOWatchdog`，我们没有；新单元 `piano-watchdog-policy` 让它别再循环，重启实测崩溃归零
 
 细节 `docs/results-2026-11-28-watchdogd-cannot-open-iowatchdog.md`。装机集没换（`boot_a` `df6d5a18…`、ESP `44de650a…`、seed `b2583ea5`）。
