@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- UniXNU-piano: take watchdogd out of the boot until piano publishes IOWatchdog (tooling/userland/piano-watchdog-policy.sh).
+     Install as /Library/LaunchDaemons/com.unixnu.piano-watchdog-policy.plist (root:wheel 644) with the script at
+     /usr/local/libexec/piano-watchdog-policy (root:wheel 755): configs/userland.toml, docs/userland.md.
+     One run per boot (LaunchOnlyOnce); it disables and boots out com.apple.watchdogd and returns. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.unixnu.piano-watchdog-policy</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>/usr/local/libexec/piano-watchdog-policy</string>
+    <string>--apply</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>LaunchOnlyOnce</key><true/>
+</dict>
+</plist>

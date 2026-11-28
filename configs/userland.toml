@@ -564,6 +564,22 @@ build = "copy"
 dest = "/Library/LaunchDaemons/com.unixnu.piano-powerlog-policy.plist"
 mode = "0644"
 [[unit]]
+name = "piano-watchdog-policy"
+about = "com.apple.watchdogd disabled and booted out (it opens IOWatchdog, piano publishes none, and its only quiet exit is gated on kern.hv_vmm_present, so a native boot gets __os_crash + brk instead of a watchdog: docs/results-2026-11-28-watchdogd-cannot-open-iowatchdog.md); the override that was in place before us is recorded and --remove restores it"
+default_on = true
+
+[[unit.file]]
+source = "tooling/userland/piano-watchdog-policy.sh"
+build = "copy"
+dest = "/usr/local/libexec/piano-watchdog-policy"
+mode = "0755"
+
+[[unit.file]]
+source = "tooling/userland/com.unixnu.piano-watchdog-policy.plist"
+build = "copy"
+dest = "/Library/LaunchDaemons/com.unixnu.piano-watchdog-policy.plist"
+mode = "0644"
+[[unit]]
 name = "piano-boot-probe"
 about = "diagnostic only, off by default: one CPU/load record every 15 s for 20 min from the moment launchd gets round to it, so a boot can be attributed after the fact (docs/results-2026-11-28-the-boot-storm-measured.md); a 5 s loop with top -l 1 was measured at 12 s per record and pushed the root shell out by ~150 s, so it stays off on a daily boot"
 default_on = false
