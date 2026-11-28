@@ -1,3 +1,38 @@
+## 2026-11-28 ul10：启动行预算不再是限制（1095/4095），视频在 ul10 重新证明；Wi-Fi 关联差最后一步
+
+装机集：`boot_a` `df6d5a18…` + ESP `esp-7ccdd855-k273-ul10.img`（`5b357cb9…`）。ul10 是 ul9 的 payload/ADT/trust cache/seed 逐字节不动，
+只把 macos 条目改成 `--split --arg piano-long-boot-args=1` 的拆分形状：DarwinBoot 行 694 B，其余 400 B 放进基础 ADT 的
+`/chosen/piano-boot-args-macos`，由装机内核（含 k27 0066）合并。控制台实测
+`piano-boot-args: /chosen/piano-boot-args-macos (401 bytes): 400 bytes appended, boot-args 1095 bytes`，上限 4095。
+ul9 为腾字节去掉的 `piano-keyboard-gestures=1` 已还回。日志 `logs\session-flash-ul10-20261128-101608.log`（`done`），seed `b2583ea5`、
+store LBA 117735999 未动。细节 `docs/results-2026-11-28-ul10-long-boot-args.md`。
+
+实机同一次启动验证：
+
+- **视频（此前只在 ul6 证过，现在 ul10 重证）**：`play-check /var/tmp/piano-1080p-30s.mp4` →
+  `RESULT seconds=30.0 restarts=0 end=0 samples=29 late=0.76 not-ready=0`，exit 0（ul6 是 `samples=28 not-ready=0`，加回 Wi-Fi、
+  audio 8、USB HID、键盘手势之后没有变差）。`video-v6 --qualify …/fixtures/v6` 的 golden 帧 SHA 仍是
+  `bd230ec4…`，两次分别 25.4 ms、9.2 ms；`first-failed-phase=single-regression failures=3` 与 ul6 的 `v6.log` 完全同三条
+  （`rejected-completion`、第三条 `reject-has-error-disposition`、`original-one-golden-callback`），属未变的负向检查而不是回退。
+- GPU：`machdep.piano_gpu_state` = `lvl=2 mhz=222 cap=13 cap_mhz=1050 why=demand`（ul9 的修法在 ul10 仍然成立）。
+- Data：`machdep.piano_data_io` = `state=2 persist=2 lba=117735999 bound=117735999 generation=4 seed=b2583ea5 errors=0`。
+- 健康：`machdep.piano_boot_guard` = `healthy; restart reason normal`。
+- `swap_wait … 0xe00002d5` 在 ul10 的启动控制台里一次都没出现（ul9 同格式捕获里 23 行、计数到 16000）。这只是记录不是结论：两次捕获
+  长度不同，而 COM5 monitor 的 `log` 转储根本不含 NativeGopDisplay 行，所以还不能用它证明计数器归零。要等一次带界面活动的长捕获再判。
+
+**Wi-Fi 走到门口**：SSID 与口令已从本机 Windows 的无线配置里取到（`Xiaomi_36A1`，口令已存 `private/` 下并被 `.gitignore` 的 `*.psk` 排除，
+不要提交）。`/private/var/db/piano-wifi/profile`（root:wheel 600、目录 700，`ssid=`/`security=wpa2-psk`/`psk=`）已按格式写好。
+`/usr/local/libexec/piano-wifi-join` 在这台机器上是 Apple/CoreWLAN 那一份，直接以 `airportd-kick-missing` 退出（它要求
+`machdep.piano_wifi_native_boot=1` 和 `/var/run/piano-airportd-kick` 回执，本机是 0，走的是 Ethernet/supplicant 路线）。
+仓库里另有原生那份 `tooling/native/piano-wifi-join/piano-wifi-join.c`，在 Mac 上 `cc -O2` 编好并 ad-hoc 签名
+（`out/native-tools/piano-wifi-join-native`，SHA `ff1fc3c47e1ee607d72b7042747d83415eebff5292bfca59ef79b9e528d88ed6`），
+放到平板 `/usr/local/libexec/` 后运行，`machdep.piano_wifi_join` 变成
+`set (generation 1): a network name of 11 byte(s), WPA2-PSK with a passphrase … source sysctl`。
+但 `piano-wifi-level7` 仍停在 `step 701 waiting for the join profile`，`piano-wifi-survey` 显示 `pcie0 off phy off`：
+开机时无 profile，`piano-wifi-l7wait` 默认 600 s 到期后阶梯已经把射频放下，`profileToSta` 需要阶梯在等才会交接。
+平板上 `com.unixnu.piano-wifi-supplicant` 开机就在跑（pid 281），一直报 `the 802.1X port is not there yet (Resource busy)`——
+端口要等级 7 真去关联才注册。下一步：profile 文件已在位（kext 会在每次 join、每次重启的首次以及等待中按 stamp 重读该文件），
+按正常重启走一次干净启动，让等级 6 扫完后等级 7 立刻从文件拿到 profile，再看 EAPOL、密钥、DHCP 与流量。
 ## 2026-11-28 ul9：GPU 硬顶 160 MHz 找到根因并修好——ADC 采样周期 30 s 不满足 governor 要求的 5 s
 
 ul8 之前每次启动 GPU 都是 `R3b LV … lvl=1 mhz=160 cap=1 cause=hard`、`R3a RES … ceiling=1`、`R3b THERM … healthy=0`。
