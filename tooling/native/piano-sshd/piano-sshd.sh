@@ -19,7 +19,9 @@ keys=${PIANO_SSHD_KEYS:-/var/root/.ssh/authorized_keys}
 port=${PIANO_SSHD_PORT:-2222}
 wait_s=${PIANO_SSHD_WAIT:-240}
 hostkey=${PIANO_SSHD_HOSTKEY:-/etc/ssh/ssh_host_ed25519_key}
-say() { printf 'piano-sshd: %.230s\n' "$1" >> "$out" 2> /dev/null; printf 'piano-sshd: %.230s\n' "$1" 2> /dev/null; }
+# Both ends, deliberately: /dev/console lines are unreliable this early (0-byte logs seen twice), and launchd's StandardErrorPath
+# only sees the job's stderr, so the second printf is redirected to fd 2 rather than left on stdout (where it went to /dev/null).
+say() { printf 'piano-sshd: %.230s\n' "$1" >> "$out" 2> /dev/null; printf 'piano-sshd: %.230s\n' "$1" >&2; }
 
 w=0
 while [ ! -s "$keys" ]; do
