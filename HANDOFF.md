@@ -1,3 +1,22 @@
+## 2026-11-28 ul9：GPU 硬顶 160 MHz 找到根因并修好——ADC 采样周期 30 s 不满足 governor 要求的 5 s
+
+ul8 之前每次启动 GPU 都是 `R3b LV … lvl=1 mhz=160 cap=1 cause=hard`、`R3a RES … ceiling=1`、`R3b THERM … healthy=0`。
+根因在 `A830R3bThermal.h:102/110/140`：`healthy` 要 `board` 新鲜，而 `board` 硬要 `period_ms==5000` 且 `age_ms<=10000`；
+`PianoThermal.cpp:1184` 把 ADC 轮询周期默认成了上报周期 `gArgs.logS`（30 s），所以 `board` 永远不新鲜，`healthy=0`，`hard` 成立，`cap=1`。
+`PianoThermalAdc.cpp:447` 有现成开关 `piano-thermal-adc-s`（限 5…3600），填 5 即可。
+
+ul9（`esp-7ccdd855-k273-ul9.img` `99d70675…`，行 977 B）加 `piano-thermal-adc-s=5`；为了腾字节去掉 `piano-keyboard-gestures=1`
+（键盘盖触摸板手势，本机没接键盘盖，等长启动行内核到位再还回去）。日志 `logs\session-flash-ul9-20261128-095708.log`（`done`），seed 与 store 未动。
+
+实机同一次启动：`period=5000`、`age-ms=1052`、`healthy=1`、`step=14`、`effective=7`、`cap=13 cause=skinband`、`ceiling=13`，
+ladder 直方图 `l2=651 l4=46 l8=288 l10=13`，`sent=612 ack=612`、`gpu-peak=594`。空闲 222 MHz 是 `why=demand`，不是被顶住。
+温度随之从 52 升到 56 摄氏度，顶端 OPP 由 skin band 约束，和 `m120-throughput.md` 一致。
+
+没变的：`NativeGopDisplay: swap_wait … 0xe00002d5 (16000 failures)` 这个 GPU 与显示池缺陷还在；Wi-Fi level 8 仍扫到 32 个网；音频通路仍是 level 8 待播；亮度 `percent=45`。
+Data 跨 ul7 到 ul9 再加一趟 Android 往返全部逐字读回（`persist-normal.txt` `b88c2645…`、ul7 写的 `persist-ul7.txt` `ed68ce9f…`）。
+COM5 现在是 PianoDwc3 内核 monitor，root shell 在 COM6，用户管道助手要登录后 1 到 2 分钟才起来，早探会拿到内核 monitor 的 `unknown command`。
+
+细节 `docs/results-2026-11-28-ul9-gpu-cap-root-cause.md`。剩下：出声确认、麦克风、Wi-Fi 关联（等 SSID 与密码）、`swap_wait 0xe00002d5`、长启动行内核（好把视频还回来）。
 ## 2026-11-28 ul8 装机：audio 提到 level 8 真的往 ADSP 送数了；retry 归零的恢复流程走通
 
 现在装的是 `boot_a` `df6d5a18…` + ESP `esp-7ccdd855-k273-ul8.img`（`2cb111ea…`）：ul7 只把 `piano-audio=2` 改成 `8`（字节数不变，行仍 981 B）。
