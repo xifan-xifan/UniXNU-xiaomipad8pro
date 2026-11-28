@@ -1,3 +1,17 @@
+## 2026-11-28 上游巡查：作者仓库没有新提交，需要合的东西一件都没有
+
+细节 `docs/results-2026-11-28-upstream-sweep.md`。只读巡查，pin 与装机集都没动。
+
+- `lenzhang/UniXNU-xiaomipad8pro` `main` 还是 `751a0a12`（11-27 10:30），`git rev-list HEAD..upstream/main` = 0；
+  README 中英语言版和 `skills/install-piano-macos/` 与本地逐字节相同；open issue/PR 为零。
+- 今天推过的两个 fork 都不构成新实现：`liao2333-me` 5 个提交只改 CI 的 KDK 取法（`.pkg` 找两层、payload 锚在
+  `Kernel.framework`），这几行以后我们自己换 KDK 时用得上；`SorasakiHinaHusband` 只有那条 CI 草稿分支。
+- 我们的 UniXNU 核心 pin `d830d23b` 属于 `CrossDarwin/UniXNU_macOS` `main`（`392a41a2`，11-10）之后 6 个提交那条线，它没动；
+  热闹的是 `UniXNU/UniXNU` `main`（和我们分叉 649/331），11-27 并的五个 PR 里只有 `#328` 拒 `wifip2pd` 治 30 s 睡眠超时
+  对我们是新的，背光那条（`#319`）我们早就用 `PianoBacklight` + `piano-brightness-sync` 做在前面了。
+- k27 树源头 `Droid-VM/macOS-DroidVM`：`main` 比 pin 前 85 个提交、另有 `macOS`（11-20）分支；**原生那个提交
+  `11ac316b…` 依旧 404，`el1/native-variant` 依旧不公开**。它 KC 里"留 driverkit.serial 治网络等 240 s"那条我们 patch 里已有。
+  结论：登记，不 bump。
 ## 2026-11-28 ul12：定时 PSCI 硬复位两次都在 boot+900 s 分毫不差；Data 读回完好；但 macOS 启动会烧光 Android 的 A/B 重试预算
 
 细节 `docs/results-2026-11-28-ul12-timed-hard-reset-and-the-ab-retry-budget.md`。装机集：`boot_a` macOS `df6d5a18…` 未动，ESP 走了一趟
