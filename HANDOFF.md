@@ -1,3 +1,31 @@
+## 2026-11-28 ul10：Wi-Fi 关联成功（WPA2 密钥已装、DHCP 拿到地址、双向有流量），没有重新刷写
+
+装机集不变（`boot_a` `df6d5a18…` + ESP `5b357cb9…`，seed `b2583ea5`、store LBA 117735999 未动）。细节
+`docs/results-2026-11-28-ul10-wifi-join.md`。
+
+- 口令来源：本机 Windows 里已保存的无线配置（`netsh wlan show profile … key=clear`），SSID 11 字节、WPA2-PSK 口令 8 字符。
+  只写进平板的 `/private/var/db/piano-wifi/profile`（root:wheel 600、目录 700）和 PC 上 `private/` 下的 `*.psk`（被 `.gitignore` 排除）。
+- 平板上装的 `/usr/local/libexec/piano-wifi-join` 是 Apple/CoreWLAN 那一份，在本机启动模式下一句就退（`airportd-kick-missing`，
+  要 `machdep.piano_wifi_native_boot=1` 与 `/var/run/piano-airportd-kick` 回执，本机是 0）。仓库里原生的
+  `tooling/native/piano-wifi-join/piano-wifi-join.c` 才是这条 Ethernet/supplicant 路线要的：在 Mac（Darwin 27.2）上
+  `cc -O2` + `codesign -s -`，装成平板的 `/usr/local/libexec/piano-wifi-join-native`，写 `machdep.piano_wifi_join` 成功
+  （`set (generation 1): … source sysctl`）。
+- 头七次关联全失败：等级 7 从 profile 关联上了，AP 送来 EAPOL message 1（12 帧），但
+  `12 EAPOL (to the port 0, no client 12)` → 握手超时 → `deauthentication, reason 15`，七次；阶梯自己每 30 s 再试
+  （`joining again in 30 s, from the profile`）。原因是 802.1X 端口只容一个客户（`portConnect` 在 `gCtlUnit` 非 0 时回 EBUSY），
+  `portEnqueue` 在 `gCtlUnit==0` 时直接丢帧；用 `lsof` 能看到持有者是开机那个 `piano-wifi-supplicant`（pid 261，
+  `ctl com.unixnu.driver.PianoWifi.8021x id 12 unit 1`），我再手起一个只会拿到 EBUSY（这是正确行为）。
+- 客户端到位后下一次 join 就过了，控制台：`the port: a client (1 connect(s), 0 bad), 9 message(s) out (0 failed);
+  keys: 2 sent, 2 installed, 0 refused, 0 unanswered`，`level 8 while associated (190050 ms after the association)`（关联稳定维持 3 分钟以上）。
+- `en0` = `192.168.31.98/24`，DHCP ACK 来自 `192.168.31.1`，租期 43200 s，`status: active`，默认路由 `192.168.31.1`。
+  双向流量实测：平板 `ping 192.168.31.1` 3/3（5.0/5.6/6.1 ms）、`curl http://192.168.31.1` 200（18 ms）；
+  Mac `ping 192.168.31.98` 2/2（10.8/11.2 ms）；Windows 直接 `ssh -p 2222 root@192.168.31.98` 可用（比 COM6+USB NCM 省事）。
+- 没做到的：域名解析与出网。路由器对平板的 DNS 回 `REFUSED`，改设 223.5.5.5 / 119.29.29.29 全超时（随后已用
+  `networksetup -setdnsservers Ethernet Empty` 恢复成路由器下发）；同一局域网的 Mac 同样解析不到、`ping 223.5.5.5` 100% 丢、
+  `nc -z 223.5.5.5 443` 失败；PC 侧 `git push` 报 `ssh: Could not resolve hostname github.com: Name or service not known`，
+  其本地代理 `127.0.0.1:10808` 对任何 CONNECT 都回 `200 Connection established` 之后一字节不转（连百度也不通）。
+  也就是说此刻整个局域网的 DNS/WAN 都是断的，"Wi-Fi 能出网"这件事在当前环境里任何设备都验证不了；本机可断言的是
+  关联、WPA2 密钥、DHCP 与局域网内双向单播流量。
 ## 2026-11-28 ul10：启动行预算不再是限制（1095/4095），视频在 ul10 重新证明；Wi-Fi 关联差最后一步
 
 装机集：`boot_a` `df6d5a18…` + ESP `esp-7ccdd855-k273-ul10.img`（`5b357cb9…`）。ul10 是 ul9 的 payload/ADT/trust cache/seed 逐字节不动，
