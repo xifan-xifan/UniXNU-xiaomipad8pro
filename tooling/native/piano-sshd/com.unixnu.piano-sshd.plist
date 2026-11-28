@@ -19,7 +19,7 @@
 	<key>RunAtLoad</key>
 	<true/>
 	<key>StandardErrorPath</key>
-	<string>/var/log/piano-sshd.log</string>
+	<string>/private/var/log/piano-sshd.log</string>
 	<key>ThrottleInterval</key>
 	<integer>10</integer>
 </dict>

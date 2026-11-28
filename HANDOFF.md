@@ -1,3 +1,14 @@
+## 2026-11-28 ul11 第一轮 macOS→Android→macOS 往返通过，Data 里的标记穿过换系统还在
+
+细节 `docs/results-2026-11-28-ul11-roundtrip-1-macos-android-macos.md`。要点：去程 `COM5 reset fastboot` → 刷 Android `boot_a` `7c444a2d…` →
+HyperOS 3.0.309 起来（`OS3.0.309.0.WPYCNXM`、Android 16、`sys.boot_completed=1`）；回程 `adb reboot bootloader` → 刷回 macOS `boot_a` `df6d5a18…`，
+内核侧 `Data store state 2 (resumed) seed b2583ea5` + `healthy after 180 s, restart reason normal`。往返前后的六个标记 MD5 全部一致，其中
+`ul11-rt1.txt a3f8428d…` 是去程之前新写的。槽位读数按预期：Android 起来后 `slot-successful:a` 回到 `yes`、`retry-count` 回到 7。
+
+- 设备上 `piano-sshd` 已换成"等密钥最多 240 s"的版本，plist 的错误日志路径改成 `/private/var/log/piano-sshd.log`；`plutil -lint`、`sh -n` 过。
+- 从 Windows 走 `System32\OpenSSH` 时私钥 ACL 会被嫌（`Bad permissions … Authenticated Users`），用 `tmp-ssh.ps1` 那份 ssh 就好；
+  另外 sshd 的控制台行不是可靠判据（这次它 boot+60 s 就在了，控制台却没有行、日志文件 0 字节），判"有没有 shell"要看 `launchctl print` 或 TCP 2222。
+- 下一步：第二轮往返（同一套脚本）→ 再补一轮复位 + 读回 → 查 supplicant 第一条日志之前那几分钟 → `NativeGopDisplay` 的 Busy 判据放宽打 ul12。
 ## 2026-11-28 ul11：两轮重启过了，root shell 改成开机即起，802.1X 客户晚到的原因找到了（还没修）
 
 装机集：`boot_a` `df6d5a18…` + ESP `esp-7ccdd855-k273-ul11.img` `44de650a…`；Data store 没动（seed `b2583ea5`、`linux_data` LBA 117735999、generation 4）。
